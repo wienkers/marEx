@@ -1,0 +1,11 @@
+name: pyMHW_tracker
+channels:
+  - conda-forge
+dependencies:
+  - pytest
+  - jupyter
+  - xarray
+  - scipy
+  - dask
+  - scikit-image
+  - dask_image
