@@ -1,4 +1,4 @@
-name: pyMHW_tracker
+name: spot_the_blOb
 channels:
   - conda-forge
 dependencies:
