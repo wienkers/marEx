@@ -1,6 +1,5 @@
 from setuptools import setup
 
-
 setup(
     name='spot_the_blOb',
     use_scm_version={
