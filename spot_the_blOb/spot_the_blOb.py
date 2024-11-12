@@ -1,9 +1,10 @@
 import xarray as xr
 import numpy as np
-import scipy.ndimage
-from skimage.measure import regionprops_table 
 from dask_image.ndmeasure import label
-import dask.array as dsa
+from skimage.measure import regionprops_table
+from dask_image.ndmorph import binary_closing, binary_opening
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from dask import persist
 from dask.base import is_dask_collection
 
@@ -26,6 +27,14 @@ class Spotter:
             except:
                 raise ValueError(f'Spot_the_blOb currently only supports 3D DataArrays. The dimensions should only contain ({timedim}, {xdim}, and {ydim}). Found {list(data_bin.dims)}')
 
+        if (self.data_bin[xdim].max() < 10.0):
+            print('The lat/lon coordinates appear to be in degrees. Converting to radians...')
+            self.data_bin[xdim] = np.deg2rad(self.data_bin[xdim])
+            self.data_bin[ydim] = np.deg2rad(self.data_bin[ydim])
+            self.converted_to_radians = True
+        else:
+            self.converted_to_radians = False
+        
         if (data_bin.data.dtype != np.bool):
             raise ValueError('The input DataArray is not binary. Please convert to a binary array, and try again.  :)')
         
@@ -79,6 +88,10 @@ class Spotter:
             # Track Blobs _with_ Merging & Splitting
             blob_id_field, N_blobs_final = self.track_blObs(data_bin_filtered)
 
+        if self.converted_to_radians: # Convert back to degrees
+            blob_id_field[self.xdim] = np.rad2deg(blob_id_field[self.xdim])
+            blob_id_field[self.ydim] = np.rad2deg(blob_id_field[self.ydim])
+        
         
         ## Save Some BlObby Stats
 
@@ -132,21 +145,11 @@ class Spotter:
         x, y = np.meshgrid(x, x)
         r = x**2 + y**2 
         se_kernel = r < (self.R_fill**2)+1
-
-        def binary_open_close(binary_data):
-            binary_data_padded = np.pad(binary_data,
-                                          ((diameter, diameter), (diameter, diameter)),
-                                          mode='wrap')
-            binary_data_closed = scipy.ndimage.binary_closing(binary_data_padded, se_kernel)
-            binary_data_opened = scipy.ndimage.binary_opening(binary_data_closed, se_kernel, output=binary_data_padded)
-            return binary_data_opened[diameter:-diameter, diameter:-diameter]
-
-        data_bin_filled = xr.apply_ufunc(binary_open_close, self.data_bin,
-                                   input_core_dims=[[self.ydim, self.xdim]],
-                                   output_core_dims=[[self.ydim, self.xdim]],
-                                   output_dtypes=[self.data_bin.dtype],
-                                   vectorize=True,
-                                   dask='parallelized')
+        
+        binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+        binary_data_closed = binary_closing(binary_data_padded, structure=se_kernel)
+        binary_data_opened = binary_opening(binary_data_closed, structure=se_kernel)
+        data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
         
         # Mask out edge features arising from Morphological Operations
         data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
@@ -183,6 +186,48 @@ class Spotter:
         return blob_id_field, N_blobs
     
     
+    def calculate_centroid(binary_mask, original_centroid):
+        '''Calculates the centroid of the binary data when blob touches x-dimension edges.
+        
+        Parameters:
+        -----------
+        binary_mask : numpy.ndarray
+            2D binary array where True/1 indicates the blob
+        original_centroid : tuple
+            (y_centroid, x_centroid) from regionprops_table
+            
+        Returns:
+        --------
+        tuple
+            (y_centroid, x_centroid)
+        '''
+        
+        ..........
+        
+        # Check if blob touches either edge of x dimension
+        x_indices = np.nonzero(binary_mask)[1]  # Only need x coordinates
+        touches_left = np.any(x_indices == 0)
+        touches_right = np.any(x_indices == binary_mask.shape[1] - 1)
+        
+        # If blob touches both edges, recalculate x centroid
+        if touches_left and touches_right:
+            # Adjust x coordinates that are near right edge
+            x_indices_adj = x_indices.copy()
+            right_side = x_indices > binary_mask.shape[1] // 2
+            x_indices_adj[right_side] -= binary_mask.shape[1]
+            
+            # Calculate x centroid
+            x_centroid = np.mean(x_indices_adj)
+            if x_centroid < 0:
+                x_centroid += binary_mask.shape[1]
+                
+            return (original_centroid[0], x_centroid)
+        
+        # If blob doesn't touch both edges, return original centroid
+        return original_centroid
+        
+    
+    
     def calculate_blob_properties(self, blob_id_field, properties=None):
         '''
         Calculates properties of the blobs from the blob_id_field.
@@ -209,10 +254,33 @@ class Spotter:
         if 'label' not in properties:
             properties = ['label'] + properties
         
+        check_centroids = 'centroid' in properties
+        
         # Define wrapper function to run in parallel
         def blob_properties_chunk(ids):
+            
+            # Calculate Standard Properties
             props_slice = regionprops_table(ids, properties=properties)
+            
+            # Check Centroids if blob touches either edge (Need to account for x-dimension edge wrapping)
+            if check_centroids and len(props_slice['label']) > 0:
+                # Get original centroids
+                centroids = list(zip(props_slice['centroid-0'], props_slice['centroid-1']))
+                centroids_wrapped = []
+                
+                # Process each blob
+                for label_idx, label in enumerate(props_slice['label']):
+                    binary_mask = ids == label
+                    centroids_wrapped.append(
+                        calculate_centroid(binary_mask, centroids[label_idx])
+                    )
+                
+                # Update centroid values
+                props_slice['centroid-0'] = [c[0] for c in centroids_wrapped]
+                props_slice['centroid-1'] = [c[1] for c in centroids_wrapped]
+            
             return props_slice
+        
         
         blob_props = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
                                     input_core_dims=[[self.ydim, self.xdim]],
@@ -265,14 +333,14 @@ class Spotter:
             
             # Create arrays of indices for valid labels
             id_mask_t0 = ids_t0 > 0
-            valid_indices_t0 = np.nonzero(id_mask_t0)[0]
-            valid_indices_prev = valid_indices_t0[ids_prev[id_mask_t0] > 0]
-            valid_indices_next = valid_indices_t0[ids_next[id_mask_t0] > 0]
+            id_indices_t0 = np.nonzero(id_mask_t0)[0]
+            id_indices_prev = id_indices_t0[ids_prev[id_mask_t0] > 0]
+            id_indices_next = id_indices_t0[ids_next[id_mask_t0] > 0]
 
             # Create Pairs using advanced indexing & Concatenate. N.B. We keep the earlier label in time first
             id_pairs = np.concatenate((
-                                    np.stack((ids_prev[valid_indices_prev], ids_t0[valid_indices_prev]),   axis=1),
-                                    np.stack((ids_t0[valid_indices_next],   ids_next[valid_indices_next]), axis=1)), axis=0)
+                                    np.stack((ids_prev[id_indices_prev], ids_t0[id_indices_prev]),   axis=1),
+                                    np.stack((ids_t0[id_indices_next],   ids_next[id_indices_next]), axis=1)), axis=0)
             
             # Find unique pairs
             unique_id_pairs = np.unique(id_pairs, axis=0)
@@ -292,82 +360,98 @@ class Spotter:
                             output_dtypes=[object]
                         ).compute()
         
-        return np.concatenate(overlap_blobs_list.values)
+        overlap_blobs_list_unique = np.unique(np.concatenate(overlap_blobs_list.values), axis=0)
+        
+        return overlap_blobs_list_unique
     
         
-    def cluster_rename_blobs(self, blob_id_field_unique, overlap_pairs_all):
-        ''' '''
-        ...
+    def cluster_rename_blobs(self, blob_id_field_unique, overlap_blobs_list):
+        '''Cluster the blob pairs to determine the final labels, and relabel the blobs.
         
-        ## Cluster the overlap_pairs into groups of equivalent labels.
-        # Get unique labels from the overlap pairs
-        labels = np.unique(overlap_pairs_all) # 1D sorted unique.
+        Parameters
+        ----------
+        blob_id_field_unique : xarray.DataArray
+            Field of unique blob IDs. IDs must not be repeated across time.
+        overlap_blobs_list : (N x 2) np.ndarray
+            Array of Blob IDs that indicate which blobs are the same. The blob in the first column precedes the second column in time.
         
-        # Create a mapping from labels to indices
-        label_to_index = {label: index for index, label in enumerate(labels)}
+        Returns
+        -------
+        split_merged_relabeled_blob_id_field : xarray.DataArray
+            Field of renamed blob IDs which track & ID blobs across time. ID = 0 indicates no object.
+        '''
+        
+        ## Cluster the overlap_pairs into groups of equivalent labels
+        
+        # Get unique IDs from the overlap pairs
+        IDs = np.unique(overlap_blobs_list) # 1D sorted unique
+        
+        # Create a mapping from ID to indices
+        ID_to_index = {label: index for index, label in enumerate(IDs)}
         
         # Convert overlap pairs to indices
-        overlap_pairs_indices = np.array([(label_to_index[pair[0]], label_to_index[pair[1]]) for pair in overlap_pairs_all])
+        overlap_pairs_indices = np.array([(ID_to_index[pair[0]], ID_to_index[pair[1]]) for pair in overlap_blobs_list])
         
         # Create a sparse matrix representation of the graph
-        n = len(labels)
+        n = len(IDs)
         row_indices, col_indices = overlap_pairs_indices.T
         data = np.ones(len(overlap_pairs_indices))
         graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n))
         
-        # Find connected components
-        num_components, component_labels = connected_components(csgraph=graph, directed=False, return_labels=True)
+        # Solve the graph to determine connected components
+        num_components, component_IDs = connected_components(csgraph=graph, directed=False, return_labels=True)
         
-        # Group labels by their component label
-        clusters = [[] for _ in range(num_components)]
-        for label, component_label in zip(labels, component_labels):
-            clusters[component_label].append(label)
+        # Group IDs by their component label
+        ID_clusters = [[] for _ in range(num_components)]
+        for ID, component_ID in zip(IDs, component_IDs):
+            ID_clusters[component_ID].append(ID)
         
         
-        
-         
-        ## Replace all labels in cluster_labels_unique that match the equivalent_labels with the list index:  This is the new/final label.
+        ## ID_clusters now is a list of lists of equivalent blob IDs that have been tracked across time
+        #  We now need to replace all IDs in blob_id_field_unique that match the equivalent_labels with the list index:  This is the new/final ID field.
         
         # Create a dictionary to map labels to the new cluster indices
         min_int32 = np.iinfo(np.int32).min
-        max_label = cluster_labels_unique.max().compute().data
-        label_to_cluster_index_array = np.full(max_label + 1, min_int32, dtype=np.int32)
+        max_ID = blob_id_field_unique.max().compute().data
+        ID_to_cluster_index_array = np.full(max_ID + 1, min_int32, dtype=np.int32)
 
         # Fill the lookup array with cluster indices
-        for index, cluster in enumerate(equivalent_labels):
-            for label in cluster:
-                label_to_cluster_index_array[label] = np.int32(index) # Because these are the connected labels, there are many fewer!
+        for index, cluster in enumerate(ID_clusters):
+            for ID in cluster:
+                ID_to_cluster_index_array[ID] = np.int32(index) # Because these are the connected labels, there are many fewer!
         
-        # NB: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly with large shared-mem numpy arrays !!!
-        label_to_cluster_index_array_da = xr.DataArray(label_to_cluster_index_array, dims='label', coords={'label': np.arange(max_label + 1)})
+        # N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly with large shared-mem numpy arrays**
+        ID_to_cluster_index_da = xr.DataArray(ID_to_cluster_index_array, dims='ID', coords={'ID': np.arange(max_ID + 1)})
         
-        def map_labels_to_indices(block, label_to_cluster_index_array):
+        def map_labels_to_indices(block, ID_to_cluster_index_array):
             mask = block >= 0
             new_block = np.zeros_like(block, dtype=np.int32)
-            new_block[mask] = label_to_cluster_index_array[block[mask]]
+            new_block[mask] = ID_to_cluster_index_array[block[mask]]
             new_block[~mask] = -10
             return new_block
         
-        relabeled_unique = xr.apply_ufunc(
+        split_merged_relabeled_blob_id_field = xr.apply_ufunc(
             map_labels_to_indices,
-            cluster_labels_unique, 
-            label_to_cluster_index_array_da,
-            input_core_dims=[[self.xdim],['label']],
-            output_core_dims=[[self.xdim]],
+            blob_id_field_unique, 
+            ID_to_cluster_index_da,
+            input_core_dims=[[self.ydim, self.xdim],['ID']],
+            output_core_dims=[[self.ydim, self.xdim]],
             vectorize=True,
             dask="parallelized",
             output_dtypes=[np.int32]
         )
         
-        return clusters
+        return split_merged_relabeled_blob_id_field
     
     
-    def split_and_merge_blobs(self, overlap_blobs_list, blob_props):
+    def split_and_merge_blobs(self, blob_id_field_unique, overlap_blobs_list, blob_props):
         '''Implements Blob Splitting & Merging.
            cf. Reference Paper
         
         Parameters:
         -----------
+        blob_id_field_unique : xarray.DataArray
+            Field of unique blob IDs. IDs must not be repeated across time.
         overlap_blobs_list : (N x 2) np.ndarray
             Array of overlapping blob pairs across time. The blob in the first column precedes the second column in time.
         blob_props : xarray.Dataset
@@ -375,14 +459,20 @@ class Spotter:
             
         Returns
         -------
+        split_merged_blob_id_field_unique : xarray.DataArray
+            Field of unique blob IDs with any splitting or merging logic applied.
         split_merged_blobs : (? x 2) np.ndarray
             Array of overlapping blob pairs, with any splitting or merging logic applied. May have removed or added pairs.
         '''
         
         
+        # N.B. Need to modify the blob_id_field_unique as well... 
+        #      Likely, need to add new labels, and change parts of certain labels in blob_id_field_unique, which then needs to be reflected in overlap_blobs_list
         
         
-        return split_merged_blobs
+        
+        
+        return split_merged_blob_id_field_unique, split_merged_blobs
         
     
     
@@ -402,7 +492,7 @@ class Spotter:
         cumulative_ids = (blob_id_field.max(dim={self.ydim, self.xdim}) + 1).cumsum(self.timedim).compute()
         min_int64 = np.iinfo(np.int64).min
         blob_id_field_adjust0 = blob_id_field.where(blob_id_field > 0, drop=False, other=min_int64)  # Need to protect the (unlabelled) 0s 
-        blob_id_field_unique = blob_id_field_adjust0 + cumulative_ids
+        blob_id_field_unique = (blob_id_field_adjust0 + cumulative_ids).persist()  # Persist because we will use this a lot...
                 
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid'])
@@ -411,10 +501,10 @@ class Spotter:
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique)  # List of overlapping blob pairs
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
-        split_merged_blobs_list = self.split_and_merge_blobs(overlap_blobs_list, blob_props)
+        split_merged_blob_id_field_unique, split_merged_blobs_list = self.split_and_merge_blobs(blob_id_field_unique, overlap_blobs_list, blob_props)
                 
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-        split_merged_blob_id_field = self.cluster_rename_blobs(blob_id_field_unique, split_merged_blobs_list)
+        split_merged_blob_id_field = self.cluster_rename_blobs(split_merged_blob_id_field_unique, split_merged_blobs_list)
         
         ## Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blob_id_field.max().compute().data
