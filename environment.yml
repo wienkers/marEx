@@ -2,7 +2,6 @@ name: spot_the_blOb
 channels:
   - conda-forge
 dependencies:
-  - jupyter
   - xarray
   - scipy
   - dask
