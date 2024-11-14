@@ -13,13 +13,14 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, timedim='time', xdim='lat', ydim='lon'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, overlap_threshold=0.5, timedim='time', xdim='lat', ydim='lon'):
         
         self.data_bin           = data_bin
         self.mask               = mask
         self.R_fill             = int(R_fill)
         self.area_filter_quartile   = area_filter_quartile
         self.allow_merging      = allow_merging
+        self.overlap_threshold  = overlap_threshold
         self.timedim    = timedim
         self.xdim       = xdim
         self.ydim       = ydim   
@@ -61,8 +62,14 @@ class Spotter:
         R_fill : int
             The size of the structuring element used in morphological opening & closing, relating to the largest hole that can be filled. In units of pixels.
 
-        discard_fraction : float
+        area_filter_quartile : float
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
+        
+        allow_merging : bool, optional
+            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity.
+        
+        overlap_threshold : float, optional
+            The minimum fraction of overlap between blobs across time to consider them the same object. Value should be between 0 and 1.
         
         Returns
         -------
@@ -541,7 +548,7 @@ class Spotter:
     
     
     
-    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list, overlap_threshold=0.5):
+    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list):
         '''Implements Blob Splitting & Merging.
            cf. Reference Di Sun  & Bohai Zhang 2023
         
@@ -579,7 +586,7 @@ class Spotter:
         overlap_fractions = overlap_blobs_list[:, 2].astype(float) / min_areas
 
         # Filter out the overlaps that are too small
-        overlap_blobs_list = overlap_blobs_list[overlap_fractions >= overlap_threshold]
+        overlap_blobs_list = overlap_blobs_list[overlap_fractions >= self.overlap_threshold]
         
         
         
@@ -652,13 +659,12 @@ class Spotter:
             areas_1 = blob_props['area'].sel(ID=new_child_overlaps_list[:, 1])
             min_areas = np.minimum(areas_0, areas_1).values
             overlap_fractions = new_child_overlaps_list[:, 2].astype(float) / min_areas
-            new_child_overlaps_list = new_child_overlaps_list[overlap_fractions >= overlap_threshold]
+            new_child_overlaps_list = new_child_overlaps_list[overlap_fractions >= self.overlap_threshold]
             
             # Replace the lines in the overlap_blobs_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
             overlap_blobs_list = np.concatenate([overlap_blobs_list[~child_mask], new_child_overlaps_list])
             
         
-                
         return (blob_id_field_unique, 
                 blob_props, 
                 overlap_blobs_list[:, :2],
