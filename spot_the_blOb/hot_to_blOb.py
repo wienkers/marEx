@@ -70,7 +70,7 @@ def rechunk_for_cohorts(da, chunksize=100, dim='time'):
     return da
 
 
-def compute_normalised_anomaly(da, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def compute_normalised_anomaly(da, std_normalise=False, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Standardise data by:
     1. Removing trend and seasonal cycle using a 6-coefficient model (mean, trend, annual & semi-annual harmonics)
@@ -140,46 +140,54 @@ def compute_normalised_anomaly(da, dask_chunks={'time': 25}, dimensions={'time':
     # Remove trend and seasonal cycle
     da_detrend = (da - model_da.dot(model_fit_da))
     
+    # Rechunk the data
+    da_detrend = da_detrend.chunk({'time':dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
+    
+    # Create mask from first timestep
+    mask = np.isfinite(da.isel({dimensions['time']:0})).chunk({dimensions['ydim']:-1, dimensions['xdim']:-1}).drop_vars({'decimal_year', 'time'})
+
+    
+    data_vars = {
+        'dat_detrend': da_detrend.drop_vars({'decimal_year'}),
+        'mask': mask
+    }    
     
     ## Standardise Data Anomalies
     #  This step places equal variance on anomaly at all spatial points
+    if std_normalise: 
+        # Calculate daily standard deviation
+        std_day = flox.xarray.xarray_reduce(
+            da_detrend,
+            da_detrend[dimensions['time']].dt.dayofyear,
+            dim=dimensions['time'],
+            func='std',
+            isbin=False,
+            method='cohorts'
+        )
+        
+        # Calculate 30-day rolling standard deviation
+        std_day_wrap = std_day.pad(dayofyear=16, mode='wrap')
+        std_rolling = np.sqrt(
+            (std_day_wrap**2)
+            .rolling(dayofyear=30, center=True)
+            .mean()
+        ).isel(dayofyear=slice(16,366+16))
+        
+        # STD Normalised anomalies
+        da_stn = da_detrend.groupby(da_detrend[dimensions['time']].dt.dayofyear) / std_rolling
+        
+        # Rechunk the data
+        da_stn = da_stn.chunk({'time':dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
+        std_rolling = std_rolling.chunk({'dayofyear':-1, dimensions['ydim']:-1, dimensions['xdim']:-1})
+        
+        data_vars['dat_stn'] = da_stn.drop_vars({'dayofyear', 'decimal_year'})
+        data_vars['STD'] = std_rolling
     
-    # Calculate daily standard deviation
-    std_day = flox.xarray.xarray_reduce(
-        da_detrend,
-        da_detrend[dimensions['time']].dt.dayofyear,
-        dim=dimensions['time'],
-        func='std',
-        isbin=False,
-        method='cohorts'
-    )
-    
-    # Calculate 30-day rolling standard deviation
-    std_day_wrap = std_day.pad(dayofyear=16, mode='wrap')
-    std_rolling = np.sqrt(
-        (std_day_wrap**2)
-        .rolling(dayofyear=30, center=True)
-        .mean()
-    ).isel(dayofyear=slice(16,366+16))
-    
-    # STD Normalised anomalies
-    da_stn = da_detrend.groupby(da_detrend[dimensions['time']].dt.dayofyear) / std_rolling
-    
-    # Create mask from first timestep
-    mask = np.isfinite(da.isel({dimensions['time']:0})).chunk({dimensions['ydim']:-1, dimensions['xdim']:-1})
     
     
-    # Rechunk the data
-    da_detrend = da_detrend.chunk({'time':dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
-    std_rolling = std_rolling.chunk({'dayofyear':-1, dimensions['ydim']:-1, dimensions['xdim']:-1})
     
     return xr.Dataset(
-        data_vars={
-            'dat_detrend': da_detrend,
-            'dat_stn': da_stn,
-            'STD': std_rolling,
-            'mask': mask
-        },
+        data_vars=data_vars,
         attrs={
             'description': 'Standardised & Detrended Data',
             'preprocessing_steps': [
@@ -217,11 +225,12 @@ def identify_extremes(da, threshold_percentile=95, dask_chunks={'time': 25}, dim
     extremes = da >= threshold
     
     extremes = extremes.chunk({dimensions['time']:dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
-        
+    extremes = extremes.drop_vars('quantile')
+    
     return extremes
 
 
-def preprocess_data(da, threshold_percentile=95, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def preprocess_data(da, std_normalise=False, threshold_percentile=95, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Complete preprocessing pipeline from raw Data to extreme event identification.
     
@@ -229,6 +238,8 @@ def preprocess_data(da, threshold_percentile=95, dask_chunks={'time': 25}, dimen
     ----------
     da : xarray.DataArray
         Raw input data
+    std_normalise=True : bool, optional
+        Additionally compute the Normalised/Standardised (by STD) Anomalies
     threshold_percentile : float, optional
         Percentile threshold for extremes
     dask_chunks : dict, optional
@@ -240,19 +251,26 @@ def preprocess_data(da, threshold_percentile=95, dask_chunks={'time': 25}, dimen
         Processed dataset containing normalised anomalies and extreme events
     """
     
-    # Standardise SST data
-    ds = compute_normalised_anomaly(da, dask_chunks=dask_chunks, dimensions=dimensions)
+    # Compute Anomalies and Normalise/Standardise
+    ds = compute_normalised_anomaly(da, std_normalise, dask_chunks=dask_chunks, dimensions=dimensions)
     
-    # Identify extreme events
-    extremes = identify_extremes(
-        ds,
+    # Identify extreme events:  
+    extremes_detrend = identify_extremes(
+        ds.dat_detrend,
         threshold_percentile=threshold_percentile,
         dask_chunks=dask_chunks,
         dimensions=dimensions
     )
+    ds['extreme_events'] = extremes_detrend
     
-    # Add extremes to dataset
-    ds['extreme_events'] = extremes
+    if std_normalise:  # Also compute normalised/standardised anomalies
+        extremes_stn = identify_extremes(
+            ds.dat_stn,
+            threshold_percentile=threshold_percentile,
+            dask_chunks=dask_chunks,
+            dimensions=dimensions
+        )
+        ds['extreme_events_stn'] = extremes_stn
     
     # Add processing parameters to attributes
     ds.attrs.update({
