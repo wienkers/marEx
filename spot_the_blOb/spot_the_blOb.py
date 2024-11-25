@@ -680,7 +680,7 @@ class Spotter:
         return time_index_map
     
     
-    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list):
+    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list, chunk_time = 100):
         '''Implements Blob Splitting & Merging.
         
         Parameters:
@@ -706,6 +706,10 @@ class Spotter:
         merge_ledger : list
             List of tuples indicating which blobs have been merged.
         '''
+        
+        ## Re-chunk for better strides:
+        chunk_time_original = blob_id_field_unique.chunks[0]
+        blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time})
         
         ###################################################################
         ##### Enforce all Blob Pairs overlap by at least 50% (in Area) ####
@@ -749,6 +753,10 @@ class Spotter:
             # Find which chunk this time index belongs to
             chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[blob_id], side='right') - 1
             blobs_by_chunk.setdefault(chunk_idx, []).append(blob_id)
+        
+        # Ensure that blobs_by_chunk has entry for every key
+        for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
+            blobs_by_chunk.setdefault(chunk_idx, [])
         
         
         future_chunk_merges = []
@@ -905,40 +913,42 @@ class Spotter:
                 self.timedim: slice(chunk_start, chunk_end-1)  # cf. above definition of chunk_end for why we need -1
             }] = chunk_data[:(chunk_end-1-chunk_start)]
             
-            
-            ### Process the Merge Events
-            max_parents = max(len(ids) for ids in merge_parent_ids)
-            max_children = max(len(ids) for ids in merge_child_ids)
-            
-            # Convert lists to padded numpy arrays
-            parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
-            child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
-            overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
+        
+        ### Process the Merge Events
+        max_parents = max(len(ids) for ids in merge_parent_ids)
+        max_children = max(len(ids) for ids in merge_child_ids)
+        
+        # Convert lists to padded numpy arrays
+        parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
+        child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
+        overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
 
-            for i, parents in enumerate(merge_parent_ids):
-                parent_ids_array[i, :len(parents)] = parents
-            
-            for i, children in enumerate(merge_child_ids):
-                child_ids_array[i, :len(children)] = children
-            
-            for i, areas in enumerate(merge_areas):
-                overlap_areas_array[i, :len(areas)] = areas
-            
-            # Create merge events dataset
-            merge_events = xr.Dataset(
-                {
-                    'merge_parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
-                    'merge_child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
-                    'merge_overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
-                    'merge_time': ('merge_ID', merge_times),
-                    'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids])),
-                    'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids]))
-                },
-                attrs={
-                    'fill_value': -1
-                }
-            )
-            
+        for i, parents in enumerate(merge_parent_ids):
+            parent_ids_array[i, :len(parents)] = parents
+        
+        for i, children in enumerate(merge_child_ids):
+            child_ids_array[i, :len(children)] = children
+        
+        for i, areas in enumerate(merge_areas):
+            overlap_areas_array[i, :len(areas)] = areas
+        
+        # Create merge events dataset
+        merge_events = xr.Dataset(
+            {
+                'merge_parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
+                'merge_child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
+                'merge_overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
+                'merge_time': ('merge_ID', merge_times),
+                'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids])),
+                'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids]))
+            },
+            attrs={
+                'fill_value': -1
+            }
+        )
+        
+        
+        blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
         
         return (blob_id_field_unique, 
                 blob_props, 
@@ -966,7 +976,7 @@ class Spotter:
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field)  # List of overlapping blob pairs
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
-        #   N.B. This is the longest step due to loop-wise dependencies...
+        #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
         
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
