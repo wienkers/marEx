@@ -593,6 +593,7 @@ class Spotter:
         # Add start and end time indices for each ID
         valid_presence = blobs_props_extended['global_ID'] > 0  # Where we have valid data
         
+        blobs_props_extended['presence'] = valid_presence
         blobs_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
         blobs_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
         
@@ -989,7 +990,7 @@ def wrapped_euclidian_parallel(mask_values, parent_centroids_values, Nx):
 
 
 
-@jit(nopython=True)
+@jit(nopython=True, fastmath=True)
 def create_grid_index_arrays(points_y, points_x, grid_size, ny, nx):
     """
     Creates a grid-based spatial index using numpy arrays.
@@ -1011,7 +1012,7 @@ def create_grid_index_arrays(points_y, points_x, grid_size, ny, nx):
     
     return grid_points, grid_counts
 
-@jit(nopython=True)
+@jit(nopython=True, fastmath=True)
 def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
     """
     Calculate distance with periodic boundary conditions in x dimension.
@@ -1027,7 +1028,7 @@ def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
         
     return np.sqrt(dy * dy + dx * dx)
 
-@jit(nopython=True, parallel=True)
+@jit(nopython=True, parallel=True, fastmath=True)
 def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
     """
     Optimised version that assigns labels based on nearest parent blob points.
@@ -1139,3 +1140,4 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
     new_labels = child_ids[parent_assignments]
     
     return new_labels
+
