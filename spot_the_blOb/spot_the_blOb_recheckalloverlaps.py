@@ -604,7 +604,7 @@ class Spotter:
         return split_merged_relabeled_blobs_ds
     
     
-    def compute_id_time_dict(self, da, child_blobs, max_blobs, all_blobs=True):
+    def compute_id_time_dict(self, da, child_blobs, max_blobs):
         '''Generate lookup table mapping blob IDs to their time index.
         
         Parameters
@@ -636,19 +636,11 @@ class Spotter:
                 dask='parallelized'
             )
         
-        if not all_blobs:  # Just index the blobs in "child_blobs"
-            search_ids = xr.DataArray(
-                child_blobs,
-                dims=['child_id'],
-                coords={'child_id': child_blobs}
-            )
-        else:
-            search_ids = xr.DataArray(
-                np.arange(max_blobs, dtype=np.int32),
-                dims=['child_id'],
-                coords={'child_id': np.arange(max_blobs)}
-            )
-            
+        search_ids = xr.DataArray(
+            child_blobs,
+            dims=['child_id'],
+            coords={'child_id': child_blobs}
+        )
 
         # Reduce boolean array in spatial dimensions for all IDs at once
         time_indices = ((unique_ids_by_time == search_ids)
@@ -733,7 +725,6 @@ class Spotter:
             blobs_by_chunk.setdefault(chunk_idx, []).append(blob_id)
         
         
-        future_chunk_merges = []
         for chunk_idx, chunk_blobs in blobs_by_chunk.items(): # Loop over each time-chunk
             # We do this to avoid repetetively re-computing and injecting tiny changes into the full dask-backed DataArray blob_id_field_unique
             
@@ -744,21 +735,20 @@ class Spotter:
             
             chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
             
-            # Create a working queue of blobs to process
-            blobs_to_process = chunk_blobs.copy()
-            # Combine only the future_chunk_merges that don't already appear in blobs_to_process
-            blobs_to_process = blobs_to_process + [blob_id for blob_id in future_chunk_merges if blob_id not in blobs_to_process]  # First, assess the new blobs from the end of the previous chunk...
-            future_chunk_merges = []
-            
-            #for child_id in chunk_blobs: # Process each blob in this chunk
-            while blobs_to_process:  # Process until queue is empty
-                child_id = blobs_to_process.pop(0)  # Get next blob to process
+            for child_id in chunk_blobs: # Process each blob in this chunk
                 
                 child_time_idx = time_index_map[child_id]
                 relative_time_idx = child_time_idx - chunk_start
                 
                 blob_id_time = chunk_data.isel({self.timedim: relative_time_idx})
                 blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
+                if relative_time_idx-1 >= 0:
+                    blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
+                elif chunk_idx > 0:
+                    blob_id_time_m1 = blob_id_field_unique.isel({self.timedim: chunk_start-1})
+                else:
+                    blob_id_time_m1 = xr.full_like(blob_id_time, 0)
+                    
                 
                 child_mask_2d  = (blob_id_time == child_id).values
                 
@@ -777,7 +767,7 @@ class Spotter:
                 merge_ledger.append(parent_ids)
                 
                 # Replace the 2nd+ Child in the Overlap Blobs List with the new Child ID
-                overlap_blobs_list[child_where[1:], 1] = new_blob_id    #overlap_blobs_list[child_mask, 1][1:] = new_blob_id
+                #overlap_blobs_list[child_where[1:], 1] = new_blob_id    #overlap_blobs_list[child_mask, 1][1:] = new_blob_id
                 child_ids = np.concatenate((np.array([child_id]), new_blob_id))    #np.array([child_id, new_blob_id])
                 
                 ## Relabel the Original Child Blob ID Field to account for the New ID:
@@ -818,33 +808,36 @@ class Spotter:
                 ## Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
                 
                 # Look at the overlap IDs between the original child_id and the next time-step, and also the new_blob_id and the next time-step
-                new_overlaps = self.check_overlap_slice(blob_id_time.values, blob_id_time_p1.values)
-                new_child_overlaps_list = new_overlaps[(new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_blob_id)]
+                new_overlaps_p1 = self.check_overlap_slice(blob_id_time.values, blob_id_time_p1.values)
+                new_child_overlaps_list_p1 = new_overlaps_p1[np.isin(new_overlaps_p1[:, 0], child_ids)] # i.e. where child_ids are parents
+                
+                new_overlaps_m1 = self.check_overlap_slice(blob_id_time_m1.values, blob_id_time.values)
+                new_child_overlaps_list_m1 = new_overlaps_m1[np.isin(new_overlaps_m1[:, 1], child_ids)] # i.e. where child_ids are children
+                
                 
                 # _Before_ replacing the overlap_blobs_list, we need to re-assess the overlap fractions of just the new_child_overlaps_list
-                areas_0 = blob_props['area'].sel(ID=new_child_overlaps_list[:, 0]).values
-                areas_1 = blob_props['area'].sel(ID=new_child_overlaps_list[:, 1]).values
+                areas_0 = blob_props['area'].sel(ID=new_child_overlaps_list_p1[:, 0]).values
+                areas_1 = blob_props['area'].sel(ID=new_child_overlaps_list_p1[:, 1]).values
                 min_areas = np.minimum(areas_0, areas_1)
-                overlap_fractions = new_child_overlaps_list[:, 2].astype(float) / min_areas
-                new_child_overlaps_list = new_child_overlaps_list[overlap_fractions >= self.overlap_threshold]
+                overlap_fractions = new_child_overlaps_list_p1[:, 2].astype(float) / min_areas
+                new_child_overlaps_list_p1 = new_child_overlaps_list_p1[overlap_fractions >= self.overlap_threshold]
+                
+                areas_0 = blob_props['area'].sel(ID=new_child_overlaps_list_m1[:, 0]).values
+                areas_1 = blob_props['area'].sel(ID=new_child_overlaps_list_m1[:, 1]).values
+                min_areas = np.minimum(areas_0, areas_1)
+                overlap_fractions = new_child_overlaps_list_m1[:, 2].astype(float) / min_areas
+                new_child_overlaps_list_m1 = new_child_overlaps_list_m1[overlap_fractions >= self.overlap_threshold]
+                
                 
                 # Replace the lines in the overlap_blobs_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
-                child_mask_LHS = overlap_blobs_list[:, 0] == child_id
-                overlap_blobs_list = np.concatenate([overlap_blobs_list[~child_mask_LHS], new_child_overlaps_list])
-                
-                
-                ## Finally, _FINALLY_, we need to ensure that of the new children blobs we made, they only overlap with their respective parent...
-                new_unique_children, new_children_counts = np.unique(new_child_overlaps_list[:, 1], return_counts=True)
-                new_merging_blobs = new_unique_children[new_children_counts > 1]
-                if new_merging_blobs.size > 0:
-                    
-                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim]:  # If there is a next time-step in this chunk
-                        for new_child_id in new_merging_blobs:
-                            if new_child_id not in blobs_to_process: # We aren't already going to assess this blob
-                                blobs_to_process.insert(0, new_child_id)
-                    
-                    else: # This is out of our current jurisdiction: Defer this reassessment to the beginning of the next chunk
-                        future_chunk_merges.extend(new_merging_blobs)
+                mask_contains_nochild = ~(np.isin(overlap_blobs_list[:, 0], child_ids) | 
+                                        np.isin(overlap_blobs_list[:, 1], child_ids))
+
+                overlap_blobs_list = np.concatenate([
+                                    overlap_blobs_list[mask_contains_nochild],
+                                    new_child_overlaps_list_p1,
+                                    new_child_overlaps_list_m1
+                                ])
                 
             
             # Update the full dask DataArray with this processed chunk
