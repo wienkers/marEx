@@ -848,6 +848,9 @@ class Spotter:
                 chunk_data[{self.timedim: relative_time_idx}] = blob_id_time
                 
                 
+                ## Add new entries to time_index_map for each of new_blob_id corresponding to the current time index
+                time_index_map.update({new_id: child_time_idx for new_id in new_blob_id})
+                
                 ## Update the Properties of the N Children Blobs
                 new_child_props = self.calculate_blob_properties(blob_id_time, properties=['area', 'centroid'])
                 
