@@ -14,13 +14,14 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, centroid_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
         
         self.data_bin           = data_bin
         self.mask               = mask
         self.R_fill             = int(R_fill)
         self.area_filter_quartile   = area_filter_quartile
         self.allow_merging      = allow_merging
+        self.centroid_partitioning = centroid_partitioning
         self.overlap_threshold  = overlap_threshold
         self.timedim    = timedim
         self.xdim       = xdim
@@ -68,6 +69,10 @@ class Spotter:
         
         allow_merging : bool, optional
             Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity.
+        
+        centroid_partitioning : bool, optional
+            If True, then the centroid is used to determine partitioning between new child labels, e.g. Di Sun & Bohai Zhang 2023
+            If False, then implement a better merged child partitioning calculation based on closest parent cell.
         
         overlap_threshold : float, optional
             The minimum fraction of overlap between blobs across time to consider them the same object. Value should be between 0 and 1.
@@ -119,8 +124,18 @@ class Spotter:
         print(f'Rejected Area Fraction: {rejected_area_fraction}')
         print(f'Total Blobs Tracked: {N_blobs_final}')
         
-        print(f'Total Merging Events: {len(blObs_ds.attrs["merge_ledger"])}')
-        
+        if self.allow_merging:
+            
+            blObs_ds.attrs['allow_merging'] = self.allow_merging
+            blObs_ds.attrs['overlap_threshold'] = self.overlap_threshold
+            blObs_ds.attrs['centroid_partitioning'] = self.centroid_partitioning
+            
+            # Add merge-specific summary attributes 
+            blObs_ds.attrs['total_merges'] = len(blObs_ds.merge_ID)
+            blObs_ds.attrs['multi_parent_merges'] = (blObs_ds.merge_n_parents > 2).sum().item()
+            
+            print(f"Total Merging Events: {blObs_ds.attrs['total_merges']}")
+            print(f"Multi-Parent Merging Events: {blObs_ds.attrs['multi_parent_merges']}")
         
         return blObs_ds
     
@@ -593,6 +608,7 @@ class Spotter:
         # Add start and end time indices for each ID
         valid_presence = blobs_props_extended['global_ID'] > 0  # Where we have valid data
         
+        blobs_props_extended['presence'] = valid_presence
         blobs_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
         blobs_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
         
@@ -666,7 +682,6 @@ class Spotter:
     
     def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list):
         '''Implements Blob Splitting & Merging.
-           cf. Reference Di Sun  & Bohai Zhang 2023
         
         Parameters:
         -----------
@@ -711,8 +726,11 @@ class Spotter:
         ##### Consider Merging Blobs ####
         #################################
         
-        ## Initialise merge tracking structures
-        merge_ledger = []                      # List of IDs of the 2 Merging Parents
+        ## Initialize merge tracking lists to build DataArray later
+        merge_times = []      # When the merge occurred
+        merge_child_ids = []  # Resulting child ID
+        merge_parent_ids = [] # List of parent IDs that merged
+        merge_areas = []      # Areas of overlap
         next_new_id = blob_props.ID.max().item() + 1  # Start new IDs after highest existing ID
         
         # Find all the Children (t+1 / RHS) elements that appear multiple times --> Indicates there are 2+ Parent Blobs...
@@ -759,6 +777,12 @@ class Spotter:
                 
                 blob_id_time = chunk_data.isel({self.timedim: relative_time_idx})
                 blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
+                if relative_time_idx-1 >= 0:
+                    blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
+                elif chunk_idx > 0:
+                    blob_id_time_m1 = blob_id_field_unique.isel({self.timedim: chunk_start-1})
+                else:
+                    blob_id_time_m1 = xr.full_like(blob_id_time, 0)
                 
                 child_mask_2d  = (blob_id_time == child_id).values
                 
@@ -774,29 +798,58 @@ class Spotter:
                 # Make a new ID for the other Half of the Child Blob & Record in the Merge Ledger
                 new_blob_id = np.arange(next_new_id, next_new_id + (num_parents - 1), dtype=np.int32)
                 next_new_id += num_parents - 1
-                merge_ledger.append(parent_ids)
                 
                 # Replace the 2nd+ Child in the Overlap Blobs List with the new Child ID
                 overlap_blobs_list[child_where[1:], 1] = new_blob_id    #overlap_blobs_list[child_mask, 1][1:] = new_blob_id
                 child_ids = np.concatenate((np.array([child_id]), new_blob_id))    #np.array([child_id, new_blob_id])
                 
-                ## Relabel the Original Child Blob ID Field to account for the New ID:
-                # --> For every (Original) Child Cell in the ID Field, Measure the Distance to the Centroids of the Parents
-                # --> Assign the ID for each Cell corresponding to the closest Parent
+                # Record merge event data
+                merge_times.append(chunk_data.isel({self.timedim: relative_time_idx}).time.values)
+                merge_child_ids.append(child_ids)
+                merge_parent_ids.append(parent_ids)
+                merge_areas.append(overlap_blobs_list[child_mask, 2])
                 
+                ### Relabel the Original Child Blob ID Field to account for the New ID:
                 parent_centroids = blob_props.sel(ID=parent_ids).centroid.values.T  # (y, x), [:,0] are the y's
-                distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
                 
-                # Assign the new ID to each cell based on the closest parent
-                new_labels = child_ids[np.argmin(distances, axis=1)]
+                if self.centroid_partitioning:
+                    # --> For every (Original) Child Cell in the ID Field, Measure the Distance to the Centroids of the Parents
+                    distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
+                    
+                    # Assign the new ID to each cell based on the closest parent
+                    new_labels = child_ids[np.argmin(distances, axis=1)]
                 
-                # Update values in child_time_idx and assign the updated slice back to the original DataArray
+                else:
+                    # --> For every (Original) Child Cell in the ID Field, Find the closest parent cell
+                    parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0], blob_id_time.shape[1]), dtype=bool)
+                    for idx, parent_id in enumerate(parent_ids):
+                        parent_masks[idx] = (blob_id_time_m1 == parent_id).values
+                    
+                    # Calculate typical blob size to set max_distance
+                    max_area = np.max(blob_props.sel(ID=parent_ids).area.values)
+                    max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
+                    max_distance = max(max_distance, 20)  # Set minimum threshold...
+                    
+                    new_labels = get_nearest_parent_labels(
+                        child_mask_2d,
+                        parent_masks, 
+                        child_ids,
+                        parent_centroids,
+                        Nx,
+                        max_distance=max_distance
+                    )
+                
+                
+                ## Update values in child_time_idx and assign the updated slice back to the original DataArray
                 temp = np.zeros_like(blob_id_time)
                 temp[child_mask_2d] = new_labels
                 blob_id_time = blob_id_time.where(~child_mask_2d, temp)
                 ## ** Update directly into the chunk
                 chunk_data[{self.timedim: relative_time_idx}] = blob_id_time
                 
+                
+                ## Add new entries to time_index_map for each of new_blob_id corresponding to the current time index
+                time_index_map.update({new_id: child_time_idx for new_id in new_blob_id})
                 
                 ## Update the Properties of the N Children Blobs
                 new_child_props = self.calculate_blob_properties(blob_id_time, properties=['area', 'centroid'])
@@ -838,7 +891,7 @@ class Spotter:
                 new_merging_blobs = new_unique_children[new_children_counts > 1]
                 if new_merging_blobs.size > 0:
                     
-                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim]:  # If there is a next time-step in this chunk
+                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim]-1:  # If there is a next time-step in this chunk
                         for new_child_id in new_merging_blobs:
                             if new_child_id not in blobs_to_process: # We aren't already going to assess this blob
                                 blobs_to_process.insert(0, new_child_id)
@@ -853,11 +906,44 @@ class Spotter:
             }] = chunk_data[:(chunk_end-1-chunk_start)]
             
             
+            ### Process the Merge Events
+            max_parents = max(len(ids) for ids in merge_parent_ids)
+            max_children = max(len(ids) for ids in merge_child_ids)
+            
+            # Convert lists to padded numpy arrays
+            parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
+            child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
+            overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
+
+            for i, parents in enumerate(merge_parent_ids):
+                parent_ids_array[i, :len(parents)] = parents
+            
+            for i, children in enumerate(merge_child_ids):
+                child_ids_array[i, :len(children)] = children
+            
+            for i, areas in enumerate(merge_areas):
+                overlap_areas_array[i, :len(areas)] = areas
+            
+            # Create merge events dataset
+            merge_events = xr.Dataset(
+                {
+                    'merge_parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
+                    'merge_child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
+                    'merge_overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
+                    'merge_time': ('merge_ID', merge_times),
+                    'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids])),
+                    'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids]))
+                },
+                attrs={
+                    'fill_value': -1
+                }
+            )
+            
         
         return (blob_id_field_unique, 
                 blob_props, 
                 overlap_blobs_list[:, :2],
-                merge_ledger)
+                merge_events)
         
     
     
@@ -881,24 +967,31 @@ class Spotter:
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies...
-        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merged_blobs_ledger = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
+        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
         
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
         
-        # Add Merge Ledger to split_merged_blobs_ds
-        split_merged_blobs_ds.attrs['merge_ledger'] = merged_blobs_ledger
+        # Merge the merge_events dataset into split_merged_blobs_ds
+        split_merged_blobs_ds = xr.merge([split_merged_blobs_ds, merge_events])
         
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
     
         return split_merged_blobs_ds, N_blobs
-    
-
-    
 
 
-## Optimised Helper Functions
+
+
+
+
+
+
+
+##################################
+### Optimised Helper Functions ###
+##################################
+
 
 @jit(nopython=True, parallel=True, fastmath=True)
 def wrapped_euclidian_parallel(mask_values, parent_centroids_values, Nx):
@@ -948,4 +1041,157 @@ def wrapped_euclidian_parallel(mask_values, parent_centroids_values, Nx):
         distances[idx] = np.sqrt(dy * dy + dx * dx)
     
     return distances
+
+
+
+@jit(nopython=True, fastmath=True)
+def create_grid_index_arrays(points_y, points_x, grid_size, ny, nx):
+    """
+    Creates a grid-based spatial index using numpy arrays.
+    """
+    n_grids_y = (ny + grid_size - 1) // grid_size
+    n_grids_x = (nx + grid_size - 1) // grid_size
+    max_points_per_cell = len(points_y)
+    
+    grid_points = np.full((n_grids_y, n_grids_x, max_points_per_cell), -1, dtype=np.int32)
+    grid_counts = np.zeros((n_grids_y, n_grids_x), dtype=np.int32)
+    
+    for idx in range(len(points_y)):
+        grid_y = min(points_y[idx] // grid_size, n_grids_y - 1)
+        grid_x = min(points_x[idx] // grid_size, n_grids_x - 1)
+        count = grid_counts[grid_y, grid_x]
+        if count < max_points_per_cell:
+            grid_points[grid_y, grid_x, count] = idx
+            grid_counts[grid_y, grid_x] += 1
+    
+    return grid_points, grid_counts
+
+@jit(nopython=True, fastmath=True)
+def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
+    """
+    Calculate distance with periodic boundary conditions in x dimension.
+    """
+    dy = y1 - y2
+    dx = x1 - x2
+    
+    if dx > half_nx:
+        dx -= nx
+    elif dx < -half_nx:
+        dx += nx
+        
+    return np.sqrt(dy * dy + dx * dx)
+
+@jit(nopython=True, parallel=True, fastmath=True)
+def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
+    """
+    Assigns labels based on nearest parent blob points.
+    This is quite computationally-intensive, so we utilise many optimisations here...
+    """
+    ny, nx = child_mask.shape
+    half_Nx = Nx / 2
+    n_parents = len(parent_masks)
+    grid_size = max(2, max_distance // 4)
+    
+    y_indices, x_indices = np.nonzero(child_mask)
+    n_child_points = len(y_indices)
+    
+    min_distances = np.full(n_child_points, np.inf)
+    parent_assignments = np.zeros(n_child_points, dtype=np.int32)
+    found_close = np.zeros(n_child_points, dtype=np.bool_)
+    
+    for parent_idx in range(n_parents):
+        py, px = np.nonzero(parent_masks[parent_idx])
+        
+        if len(py) == 0:  # Skip empty parents
+            continue
+            
+        # Create grid index for this parent
+        n_grids_y = (ny + grid_size - 1) // grid_size
+        n_grids_x = (nx + grid_size - 1) // grid_size
+        grid_points, grid_counts = create_grid_index_arrays(py, px, grid_size, ny, nx)
+        
+        # Process child points in parallel
+        for child_idx in prange(n_child_points):
+            if found_close[child_idx]:  # Skip if we already found a very close match
+                continue
+                
+            child_y, child_x = y_indices[child_idx], x_indices[child_idx]
+            grid_y = min(child_y // grid_size, n_grids_y - 1)
+            grid_x = min(child_x // grid_size, n_grids_x - 1)
+            
+            min_dist_to_parent = np.inf
+            
+            # Check nearby grid cells
+            for dy in range(-1, 2):
+                grid_y_check = (grid_y + dy) % n_grids_y
+                
+                for dx in range(-1, 2):
+                    grid_x_check = (grid_x + dx) % n_grids_x
+                    
+                    # Process points in this grid cell
+                    n_points = grid_counts[grid_y_check, grid_x_check]
+                    
+                    for p_idx in range(n_points):
+                        point_idx = grid_points[grid_y_check, grid_x_check, p_idx]
+                        if point_idx == -1:
+                            break
+                        
+                        dist = calculate_wrapped_distance(
+                            child_y, child_x,
+                            py[point_idx], px[point_idx],
+                            Nx, half_Nx
+                        )
+                        
+                        if dist > max_distance:
+                            continue
+                        
+                        if dist < min_dist_to_parent:
+                            min_dist_to_parent = dist
+                            
+                        if dist < 2:  # Very close match found
+                            min_dist_to_parent = dist
+                            found_close[child_idx] = True
+                            break
+                    
+                    if found_close[child_idx]:
+                        break
+                
+                if found_close[child_idx]:
+                    break
+            
+            # Update assignment if this parent is closer
+            if min_dist_to_parent < min_distances[child_idx]:
+                min_distances[child_idx] = min_dist_to_parent
+                parent_assignments[child_idx] = parent_idx
+                
+                if min_dist_to_parent < 2:
+                    found_close[child_idx] = True
+    
+    # Handle any unassigned points using centroids
+    unassigned = min_distances == np.inf
+    if np.any(unassigned):
+        for child_idx in np.nonzero(unassigned)[0]:
+            child_y, child_x = y_indices[child_idx], x_indices[child_idx]
+            min_dist = np.inf
+            best_parent = 0
+            
+            for parent_idx in range(n_parents):
+                # Calculate distance to centroid with periodic boundary conditions
+                dist = calculate_wrapped_distance(
+                    child_y, child_x,
+                    parent_centroids[parent_idx, 0],
+                    parent_centroids[parent_idx, 1],
+                    Nx, half_Nx
+                )
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    best_parent = parent_idx
+                    
+            parent_assignments[child_idx] = best_parent
+    
+    # Convert from parent indices to child_ids
+    new_labels = child_ids[parent_assignments]
+    
+    return new_labels
 
