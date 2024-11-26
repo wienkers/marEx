@@ -8,20 +8,21 @@ from scipy.sparse.csgraph import connected_components
 from dask import persist
 from dask.base import is_dask_collection
 from numba import jit, prange
+import warnings
 
 class Spotter:
     '''
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, centroid_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
         
         self.data_bin           = data_bin
         self.mask               = mask
         self.R_fill             = int(R_fill)
         self.area_filter_quartile   = area_filter_quartile
         self.allow_merging      = allow_merging
-        self.centroid_partitioning = centroid_partitioning
+        self.nn_partitioning = nn_partitioning
         self.overlap_threshold  = overlap_threshold
         self.timedim    = timedim
         self.xdim       = xdim
@@ -70,9 +71,9 @@ class Spotter:
         allow_merging : bool, optional
             Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity.
         
-        centroid_partitioning : bool, optional
-            If True, then the centroid is used to determine partitioning between new child labels, e.g. Di Sun & Bohai Zhang 2023
-            If False, then implement a better merged child partitioning calculation based on closest parent cell.
+        nn_partitioning : bool, optional
+            If True, then implement a better merged child partitioning calculation based on closest parent cell.
+            If False, then the centroid is used to determine partitioning between new child labels, e.g. Di Sun & Bohai Zhang 2023
         
         overlap_threshold : float, optional
             The minimum fraction of overlap between blobs across time to consider them the same object. Value should be between 0 and 1.
@@ -85,16 +86,19 @@ class Spotter:
 
         # Fill Small Holes & Gaps between Objects
         data_bin_filled = self.fill_holes()
+        print('Finished filling holes.')
 
         # Remove Small Objects
         data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_filled)
-
+        print('Finished filtering small blobs.')
+        
         if not self.allow_merging:
             # Track Blobs without any special merging or splitting
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
         else:
             # Track Blobs _with_ Merging & Splitting
             blObs_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
+        print('Finished tracking blobs.')
         
         
         ## Save Some BlObby Stats
@@ -107,6 +111,7 @@ class Spotter:
         accepted_area = blob_areas.where(blob_areas > area_threshold, drop=True).sum().item()
         accepted_area_fraction = accepted_area / total_id_area
 
+        blObs_ds.attrs['allow_merging'] = int(self.allow_merging)
         blObs_ds.attrs['N_blobs_unfiltered'] = int(N_blobs_unfiltered)
         blObs_ds.attrs['N_blobs_final'] = int(N_blobs_final)
         blObs_ds.attrs['R_fill'] = self.R_fill
@@ -126,9 +131,9 @@ class Spotter:
         
         if self.allow_merging:
             
-            blObs_ds.attrs['allow_merging'] = self.allow_merging
+            
             blObs_ds.attrs['overlap_threshold'] = self.overlap_threshold
-            blObs_ds.attrs['centroid_partitioning'] = self.centroid_partitioning
+            blObs_ds.attrs['nn_partitioning'] = int(self.nn_partitioning)
             
             # Add merge-specific summary attributes 
             blObs_ds.attrs['total_merges'] = len(blObs_ds.merge_ID)
@@ -263,7 +268,6 @@ class Spotter:
         return (y_centroid, x_centroid)
         
     
-    
     def calculate_blob_properties(self, blob_id_field, properties=None):
         '''
         Calculates properties of the blobs from the blob_id_field.
@@ -369,26 +373,6 @@ class Spotter:
 
         return data_bin_filtered, area_threshold, blob_areas, N_blobs
     
-    def check_overlap_slice_slow(self, ids_t0, ids_next):
-        '''Finds overlapping blobs in a single time slice by looking at +-1 in time.'''
-        
-        # Flatten the arrays in a memory-efficient way
-        ids_t0_flat = ids_t0.ravel()
-        ids_next_flat = ids_next.ravel()
-        
-        # Create array of indices for valid IDs
-        id_mask_t0 = ids_t0_flat > 0
-        id_indices_t0 = np.nonzero(id_mask_t0)[0]
-        id_indices_next = id_indices_t0[ids_next_flat[id_mask_t0] > 0]
-
-        # Create Pairs using advanced indexing. N.B. We keep the earlier ID in time first
-        id_pairs = np.stack((ids_t0_flat[id_indices_next],   ids_next_flat[id_indices_next]), axis=1)
-        
-        # Find unique pairs with their counts within this chunk
-        unique_pairs, counts_chunk = np.unique(id_pairs, axis=0, return_counts=True)
-        
-        # Return pairs with their chunk-level counts
-        return np.column_stack((unique_pairs, counts_chunk))
     
     def check_overlap_slice(self, ids_t0, ids_next):
         '''Finds overlapping blobs in a single time slice by looking at +-1 in time.'''
@@ -587,7 +571,7 @@ class Spotter:
             transformed_arrays.append(original_ids)
 
         global_id_mapping = xr.concat(transformed_arrays, dim='new_id').assign_coords(new_id=new_ids).rename({'new_id': 'ID'}).compute()
-        blobs_props_extended['global_ID'] = global_id_mapping
+        blobs_props_extended['global_ID'] = global_id_mapping.astype(np.int32)
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
         
@@ -600,9 +584,16 @@ class Spotter:
         
         for var_name in blobs_props.data_vars:
             
-            blobs_props_extended[var_name] = (blobs_props[var_name]
+            temp = (blobs_props[var_name]
                               .sel(ID=global_id_mapping.rename({'ID':'new_id'}))
                               .drop_vars('ID').rename({'new_id':'ID'}))
+            
+            if var_name == 'ID':
+                temp = temp.astype(np.int32)
+            else:
+                temp = temp.astype(np.float32)
+                
+            blobs_props_extended[var_name] = temp
         
         
         # Add start and end time indices for each ID
@@ -647,9 +638,9 @@ class Spotter:
                 da,
                 input_core_dims=[[self.ydim, self.xdim]],
                 output_core_dims=[['unique_values']],
-                output_sizes={'unique_values': est_blobs_per_time_max},
+                dask='parallelized',
                 vectorize=True,
-                dask='parallelized'
+                dask_gufunc_kwargs={'output_sizes': {'unique_values': est_blobs_per_time_max}}
             )
         
         if not all_blobs:  # Just index the blobs in "child_blobs"
@@ -663,7 +654,7 @@ class Spotter:
                 np.arange(max_blobs, dtype=np.int32),
                 dims=['child_id'],
                 coords={'child_id': np.arange(max_blobs)}
-            )
+            ).chunk({'child_id': max_blobs // 20})
             
 
         # Reduce boolean array in spatial dimensions for all IDs at once
@@ -707,10 +698,6 @@ class Spotter:
             List of tuples indicating which blobs have been merged.
         '''
         
-        ## Re-chunk for better strides:
-        chunk_time_original = blob_id_field_unique.chunks[0]
-        blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time})
-        
         ###################################################################
         ##### Enforce all Blob Pairs overlap by at least 50% (in Area) ####
         ###################################################################
@@ -745,18 +732,22 @@ class Spotter:
         time_index_map = self.compute_id_time_dict(blob_id_field_unique, merging_blobs, next_new_id)
         Nx = blob_id_field_unique[self.xdim].size
         
+        ## Re-chunk for better strides:
+        #chunk_time_original = blob_id_field_unique.chunks[0]
+        #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time})
+        
         # Group blobs by time-chunk
         # -- Pre-condition: Blob IDs should be monotonically increasing in time...
         chunk_boundaries = np.cumsum([0] + list(blob_id_field_unique.chunks[0] ))
         blobs_by_chunk = {}
+        # Ensure that blobs_by_chunk has entry for every key
+        for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
+            blobs_by_chunk.setdefault(chunk_idx, [])
+        
         for blob_id in merging_blobs:
             # Find which chunk this time index belongs to
             chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[blob_id], side='right') - 1
             blobs_by_chunk.setdefault(chunk_idx, []).append(blob_id)
-        
-        # Ensure that blobs_by_chunk has entry for every key
-        for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
-            blobs_by_chunk.setdefault(chunk_idx, [])
         
         
         future_chunk_merges = []
@@ -784,7 +775,10 @@ class Spotter:
                 relative_time_idx = child_time_idx - chunk_start
                 
                 blob_id_time = chunk_data.isel({self.timedim: relative_time_idx})
-                blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
+                try:
+                    blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
+                except: # If this is the last chunk...
+                    blob_id_time_p1 = xr.full_like(blob_id_time, 0)
                 if relative_time_idx-1 >= 0:
                     blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
                 elif chunk_idx > 0:
@@ -820,15 +814,8 @@ class Spotter:
                 ### Relabel the Original Child Blob ID Field to account for the New ID:
                 parent_centroids = blob_props.sel(ID=parent_ids).centroid.values.T  # (y, x), [:,0] are the y's
                 
-                if self.centroid_partitioning:
-                    # --> For every (Original) Child Cell in the ID Field, Measure the Distance to the Centroids of the Parents
-                    distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
-                    
-                    # Assign the new ID to each cell based on the closest parent
-                    new_labels = child_ids[np.argmin(distances, axis=1)]
-                
-                else:
-                    # --> For every (Original) Child Cell in the ID Field, Find the closest parent cell
+                if self.nn_partitioning:
+                    # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
                     parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0], blob_id_time.shape[1]), dtype=bool)
                     for idx, parent_id in enumerate(parent_ids):
                         parent_masks[idx] = (blob_id_time_m1 == parent_id).values
@@ -846,6 +833,12 @@ class Spotter:
                         Nx,
                         max_distance=max_distance
                     )
+                else: 
+                    # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Centroid_
+                    distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
+                    
+                    # Assign the new ID to each cell based on the closest parent
+                    new_labels = child_ids[np.argmin(distances, axis=1)]
                 
                 
                 ## Update values in child_time_idx and assign the updated slice back to the original DataArray
@@ -913,6 +906,8 @@ class Spotter:
                 self.timedim: slice(chunk_start, chunk_end-1)  # cf. above definition of chunk_end for why we need -1
             }] = chunk_data[:(chunk_end-1-chunk_start)]
             
+            if chunk_idx % 10 == 0:
+                print(f"Processed chunk {chunk_idx} of {len(blobs_by_chunk)}")
         
         ### Process the Merge Events
         max_parents = max(len(ids) for ids in merge_parent_ids)
@@ -939,8 +934,8 @@ class Spotter:
                 'merge_child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
                 'merge_overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
                 'merge_time': ('merge_ID', merge_times),
-                'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids])),
-                'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids]))
+                'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids], dtype=np.int8)),
+                'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids], dtype=np.int8))
             },
             attrs={
                 'fill_value': -1
@@ -948,7 +943,7 @@ class Spotter:
         )
         
         
-        blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
+        #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
         
         return (blob_id_field_unique, 
                 blob_props, 
@@ -968,19 +963,26 @@ class Spotter:
         
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
-                
+        print('Finished blob identification.')
+        
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
+        print('Finished calculating blob properties.')
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field)  # List of overlapping blob pairs
+        print('Finished finding overlapping blobs.')
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
-        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
+        print('Finished splitting and merging blobs.')
         
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
+        print('Finished clustering and renaming blobs.')
         
         # Merge the merge_events dataset into split_merged_blobs_ds
         split_merged_blobs_ds = xr.merge([split_merged_blobs_ds, merge_events])
