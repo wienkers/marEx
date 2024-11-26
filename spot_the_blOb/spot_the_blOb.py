@@ -2,7 +2,9 @@ import xarray as xr
 import numpy as np
 from dask_image.ndmeasure import label
 from skimage.measure import regionprops_table
-from dask_image.ndmorph import binary_closing, binary_opening
+from dask_image.ndmorph import binary_closing as binary_closing_dask
+from dask_image.ndmorph import binary_opening as binary_opening_dask
+from scipy.ndimage import binary_closing, binary_opening
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from dask import persist
@@ -69,7 +71,7 @@ class Spotter:
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
         
         allow_merging : bool, optional
-            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity.
+            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
         
         nn_partitioning : bool, optional
             If True, then implement a better merged child partitioning calculation based on closest parent cell.
@@ -161,22 +163,43 @@ class Spotter:
             Binary data with holes/gaps filled and masked.
         '''
         
+        use_scipy_morph = True  # dask_image.ndmorph currently has a bug in the binary_closing function
+        
         # Generate Structuring Element
         y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
         r = x**2 + y**2
+        diameter = 2 * self.R_fill
         se_kernel = r < (self.R_fill**2)+1
         
-        # Pad the binary data
-        diameter = 2 * self.R_fill
-        binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
         
-        # Apply binary closing and opening
-        binary_data_closed = binary_closing(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
-        binary_data_opened = binary_opening(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
+        if use_scipy_morph:
+            
+            def binary_open_close(bitmap_binary):
+                bitmap_binary_padded = np.pad(bitmap_binary,
+                                                ((diameter, diameter), (diameter, diameter)),
+                                                mode='wrap')
+                s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
+                s2 = binary_opening(s1, se_kernel, iterations=1)
+                unpadded= s2[diameter:-diameter, diameter:-diameter]
+                return unpadded
+
+            data_bin_filled = xr.apply_ufunc(binary_open_close, self.data_bin,
+                                    input_core_dims=[[self.ydim, self.xdim]],
+                                    output_core_dims=[[self.ydim, self.xdim]],
+                                    output_dtypes=[self.data_bin.dtype],
+                                    vectorize=True,
+                                    dask='parallelized')
         
-        # Convert back to xarray.DataArray
-        binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
-        data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+        else:  # _CAUTION_:  Optimised dask_ndimage library gives some incorrectly holy/segmented binary-closed images...
+        
+            binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+            binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+            binary_data_opened = binary_opening_dask(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
+            
+            # Convert back to xarray.DataArray
+            binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
+            data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+        
         
         # Mask out edge features arising from Morphological Operations
         data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
@@ -198,7 +221,7 @@ class Spotter:
         
         if time_connectivity:
             # ID blobs in 3D (i.e. space & time) -- N.B. IDs are unique across time
-            neighbours[:,1,1] = 1 #                         including +-1 in time
+            neighbours[:,:,:] = 1 #                         including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
         # else, ID blobs only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
         
         # Cluster & Label Binary Data
@@ -552,25 +575,21 @@ class Spotter:
         
         ## Create a mapping from new IDs to the original IDs _at the corresponding time_
         valid_new_ids = (split_merged_relabeled_blob_id_field > 0)      
-        original_ids = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
+        original_ids_field = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         
-        id_mapping = xr.Dataset({
-            'original_id': original_ids,
-            'new_id': new_ids_field
-        })
+        new_ids_da = xr.DataArray(new_ids, dims='new_id').chunk({'new_id': 400})
+        first_match_idx = (new_ids_field.chunk({'z': 50000}) == new_ids_da).argmax(dim='z').compute()
         
-        transformed_arrays = []
-        for new_id in new_ids:
-            
-            mask = id_mapping.new_id == new_id
-            mask_time = mask.any('z')
-            
-            original_ids = id_mapping.original_id.where(mask, 0).max(dim='z').where(mask_time, 0)
-            
-            transformed_arrays.append(original_ids)
+        result = xr.where(new_ids_field.isel(z=first_match_idx) == new_ids, 
+                          original_ids_field.isel(z=first_match_idx), 0)
+        
+        global_id_mapping = (result
+            .assign_coords(new_id=new_ids)
+            .rename({'new_id': 'ID'})
+            .astype(np.int32)
+            .compute())
 
-        global_id_mapping = xr.concat(transformed_arrays, dim='new_id').assign_coords(new_id=new_ids).rename({'new_id': 'ID'}).astype(np.int32).compute()
         blobs_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
@@ -906,8 +925,8 @@ class Spotter:
                 self.timedim: slice(chunk_start, chunk_end-1)  # cf. above definition of chunk_end for why we need -1
             }] = chunk_data[:(chunk_end-1-chunk_start)]
             
-            if chunk_idx % 10 == 0:
-                print(f"Processed chunk {chunk_idx} of {len(blobs_by_chunk)}")
+            if chunk_idx % 25 == 0:
+                print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
         
         ### Process the Merge Events
         max_parents = max(len(ids) for ids in merge_parent_ids)
@@ -944,6 +963,7 @@ class Spotter:
         
         
         #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
+        blob_id_field_unique = blob_id_field_unique.persist()
         
         return (blob_id_field_unique, 
                 blob_props, 
@@ -973,16 +993,17 @@ class Spotter:
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field)  # List of overlapping blob pairs
         print('Finished finding overlapping blobs.')
         
-        # Apply Splitting & Merging Logic to `overlap_blobs`
-        #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
+            
+            # Apply Splitting & Merging Logic to `overlap_blobs`
+            #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
             split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
-        print('Finished splitting and merging blobs.')
-        
-        # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-        split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
-        print('Finished clustering and renaming blobs.')
+            print('Finished splitting and merging blobs.')
+            
+            # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
+            split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
+            print('Finished clustering and renaming blobs.')
         
         # Merge the merge_events dataset into split_merged_blobs_ds
         split_merged_blobs_ds = xr.merge([split_merged_blobs_ds, merge_events])
