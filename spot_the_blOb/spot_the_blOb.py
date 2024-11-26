@@ -69,7 +69,7 @@ class Spotter:
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
         
         allow_merging : bool, optional
-            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity.
+            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
         
         nn_partitioning : bool, optional
             If True, then implement a better merged child partitioning calculation based on closest parent cell.
@@ -198,7 +198,7 @@ class Spotter:
         
         if time_connectivity:
             # ID blobs in 3D (i.e. space & time) -- N.B. IDs are unique across time
-            neighbours[:,1,1] = 1 #                         including +-1 in time
+            neighbours[:,:,:] = 1 #                         including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
         # else, ID blobs only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
         
         # Cluster & Label Binary Data

@@ -24,10 +24,10 @@ def clim_robust(data, issym, percentiles=[2, 98]):
 @xr.register_dataarray_accessor('plotter')
 class PlotterAccessor:
     def __init__(self, xarray_obj):
-        self._obj = xarray_obj
+        self.da = xarray_obj
 
         
-    def pplot(self, title = None, var_units='', issym = False, cmap = None, cperc = [4, 96], clim = None, ax = None, dimensions={'time':'time','ydim':'lat','xdim':'lon'}):
+    def pplot(self, title = None, var_units='', issym = False, cmap = None, cperc = [4, 96], clim = None, show_colorbar=True, ax = None, dimensions={'time':'time','ydim':'lat','xdim':'lon'}):
         '''Make pretty plots.'''
         
         plt.rc('text', usetex=False)  # Use built-in math text rendering
@@ -43,14 +43,17 @@ class PlotterAccessor:
             fig = ax.get_figure()
         
         
-        cl = clim_robust(self, issym, cperc) if clim is None else clim
-        im = ax.pcolormesh(self[dimensions['xdim']],self[dimensions['ydim']],self.values,
+        cl = clim_robust(self.da, issym, cperc) if clim is None else clim
+        im = ax.pcolormesh(self.da[dimensions['xdim']],self.da[dimensions['ydim']],self.da.values,
                     vmin=cl[0],vmax=cl[1],cmap=cmap,
                     transform=ccrs.PlateCarree())
-        if title is not None: ax.set_title(title,size=14)
-        cb = plt.colorbar(im,shrink=0.6,ax=ax,extend='both')
-        cb.ax.set_ylabel(f'{var_units}',fontsize=10)
-        cb.ax.tick_params(labelsize=10)
+        if title is not None: ax.set_title(title,size=12)
+        
+        if show_colorbar:
+            cb = plt.colorbar(im, shrink=0.6, ax=ax, extend='both')
+            cb.ax.set_ylabel(f'{var_units}', fontsize=10)
+            cb.ax.tick_params(labelsize=10)
+
         ax.add_feature(cfeature.LAND,facecolor='darkgrey')
         ax.coastlines()
         gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
@@ -58,12 +61,12 @@ class PlotterAccessor:
         
         return fig, ax
 
-    def pplot_col(self, col='time', col_wrap=3, var_units='', issym = False, cmap = None, cperc = [4, 96], clim = None, ax = None, dimensions={'time':'time','ydim':'lat','xdim':'lon'}):
+    def pplot_col(self, col='time', col_wrap=3, var_units='', issym = False, cmap = None, cperc = [4, 96], clim = None, show_colorbar=True, ax = None, dimensions={'time':'time','ydim':'lat','xdim':'lon'}):
         '''Make pretty wrapped subplots.'''
         
         plt.rc('text', usetex=False)
         
-        npanels = self[col].size
+        npanels = self.da[col].size
         nrows = int(np.ceil(npanels/col_wrap))
         ncols = min(npanels, col_wrap)
         
@@ -72,7 +75,7 @@ class PlotterAccessor:
         
         for i, ax in enumerate(axes):
             if i < npanels:
-                self.isel({col: i}).pplot(title = f"{col}={self[col].isel({col: i}).values()}", var_units=var_units, issym = issym, cmap = cmap, cperc = cperc, clim = clim, ax = ax, dimensions=dimensions)
+                self.da.isel({col: i}).plotter.pplot(title = f"{col}={self.da[col].isel({col: i}).values}", var_units=var_units, issym = issym, cmap = cmap, cperc = cperc, clim = clim, show_colorbar = show_colorbar, ax = ax, dimensions=dimensions)
             else:
                 fig.delaxes(ax)
         
