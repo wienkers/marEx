@@ -570,8 +570,8 @@ class Spotter:
             
             transformed_arrays.append(original_ids)
 
-        global_id_mapping = xr.concat(transformed_arrays, dim='new_id').assign_coords(new_id=new_ids).rename({'new_id': 'ID'}).compute()
-        blobs_props_extended['global_ID'] = global_id_mapping.astype(np.int32)
+        global_id_mapping = xr.concat(transformed_arrays, dim='new_id').assign_coords(new_id=new_ids).rename({'new_id': 'ID'}).astype(np.int32).compute()
+        blobs_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
         
@@ -654,7 +654,7 @@ class Spotter:
                 np.arange(max_blobs, dtype=np.int32),
                 dims=['child_id'],
                 coords={'child_id': np.arange(max_blobs)}
-            ).chunk({'child_id': max_blobs // 20})
+            ).chunk({'child_id': 10000}) # ~ max_blobs // 20
             
 
         # Reduce boolean array in spatial dimensions for all IDs at once
