@@ -575,36 +575,15 @@ class Spotter:
         
         ## Create a mapping from new IDs to the original IDs _at the corresponding time_
         valid_new_ids = (split_merged_relabeled_blob_id_field > 0)      
-        original_ids = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
+        original_ids_field = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         
-        id_mapping = xr.Dataset({
-            'original_id': original_ids,
-            'new_id': new_ids_field
-        })
+        new_ids_da = xr.DataArray(new_ids, dims='new_id').chunk({'new_id': 400})
+        first_match_idx = (new_ids_field.chunk({'z': 50000}) == new_ids_da).argmax(dim='z').compute()
         
-        def map_ids_chunk(original_ids, new_ids_field, target_new_id):
-            """Process a single chunk/new_id combination."""
-            mask = new_ids_field == target_new_id
-            if not np.any(mask):
-                return np.zeros(1, dtype=np.int32)
-            return np.array([np.max(original_ids[mask])], dtype=np.int32)
-
-        # Replace your loop with this:
-        result = xr.apply_ufunc(
-            map_ids_chunk,
-            id_mapping.original_id,
-            id_mapping.new_id,
-            xr.DataArray(new_ids, dims='new_id'),
-            input_core_dims=[['z'], ['z'], []],
-            output_core_dims=[[]],
-            vectorize=True,
-            dask='parallelized',
-            output_dtypes=[np.int32],
-            dask_gufunc_kwargs={'allow_rechunk': True}
-        )
-
-        # Convert to the expected format
+        result = xr.where(new_ids_field.isel(z=first_match_idx) == new_ids, 
+                          original_ids_field.isel(z=first_match_idx), 0)
+        
         global_id_mapping = (result
             .assign_coords(new_id=new_ids)
             .rename({'new_id': 'ID'})
@@ -946,8 +925,8 @@ class Spotter:
                 self.timedim: slice(chunk_start, chunk_end-1)  # cf. above definition of chunk_end for why we need -1
             }] = chunk_data[:(chunk_end-1-chunk_start)]
             
-            if chunk_idx % 10 == 0:
-                print(f"Processed chunk {chunk_idx} of {len(blobs_by_chunk)}")
+            if chunk_idx % 25 == 0:
+                print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
         
         ### Process the Merge Events
         max_parents = max(len(ids) for ids in merge_parent_ids)
@@ -984,6 +963,7 @@ class Spotter:
         
         
         #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
+        blob_id_field_unique = blob_id_field_unique.persist()
         
         return (blob_id_field_unique, 
                 blob_props, 
@@ -1013,16 +993,17 @@ class Spotter:
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field)  # List of overlapping blob pairs
         print('Finished finding overlapping blobs.')
         
-        # Apply Splitting & Merging Logic to `overlap_blobs`
-        #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
+            
+            # Apply Splitting & Merging Logic to `overlap_blobs`
+            #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
             split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs(blob_id_field, blob_props, overlap_blobs_list)
-        print('Finished splitting and merging blobs.')
-        
-        # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-        split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
-        print('Finished clustering and renaming blobs.')
+            print('Finished splitting and merging blobs.')
+            
+            # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
+            split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
+            print('Finished clustering and renaming blobs.')
         
         # Merge the merge_events dataset into split_merged_blobs_ds
         split_merged_blobs_ds = xr.merge([split_merged_blobs_ds, merge_events])
