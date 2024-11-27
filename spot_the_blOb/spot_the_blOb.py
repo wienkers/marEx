@@ -2,7 +2,9 @@ import xarray as xr
 import numpy as np
 from dask_image.ndmeasure import label
 from skimage.measure import regionprops_table
-from dask_image.ndmorph import binary_closing, binary_opening
+from dask_image.ndmorph import binary_closing as binary_closing_dask
+from dask_image.ndmorph import binary_opening as binary_opening_dask
+from scipy.ndimage import binary_closing, binary_opening
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from dask import persist
@@ -161,22 +163,43 @@ class Spotter:
             Binary data with holes/gaps filled and masked.
         '''
         
+        use_scipy_morph = True  # dask_image.ndmorph currently has a bug in the binary_closing function
+        
         # Generate Structuring Element
         y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
         r = x**2 + y**2
+        diameter = 2 * self.R_fill
         se_kernel = r < (self.R_fill**2)+1
         
-        # Pad the binary data
-        diameter = 2 * self.R_fill
-        binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
         
-        # Apply binary closing and opening
-        binary_data_closed = binary_closing(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
-        binary_data_opened = binary_opening(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
+        if use_scipy_morph:
+            
+            def binary_open_close(bitmap_binary):
+                bitmap_binary_padded = np.pad(bitmap_binary,
+                                                ((diameter, diameter), (diameter, diameter)),
+                                                mode='wrap')
+                s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
+                s2 = binary_opening(s1, se_kernel, iterations=1)
+                unpadded= s2[diameter:-diameter, diameter:-diameter]
+                return unpadded
+
+            data_bin_filled = xr.apply_ufunc(binary_open_close, self.data_bin,
+                                    input_core_dims=[[self.ydim, self.xdim]],
+                                    output_core_dims=[[self.ydim, self.xdim]],
+                                    output_dtypes=[self.data_bin.dtype],
+                                    vectorize=True,
+                                    dask='parallelized')
         
-        # Convert back to xarray.DataArray
-        binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
-        data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+        else:  # _CAUTION_:  Optimised dask_ndimage library gives some incorrectly holy/segmented binary-closed images...
+        
+            binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+            binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+            binary_data_opened = binary_opening_dask(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
+            
+            # Convert back to xarray.DataArray
+            binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
+            data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+        
         
         # Mask out edge features arising from Morphological Operations
         data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
@@ -560,17 +583,34 @@ class Spotter:
             'new_id': new_ids_field
         })
         
-        transformed_arrays = []
-        for new_id in new_ids:
-            
-            mask = id_mapping.new_id == new_id
-            mask_time = mask.any('z')
-            
-            original_ids = id_mapping.original_id.where(mask, 0).max(dim='z').where(mask_time, 0)
-            
-            transformed_arrays.append(original_ids)
+        def map_ids_chunk(original_ids, new_ids_field, target_new_id):
+            """Process a single chunk/new_id combination."""
+            mask = new_ids_field == target_new_id
+            if not np.any(mask):
+                return np.zeros(1, dtype=np.int32)
+            return np.array([np.max(original_ids[mask])], dtype=np.int32)
 
-        global_id_mapping = xr.concat(transformed_arrays, dim='new_id').assign_coords(new_id=new_ids).rename({'new_id': 'ID'}).astype(np.int32).compute()
+        # Replace your loop with this:
+        result = xr.apply_ufunc(
+            map_ids_chunk,
+            id_mapping.original_id,
+            id_mapping.new_id,
+            xr.DataArray(new_ids, dims='new_id'),
+            input_core_dims=[['z'], ['z'], []],
+            output_core_dims=[[]],
+            vectorize=True,
+            dask='parallelized',
+            output_dtypes=[np.int32],
+            dask_gufunc_kwargs={'allow_rechunk': True}
+        )
+
+        # Convert to the expected format
+        global_id_mapping = (result
+            .assign_coords(new_id=new_ids)
+            .rename({'new_id': 'ID'})
+            .astype(np.int32)
+            .compute())
+
         blobs_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
