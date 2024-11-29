@@ -52,7 +52,7 @@ class Spotter:
             raise ValueError('The discard_fraction should be between 0 and 1.')
         
             
-    def run(self):
+    def run(self, return_merges=False):
         '''
         Cluster, ID, filter, and track objects in a binary field with optional merging & splitting. 
         
@@ -99,7 +99,7 @@ class Spotter:
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
         else:
             # Track Blobs _with_ Merging & Splitting
-            blObs_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
+            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
         print('Finished tracking blobs.')
         
         
@@ -138,13 +138,17 @@ class Spotter:
             blObs_ds.attrs['nn_partitioning'] = int(self.nn_partitioning)
             
             # Add merge-specific summary attributes 
-            blObs_ds.attrs['total_merges'] = len(blObs_ds.merge_ID)
-            blObs_ds.attrs['multi_parent_merges'] = (blObs_ds.merge_n_parents > 2).sum().item()
+            blObs_ds.attrs['total_merges'] = len(merges_ds.merge_ID)
+            blObs_ds.attrs['multi_parent_merges'] = (merges_ds.n_parents > 2).sum().item()
             
             print(f"Total Merging Events: {blObs_ds.attrs['total_merges']}")
             print(f"Multi-Parent Merging Events: {blObs_ds.attrs['multi_parent_merges']}")
         
-        return blObs_ds
+        
+        if self.allow_merging and return_merges:
+            return blObs_ds, merges_ds
+        else:
+            return blObs_ds
     
     
 
@@ -445,7 +449,7 @@ class Spotter:
         ## Check just for overlap with next time slice.
         #  Keep a running list of all blob IDs that overlap
         
-        blob_id_field_next = blob_id_field.roll({self.timedim: -1}, roll_coords=False)
+        blob_id_field_next = blob_id_field.shift({self.timedim: -1}, fill_value=0)
 
         # ID Overlapping Blobs in Parallel
         overlap_blob_pairs_list = xr.apply_ufunc(
@@ -476,7 +480,7 @@ class Spotter:
         return overlap_blobs_list_unique
     
         
-    def cluster_rename_blobs_and_props(self, blob_id_field_unique, blobs_props, overlap_blobs_list):
+    def cluster_rename_blobs_and_props(self, blob_id_field_unique, blobs_props, overlap_blobs_list, merge_events):
         '''Cluster the blob pairs to determine the final IDs, and relabel the blobs.
         
         Parameters
@@ -503,7 +507,7 @@ class Spotter:
         
         # Get unique IDs from the overlap pairs
         IDs = np.unique(overlap_blobs_list) # 1D sorted unique
-        
+                
         # Create a mapping from ID to indices
         ID_to_index = {ID: index for index, ID in enumerate(IDs)}
         
@@ -615,19 +619,53 @@ class Spotter:
             blobs_props_extended[var_name] = temp
         
         
+        ## Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx) 
+        #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
+        # i.e. for each merge_ID --> merge_parent_IDs   gives the old IDs  --> map to new ID using ID_to_cluster_index_da
+        #                   --> merge_time
+        
+        old_parent_IDs = xr.where(merge_events.parent_IDs>0, merge_events.parent_IDs, 0)
+        new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
+
+        # Replace the coordinate merge_ID in new_IDs_parents with merge_time.  merge_events.merge_time gives merge_time for each merge_ID
+        new_IDs_parents_t = new_IDs_parents.assign_coords({'merge_time': merge_events.merge_time}).drop_vars('ID').swap_dims({'merge_ID': 'merge_time'})  # this now has coordinate merge_time and ID
+
+        # Map new_IDs_parents_t into a new data array with dimensions time, ID, and sibling_ID
+        merge_ledger = xr.full_like(global_id_mapping, fill_value=-1).expand_dims({'sibling_ID': new_IDs_parents_t.parent_idx.shape[0]}).copy() # dimesions are time, ID, sibling_ID
+        
+        for time_val in new_IDs_parents_t.merge_time.values:
+            IDs = new_IDs_parents_t.sel({'merge_time': time_val})
+            if IDs.ndim == 1:
+                IDs = IDs.values
+                for ID in IDs:
+                    if ID > 0:
+                        merge_ledger.loc[{self.timedim: time_val, 'ID': ID}] = IDs
+            else:  # There were multiple mergers at this time...
+                for merge_num, _ in enumerate(IDs.merge_time):
+                    IDs_sub = IDs.isel(merge_time=merge_num).values
+                    for ID in IDs_sub:
+                        if ID > 0:
+                            merge_ledger.loc[{self.timedim: time_val, 'ID': ID}] = IDs_sub
+        
+        merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').chunk({self.timedim: split_merged_relabeled_blob_id_field.data.chunksize[0]})
+        
+        
+        ## Finish up:
         # Add start and end time indices for each ID
         valid_presence = blobs_props_extended['global_ID'] > 0  # Where we have valid data
         
         blobs_props_extended['presence'] = valid_presence
         blobs_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
         blobs_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
-        
+                
         # Combine blobs_props_extended with split_merged_relabeled_blob_id_field
         split_merged_relabeled_blobs_ds = xr.merge([split_merged_relabeled_blob_id_field.rename('ID_field'), 
-                                                 blobs_props_extended])
-                
+                                                    blobs_props_extended,
+                                                    merge_ledger])
         
-        return split_merged_relabeled_blobs_ds
+        
+        # Remove the last ID -- it is all 0s        
+        return split_merged_relabeled_blobs_ds.isel(ID=slice(0, -1))
     
     
     def compute_id_time_dict(self, da, child_blobs, max_blobs, all_blobs=True):
@@ -690,7 +728,7 @@ class Spotter:
         return time_index_map
     
     
-    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list, chunk_time = 100):
+    def split_and_merge_blobs(self, blob_id_field_unique, blob_props, overlap_blobs_list):
         '''Implements Blob Splitting & Merging.
         
         Parameters:
@@ -750,10 +788,6 @@ class Spotter:
         # Pre-compute the child_time_idx & 2d_mask_id for each child_blob
         time_index_map = self.compute_id_time_dict(blob_id_field_unique, merging_blobs, next_new_id)
         Nx = blob_id_field_unique[self.xdim].size
-        
-        ## Re-chunk for better strides:
-        #chunk_time_original = blob_id_field_unique.chunks[0]
-        #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time})
         
         # Group blobs by time-chunk
         # -- Pre-condition: Blob IDs should be monotonically increasing in time...
@@ -949,12 +983,12 @@ class Spotter:
         # Create merge events dataset
         merge_events = xr.Dataset(
             {
-                'merge_parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
-                'merge_child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
-                'merge_overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
+                'parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
+                'child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
+                'overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
                 'merge_time': ('merge_ID', merge_times),
-                'merge_n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids], dtype=np.int8)),
-                'merge_n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids], dtype=np.int8))
+                'n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids], dtype=np.int8)),
+                'n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids], dtype=np.int8))
             },
             attrs={
                 'fill_value': -1
@@ -962,7 +996,6 @@ class Spotter:
         )
         
         
-        #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_time_original})
         blob_id_field_unique = blob_id_field_unique.persist()
         
         return (blob_id_field_unique, 
@@ -1002,16 +1035,13 @@ class Spotter:
             print('Finished splitting and merging blobs.')
             
             # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-            split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list)
+            split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
             print('Finished clustering and renaming blobs.')
-        
-        # Merge the merge_events dataset into split_merged_blobs_ds
-        split_merged_blobs_ds = xr.merge([split_merged_blobs_ds, merge_events])
         
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
     
-        return split_merged_blobs_ds, N_blobs
+        return split_merged_blobs_ds, merge_events, N_blobs
 
 
 
