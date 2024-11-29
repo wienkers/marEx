@@ -582,17 +582,45 @@ class Spotter:
         original_ids_field = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
         
-        new_ids_da = xr.DataArray(new_ids, dims='new_id').chunk({'new_id': 400})
-        first_match_idx = (new_ids_field.chunk({'z': 50000}) == new_ids_da).argmax(dim='z').compute()
+        new_id_to_idx = {id_val: idx for idx, id_val in enumerate(new_ids)}
+
+        def process_timestep(orig_ids, new_ids_t):
+            """Process a single timestep to create ID mapping."""
+            result = np.zeros(len(new_id_to_idx), dtype=np.int32)
+            
+            valid_mask = new_ids_t > 0
+            
+            # Get valid points for this timestep
+            if not valid_mask.any():
+                return result
+                
+            orig_valid = orig_ids[valid_mask]
+            new_valid = new_ids_t[valid_mask]
+            
+            if len(orig_valid) == 0:
+                return result
+                
+            unique_pairs = np.unique(np.column_stack((orig_valid, new_valid)), axis=0)
+            
+            # Create mapping
+            for orig_id, new_id in unique_pairs:
+                if new_id in new_id_to_idx:
+                    result[new_id_to_idx[new_id]] = orig_id
+                    
+            return result
+
+        global_id_mapping = xr.apply_ufunc(
+                    process_timestep,
+                    original_ids_field,
+                    new_ids_field,
+                    input_core_dims=[['z'], ['z']],
+                    output_core_dims=[['ID']],
+                    vectorize=True,
+                    dask='parallelized',
+                    output_dtypes=[np.int32],
+                    dask_gufunc_kwargs={'output_sizes': {'ID': len(new_ids)}}
+            ).assign_coords(ID=new_ids).compute()
         
-        result = xr.where(new_ids_field.isel(z=first_match_idx) == new_ids, 
-                          original_ids_field.isel(z=first_match_idx), 0)
-        
-        global_id_mapping = (result
-            .assign_coords(new_id=new_ids)
-            .rename({'new_id': 'ID'})
-            .astype(np.int32)
-            .compute())
 
         blobs_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
@@ -646,7 +674,7 @@ class Spotter:
                     for ID in IDs_sub:
                         if ID > 0:
                             merge_ledger.loc[{self.timedim: time_val, 'ID': ID}] = IDs_sub
-        
+
         merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').chunk({self.timedim: split_merged_relabeled_blob_id_field.data.chunksize[0]})
         
         
