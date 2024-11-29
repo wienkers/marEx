@@ -96,13 +96,13 @@ mask = ds_hot.mask.where((ds_hot.lat < 85) & (ds_hot.lat > -90), other=False)
 
 # Spot the Blobs
 tracker = blob.Spotter(extreme_bin, mask, R_fill=8, area_filter_quartile=0.5, allow_merging=True, overlap_threshold=0.5)
-blobs_ds = tracker.run()
+blobs_ds, merges_ds = tracker.run(return_merges=True)
 ```
 
 The resulting xarray dataset `blobs_ds` will have the following structure & entries:
 ```
 xarray.Dataset 
-Dimensions: (lat, lon, time, ID, component, merge_ID, parent_idx, child_idx) 
+Dimensions: (lat, lon, time, ID, component, sibling_ID) 
 Coordinates:
     lat         (lat)
     lon         (lon)
@@ -110,18 +110,13 @@ Coordinates:
     ID          (ID)
 Data variables:
     ID_field              (time, lat, lon)        int32       dask.array
-    global_ID             (time, ID)              int32       dask.array
-    area                  (time, ID)              float32     dask.array
-    centroid              (component, time, ID)   float32     dask.array
-    presence              (time, ID)              bool        dask.array
-    time_start            (ID)                    datetime64  dask.array
-    time_end              (ID)                    datetime64  dask.array
-    merge_parent_IDs      (merge_ID, parent_idx)  int32       dask.array
-    merge_child_IDs       (merge_ID, child_idx)   int32       dask.array
-    merge_overlap_areas   (merge_ID, parent_idx)  int32       dask.array
-    merge_time            (merge_ID)              datetime64  dask.array
-    merge_n_parents       (merge_ID)              int8        dask.array
-    merge_n_children      (merge_ID)              int8        dask.array
+    global_ID             (time, ID)              int32       ndarray
+    area                  (time, ID)              float32     ndarray
+    centroid              (component, time, ID)   float32     ndarray
+    presence              (time, ID)              bool        ndarray
+    time_start            (ID)                    datetime64  ndarray
+    time_end              (ID)                    datetime64  ndarray
+    merge_ledger          (time, ID, sibling_ID)  int32       ndarray
 
 ```
 where 
@@ -131,10 +126,25 @@ where
 - `centroid` is the (x,y) centroid of each blob as a function of time,
 - `presence` indicates the presence of each blob at each time (anywhere in space),
 - `time_start` and `time_end` are the start and end times of each blob,
-- `merge_parent_IDs` and `merge_child_IDs` are the _original_ parent and child IDs of each merging event,
-- `merge_overlap_areas` is the area of overlap between the parent and child blobs in each merging event,
+- `merge_ledger` gives the sibling IDs (matching `ID_field`) of each merging event. Values of `-1` indicate no merging event occurred.
+
+Additionally, if running with `return_merges=True`, the resulting xarray dataset `merges_ds` will have the following structure & entries:
+```
+xarray.Dataset 
+Dimensions: (merge_ID, parent_idx, child_idx) 
+Data variables:
+    parent_IDs      (merge_ID, parent_idx)  int32       ndarray
+    child_IDs       (merge_ID, child_idx)   int32       ndarray
+    overlap_areas   (merge_ID, parent_idx)  int32       ndarray
+    merge_time      (merge_ID)              datetime64  ndarray
+    n_parents       (merge_ID)              int8        ndarray
+    n_children      (merge_ID)              int8        ndarray
+```
+where
+- `parent_IDs` and `child_IDs` are the _original_ parent and child IDs of each merging event,
+- `overlap_areas` is the area of overlap between the parent and child blobs in each merging event,
 - `merge_time` is the time of each merging event,
-- `merge_n_parents` and `merge_n_children` are the number of parent and child blobs participating in each merging event.
+- `n_parents` and `n_children` are the number of parent and child blobs participating in each merging event.
 
 Arguments for `spot_the_blOb.Spotter()` include: 
 - `data_bin`: The binary field of events to group & label. _Must represent an underlying `dask` array_.
