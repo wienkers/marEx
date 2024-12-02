@@ -20,3 +20,4 @@ color = true
 
 [tool.isort]
 known_third_party = ["numpy", "setuptools"]
+
