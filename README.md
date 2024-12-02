@@ -11,6 +11,7 @@ Efficient and scalable Marine Heatwave detection and tracking.
   - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
   - Identifies extreme events based on a global-in-time percentile threshold.
   - Utilises `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets.
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores takes ~2 wall-minutes per decade.
 
 ### Blob Detection & Tracking
 **Blob Detection**:
@@ -19,6 +20,7 @@ Efficient and scalable Marine Heatwave detection and tracking.
   - Uses morphological opening & closing to fill small holes and gaps in binary features.
   - Filters out small objects based on area thresholds.
   - Identifies and labels connected regions in binary data representing arbitrary events (e.g. SST or SSS extrema, tracer presence, eddies, etc...).
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores takes ~5 wall-minutes per _century_.
 
 **Blob Tracking**:
   - Implements strict event tracking conditions to avoid very few, very large blobs.
@@ -33,11 +35,13 @@ Efficient and scalable Marine Heatwave detection and tracking.
       - Blob presence in time
       - Blob start/end times and duration
       - etc...
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64cores takes ~15 wall-minutes per decade. 
 
 ### Visualisation
 **Plotting**:
-  - Provides a few helper functions to create pretty plots and wrapped subplots.
+  - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
 
+https://github.com/user-attachments/assets/52385e21-4636-4047-88c5-aff03674b7d6
 
 ## Usage
 
