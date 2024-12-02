@@ -7,3 +7,4 @@ dependencies:
   - dask
   - scikit-image
   - dask_image
+  - pillow
