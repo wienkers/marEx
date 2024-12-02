@@ -39,8 +39,9 @@ Efficient and scalable Marine Heatwave detection and tracking.
 
 ### Visualisation
 **Plotting**:
-  - Provides a few helper functions to create pretty plots, wrapped subplots, and animations.
+  - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
 
+https://github.com/user-attachments/assets/52385e21-4636-4047-88c5-aff03674b7d6
 
 ## Usage
 
