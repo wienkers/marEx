@@ -17,11 +17,12 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=0, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
         
         self.data_bin           = data_bin
         self.mask               = mask
         self.R_fill             = int(R_fill)
+        self.T_fill             = T_fill
         self.area_filter_quartile   = area_filter_quartile
         self.allow_merging      = allow_merging
         self.nn_partitioning = nn_partitioning
@@ -51,6 +52,9 @@ class Spotter:
         if (area_filter_quartile < 0) or (area_filter_quartile > 1):
             raise ValueError('The discard_fraction should be between 0 and 1.')
         
+        if (T_fill != 0 and T_fill != 1 and T_fill != 3):
+            raise ValueError('Filling time-gaps of 0, 1, or 3 days is currently only supported.')
+        
             
     def run(self, return_merges=False):
         '''
@@ -66,9 +70,12 @@ class Spotter:
 
         R_fill : int
             The size of the structuring element used in morphological opening & closing, relating to the largest hole that can be filled. In units of pixels.
-
+        
         area_filter_quartile : float
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
+        
+        T_fill : int
+            The number of days of a time-gap that is permitted to continue tracking the blobs.
         
         allow_merging : bool, optional
             Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
@@ -93,6 +100,10 @@ class Spotter:
         # Remove Small Objects
         data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_filled)
         print('Finished filtering small blobs.')
+        
+        if (self.T_fill != 0):
+            # Fill Small Time-Gaps between Objects
+            data_bin_filtered = self.fill_time_gaps(data_bin_filtered)
         
         if not self.allow_merging:
             # Track Blobs without any special merging or splitting
@@ -167,7 +178,7 @@ class Spotter:
             Binary data with holes/gaps filled and masked.
         '''
         
-        use_scipy_morph = True  # dask_image.ndmorph currently has a bug in the binary_closing function
+        use_dask_morph = True
         
         # Generate Structuring Element
         y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
@@ -176,7 +187,17 @@ class Spotter:
         se_kernel = r < (self.R_fill**2)+1
         
         
-        if use_scipy_morph:
+        if use_dask_morph:
+            
+            binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+            binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+            binary_data_opened = binary_opening_dask(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
+            
+            # Convert back to xarray.DataArray
+            binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
+            data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+        
+        else:
             
             def binary_open_close(bitmap_binary):
                 bitmap_binary_padded = np.pad(bitmap_binary,
@@ -194,22 +215,34 @@ class Spotter:
                                     vectorize=True,
                                     dask='parallelized')
         
-        else:  # _CAUTION_:  Optimised dask_ndimage library gives some incorrectly holy/segmented binary-closed images...
-        
-            binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
-            binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
-            binary_data_opened = binary_opening_dask(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
-            
-            # Convert back to xarray.DataArray
-            binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
-            data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
-        
         
         # Mask out edge features arising from Morphological Operations
         data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
         
         return data_bin_filled_mask
 
+    
+    def fill_time_gaps(self, data_bin):
+        '''Fills temporal gaps of 1 day with the +- blob information.'''
+        
+        data_bin_next = data_bin.shift({self.timedim: -1}, fill_value=0)
+        data_bin_previous = data_bin.shift({self.timedim: 1}, fill_value=0)
+
+        if self.T_fill == 3:
+            data_bin_next2 = data_bin.shift({self.timedim: -2}, fill_value=0)
+            data_bin_previous2 = data_bin.shift({self.timedim: 2}, fill_value=0)
+        
+        if self.T_fill == 1:
+            # If not an object, but the +-1 time-slices have an object at this location, then make this an object...
+            data_bin_filled = data_bin | (data_bin_next & data_bin_previous)
+        elif self.T_fill == 3: # 3 days...
+            data_bin_filled = data_bin | (  (data_bin_next | data_bin_next2) 
+                                          & (data_bin_previous | data_bin_previous2))    
+        else:
+            data_bin_filled = data_bin
+        
+        return data_bin_filled
+    
 
     def identify_blobs(self, data_bin, time_connectivity):
         '''IDs connected regions in the binary data.
