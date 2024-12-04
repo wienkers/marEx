@@ -17,7 +17,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=0, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -52,8 +52,8 @@ class Spotter:
         if (area_filter_quartile < 0) or (area_filter_quartile > 1):
             raise ValueError('The discard_fraction should be between 0 and 1.')
         
-        if (T_fill != 0 and T_fill != 1 and T_fill != 3):
-            raise ValueError('Filling time-gaps of 0, 1, or 3 days is currently only supported.')
+        if (T_fill % 2 != 0):
+            raise ValueError('Filling time-gaps must be even (for symmetry).')
         
             
     def run(self, return_merges=False):
@@ -75,7 +75,7 @@ class Spotter:
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
         
         T_fill : int
-            The number of days of a time-gap that is permitted to continue tracking the blobs.
+            The number of days of a time-gap that is permitted to continue tracking the blobs. For time-symmetry, this number should be even.
         
         allow_merging : bool, optional
             Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
@@ -95,15 +95,14 @@ class Spotter:
 
         # Fill Small Holes & Gaps between Objects
         data_bin_filled = self.fill_holes()
-        print('Finished filling holes.')
 
-        # Remove Small Objects
-        data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_filled)
-        print('Finished filtering small blobs.')
+        # Fill Small Time-Gaps between Objects
+        data_bin_gap_filled = self.fill_time_gaps(data_bin_filled)
+        print('Finished filling spatio-temporal holes.')
         
-        if (self.T_fill != 0):
-            # Fill Small Time-Gaps between Objects
-            data_bin_filtered = self.fill_time_gaps(data_bin_filtered)
+        # Remove Small Objects
+        data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_gap_filled)
+        print('Finished filtering small blobs.')
         
         if not self.allow_merging:
             # Track Blobs without any special merging or splitting
@@ -128,6 +127,7 @@ class Spotter:
         blObs_ds.attrs['N_blobs_unfiltered'] = int(N_blobs_unfiltered)
         blObs_ds.attrs['N_blobs_final'] = int(N_blobs_final)
         blObs_ds.attrs['R_fill'] = self.R_fill
+        blObs_ds.attrs['T_fill'] = self.T_fill
         blObs_ds.attrs['area_filter_quartile'] = self.area_filter_quartile
         blObs_ds.attrs['area_threshold'] = area_threshold
         blObs_ds.attrs['rejected_area_fraction'] = rejected_area_fraction
@@ -223,23 +223,19 @@ class Spotter:
 
     
     def fill_time_gaps(self, data_bin):
-        '''Fills temporal gaps of 1 day with the +- blob information.'''
+        '''Fills temporal gaps. N.B.: We only perform binary closing (i.e. dilation then erosion, to fill small gaps -- we don't want to remove small objects!)
+        '''
         
-        data_bin_next = data_bin.shift({self.timedim: -1}, fill_value=0)
-        data_bin_previous = data_bin.shift({self.timedim: 1}, fill_value=0)
-
-        if self.T_fill == 3:
-            data_bin_next2 = data_bin.shift({self.timedim: -2}, fill_value=0)
-            data_bin_previous2 = data_bin.shift({self.timedim: 2}, fill_value=0)
+        if (self.T_fill == 0):
+            return data_bin
         
-        if self.T_fill == 1:
-            # If not an object, but the +-1 time-slices have an object at this location, then make this an object...
-            data_bin_filled = data_bin | (data_bin_next & data_bin_previous)
-        elif self.T_fill == 3: # 3 days...
-            data_bin_filled = data_bin | (  (data_bin_next | data_bin_next2) 
-                                          & (data_bin_previous | data_bin_previous2))    
-        else:
-            data_bin_filled = data_bin
+        kernel_size = self.T_fill + 1  # This will then fill a maximum hole size of self.T_fill
+        time_kernel = np.ones(kernel_size, dtype=bool)
+        
+        data_bin_closed = binary_closing_dask(data_bin.data, structure=time_kernel[:, np.newaxis, np.newaxis])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+        
+        # Convert back to xarray.DataArray
+        data_bin_filled = xr.DataArray(data_bin_closed, coords=data_bin.coords, dims=data_bin.dims)
         
         return data_bin_filled
     
@@ -550,11 +546,18 @@ class Spotter:
         # Create a sparse matrix representation of the graph
         n = len(IDs)
         row_indices, col_indices = overlap_pairs_indices.T
-        data = np.ones(len(overlap_pairs_indices))
-        graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n))
+        data = np.ones(len(overlap_pairs_indices), dtype=np.bool_)
+        graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n), dtype=np.bool_)
+        
+        # Clear temporary arrays
+        del row_indices
+        del col_indices
+        del data
         
         # Solve the graph to determine connected components
         num_components, component_IDs = connected_components(csgraph=graph, directed=False, return_labels=True)
+        
+        del graph
         
         # Group IDs by their component index
         ID_clusters = [[] for _ in range(num_components)]
@@ -595,7 +598,7 @@ class Spotter:
             vectorize=True,
             dask="parallelized",
             output_dtypes=[np.int32]
-        )
+        ).persist()
         
         
         
@@ -689,26 +692,53 @@ class Spotter:
         new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
 
         # Replace the coordinate merge_ID in new_IDs_parents with merge_time.  merge_events.merge_time gives merge_time for each merge_ID
-        new_IDs_parents_t = new_IDs_parents.assign_coords({'merge_time': merge_events.merge_time}).drop_vars('ID').swap_dims({'merge_ID': 'merge_time'})  # this now has coordinate merge_time and ID
+        new_IDs_parents_t = new_IDs_parents.assign_coords({'merge_time': merge_events.merge_time}).drop_vars('ID').swap_dims({'merge_ID': 'merge_time'}).persist()  # this now has coordinate merge_time and ID
 
         # Map new_IDs_parents_t into a new data array with dimensions time, ID, and sibling_ID
-        merge_ledger = xr.full_like(global_id_mapping, fill_value=-1).expand_dims({'sibling_ID': new_IDs_parents_t.parent_idx.shape[0]}).copy() # dimesions are time, ID, sibling_ID
+        merge_ledger = xr.full_like(global_id_mapping, fill_value=-1).chunk({self.timedim: split_merged_relabeled_blob_id_field.data.chunksize[0]}).expand_dims({'sibling_ID': new_IDs_parents_t.parent_idx.shape[0]}).copy() # dimesions are time, ID, sibling_ID
         
-        for time_val in new_IDs_parents_t.merge_time.values:
-            IDs = new_IDs_parents_t.sel({'merge_time': time_val})
-            if IDs.ndim == 1:
-                IDs = IDs.values
-                for ID in IDs:
-                    if ID > 0:
-                        merge_ledger.loc[{self.timedim: time_val, 'ID': ID}] = IDs
-            else:  # There were multiple mergers at this time...
-                for merge_num, _ in enumerate(IDs.merge_time):
-                    IDs_sub = IDs.isel(merge_time=merge_num).values
-                    for ID in IDs_sub:
-                        if ID > 0:
-                            merge_ledger.loc[{self.timedim: time_val, 'ID': ID}] = IDs_sub
+        # Wrapper for processing/mapping mergers in parallel
+        def process_time_group(time_block, IDs_data, IDs_coords):
+            """Process all mergers for a single block of timesteps."""
+            result = xr.full_like(time_block, -1)
+            
+            # Get unique times in this block
+            unique_times = np.unique(time_block[self.timedim])
+            
+            for time_val in unique_times:
+                # Get IDs for this time
+                time_mask = IDs_coords['merge_time'] == time_val
+                if not np.any(time_mask):
+                    continue
+                    
+                IDs_at_time = IDs_data[time_mask]
+                
+                # Single merger case
+                if IDs_at_time.ndim == 1:
+                    valid_mask = IDs_at_time > 0
+                    if np.any(valid_mask):
+                        # Create expanded array for each sibling_ID dimension
+                        expanded_IDs = np.broadcast_to(IDs_at_time, (len(time_block.sibling_ID), len(IDs_at_time)))
+                        result.loc[{self.timedim: time_val, 'ID': IDs_at_time[valid_mask]}] = expanded_IDs[:, valid_mask]
+                # Multiple mergers case
+                else:
+                    for merger_IDs in IDs_at_time:
+                        valid_mask = merger_IDs > 0
+                        if np.any(valid_mask):
+                            expanded_IDs = np.broadcast_to(merger_IDs, (len(time_block.sibling_ID), len(merger_IDs)))
+                            result.loc[{self.timedim: time_val, 'ID': merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
+                            
+            return result
+        
+        merge_ledger = xr.map_blocks(
+            process_time_group,
+            merge_ledger,
+            args=(new_IDs_parents_t.values, new_IDs_parents_t.coords),
+            template=merge_ledger
+        )
 
-        merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').chunk({self.timedim: split_merged_relabeled_blob_id_field.data.chunksize[0]})
+        # Final formatting
+        merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').persist()
         
         
         ## Finish up:
@@ -858,6 +888,8 @@ class Spotter:
         for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
             blobs_by_chunk.setdefault(chunk_idx, [])
         
+        blob_id_field_unique = blob_id_field_unique.persist()
+        
         for blob_id in merging_blobs:
             # Find which chunk this time index belongs to
             chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[blob_id], side='right') - 1
@@ -865,6 +897,7 @@ class Spotter:
         
         
         future_chunk_merges = []
+        updated_chunks = []
         for chunk_idx, chunk_blobs in blobs_by_chunk.items(): # Loop over each time-chunk
             # We do this to avoid repetetively re-computing and injecting tiny changes into the full dask-backed DataArray blob_id_field_unique
             
@@ -895,8 +928,9 @@ class Spotter:
                     blob_id_time_p1 = xr.full_like(blob_id_time, 0)
                 if relative_time_idx-1 >= 0:
                     blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
-                elif chunk_idx > 0:
-                    blob_id_time_m1 = blob_id_field_unique.isel({self.timedim: chunk_start-1})
+                elif updated_chunks:  # Get the last time slice from the previous chunk (stored in updated_chunks)
+                    _, _, last_chunk_data = updated_chunks[-1]
+                    blob_id_time_m1 = last_chunk_data[-1]
                 else:
                     blob_id_time_m1 = xr.full_like(blob_id_time, 0)
                 
@@ -1015,13 +1049,25 @@ class Spotter:
                         future_chunk_merges.extend(new_merging_blobs)
                 
             
-            # Update the full dask DataArray with this processed chunk
-            blob_id_field_unique[{
-                self.timedim: slice(chunk_start, chunk_end-1)  # cf. above definition of chunk_end for why we need -1
-            }] = chunk_data[:(chunk_end-1-chunk_start)]
+            # Store the processed chunk
+            updated_chunks.append((chunk_start, chunk_end-1, chunk_data[:(chunk_end-1-chunk_start)]))
             
-            if chunk_idx % 25 == 0:
+            if chunk_idx % 10 == 0:
                 print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
+                
+                # Periodically update the main array to prevent memory buildup
+                if len(updated_chunks) > 1:  # Keep the last chunk for potential blob_id_time_m1 reference
+                    for start, end, chunk_data in updated_chunks[:-1]:
+                        blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+                    updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
+                    blob_id_field_unique = blob_id_field_unique.persist() # Persist to collapse the dask graph !
+
+        # Final chunk updates
+        for start, end, chunk_data in updated_chunks:
+            blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+        blob_id_field_unique = blob_id_field_unique.persist()
+        
+        
         
         ### Process the Merge Events
         max_parents = max(len(ids) for ids in merge_parent_ids)
@@ -1057,7 +1103,7 @@ class Spotter:
         )
         
         
-        blob_id_field_unique = blob_id_field_unique.persist()
+        blob_props = blob_props.persist()
         
         return (blob_id_field_unique, 
                 blob_props, 
@@ -1236,7 +1282,7 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
         
         # Process child points in parallel
         for child_idx in prange(n_child_points):
-            if found_close[child_idx]:  # Skip if we already found a very close match
+            if found_close[child_idx]:  # Skip if we already found an exact match
                 continue
                 
             child_y, child_x = y_indices[child_idx], x_indices[child_idx]
@@ -1272,7 +1318,7 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
                         if dist < min_dist_to_parent:
                             min_dist_to_parent = dist
                             
-                        if dist < 2:  # Very close match found
+                        if dist < 1e-6:  # Found exact same point (within numerical precision)
                             min_dist_to_parent = dist
                             found_close[child_idx] = True
                             break
@@ -1287,9 +1333,6 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
             if min_dist_to_parent < min_distances[child_idx]:
                 min_distances[child_idx] = min_dist_to_parent
                 parent_assignments[child_idx] = parent_idx
-                
-                if min_dist_to_parent < 2:
-                    found_close[child_idx] = True
     
     # Handle any unassigned points using centroids
     unassigned = min_distances == np.inf

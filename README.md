@@ -11,7 +11,10 @@ Efficient and scalable Marine Heatwave detection and tracking.
   - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
   - Identifies extreme events based on a global-in-time percentile threshold.
   - Utilises `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets.
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores takes ~2 wall-minutes per decade.
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores...
+    - Takes ~2 wall-minutes per decade
+    - Requires only 1 Gb memory per core (when `dask`-backed data has chunks of 25 days) 
+
 
 ### Blob Detection & Tracking
 **Blob Detection**:
@@ -20,10 +23,13 @@ Efficient and scalable Marine Heatwave detection and tracking.
   - Uses morphological opening & closing to fill small holes and gaps in binary features.
   - Filters out small objects based on area thresholds.
   - Identifies and labels connected regions in binary data representing arbitrary events (e.g. SST or SSS extrema, tracer presence, eddies, etc...).
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores takes ~5 wall-minutes per _century_.
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
+    - Takes ~5 wall-minutes per _century_
+    - Requires only 1 Gb memory per core (with `dask` chunks of 25 days)
 
 **Blob Tracking**:
   - Implements strict event tracking conditions to avoid very few, very large blobs.
+  - Permits temporal gaps (of `T_fill` days) between blobs, to allow more continuous blob tracking.
   - Requires blobs to overlap by at least `overlap_threshold` fraction of the smaller blob's area to be considered the same event and continue tracking with the same ID.
   - Accounts for & keeps a history of blob splitting & merging events, ensuring blobs are more coherent and retain their previous identities & histories.
   - Improves upon the splitting & merging logic of [Sun et al. (2023)](https://doi.org/10.1038/s41561-023-01325-w):
@@ -35,13 +41,21 @@ Efficient and scalable Marine Heatwave detection and tracking.
       - Blob presence in time
       - Blob start/end times and duration
       - etc...
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64cores takes ~15 wall-minutes per decade. 
+  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
+    - Takes ~8 wall-minutes per decade (cf. _Old_ Method, i.e. _without_ merge-split-tracking, time-gap filling, overlap-thresholding, et al., but here updated to leverage `dask`, now takes 1 wall-minute per decade!)
+    - Requires only ~2 Gb memory per core (wwith `dask` chunks of 25 days)
 
 ### Visualisation
 **Plotting**:
   - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
 
-https://github.com/user-attachments/assets/52385e21-4636-4047-88c5-aff03674b7d6
+cf. Old Method vs. New Tracking Algorithms (Centroidal & Nearest-Neighbour Partitioning):
+
+https://github.com/user-attachments/assets/9936fb43-f7a3-461e-aa82-9beb2826619c
+
+https://github.com/user-attachments/assets/462acafd-b2af-467c-b2c5-efec28ed24f1
+
+
 
 ## Usage
 
@@ -99,7 +113,7 @@ extreme_bin = ds_hot.dat_stn
 mask = ds_hot.mask.where((ds_hot.lat < 85) & (ds_hot.lat > -90), other=False)
 
 # Spot the Blobs
-tracker = blob.Spotter(extreme_bin, mask, R_fill=8, area_filter_quartile=0.5, allow_merging=True, overlap_threshold=0.5)
+tracker = blob.Spotter(extreme_bin, mask, R_fill=8, T_fill=2, area_filter_quartile=0.5, allow_merging=True, overlap_threshold=0.5)
 blobs_ds, merges_ds = tracker.run(return_merges=True)
 ```
 
@@ -154,6 +168,7 @@ Arguments for `spot_the_blOb.Spotter()` include:
 - `data_bin`: The binary field of events to group & label. _Must represent an underlying `dask` array_.
 - `mask`: The land-sea mask to apply to the binary field, indicating points to keep.
 - `R_fill`: The size of the structuring element used in morphological opening & closing, relating to the largest hole that can be filled. In units of pixels.
+- `T_fill`: The permissible temporal gap between blobs for tracking continuity to be maintained. Default is `2` days.
 - `area_filter_quartile`: The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
 - `allow_merging`:
   - `True`: (Default) Apply splitting & merging criteria, track merge events, and maintain original identities of merged blobs across time.
