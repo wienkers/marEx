@@ -51,7 +51,7 @@ Efficient and scalable Marine Heatwave detection and tracking.
 
 cf. Old Method vs. New Tracking Algorithm:
 
-https://github.com/user-attachments/assets/52385e21-4636-4047-88c5-aff03674b7d6
+https://github.com/user-attachments/assets/af8a58b5-b956-47b1-8de1-0712972f2d15
 
 ## Usage
 
