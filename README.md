@@ -49,9 +49,13 @@ Efficient and scalable Marine Heatwave detection and tracking.
 **Plotting**:
   - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
 
-cf. Old Method vs. New Tracking Algorithm:
+cf. Old Method vs. New Tracking Algorithms (Centroidal & Nearest-Neighbour Partitioning):
 
-https://github.com/user-attachments/assets/af8a58b5-b956-47b1-8de1-0712972f2d15
+https://github.com/user-attachments/assets/9936fb43-f7a3-461e-aa82-9beb2826619c
+
+https://github.com/user-attachments/assets/462acafd-b2af-467c-b2c5-efec28ed24f1
+
+
 
 ## Usage
 
