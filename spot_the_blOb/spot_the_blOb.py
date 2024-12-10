@@ -35,7 +35,7 @@ class Spotter:
         self.unstructured_grid = unstructured_grid
         
         if unstructured_grid:
-            ydim = None
+            self.ydim = None
             if ((timedim, xdim) != data_bin.dims):
                 try:
                     data_bin = data_bin.transpose(timedim, xdim) 
@@ -77,6 +77,7 @@ class Spotter:
                 raise ValueError('The neighbours array must have dimensions of (nv, xdim).')
             
             ## Construct the sparse dilation matrix
+            print('Constructing the Sparse Dilation Matrix...')
             
             # Create row indices (i) and column indices (j) for the sparse matrix
             row_indices = jnp.repeat(jnp.arange(self.neighbours_int.shape[1]), 3)
@@ -208,7 +209,7 @@ class Spotter:
 
     def fill_holes(self): 
         '''
-        Performs morphological closing then opening to fill in gaps & holes up to size R_fill.
+        Performs morphological closing then opening to fill in gaps & holes up to size R_fill (in units of grid dx).
         
         Parameters
         ----------
@@ -223,8 +224,6 @@ class Spotter:
 
         if self.unstructured_grid:
             
-            exponent = self.R_fill
-            land_mask = self.mask.data
             ## _Put the data into an xarray.DataArray to pass into the apply_ufunc_ -- Needed for correct memory management !!!
             sp_data = xr.DataArray(self.dilate_sparse.data, dims='sp_data')
             indices = xr.DataArray(self.dilate_sparse.indices, dims='indices')
@@ -236,30 +235,30 @@ class Spotter:
                 ## Closing:  Dilation --> Erosion (Fills small gaps)
                 
                 # Dilation
-                bitmap_binary_dilated = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, exponent)  # This sparse_bool_power assumes the xdim (multiplying the sparse matrix) is in dim=1
+                bitmap_binary_dilated = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, self.R_fill)  # This sparse_bool_power assumes the xdim (multiplying the sparse matrix) is in dim=1
                 
                 # Set the land values to True (to avoid artificially eroding the shore)
-                bitmap_binary_dilated[:, land_mask] = True
+                bitmap_binary_dilated[:, ~self.mask] = True
                 
                 # Erosion is just the negated Dilation of the negated image
-                bitmap_binary_closed = ~sparse_bool_power(~bitmap_binary_dilated, sp_data, indices, indptr, exponent)
+                bitmap_binary_closed = ~sparse_bool_power(~bitmap_binary_dilated, sp_data, indices, indptr, self.R_fill)
                 
                 
                 ## Opening:  Erosion --> Dilation (Removes small objects)
                 
                 # Set the land values to True (to avoid artificially eroding the shore)
-                bitmap_binary_closed[:, land_mask] = True
+                bitmap_binary_closed[:, ~self.mask] = True
                 
                 # Erosion
-                bitmap_binary_eroded = ~sparse_bool_power(~bitmap_binary_closed, sp_data, indices, indptr, exponent)
+                bitmap_binary_eroded = ~sparse_bool_power(~bitmap_binary_closed, sp_data, indices, indptr, self.R_fill)
                 
                 # Dilation
-                bitmap_binary_closed_opened = sparse_bool_power(bitmap_binary_eroded, sp_data, indices, indptr, exponent)
+                bitmap_binary_closed_opened = sparse_bool_power(bitmap_binary_eroded, sp_data, indices, indptr, self.R_fill)
                 
                 return bitmap_binary_closed_opened
             
 
-            mo_binary = xr.apply_ufunc(binary_open_close, self.da, sp_data, indices, indptr,
+            data_bin_filled_mask = xr.apply_ufunc(binary_open_close, self.data_bin, sp_data, indices, indptr,
                                         input_core_dims=[[self.xdim],['sp_data'],['indices'],['indptr']],
                                         output_core_dims=[[self.xdim]],
                                         output_dtypes=[np.bool_],
@@ -324,6 +323,8 @@ class Spotter:
         '''
         
         if self.unstructured_grid:
+            # N.B.:  The resulting ID field for unstructured grid will start at 0 for each time-slice !
+            #        This is different behaviour to the structured grid, where IDs are unique across time.
             
             if time_connectivity:
                 raise ValueError('Cannot automatically compute time-connectivity on the unstructured grid!')
@@ -356,7 +357,7 @@ class Spotter:
                 return labels
             
             ## Label time-independent in 2D (i.e. no time connectivity!)
-            data_bin_mask = data_bin.where(~self.land_mask, other=True).persist()  # Mask land
+            data_bin_mask = data_bin.where(self.mask, other=False)  # Mask land
             
             blob_id_field = xr.apply_ufunc(cluster_true_values, 
                                     data_bin_mask, 
@@ -367,9 +368,9 @@ class Spotter:
                                     vectorize=False,
                                     dask='parallelized') + 1
             
-            blob_id_field = xr.where(~self.land_mask, blob_id_field, 0) # ID = 0 if False
+            blob_id_field = blob_id_field.where(self.mask, other=0) # ID = 0 on land
             blob_id_field = blob_id_field.rename('ID_field')
-            N_blobs = 1  # IDK
+            N_blobs = 1  # IDC
             
         else:  # Structured Grid
         
@@ -543,8 +544,8 @@ class Spotter:
         
         
         if self.unstructured_grid:
-                    
-            max_ID = blob_id_field.max().compute().data
+            # N.B.: identify_blobs() starts at ID=0 for every time slice
+            max_ID = blob_id_field.max().compute().item()
             
             ## Calculate areas: 
             
@@ -554,7 +555,7 @@ class Spotter:
                 padded_unique = np.zeros(max_ID, dtype=np.int32)
                 padded_sizes[:len(counts)] = counts
                 padded_unique[:len(counts)] = unique
-                return padded_sizes, padded_unique  # ith element corresponds to label=i
+                return padded_sizes, padded_unique
             
             cluster_sizes, unique_cluster_IDs = xr.apply_ufunc(count_cluster_sizes, 
                                     blob_id_field, 
@@ -567,7 +568,7 @@ class Spotter:
                     
             cluster_sizes, unique_cluster_IDs = persist(cluster_sizes, unique_cluster_IDs)
             
-            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 10).data  # Pre-filter < 10 cells
+            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data  # Pre-filter < 50 cells
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
             blob_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
@@ -575,14 +576,14 @@ class Spotter:
             
             N_blobs = len(blob_areas)
             
-            area_threshold = np.percentile(blob_areas, self.min_size_quartile*100)
+            area_threshold = np.percentile(blob_areas, self.area_filter_quartile*100)
                         
             def filter_area_binary(cluster_IDs_0, keep_IDs_0):
                 keep_IDs_0 = keep_IDs_0[keep_IDs_0>0]
                 keep_where = np.isin(cluster_IDs_0, keep_IDs_0)
                 return keep_where
             
-            keep_IDs = xr.where(cluster_sizes>=area_threshold, unique_cluster_IDs, 0)  # unique_cluster_IDs has been mapped in "count_cluster_sizes"
+            keep_IDs = xr.where(cluster_sizes > area_threshold, unique_cluster_IDs, 0)  # unique_cluster_IDs has been mapped in "count_cluster_sizes"
             
             data_bin_filtered = xr.apply_ufunc(filter_area_binary, 
                                     blob_id_field, keep_IDs, 
@@ -660,11 +661,12 @@ class Spotter:
         blob_id_field_next = blob_id_field.shift({self.timedim: -1}, fill_value=0)
 
         # ID Overlapping Blobs in Parallel
+        input_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
         overlap_blob_pairs_list = xr.apply_ufunc(
                             self.check_overlap_slice,
                             blob_id_field,
                             blob_id_field_next,
-                            input_core_dims=[[self.ydim, self.xdim], [self.ydim, self.xdim]],
+                            input_core_dims=[input_dims, input_dims],
                             output_core_dims=[[]],
                             vectorize=True,
                             dask="parallelized",
@@ -1300,13 +1302,22 @@ class Spotter:
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
-        #if self.unstructured_grid:
-            #... _label_unstruct_time() but also need to measure and check overlap, etc
-        
-        
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
         print('Finished blob identification.')
+        
+        if self.unstructured_grid:
+            # Make the blob_id_field unique across time
+            cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim)
+            blob_id_field = blob_id_field.where(blob_id_field > 0, 
+                                                    blob_id_field + cumsum_ids)
+        
+        ### TODO:  (see my dask-tracker.py as a reference)
+        #  [ ] Calculate Blob Properties for Unstructured Grid
+        #  [x] Overlapping Blobs List
+        #  [ ] Stuff in split_and_merge_blobs(), including nn & centroid partitioning
+        #  [ ] Stuff in cluster_rename_blobs_and_props()
+        
         
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
