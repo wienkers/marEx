@@ -8,3 +8,4 @@ dependencies:
   - scikit-image
   - dask_image
   - pillow
+  - xhistogram

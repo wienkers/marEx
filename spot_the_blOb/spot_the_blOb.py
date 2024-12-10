@@ -5,11 +5,13 @@ from skimage.measure import regionprops_table
 from dask_image.ndmorph import binary_closing as binary_closing_dask
 from dask_image.ndmorph import binary_opening as binary_opening_dask
 from scipy.ndimage import binary_closing, binary_opening
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, eye
 from scipy.sparse.csgraph import connected_components
 from dask import persist
+import dask.array as dsa
 from dask.base import is_dask_collection
-from numba import jit, prange
+from numba import jit, njit, int64, int32, prange
+import jax.numpy as jnp
 import warnings
 
 class Spotter:
@@ -17,7 +19,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, timedim='time', xdim='lon', ydim='lat'):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -30,12 +32,22 @@ class Spotter:
         self.timedim    = timedim
         self.xdim       = xdim
         self.ydim       = ydim   
+        self.unstructured_grid = unstructured_grid
         
-        if ((timedim, ydim, xdim) != data_bin.dims):
-            try:
-                data_bin = data_bin.transpose(timedim, ydim, xdim) 
-            except:
-                raise ValueError(f'Spot_the_blOb currently only supports 3D DataArrays. The dimensions should only contain ({timedim}, {xdim}, and {ydim}). Found {list(data_bin.dims)}')
+        if unstructured_grid:
+            ydim = None
+            if ((timedim, xdim) != data_bin.dims):
+                try:
+                    data_bin = data_bin.transpose(timedim, xdim) 
+                except:
+                    raise ValueError(f'Unstructured Spot_the_blOb currently only supports 2D DataArrays. The dimensions should only contain ({timedim} and {xdim}). Found {list(data_bin.dims)}')
+            
+        else:
+            if ((timedim, ydim, xdim) != data_bin.dims):
+                try:
+                    data_bin = data_bin.transpose(timedim, ydim, xdim) 
+                except:
+                    raise ValueError(f'Structured Spot_the_blOb currently only supports 3D DataArrays. The dimensions should only contain ({timedim}, {xdim}, and {ydim}). Found {list(data_bin.dims)}')
         
         if (data_bin.data.dtype != bool):
             raise ValueError('The input DataArray is not binary. Please convert to a binary array, and try again.  :)')
@@ -54,6 +66,36 @@ class Spotter:
         
         if (T_fill % 2 != 0):
             raise ValueError('Filling time-gaps must be even (for symmetry).')
+        
+        if unstructured_grid:
+            
+            ## Initialise the dilation array
+            self.neighbours_int = neighbours.astype(np.int32) - 1 # Convert to 0-based indexing (negative values will be dropped)
+            if self.neighbours_int.shape[0] != 3:
+                raise ValueError('Unstrucutred Spot_the_blOb currently only supports triangular grids. Therefore the neighbours array must have a shape of (3, ncells).')
+            if self.neighbours_int.dims != ('nv', self.xdim):
+                raise ValueError('The neighbours array must have dimensions of (nv, xdim).')
+            
+            ## Construct the sparse dilation matrix
+            
+            # Create row indices (i) and column indices (j) for the sparse matrix
+            row_indices = jnp.repeat(jnp.arange(self.neighbours_int.shape[1]), 3)
+            col_indices = self.neighbours_int.data.compute().T.flatten()
+
+            # Filter out negative values
+            valid_mask = col_indices >= 0
+            row_indices = row_indices[valid_mask]
+            col_indices = col_indices[valid_mask]
+            
+            max_neighbour = self.neighbours_int.max().compute().item() + 1
+
+            dilate_coo = coo_matrix((jnp.ones_like(row_indices, dtype=bool), (row_indices, col_indices)), shape=(self.neighbours_int.shape[1], max_neighbour))
+            self.dilate_sparse = csr_matrix(dilate_coo)
+            
+            # _Need to add identity!!!_  >_<
+            identity = eye(self.neighbours_int.shape[1], dtype=bool, format='csr')
+            self.dilate_sparse = self.dilate_sparse + identity
+        
         
             
     def run(self, return_merges=False):
@@ -104,12 +146,13 @@ class Spotter:
         data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_gap_filled)
         print('Finished filtering small blobs.')
         
-        if not self.allow_merging:
+        if self.allow_merging or self.unstructured_grid:
+            # Track Blobs _with_ Merging & Splitting (or, manually anyways for unstructured grid...)
+            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
+        else: 
             # Track Blobs without any special merging or splitting
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
-        else:
-            # Track Blobs _with_ Merging & Splitting
-            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
+            
         print('Finished tracking blobs.')
         
         
@@ -177,17 +220,60 @@ class Spotter:
         data_bin_filled_mask : xarray.DataArray
             Binary data with holes/gaps filled and masked.
         '''
-        
-        use_dask_morph = True
-        
-        # Generate Structuring Element
-        y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
-        r = x**2 + y**2
-        diameter = 2 * self.R_fill
-        se_kernel = r < (self.R_fill**2)+1
-        
-        
-        if use_dask_morph:
+
+        if self.unstructured_grid:
+            
+            exponent = self.R_fill
+            land_mask = self.mask.data
+            ## _Put the data into an xarray.DataArray to pass into the apply_ufunc_ -- Needed for correct memory management !!!
+            sp_data = xr.DataArray(self.dilate_sparse.data, dims='sp_data')
+            indices = xr.DataArray(self.dilate_sparse.indices, dims='indices')
+            indptr = xr.DataArray(self.dilate_sparse.indptr, dims='indptr')
+
+            def binary_open_close(bitmap_binary, sp_data, indices, indptr):
+                
+                
+                ## Closing:  Dilation --> Erosion (Fills small gaps)
+                
+                # Dilation
+                bitmap_binary_dilated = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, exponent)  # This sparse_bool_power assumes the xdim (multiplying the sparse matrix) is in dim=1
+                
+                # Set the land values to True (to avoid artificially eroding the shore)
+                bitmap_binary_dilated[:, land_mask] = True
+                
+                # Erosion is just the negated Dilation of the negated image
+                bitmap_binary_closed = ~sparse_bool_power(~bitmap_binary_dilated, sp_data, indices, indptr, exponent)
+                
+                
+                ## Opening:  Erosion --> Dilation (Removes small objects)
+                
+                # Set the land values to True (to avoid artificially eroding the shore)
+                bitmap_binary_closed[:, land_mask] = True
+                
+                # Erosion
+                bitmap_binary_eroded = ~sparse_bool_power(~bitmap_binary_closed, sp_data, indices, indptr, exponent)
+                
+                # Dilation
+                bitmap_binary_closed_opened = sparse_bool_power(bitmap_binary_eroded, sp_data, indices, indptr, exponent)
+                
+                return bitmap_binary_closed_opened
+            
+
+            mo_binary = xr.apply_ufunc(binary_open_close, self.da, sp_data, indices, indptr,
+                                        input_core_dims=[[self.xdim],['sp_data'],['indices'],['indptr']],
+                                        output_core_dims=[[self.xdim]],
+                                        output_dtypes=[np.bool_],
+                                        vectorize=False,
+                                        dask='parallelized')
+            
+            
+        else: # Structured Grid dask-powered morphological operations
+            
+            # Generate Structuring Element
+            y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
+            r = x**2 + y**2
+            diameter = 2 * self.R_fill
+            se_kernel = r < (self.R_fill**2)+1
             
             binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
             binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
@@ -197,27 +283,10 @@ class Spotter:
             binary_data_opened = xr.DataArray(binary_data_opened, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
             data_bin_filled    = binary_data_opened.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
         
-        else:
+            # Mask out edge features arising from Morphological Operations
+            data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
             
-            def binary_open_close(bitmap_binary):
-                bitmap_binary_padded = np.pad(bitmap_binary,
-                                                ((diameter, diameter), (diameter, diameter)),
-                                                mode='wrap')
-                s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
-                s2 = binary_opening(s1, se_kernel, iterations=1)
-                unpadded= s2[diameter:-diameter, diameter:-diameter]
-                return unpadded
-
-            data_bin_filled = xr.apply_ufunc(binary_open_close, self.data_bin,
-                                    input_core_dims=[[self.ydim, self.xdim]],
-                                    output_core_dims=[[self.ydim, self.xdim]],
-                                    output_dtypes=[self.data_bin.dtype],
-                                    vectorize=True,
-                                    dask='parallelized')
-        
-        
-        # Mask out edge features arising from Morphological Operations
-        data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
+            
         
         return data_bin_filled_mask
 
@@ -232,7 +301,12 @@ class Spotter:
         kernel_size = self.T_fill + 1  # This will then fill a maximum hole size of self.T_fill
         time_kernel = np.ones(kernel_size, dtype=bool)
         
-        data_bin_closed = binary_closing_dask(data_bin.data, structure=time_kernel[:, np.newaxis, np.newaxis])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+        if self.ydim is None:
+            time_kernel = time_kernel[:, np.newaxis] # Unstructured grid has only 1 additional dimension
+        else: 
+            time_kernel = time_kernel[:, np.newaxis, np.newaxis]
+        
+        data_bin_closed = binary_closing_dask(data_bin.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
         
         # Convert back to xarray.DataArray
         data_bin_filled = xr.DataArray(data_bin_closed, coords=data_bin.coords, dims=data_bin.dims)
@@ -249,23 +323,73 @@ class Spotter:
             Field of integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
-        neighbours = np.zeros((3,3,3))
-        neighbours[1,:,:] = 1           # Connectivity Kernel: All 8 neighbours, but ignore time
+        if self.unstructured_grid:
+            
+            if time_connectivity:
+                raise ValueError('Cannot automatically compute time-connectivity on the unstructured grid!')
+            
+            ## Utilise highly efficient Unstructured Union-Find (Disjoint Set Union) Clustering Algorithm
+            # N.B: cf, _label_union_find_unstruct
         
-        if time_connectivity:
-            # ID blobs in 3D (i.e. space & time) -- N.B. IDs are unique across time
-            neighbours[:,:,:] = 1 #                         including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
-        # else, ID blobs only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
+            def cluster_true_values(arr, neighbours_int):
+                t, n = arr.shape
+                labels = np.full((t, n), -1, dtype=np.int64)
+                
+                for i in range(t):
+                    true_indices = np.where(arr[i])[0]
+                    mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(true_indices)}
+                    
+                    valid_mask = (neighbours_int != -1) & arr[i][neighbours_int]
+                    row_ind, col_ind = np.where(valid_mask)
+                    
+                    mapped_row_ind = []
+                    mapped_col_ind = []
+                    for r, c in zip(neighbours_int[row_ind, col_ind], col_ind):
+                        if r in mapping and c in mapping:
+                            mapped_row_ind.append(mapping[r])
+                            mapped_col_ind.append(mapping[c])
+                    
+                    graph = csr_matrix((np.ones(len(mapped_row_ind)), (mapped_row_ind, mapped_col_ind)), shape=(len(true_indices), len(true_indices)))
+                    _, labels_true = connected_components(csgraph=graph, directed=False, return_labels=True)
+                    labels[i, true_indices] = labels_true
+                
+                return labels
+            
+            ## Label time-independent in 2D (i.e. no time connectivity!)
+            data_bin_mask = data_bin.where(~self.land_mask, other=True).persist()  # Mask land
+            
+            blob_id_field = xr.apply_ufunc(cluster_true_values, 
+                                    data_bin_mask, 
+                                    self.neighbours_int, 
+                                    input_core_dims=[[self.xdim],['nv',self.xdim]],
+                                    output_core_dims=[[self.xdim]],
+                                    output_dtypes=[np.int32],
+                                    vectorize=False,
+                                    dask='parallelized') + 1
+            
+            blob_id_field = xr.where(~self.land_mask, blob_id_field, 0) # ID = 0 if False
+            blob_id_field = blob_id_field.rename('ID_field')
+            N_blobs = 1  # IDK
+            
+        else:  # Structured Grid
         
-        # Cluster & Label Binary Data
-        blob_id_field, N_blobs = label(data_bin,           # Apply dask-powered ndimage & persist in memory
-                                        structure=neighbours, 
-                                        wrap_axes=(2,))       # Wrap in x-direction
-        blob_id_field, N_blobs = persist(blob_id_field, N_blobs)
-        
-        N_blobs = N_blobs.compute()
-        # DataArray (same shape as data_bin) but with integer IDs for each connected object: 
-        blob_id_field = xr.DataArray(blob_id_field, coords=data_bin.coords, dims=data_bin.dims, attrs=data_bin.attrs).rename('ID_field')
+            neighbours = np.zeros((3,3,3))
+            neighbours[1,:,:] = 1           # Connectivity Kernel: All 8 neighbours, but ignore time
+            
+            if time_connectivity:
+                # ID blobs in 3D (i.e. space & time) -- N.B. IDs are unique across time
+                neighbours[:,:,:] = 1 #                         including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
+            # else, ID blobs only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
+            
+            # Cluster & Label Binary Data
+            blob_id_field, N_blobs = label(data_bin,           # Apply dask-powered ndimage & persist in memory
+                                            structure=neighbours, 
+                                            wrap_axes=(2,))       # Wrap in x-direction
+            blob_id_field, N_blobs = persist(blob_id_field, N_blobs)
+            
+            N_blobs = N_blobs.compute()
+            # DataArray (same shape as data_bin) but with integer IDs for each connected object: 
+            blob_id_field = xr.DataArray(blob_id_field, coords=data_bin.coords, dims=data_bin.dims, attrs=data_bin.attrs).rename('ID_field')
         
         return blob_id_field, N_blobs
     
@@ -417,16 +541,71 @@ class Spotter:
         # Cluster & Label Binary Data: Time-independent in 2D (i.e. no time connectivity!)
         blob_id_field, N_blobs = self.identify_blobs(data_bin, time_connectivity=False)
         
-        # Compute Blob Areas
-        blob_props = self.calculate_blob_properties(blob_id_field)
-        blob_areas, blob_ids = blob_props.area, blob_props.ID
         
-        # Remove Smallest Blobs
-        area_threshold = np.percentile(blob_areas, self.area_filter_quartile*100.0)
-        blob_ids_keep = xr.where(blob_areas >= area_threshold, blob_ids, -1)
-        blob_ids_keep[0] = -1  # Don't keep ID=0
-        data_bin_filtered = blob_id_field.isin(blob_ids_keep)
+        if self.unstructured_grid:
+                    
+            max_ID = blob_id_field.max().compute().data
+            
+            ## Calculate areas: 
+            
+            def count_cluster_sizes(blob_id_field):
+                unique, counts = np.unique(blob_id_field[blob_id_field > 0], return_counts=True)
+                padded_sizes = np.zeros(max_ID, dtype=np.int32)
+                padded_unique = np.zeros(max_ID, dtype=np.int32)
+                padded_sizes[:len(counts)] = counts
+                padded_unique[:len(counts)] = unique
+                return padded_sizes, padded_unique  # ith element corresponds to label=i
+            
+            cluster_sizes, unique_cluster_IDs = xr.apply_ufunc(count_cluster_sizes, 
+                                    blob_id_field, 
+                                    input_core_dims=[[self.xdim]],
+                                    output_core_dims=[['ID'],['ID']],
+                                    output_sizes={'ID': max_ID}, 
+                                    output_dtypes=(np.int32, np.int32),
+                                    vectorize=True,
+                                    dask='parallelized')
+                    
+            cluster_sizes, unique_cluster_IDs = persist(cluster_sizes, unique_cluster_IDs)
+            
+            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 10).data  # Pre-filter < 10 cells
+            cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
+            blob_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
+            ## Filter small areas: 
+            
+            N_blobs = len(blob_areas)
+            
+            area_threshold = np.percentile(blob_areas, self.min_size_quartile*100)
+                        
+            def filter_area_binary(cluster_IDs_0, keep_IDs_0):
+                keep_IDs_0 = keep_IDs_0[keep_IDs_0>0]
+                keep_where = np.isin(cluster_IDs_0, keep_IDs_0)
+                return keep_where
+            
+            keep_IDs = xr.where(cluster_sizes>=area_threshold, unique_cluster_IDs, 0)  # unique_cluster_IDs has been mapped in "count_cluster_sizes"
+            
+            data_bin_filtered = xr.apply_ufunc(filter_area_binary, 
+                                    blob_id_field, keep_IDs, 
+                                    input_core_dims=[[self.xdim],['ID']],
+                                    output_core_dims=[[self.xdim]],
+                                    output_dtypes=[data_bin.dtype],
+                                    vectorize=True,
+                                    dask='parallelized')
+
+            
+        else: # Structured Grid is Straightforward...
+            
+            # Compute Blob Areas
+            blob_props = self.calculate_blob_properties(blob_id_field)
+            blob_areas, blob_ids = blob_props.area, blob_props.ID
+            
+            # Remove Smallest Blobs
+            area_threshold = np.percentile(blob_areas, self.area_filter_quartile*100.0)
+            blob_ids_keep = xr.where(blob_areas >= area_threshold, blob_ids, -1)
+            blob_ids_keep[0] = -1  # Don't keep ID=0
+            data_bin_filtered = blob_id_field.isin(blob_ids_keep)
+        
+        
         return data_bin_filtered, area_threshold, blob_areas, N_blobs
     
     
@@ -1121,6 +1300,10 @@ class Spotter:
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
+        #if self.unstructured_grid:
+            #... _label_unstruct_time() but also need to measure and check overlap, etc
+        
+        
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
         print('Finished blob identification.')
@@ -1362,3 +1545,26 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
     
     return new_labels
 
+
+
+## Helper Function for Super Fast Sparse Bool Multiply (*without the scipy+Dask Memory Leak*)
+@njit(fastmath=True, parallel=True)
+def sparse_bool_power(vec, sp_data, indices, indptr, exponent):
+    vec = vec.T
+    num_rows = indptr.size - 1
+    num_cols = vec.shape[1]
+    result = vec.copy()
+
+    for _ in range(exponent):
+        temp_result = np.zeros((num_rows, num_cols), dtype=np.bool_)
+
+        for i in prange(num_rows):
+            for j in range(indptr[i], indptr[i + 1]):
+                if sp_data[j]:
+                    for k in range(num_cols):
+                        if result[indices[j], k]:
+                            temp_result[i, k] = True
+
+        result = temp_result
+
+    return result.T

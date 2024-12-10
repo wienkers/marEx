@@ -48,3 +48,49 @@ def StartLocalCluster(n_workers=4, n_threads=1):
     print(f"Dashboard Link: localhost:{port}/status")
     
     return client
+
+# Make Distributed Cluster
+def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=256, dashboard_address=8889, queue='compute'):
+
+    if node_memory == 256:
+        client_memory = '250GB'
+        constraint_memory = '256'
+    elif node_memory == 512:
+        client_memory = '500GB'
+        constraint_memory = '512'
+    elif node_memory == 1024:
+        client_memory = '1000GB'
+        constraint_memory = '1024'
+    else:
+        print("Memory not defined")  
+    
+    runtime_hrs = runtime // 60
+    runtime_mins = runtime % 60
+
+    ## Distributed Cluster (without GPU)
+    clusterDistributed = SLURMCluster(name='dask-cluster',
+                                        cores=workers_per_node,
+                                        memory=client_memory,
+                                        processes=workers_per_node,  # Only 1 thread
+                                        interface='ib0',
+                                        queue='compute',
+                                        account='bk1377',
+                                        walltime=f'{runtime_hrs:02d}:{runtime_mins:02d}:00',
+                                        asynchronous=0,
+                                        job_extra_directives = [f'--constraint={constraint_memory}G --mem=0'] if node_memory != 256 else [f' --mem=0'],
+                                        log_directory=f'/home/b/{getuser()}/.log_trash',
+                                        local_directory=dask_tmp_dir.name,
+                                        scheduler_options={'dashboard_address': ':{0}'.format(dashboard_address)},)
+
+    print(f"Memory per Worker: {node_memory / workers_per_node:.2f} GB")
+    
+    clusterDistributed.scale(n_workers)
+    clientDistributed = Client(clusterDistributed)
+    
+    remote_node = subprocess.run(['hostname'], capture_output=True, text=True).stdout.strip().split('.')[0]
+    port = re.search(r':(\d+)/', clientDistributed.dashboard_link).group(1)
+    print('Hostname is ', remote_node)
+    print(f"Forward Port = {remote_node}:{port}")
+    print(f"Dashboard Link: localhost:{port}/status")
+    
+    return clientDistributed
