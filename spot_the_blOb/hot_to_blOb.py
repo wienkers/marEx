@@ -315,7 +315,7 @@ def identify_extremes(da, threshold_percentile=95, exact_percentile=False, dimen
     return extremes
 
 
-def preprocess_data(da, std_normalise=False, threshold_percentile=95, exact_percentile=False, dask_chunks={'time': 25}, neighbours = None, dimensions={'time':'time', 'xdim':'lon'}):
+def preprocess_data(da, std_normalise=False, threshold_percentile=95, exact_percentile=False, dask_chunks={'time': 25}, neighbours = None, cell_areas = None, dimensions={'time':'time', 'xdim':'lon'}):
     """
     Complete preprocessing pipeline from raw Data to extreme event identification.
     
@@ -376,6 +376,10 @@ def preprocess_data(da, std_normalise=False, threshold_percentile=95, exact_perc
             
             if 'nv' in neighbours.dims:
                 ds = ds.assign_coords(nv=neighbours.nv)
+        
+        if cell_areas is not None: # Add cell areas to dataset with appropriate chunking
+            chunk_dict = {dim: -1 for dim in cell_areas.dims}
+            ds['cell_areas'] = cell_areas.astype(np.float32).chunk(chunk_dict)
         
         # Add processing parameters to attributes
         ds.attrs.update({
