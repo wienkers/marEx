@@ -19,7 +19,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -67,7 +67,12 @@ class Spotter:
         if (T_fill % 2 != 0):
             raise ValueError('Filling time-gaps must be even (for symmetry).')
         
+        if ((data_bin.lon.max().compute().item() - data_bin.lon.min().compute().item()) < 100):
+            raise ValueError('Lat/Lon coordinates must be in degrees...')
+        
         if unstructured_grid:
+            
+            self.cell_area = cell_areas
             
             ## Initialise the dilation array
             self.neighbours_int = neighbours.astype(np.int32) - 1 # Convert to 0-based indexing (negative values will be dropped)
@@ -137,7 +142,7 @@ class Spotter:
         '''
 
         # Fill Small Holes & Gaps between Objects
-        data_bin_filled = self.fill_holes()
+        data_bin_filled = self.fill_holes(self.data_bin)
 
         # Fill Small Time-Gaps between Objects
         data_bin_gap_filled = self.fill_time_gaps(data_bin_filled)
@@ -207,7 +212,7 @@ class Spotter:
     
     
 
-    def fill_holes(self): 
+    def fill_holes(self, data_bin, R_fill=None): 
         '''
         Performs morphological closing then opening to fill in gaps & holes up to size R_fill (in units of grid dx).
         
@@ -220,7 +225,13 @@ class Spotter:
         -------
         data_bin_filled_mask : xarray.DataArray
             Binary data with holes/gaps filled and masked.
+        R_fill : int
+            Fill radius (override)
         '''
+        
+        if R_fill is None:
+            R_fill = self.R_fill
+        
 
         if self.unstructured_grid:
             
@@ -235,13 +246,13 @@ class Spotter:
                 ## Closing:  Dilation --> Erosion (Fills small gaps)
                 
                 # Dilation
-                bitmap_binary_dilated = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, self.R_fill)  # This sparse_bool_power assumes the xdim (multiplying the sparse matrix) is in dim=1
+                bitmap_binary_dilated = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, R_fill)  # This sparse_bool_power assumes the xdim (multiplying the sparse matrix) is in dim=1
                 
                 # Set the land values to True (to avoid artificially eroding the shore)
                 bitmap_binary_dilated[:, ~self.mask] = True
                 
                 # Erosion is just the negated Dilation of the negated image
-                bitmap_binary_closed = ~sparse_bool_power(~bitmap_binary_dilated, sp_data, indices, indptr, self.R_fill)
+                bitmap_binary_closed = ~sparse_bool_power(~bitmap_binary_dilated, sp_data, indices, indptr, R_fill)
                 
                 
                 ## Opening:  Erosion --> Dilation (Removes small objects)
@@ -250,15 +261,15 @@ class Spotter:
                 bitmap_binary_closed[:, ~self.mask] = True
                 
                 # Erosion
-                bitmap_binary_eroded = ~sparse_bool_power(~bitmap_binary_closed, sp_data, indices, indptr, self.R_fill)
+                bitmap_binary_eroded = ~sparse_bool_power(~bitmap_binary_closed, sp_data, indices, indptr, R_fill)
                 
                 # Dilation
-                bitmap_binary_closed_opened = sparse_bool_power(bitmap_binary_eroded, sp_data, indices, indptr, self.R_fill)
+                bitmap_binary_closed_opened = sparse_bool_power(bitmap_binary_eroded, sp_data, indices, indptr, R_fill)
                 
                 return bitmap_binary_closed_opened
             
 
-            data_bin_filled_mask = xr.apply_ufunc(binary_open_close, self.data_bin, sp_data, indices, indptr,
+            data_bin_filled_mask = xr.apply_ufunc(binary_open_close, data_bin, sp_data, indices, indptr,
                                         input_core_dims=[[self.xdim],['sp_data'],['indices'],['indptr']],
                                         output_core_dims=[[self.xdim]],
                                         output_dtypes=[np.bool_],
@@ -269,12 +280,12 @@ class Spotter:
         else: # Structured Grid dask-powered morphological operations
             
             # Generate Structuring Element
-            y, x = np.ogrid[-self.R_fill:self.R_fill+1, -self.R_fill:self.R_fill+1]
+            y, x = np.ogrid[-R_fill:R_fill+1, -R_fill:R_fill+1]
             r = x**2 + y**2
-            diameter = 2 * self.R_fill
-            se_kernel = r < (self.R_fill**2)+1
+            diameter = 2 * R_fill
+            se_kernel = r < (R_fill**2)+1
             
-            binary_data_padded = self.data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+            binary_data_padded = data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
             binary_data_closed = binary_closing_dask(binary_data_padded.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
             binary_data_opened = binary_opening_dask(binary_data_closed, structure=se_kernel[np.newaxis, :, :])
             
@@ -292,6 +303,7 @@ class Spotter:
     
     def fill_time_gaps(self, data_bin):
         '''Fills temporal gaps. N.B.: We only perform binary closing (i.e. dilation then erosion, to fill small gaps -- we don't want to remove small objects!)
+           After filling temporal gaps, we re-fill small spatial gaps with R_fill/2.
         '''
         
         if (self.T_fill == 0):
@@ -308,9 +320,12 @@ class Spotter:
         data_bin_closed = binary_closing_dask(data_bin.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
         
         # Convert back to xarray.DataArray
-        data_bin_filled = xr.DataArray(data_bin_closed, coords=data_bin.coords, dims=data_bin.dims)
+        data_bin_timegap_filled = xr.DataArray(data_bin_closed, coords=data_bin.coords, dims=data_bin.dims)
         
-        return data_bin_filled
+        # Finally, fill newly-created holes
+        data_bin_space_and_timegap_filled = self.fill_holes(data_bin_timegap_filled, R_fill=self.R_fill//2)
+        
+        return data_bin_space_and_timegap_filled
     
 
     def identify_blobs(self, data_bin, time_connectivity):
@@ -477,61 +492,154 @@ class Spotter:
         
         check_centroids = 'centroid' in properties
         
-        # Define wrapper function to run in parallel
-        def blob_properties_chunk(ids):
-            # N.B. Assumes the dimensions are ordered (y, x)
-            
-            # Calculate Standard Properties
-            props_slice = regionprops_table(ids, properties=properties)
-            
-            # Check Centroids if blob touches either edge (Need to account for x-dimension edge wrapping)
-            if check_centroids and len(props_slice['label']) > 0:
-                # Get original centroids
-                centroids = list(zip(props_slice['centroid-0'], props_slice['centroid-1']))  # (y, x)
-                centroids_wrapped = []
-                
-                # Process each blob
-                for ID_idx, ID in enumerate(props_slice['label']):
-                    binary_mask = ids == ID
-                    centroids_wrapped.append(
-                        self.calculate_centroid(binary_mask, centroids[ID_idx])
-                    )
-                
-                # Update centroid values
-                props_slice['centroid-0'] = [c[0] for c in centroids_wrapped]
-                props_slice['centroid-1'] = [c[1] for c in centroids_wrapped]
-            
-            return props_slice
         
-        if blob_id_field[self.timedim].size == 1:
-            blob_props = blob_properties_chunk(blob_id_field.values)
-            blob_props = xr.Dataset({key: (['ID'], value) for key, value in blob_props.items()})
-        else:
-            # Run in parallel
-        
-            blob_props = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
-                                        input_core_dims=[[self.ydim, self.xdim]],
-                                        output_core_dims=[[]],
-                                        output_dtypes=[object],
-                                        vectorize=True,
-                                        dask='parallelized')
+        if self.unstructured_grid: 
+            ## Compute only Centroid & Area on the Unstructured Grid
             
-            # Concatenate and Convert to an xarray Dataset
-            blob_props = xr.concat([
-                xr.Dataset({key: (['ID'], value) for key, value in item.items()}) 
-                for item in blob_props.values
-            ], dim='ID')
+            max_ID = blob_id_field.max().compute().item()+1
+            lat_rad = np.radians(blob_id_field.lat)
+            lon_rad = np.radians(blob_id_field.lon)
+            
+            def blob_properties_chunk(ids, lat, lon, area):
+                ## Efficient Vectorised Calculation over all IDs in the present chunk
+                # N.B.: lat/lon in radians now
+                
+                valid_mask = ids > 0
+                min_ID_chunk = ids[valid_mask].min()
+                max_ID_chunk = ids.max()
+                n_ids = max_ID_chunk - min_ID_chunk + 1
+                
+                
+                # Convert to Cartesian
+                x = np.cos(lat) * np.cos(lon)
+                y = np.cos(lat) * np.sin(lon)
+                z = np.sin(lat)
+                
+                mapped_indices = ids[valid_mask] - min_ID_chunk
+                
+                # Compute Areas
+                total_areas = np.zeros(n_ids, dtype=np.float32)
+                np.add.at(total_areas, mapped_indices, area[valid_mask])
+                
+                # Compute weighted coordinates
+                weighted_x = np.zeros(n_ids, dtype=np.float32)
+                weighted_y = np.zeros(n_ids, dtype=np.float32)
+                weighted_z = np.zeros(n_ids, dtype=np.float32)
+                
+                np.add.at(weighted_x, mapped_indices, area[valid_mask] * x[valid_mask])
+                np.add.at(weighted_y, mapped_indices, area[valid_mask] * y[valid_mask])
+                np.add.at(weighted_z, mapped_indices, area[valid_mask] * z[valid_mask])
+                
+                # Normalise vectors
+                norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
+                weighted_x /= norm
+                weighted_y /= norm
+                weighted_z /= norm
+                
+                # Convert back to lat/lon
+                centroid_lat = np.degrees(np.arcsin(weighted_z))
+                centroid_lon = np.degrees(np.arctan2(weighted_y, weighted_x))
+                
+                # Fix longitude range to [-180, 180]
+                centroid_lon = np.where(centroid_lon > 180., centroid_lon - 360.,
+                                        np.where(centroid_lon < -180., centroid_lon + 360.,  
+                                        centroid_lon))
+                
+                # Initialise arrays for results
+                output_props = np.zeros((3, max_ID), dtype=np.float32)
+                
+                # Put into full arrays
+                output_props[0, min_ID_chunk:max_ID_chunk+1] = total_areas
+                output_props[1, min_ID_chunk:max_ID_chunk+1] = centroid_lat
+                output_props[2, min_ID_chunk:max_ID_chunk+1] = centroid_lon
+                
+                # centroid-0 is nv=0 is lat
+                return output_props
+            
+            
+            if blob_id_field[self.timedim].size == 1:
+                props_array = blob_properties_chunk(blob_id_field.values, lat_rad.values, lon_rad.values, self.cell_area.values)
+            
+            else:        
+                # Run in parallel                
+                props_array = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
+                                                lat_rad,
+                                                lon_rad,
+                                                self.cell_area,
+                                                input_core_dims=[[self.xdim], [self.xdim], [self.xdim], [self.xdim]],
+                                                output_core_dims=[['prop', 'ID']],
+                                                output_dtypes=[np.float32],
+                                                output_sizes={'ID': max_ID, 'prop': 3}, 
+                                                vectorize=True,
+                                                dask='parallelized').sum(dim=self.timedim)
 
+            
+            blob_props = xr.Dataset({'area': ('ID', props_array.isel(prop=0).data),
+                                     'centroid-0': ('ID', props_array.isel(prop=1).data),
+                                     'centroid-1': ('ID', props_array.isel(prop=2).data)},
+                                    coords={'ID': np.arange(0, max_ID)})
+            
+        
+        else: # Structured Grid
+            # N.B.: These operations are simply done on a pixel grid — no cartesian conversion (therefore, polar regions are doubly biased)
+        
+            # Define wrapper function to run in parallel
+            def blob_properties_chunk(ids):
+                # N.B. Assumes the dimensions are ordered (y, x)
+                
+                # Calculate Standard Properties
+                props_slice = regionprops_table(ids, properties=properties)
+                
+                # Check Centroids if blob touches either edge (Need to account for x-dimension edge wrapping)
+                if check_centroids and len(props_slice['label']) > 0:
+                    # Get original centroids
+                    centroids = list(zip(props_slice['centroid-0'], props_slice['centroid-1']))  # (y, x)
+                    centroids_wrapped = []
+                    
+                    # Process each blob
+                    for ID_idx, ID in enumerate(props_slice['label']):
+                        binary_mask = ids == ID
+                        centroids_wrapped.append(
+                            self.calculate_centroid(binary_mask, centroids[ID_idx])
+                        )
+                    
+                    # Update centroid values
+                    props_slice['centroid-0'] = [c[0] for c in centroids_wrapped]
+                    props_slice['centroid-1'] = [c[1] for c in centroids_wrapped]
+                
+                return props_slice
+            
+            if blob_id_field[self.timedim].size == 1:
+                blob_props = blob_properties_chunk(blob_id_field.values)
+                blob_props = xr.Dataset({key: (['ID'], value) for key, value in blob_props.items()})
+            else:
+                # Run in parallel
+                blob_props = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
+                                            input_core_dims=[[self.ydim, self.xdim]],
+                                            output_core_dims=[[]],
+                                            output_dtypes=[object],
+                                            vectorize=True,
+                                            dask='parallelized')
+                
+                # Concatenate and Convert to an xarray Dataset
+                blob_props = xr.concat([
+                    xr.Dataset({key: (['ID'], value) for key, value in item.items()}) 
+                    for item in blob_props.values
+                ], dim='ID')
+            
+            # Set ID as coordinate
+            blob_props = blob_props.set_index(ID='label')
+        
+        
         if blob_props.ID.size == 0:
             raise ValueError(f'No objects were detected.')
+        
         
         # Combine centroid-0 and centroid-1 into a single centroid variable
         if 'centroid' in properties:
             blob_props['centroid'] = xr.concat([blob_props['centroid-0'], blob_props['centroid-1']], dim='component')
             blob_props = blob_props.drop_vars(['centroid-0', 'centroid-1'])
         
-        # Set ID as coordinate
-        blob_props = blob_props.set_index(ID='label')
         
         return blob_props
     
@@ -1306,16 +1414,18 @@ class Spotter:
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
         print('Finished blob identification.')
         
+        
         if self.unstructured_grid:
             # Make the blob_id_field unique across time
             cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim)
-            blob_id_field = blob_id_field.where(blob_id_field > 0, 
-                                                    blob_id_field + cumsum_ids)
+            blob_id_field = xr.where(blob_id_field > 0, 
+                                                    blob_id_field + cumsum_ids, 0)
         
         ### TODO:  (see my dask-tracker.py as a reference)
         #  [ ] Calculate Blob Properties for Unstructured Grid
         #  [x] Overlapping Blobs List
         #  [ ] Stuff in split_and_merge_blobs(), including nn & centroid partitioning
+        #  [ ] Nearest neighbour probably needs to be in cartesian coordinates...
         #  [ ] Stuff in cluster_rename_blobs_and_props()
         
         
