@@ -33,6 +33,7 @@ class Spotter:
         self.xdim       = xdim
         self.ydim       = ydim   
         self.unstructured_grid = unstructured_grid
+        self.mean_cell_area = 1.0  # If Structured, the units are pixels...
         
         if unstructured_grid:
             self.ydim = None
@@ -72,7 +73,8 @@ class Spotter:
         
         if unstructured_grid:
             
-            self.cell_area = cell_areas
+            self.cell_area = cell_areas  # In square metres !
+            self.mean_cell_area = cell_areas.mean().compute().item()
             
             ## Initialise the dilation array
             self.neighbours_int = neighbours.astype(np.int32) - 1 # Convert to 0-based indexing (negative values will be dropped)
@@ -317,12 +319,18 @@ class Spotter:
         else: 
             time_kernel = time_kernel[:, np.newaxis, np.newaxis]
         
-        data_bin_closed = binary_closing_dask(data_bin.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+        # Pad in time
+        binary_data_padded = data_bin.pad({self.timedim: kernel_size}, mode='constant', constant_values=False)
+        
+        data_bin_closed = binary_closing_dask(binary_data_padded.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
         
         # Convert back to xarray.DataArray
-        data_bin_timegap_filled = xr.DataArray(data_bin_closed, coords=data_bin.coords, dims=data_bin.dims)
+        data_bin_timegap_filled_pad = xr.DataArray(data_bin_closed, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
         
-        # Finally, fill newly-created holes
+        # Remove padding
+        data_bin_timegap_filled = data_bin_timegap_filled_pad.isel({self.timedim: slice(kernel_size, -kernel_size)})
+        
+        # Finally, fill newly-created spatial holes
         data_bin_space_and_timegap_filled = self.fill_holes(data_bin_timegap_filled, R_fill=self.R_fill//2)
         
         return data_bin_space_and_timegap_filled
@@ -384,6 +392,7 @@ class Spotter:
                                     dask='parallelized') + 1
             
             blob_id_field = blob_id_field.where(self.mask, other=0) # ID = 0 on land
+            blob_id_field = blob_id_field.persist()
             blob_id_field = blob_id_field.rename('ID_field')
             N_blobs = 1  # IDC
             
@@ -559,6 +568,7 @@ class Spotter:
             
             if blob_id_field[self.timedim].size == 1:
                 props_array = blob_properties_chunk(blob_id_field.values, lat_rad.values, lon_rad.values, self.cell_area.values)
+                props_array = xr.DataArray(props_array, dims=['prop', 'ID'])
             
             else:        
                 # Run in parallel                
@@ -639,7 +649,6 @@ class Spotter:
         if 'centroid' in properties:
             blob_props['centroid'] = xr.concat([blob_props['centroid-0'], blob_props['centroid-1']], dim='component')
             blob_props = blob_props.drop_vars(['centroid-0', 'centroid-1'])
-        
         
         return blob_props
     
@@ -729,7 +738,8 @@ class Spotter:
         combined_mask = mask_t0 & mask_next
         
         if not np.any(combined_mask):
-            return np.empty((0, 3), dtype=np.int32)
+            return np.empty((0, 3), 
+                            dtype=np.float32 if self.unstructured_grid else np.int32)
         
         # Extract only the overlapping points
         ids_t0_valid = ids_t0[combined_mask].astype(np.int64)
@@ -737,20 +747,33 @@ class Spotter:
         
         # Create a unique identifier for each pair
         # This is faster than using np.unique with axis=1
-        max_id = max(ids_t0.max(), ids_next.max()).astype(np.int64) # N.B.: If more IDs than ~srqt(largest int64), then this will give problems.....
-        pair_ids = ids_t0_valid * (max_id + 1) + ids_next_valid
+        max_id = max(ids_t0.max(), ids_next.max()) + 1
+        pair_ids = ids_t0_valid * max_id + ids_next_valid
         
-        # Get unique pairs and their counts
-        unique_pairs, counts = np.unique(pair_ids, return_counts=True)
+        if self.unstructured_grid:
+            # Get unique pairs and their inverse
+            unique_pairs, inverse_indices = np.unique(pair_ids, return_inverse=True)
+
+            # Sum areas for overlapping cells
+            areas_valid = self.cell_area.values[combined_mask]
+            areas = np.zeros(len(unique_pairs), dtype=np.float32)
+            np.add.at(areas, inverse_indices, areas_valid)
+        else:
+            
+            # Get unique pairs and their counts
+            unique_pairs, areas = np.unique(pair_ids, return_counts=True)   # Just the number of pixels...
+            areas = areas.astype(np.int32)
+        
         
         # Convert back to original ID pairs
-        id_t0 = (unique_pairs // (max_id + 1)).astype(np.int32)
-        id_next = (unique_pairs % (max_id + 1)).astype(np.int32)
-        
+        id_t0 = (unique_pairs // max_id).astype(np.int32)
+        id_next = (unique_pairs % max_id).astype(np.int32)
+            
         # Stack results
-        result = np.column_stack((id_t0, id_next, counts.astype(np.int32)))
+        result = np.column_stack((id_t0, id_next, areas))
         
-        return result.astype(np.int32)
+        return result
+    
     
     def find_overlapping_blobs(self, blob_id_field):
         '''Finds overlapping blobs across time.
@@ -760,7 +783,9 @@ class Spotter:
         overlap_blobs_list_unique : (N x 3) np.ndarray
             Array of Blob IDs that indicate which blobs are overlapping in time. 
             The blob in the first column precedes the second column in time. 
-            The third column is the number of overlapping cells.
+            The third column contains:
+                - For structured grid: number of overlapping pixels (int32)
+                - For unstructured grid: total overlapping area in m^2 (float32)
         '''
         
         ## Check just for overlap with next time slice.
@@ -782,18 +807,19 @@ class Spotter:
                         ).compute()
         
         
-        # Concatenate all pairs (with their chunk-level counts) from different chunks
-        all_pairs_with_counts = np.concatenate(overlap_blob_pairs_list.values).astype(np.int32)
+        # Concatenate all pairs (with their chunk-level values) from different chunks
+        all_pairs_with_values = np.concatenate(overlap_blob_pairs_list.values)
         
         # Get unique pairs and their indices
-        unique_pairs, inverse_indices = np.unique(all_pairs_with_counts[:, :2], axis=0, return_inverse=True)
+        unique_pairs, inverse_indices = np.unique(all_pairs_with_values[:, :2], axis=0, return_inverse=True)
 
-        # Sum the counts from the third column using the inverse indices
-        total_summed_counts = np.zeros(len(unique_pairs), dtype=np.int32)
-        np.add.at(total_summed_counts, inverse_indices, all_pairs_with_counts[:, 2])
+        # Sum the values from the third column using the inverse indices
+        output_dtype = np.float32 if self.unstructured_grid else np.int32
+        total_summed_values = np.zeros(len(unique_pairs), dtype=output_dtype)
+        np.add.at(total_summed_values, inverse_indices, all_pairs_with_values[:, 2])
 
         # Stack the pairs with their summed counts
-        overlap_blobs_list_unique = np.column_stack((unique_pairs, total_summed_counts))
+        overlap_blobs_list_unique = np.column_stack((unique_pairs, total_summed_values))
         
         return overlap_blobs_list_unique
     
@@ -1070,10 +1096,11 @@ class Spotter:
             result[:len(uniq)] = uniq
             return result
 
+        input_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
         unique_ids_by_time = xr.apply_ufunc(
                 unique_pad,
                 da,
-                input_core_dims=[[self.ydim, self.xdim]],
+                input_core_dims=[input_dims],
                 output_core_dims=[['unique_values']],
                 dask='parallelized',
                 vectorize=True,
@@ -1253,29 +1280,54 @@ class Spotter:
                 
                 if self.nn_partitioning:
                     # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
-                    parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0], blob_id_time.shape[1]), dtype=bool)
+                    if self.unstructured_grid:
+                        parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0]), dtype=bool)
+                    else:
+                        parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0], blob_id_time.shape[1]), dtype=bool)
+                        
                     for idx, parent_id in enumerate(parent_ids):
                         parent_masks[idx] = (blob_id_time_m1 == parent_id).values
                     
                     # Calculate typical blob size to set max_distance
-                    max_area = np.max(blob_props.sel(ID=parent_ids).area.values)
+                    max_area = np.max(blob_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
                     max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
-                    max_distance = max(max_distance, 20)  # Set minimum threshold...
                     
-                    new_labels = get_nearest_parent_labels(
-                        child_mask_2d,
-                        parent_masks, 
-                        child_ids,
-                        parent_centroids,
-                        Nx,
-                        max_distance=max_distance
-                    )
+                    if self.unstructured_grid:
+                        new_labels = get_nearest_parent_labels_unstructured(
+                            child_mask_2d,
+                            parent_masks,
+                            child_ids,
+                            parent_centroids,
+                            self.neighbours_int.values,
+                            self.data_bin.lat.values,  # Need to pass these as NumPy arrays for JIT compatibility
+                            self.data_bin.lon.values,
+                            max_distance=max(max_distance, 20)*2  # Set minimum threshold, in cells
+                        )
+                    else:
+                        new_labels = get_nearest_parent_labels(
+                            child_mask_2d,
+                            parent_masks, 
+                            child_ids,
+                            parent_centroids,
+                            Nx,
+                            max_distance=max(max_distance, 20)  # Set minimum threshold, in cells
+                        )
+                        
                 else: 
                     # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Centroid_
-                    distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
-                    
-                    # Assign the new ID to each cell based on the closest parent
-                    new_labels = child_ids[np.argmin(distances, axis=1)]
+                    if self.unstructured_grid:
+                        new_labels = unstructured_centroid_partition(
+                            child_mask_2d,
+                            parent_centroids,
+                            child_ids,
+                            self.data_bin.lat.values,
+                            self.data_bin.lon.values
+                        )                      
+                    else:
+                        distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
+
+                        # Assign the new ID to each cell based on the closest parent
+                        new_labels = child_ids[np.argmin(distances, axis=1)]
                 
                 
                 ## Update values in child_time_idx and assign the updated slice back to the original DataArray
@@ -1295,7 +1347,7 @@ class Spotter:
                 # Update the blob_props DataArray:  (but first, check if the original Children still exists)
                 if child_id in new_child_props.ID:  # Update the entry
                     blob_props.loc[dict(ID=child_id)] = new_child_props.sel(ID=child_id)
-                else:  # Delte child_id:  The blob has split/morphed such that it doesn't get a partition of this child...
+                else:  # Delete child_id:  The blob has split/morphed such that it doesn't get a partition of this child...
                     blob_props = blob_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
                     print(f"Deleted child_id {child_id} because parents have split/morphed in the meantime...")
                 # Add the properties for the N-1 other new child ID
@@ -1350,7 +1402,7 @@ class Spotter:
                         blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
                     updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
                     blob_id_field_unique = blob_id_field_unique.persist() # Persist to collapse the dask graph !
-
+        
         # Final chunk updates
         for start, end, chunk_data in updated_chunks:
             blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
@@ -1366,7 +1418,7 @@ class Spotter:
         parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
         child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
         overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
-
+        
         for i, parents in enumerate(merge_parent_ids):
             parent_ids_array[i, :len(parents)] = parents
         
@@ -1417,12 +1469,12 @@ class Spotter:
         
         if self.unstructured_grid:
             # Make the blob_id_field unique across time
-            cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim)
+            cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
             blob_id_field = xr.where(blob_id_field > 0, 
                                                     blob_id_field + cumsum_ids, 0)
         
         ### TODO:  (see my dask-tracker.py as a reference)
-        #  [ ] Calculate Blob Properties for Unstructured Grid
+        #  [x] Calculate Blob Properties for Unstructured Grid
         #  [x] Overlapping Blobs List
         #  [ ] Stuff in split_and_merge_blobs(), including nn & centroid partitioning
         #  [ ] Nearest neighbour probably needs to be in cartesian coordinates...
@@ -1561,6 +1613,7 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
     Assigns labels based on nearest parent blob points.
     This is quite computationally-intensive, so we utilise many optimisations here...
     """
+    
     ny, nx = child_mask.shape
     half_Nx = Nx / 2
     n_parents = len(parent_masks)
@@ -1665,6 +1718,174 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
     new_labels = child_ids[parent_assignments]
     
     return new_labels
+
+
+@jit(nopython=True, fastmath=True)
+def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+    """
+    Assigns labels based on nearest parent blob points for an unstructured (triangular) grid.
+    Optimised version for unstructured grids using graph connectivity information.
+    Conducts a parent-centric Breadth-First-Search (parallel in parents), so that we only need a single sweep.
+    
+    Parameters
+    ----------
+    child_mask : np.ndarray
+        1D boolean array where True indicates points in the child blob
+    parent_masks : np.ndarray
+        2D boolean array of shape (n_parents, n_points) where True indicates points in each parent blob
+    child_ids : np.ndarray
+        1D array containing the IDs to assign to each partition of the child blob
+    parent_centroids : np.ndarray
+        Array of shape (n_parents, 2) containing (lat, lon) coordinates of parent centroids in degrees
+    neighbours_int : np.ndarray
+        2D array of shape (3, n_points) containing indices of neighboring cells for each point
+    lat / lon : np.ndarray
+        Latitude/Longitude in degrees
+    max_distance : int, optional
+        Maximum number of edge hops to search for parent points
+        
+    Returns
+    -------
+    new_labels : np.ndarray
+        1D array containing the assigned child_ids for each True point in child_mask
+    """
+    n_points = len(child_mask)
+    n_parents = len(parent_masks)
+    
+    distances = np.full(n_points, np.inf)  # Track distance from any parent
+    parent_assignments = np.full(n_points, -1, dtype=np.int32)  # Record of which parent reached each point first
+    frontiers = np.zeros((n_parents, n_points), dtype=np.bool_)  # Make a separate frontier for each parent
+    visited = np.zeros((n_parents, n_points), dtype=np.bool_)
+    
+    # Initial points where parents overlap with child
+    for parent_idx in range(n_parents):
+        parent_points = np.nonzero(parent_masks[parent_idx])[0]
+        frontiers[parent_idx, parent_points] = True
+        visited[parent_idx, parent_points] = True
+        distances[parent_points] = 0
+        parent_assignments[parent_points] = parent_idx
+    
+    # Expand all frontiers simultaneously
+    distance = 0
+    unassigned_children = np.count_nonzero(child_mask)
+    
+    while distance < max_distance and unassigned_children > 0:
+        distance += 1
+        any_expansion = False
+        
+        # Process each parent's frontier
+        for parent_idx in range(n_parents):
+            current_points = np.nonzero(frontiers[parent_idx])[0]
+            frontiers[parent_idx].fill(False)  # Clear current frontier
+            
+            # Expand to neighbours
+            for point in current_points:
+                for neighbor in neighbours_int[:, point]:
+                    if neighbor >= 0 and not visited[parent_idx, neighbor]:
+                        # Check if this point is already claimed by another parent at same distance
+                        if distance < distances[neighbor]:
+                            distances[neighbor] = distance
+                            parent_assignments[neighbor] = parent_idx
+                            frontiers[parent_idx, neighbor] = True
+                            visited[parent_idx, neighbor] = True
+                            any_expansion = True
+                            
+                            if child_mask[neighbor]:
+                                unassigned_children -= 1
+        
+        if not any_expansion:
+            break
+    
+    # Handle any unassigned child points using great circle distances
+    child_points = np.nonzero(child_mask)[0]
+    unassigned = parent_assignments[child_points] == -1
+    if np.any(unassigned):
+        unassigned_points = child_points[unassigned]
+        parent_lat_rad = np.deg2rad(parent_centroids[:, 0])
+        parent_lon_rad = np.deg2rad(parent_centroids[:, 1])
+        
+        for point in unassigned_points:
+            point_lat_rad = np.deg2rad(lat[point])
+            point_lon_rad = np.deg2rad(lon[point])
+            
+            min_dist = np.inf
+            best_parent = 0
+            
+            for parent_idx in range(n_parents):
+                # Haversine formula
+                dlat = parent_lat_rad[parent_idx] - point_lat_rad
+                dlon = parent_lon_rad[parent_idx] - point_lon_rad
+                a = np.sin(dlat/2)**2 + np.cos(point_lat_rad) * np.cos(parent_lat_rad[parent_idx]) * np.sin(dlon/2)**2
+                dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    best_parent = parent_idx
+            
+            parent_assignments[point] = best_parent
+    
+    
+    child_points = np.nonzero(child_mask)[0]
+    
+    return child_ids[parent_assignments[child_points]]
+
+
+@jit(nopython=True, parallel=True, fastmath=True)
+def unstructured_centroid_partition(child_mask, parent_centroids, child_ids, lat, lon):
+    """
+    Assigns labels to child cells based on closest parent centroid using great circle distances.
+    
+    Parameters:
+    -----------
+    child_mask : np.ndarray
+        1D boolean array indicating which cells belong to the child blob
+    parent_centroids : np.ndarray
+        Array of shape (n_parents, 2) containing (lat, lon) coordinates of parent centroids in degrees
+    child_ids : np.ndarray
+        Array of IDs to assign to each partition of the child blob
+    lat / lon : np.ndarray
+        Latitude/Longitude in degrees
+        
+    Returns:
+    --------
+    new_labels : np.ndarray
+        1D array containing assigned child_ids for cells in child_mask
+    """
+    n_cells = len(child_mask)
+    n_parents = len(parent_centroids)
+    
+    lat_rad = np.deg2rad(lat)
+    lon_rad = np.deg2rad(lon)
+    parent_coords_rad = np.deg2rad(parent_centroids)
+    
+    new_labels = np.zeros(n_cells, dtype=child_ids.dtype)
+    
+    # Process each child cell in parallel
+    for i in prange(n_cells):
+        if not child_mask[i]:
+            continue
+            
+        min_dist = np.inf
+        closest_parent = 0
+        
+        # Calculate great circle distance to each parent centroid
+        for j in range(n_parents):
+            dlat = parent_coords_rad[j, 0] - lat_rad[i]
+            dlon = parent_coords_rad[j, 1] - lon_rad[i]
+            
+            # Use haversine formula for great circle distance
+            a = np.sin(dlat/2)**2 + np.cos(lat_rad[i]) * np.cos(parent_coords_rad[j, 0]) * np.sin(dlon/2)**2
+            dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+            
+            if dist < min_dist:
+                min_dist = dist
+                closest_parent = j
+        
+        new_labels[i] = child_ids[closest_parent]
+    
+    return new_labels
+
+
 
 
 
