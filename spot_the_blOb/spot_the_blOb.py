@@ -1723,9 +1723,8 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
 @jit(nopython=True, fastmath=True)
 def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
     """
-    Assigns labels based on nearest parent blob points for an unstructured (triangular) grid.
-    Optimised version for unstructured grids using graph connectivity information.
-    Conducts a parent-centric Breadth-First-Search (parallel in parents), so that we only need a single sweep.
+    Optimized version of nearest parent label assignment for unstructured grids.
+    Uses numpy arrays throughout to ensure Numba compatibility.
     
     Parameters
     ----------
@@ -1743,7 +1742,7 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
         Latitude/Longitude in degrees
     max_distance : int, optional
         Maximum number of edge hops to search for parent points
-        
+    
     Returns
     -------
     new_labels : np.ndarray
@@ -1752,81 +1751,85 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
     n_points = len(child_mask)
     n_parents = len(parent_masks)
     
-    distances = np.full(n_points, np.inf)  # Track distance from any parent
-    parent_assignments = np.full(n_points, -1, dtype=np.int32)  # Record of which parent reached each point first
-    frontiers = np.zeros((n_parents, n_points), dtype=np.bool_)  # Make a separate frontier for each parent
+    # Pre-allocate arrays
+    distances = np.full(n_points, np.inf, dtype=np.float32)
+    parent_assignments = np.full(n_points, -1, dtype=np.int32)
     visited = np.zeros((n_parents, n_points), dtype=np.bool_)
     
-    # Initial points where parents overlap with child
+    # Initialize with direct overlaps
     for parent_idx in range(n_parents):
-        parent_points = np.nonzero(parent_masks[parent_idx])[0]
-        frontiers[parent_idx, parent_points] = True
-        visited[parent_idx, parent_points] = True
-        distances[parent_points] = 0
-        parent_assignments[parent_points] = parent_idx
+        overlap_mask = parent_masks[parent_idx] & child_mask
+        if np.any(overlap_mask):
+            visited[parent_idx, overlap_mask] = True
+            unclaimed_overlap = distances[overlap_mask] == np.inf
+            if np.any(unclaimed_overlap):
+                overlap_points = np.where(overlap_mask)[0]
+                valid_points = overlap_points[unclaimed_overlap]
+                distances[valid_points] = 0
+                parent_assignments[valid_points] = parent_idx
     
-    # Expand all frontiers simultaneously
-    distance = 0
-    unassigned_children = np.count_nonzero(child_mask)
+    # Pre-compute trig values
+    lat_rad = np.deg2rad(lat)
+    lon_rad = np.deg2rad(lon)
+    cos_lat = np.cos(lat_rad)
     
-    while distance < max_distance and unassigned_children > 0:
-        distance += 1
-        any_expansion = False
+    # Graph traversal for remaining points
+    current_distance = 0
+    any_unassigned = np.any(child_mask & (parent_assignments == -1))
+    
+    while current_distance < max_distance and any_unassigned:
+        current_distance += 1
+        updates_made = False
         
-        # Process each parent's frontier
         for parent_idx in range(n_parents):
-            current_points = np.nonzero(frontiers[parent_idx])[0]
-            frontiers[parent_idx].fill(False)  # Clear current frontier
+            # Get current frontier points
+            frontier_mask = visited[parent_idx]
+            if not np.any(frontier_mask):
+                continue
             
-            # Expand to neighbours
-            for point in current_points:
-                for neighbor in neighbours_int[:, point]:
-                    if neighbor >= 0 and not visited[parent_idx, neighbor]:
-                        # Check if this point is already claimed by another parent at same distance
-                        if distance < distances[neighbor]:
-                            distances[neighbor] = distance
-                            parent_assignments[neighbor] = parent_idx
-                            frontiers[parent_idx, neighbor] = True
-                            visited[parent_idx, neighbor] = True
-                            any_expansion = True
-                            
-                            if child_mask[neighbor]:
-                                unassigned_children -= 1
+            # Process neighbors
+            for i in range(3):  # For each neighbor direction
+                neighbors = neighbours_int[i, frontier_mask]
+                valid_neighbors = neighbors >= 0
+                if not np.any(valid_neighbors):
+                    continue
+                    
+                valid_points = neighbors[valid_neighbors]
+                unvisited = ~visited[parent_idx, valid_points]
+                new_points = valid_points[unvisited]
+                
+                if len(new_points) > 0:
+                    visited[parent_idx, new_points] = True
+                    update_mask = distances[new_points] > current_distance
+                    if np.any(update_mask):
+                        points_to_update = new_points[update_mask]
+                        distances[points_to_update] = current_distance
+                        parent_assignments[points_to_update] = parent_idx
+                        updates_made = True
         
-        if not any_expansion:
+        if not updates_made:
             break
+            
+        any_unassigned = np.any(child_mask & (parent_assignments == -1))
     
-    # Handle any unassigned child points using great circle distances
-    child_points = np.nonzero(child_mask)[0]
-    unassigned = parent_assignments[child_points] == -1
-    if np.any(unassigned):
-        unassigned_points = child_points[unassigned]
+    # Handle remaining unassigned points using great circle distances
+    unassigned_mask = child_mask & (parent_assignments == -1)
+    if np.any(unassigned_mask):
         parent_lat_rad = np.deg2rad(parent_centroids[:, 0])
         parent_lon_rad = np.deg2rad(parent_centroids[:, 1])
+        cos_parent_lat = np.cos(parent_lat_rad)
         
+        unassigned_points = np.where(unassigned_mask)[0]
         for point in unassigned_points:
-            point_lat_rad = np.deg2rad(lat[point])
-            point_lon_rad = np.deg2rad(lon[point])
-            
-            min_dist = np.inf
-            best_parent = 0
-            
-            for parent_idx in range(n_parents):
-                # Haversine formula
-                dlat = parent_lat_rad[parent_idx] - point_lat_rad
-                dlon = parent_lon_rad[parent_idx] - point_lon_rad
-                a = np.sin(dlat/2)**2 + np.cos(point_lat_rad) * np.cos(parent_lat_rad[parent_idx]) * np.sin(dlon/2)**2
-                dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-                
-                if dist < min_dist:
-                    min_dist = dist
-                    best_parent = parent_idx
-            
-            parent_assignments[point] = best_parent
+            # Vectorized haversine calculation
+            dlat = parent_lat_rad - lat_rad[point]
+            dlon = parent_lon_rad - lon_rad[point]
+            a = np.sin(dlat/2)**2 + cos_lat[point] * cos_parent_lat * np.sin(dlon/2)**2
+            dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+            parent_assignments[point] = np.argmin(dist)
     
-    
-    child_points = np.nonzero(child_mask)[0]
-    
+    # Return only the assignments for points in child_mask
+    child_points = np.where(child_mask)[0]
     return child_ids[parent_assignments[child_points]]
 
 
