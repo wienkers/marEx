@@ -1513,13 +1513,10 @@ class Spotter:
         blob_id_field_unique = blob_id_field_unique.persist()
         blob_props = blob_props.persist()
         
-        def process_chunk(chunk_idx, chunk_blobs, last_timeslice, next_id_start):
+        @delayed
+        def process_chunk(chunk_start, chunk_end, chunk_data, chunk_blobs, last_timeslice, next_id_start):
             '''Process a single chunk of merging blobs.'''
-            # Extract chunk data
-            chunk_start = chunk_boundaries[chunk_idx]
-            chunk_end = chunk_boundaries[chunk_idx + 1] + 1
-            chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
-            
+
             # Initialize tracking variables for this chunk
             chunk_merge_times = []
             chunk_merge_child_ids = []
@@ -1528,6 +1525,8 @@ class Spotter:
             next_new_id = next_id_start
             new_merging_blobs = set()
             id_mapping = {}  # Track local to global ID mapping
+            
+            #chunk_data = chunk_data.compute()
             
             # Process each blob in the chunk
             blobs_to_process = chunk_blobs.copy()
@@ -1637,7 +1636,7 @@ class Spotter:
                                 blobs_to_process.append(new_blob_id)
                     
             
-            return (chunk_data, next_new_id, new_merging_blobs,
+            return (chunk_data[:(chunk_end-1-chunk_start)], next_new_id, new_merging_blobs,
                     (chunk_merge_times, chunk_merge_child_ids, chunk_merge_parent_ids, chunk_merge_areas),
                     id_mapping)
         
@@ -1655,15 +1654,21 @@ class Spotter:
             next_id_offset = 0
             last_timeslice = None
             
+            
+            # Pre-compute all required timeslices
+            timeslices = blob_id_field_unique.isel({self.timedim: chunk_boundaries[1:-1]-1}).persist()
             for chunk_idx in sorted(blobs_by_chunk.keys()):
                 chunk_blobs = [b for b in merging_blobs if chunk_idx == np.searchsorted(chunk_boundaries, time_index_map[b], side='right') - 1]
                 if not chunk_blobs:
                     continue
                 
                 chunk_start = chunk_boundaries[chunk_idx]
-                last_timeslice = blob_id_field_unique.isel({self.timedim: chunk_start - 1}) if chunk_start > 0 else None
-                    
-                future = delayed(process_chunk)(chunk_idx, chunk_blobs, last_timeslice,
+                chunk_end = chunk_boundaries[chunk_idx + 1] + 1
+                chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
+                
+                last_timeslice = timeslices[chunk_idx-1] if chunk_idx > 0 else None
+                                    
+                future = delayed(process_chunk)(chunk_start, chunk_end, chunk_data, chunk_blobs, last_timeslice,
                                             global_id_counter + next_id_offset)
                 chunk_futures.append((chunk_idx, future))
                 chunk_size = blob_id_field_unique.chunks[0][chunk_idx]
@@ -1675,7 +1680,7 @@ class Spotter:
             
             # First pass: collect all temporary IDs and create global mapping
             all_temp_ids = set()
-            for _, (_, _, _, _, _, id_mapping) in zip(chunk_futures, results):
+            for _, (_, _, _, _, id_mapping) in zip(chunk_futures, results):
                 all_temp_ids.update(id_mapping.keys())
             
             # Create global ID mapping
@@ -1688,7 +1693,7 @@ class Spotter:
             
             for (chunk_idx, _), (chunk_data, _, chunk_new_merging, chunk_merge_events, id_mapping) in zip(chunk_futures, results):
                 # Update IDs in chunk data
-                chunk_mask = np.isin(chunk_data, list(id_mapping.keys()))
+                #chunk_mask = np.isin(chunk_data, list(id_mapping.keys()))
                 for temp_id, global_id in global_id_mapping.items():
                     chunk_data = xr.where(chunk_data == temp_id, global_id, chunk_data)
                 
@@ -1716,6 +1721,7 @@ class Spotter:
                 )
             
             # Re-compute blob properties
+            blob_id_field_unique = blob_id_field_unique.persist()
             blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid'])
             
             # Prepare for next iteration
@@ -1723,8 +1729,6 @@ class Spotter:
             processed_chunks.update(new_merging_blobs)
             iteration += 1
             
-            # Persist updated arrays
-            blob_id_field_unique = blob_id_field_unique.persist()
             blob_props = blob_props.persist()
         
         if iteration == max_iterations:
