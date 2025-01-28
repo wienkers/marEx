@@ -547,6 +547,8 @@ class Spotter:
                 
                 # Normalise vectors
                 norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
+                norm[0] = 1.  # For ID = 0
+                
                 weighted_x /= norm
                 weighted_y /= norm
                 weighted_z /= norm
@@ -946,12 +948,13 @@ class Spotter:
             new_block[mask] = ID_to_cluster_index_array[block[mask]]
             return new_block
         
+        input_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
         split_merged_relabeled_blob_id_field = xr.apply_ufunc(
             map_IDs_to_indices,
             blob_id_field_unique, 
             ID_to_cluster_index_da,
-            input_core_dims=[[self.ydim, self.xdim],['ID']],
-            output_core_dims=[[self.ydim, self.xdim]],
+            input_core_dims=[input_dims,['ID']],
+            output_core_dims=[input_dims],
             vectorize=True,
             dask="parallelized",
             output_dtypes=[np.int32]
@@ -972,8 +975,12 @@ class Spotter:
         
         ## Create a mapping from new IDs to the original IDs _at the corresponding time_
         valid_new_ids = (split_merged_relabeled_blob_id_field > 0)      
-        original_ids_field = blob_id_field_unique.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
-        new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids).stack(z=(self.ydim, self.xdim), create_index=False)
+        original_ids_field = blob_id_field_unique.where(valid_new_ids)
+        new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids)
+        
+        if not self.unstructured_grid:
+            original_ids_field = original_ids_field.stack(z=(self.ydim, self.xdim), create_index=False)
+            new_ids_field = new_ids_field.stack(z=(self.ydim, self.xdim), create_index=False)
         
         new_id_to_idx = {id_val: idx for idx, id_val in enumerate(new_ids)}
 
@@ -1002,11 +1009,12 @@ class Spotter:
                     
             return result
 
+        input_dim = ['ncells'] if self.unstructured_grid else ['z']
         global_id_mapping = xr.apply_ufunc(
                     process_timestep,
                     original_ids_field,
                     new_ids_field,
-                    input_core_dims=[['z'], ['z']],
+                    input_core_dims=[input_dim, input_dim],
                     output_core_dims=[['ID']],
                     vectorize=True,
                     dask='parallelized',
@@ -1022,9 +1030,9 @@ class Spotter:
         ## Transfer and transform all variables from original blobs_props:
                 
         # Add a value of ID = 0 to this coordinate ID
-        dummy = blobs_props.isel(ID=0) * np.nan
-        blobs_props = xr.concat([dummy.assign_coords(ID=0), blobs_props], dim='ID')
-        
+        if not self.unstructured_grid:
+            dummy = blobs_props.isel(ID=0) * np.nan
+            blobs_props = xr.concat([dummy.assign_coords(ID=0), blobs_props], dim='ID')
         
         for var_name in blobs_props.data_vars:
             
@@ -1805,10 +1813,11 @@ class Spotter:
         overlap_fractions = overlap_blobs_list[:, 2].astype(float) / min_areas
         overlap_blobs_list = overlap_blobs_list[overlap_fractions >= self.overlap_threshold]
         
+        overlap_blobs_list_redact = overlap_blobs_list[:, :2].astype(np.int32)
         
         return (blob_id_field_unique,
                 blob_props.persist(),
-                overlap_blobs_list[:, :2],
+                overlap_blobs_list_redact,
                 merge_events)
         
         
@@ -1836,24 +1845,16 @@ class Spotter:
             blob_id_field = xr.where(blob_id_field > 0, 
                                                     blob_id_field + cumsum_ids, 0)
         
-        ### TODO:  (see my dask-tracker.py as a reference)
-        #  [x] Calculate Blob Properties for Unstructured Grid
-        #  [x] Overlapping Blobs List
-        #  [ ] Stuff in split_and_merge_blobs(), including nn & centroid partitioning
-        #  [ ] Nearest neighbour probably needs to be in cartesian coordinates...
-        #  [ ] Stuff in cluster_rename_blobs_and_props()
-        
-        
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
         print('Finished calculating blob properties.')
-        
         
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             
             # Apply Splitting & Merging Logic to `overlap_blobs`
-            #   N.B. This is the longest step due to loop-wise dependencies... but many sub-steps are highly threaded so we're okay-ish in the end
+            #   N.B. This is the longest step due to loop-wise dependencies... 
+            #          In v2.0 unstructured, this loop has been painstakingly parallelised
             split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
             print('Finished splitting and merging blobs.')
             
@@ -1865,6 +1866,9 @@ class Spotter:
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
     
         return split_merged_blobs_ds, merge_events, N_blobs
+
+
+
 
 
 
