@@ -87,9 +87,7 @@ class Spotter:
             if self.neighbours_int.dims != ('nv', self.xdim):
                 raise ValueError('The neighbours array must have dimensions of (nv, xdim).')
             
-            ## Construct the sparse dilation matrix
-            print('Constructing the Sparse Dilation Matrix...')
-            
+            ## Construct the sparse dilation matrix    
             # Create row indices (i) and column indices (j) for the sparse matrix
             row_indices = jnp.repeat(jnp.arange(self.neighbours_int.shape[1]), 3)
             col_indices = self.neighbours_int.data.compute().T.flatten()
@@ -107,6 +105,8 @@ class Spotter:
             # _Need to add identity!!!_  >_<
             identity = eye(self.neighbours_int.shape[1], dtype=bool, format='csr')
             self.dilate_sparse = self.dilate_sparse + identity
+            
+            print('Finished Constructing the Sparse Dilation Matrix.')
 
             
         ## Suppress Various Dask Warnings:  These are related to running optimised low-level threaded code in Dask
@@ -199,11 +199,11 @@ class Spotter:
         # Fill Small Time-Gaps between Objects
         data_bin_gap_filled = self.fill_time_gaps(data_bin_filled).persist()
         wait(data_bin_gap_filled)
-        print('Finished filling spatio-temporal holes.')
+        print('Finished Filling Spatio-temporal Holes.')
         
         # Remove Small Objects
         data_bin_filtered, area_threshold, blob_areas, N_blobs_prefiltered = self.filter_small_blobs(data_bin_gap_filled)
-        print('Finished filtering small blobs.')
+        print('Finished Filtering Small Blobs.')
         
         # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
         data_bin_filtered = data_bin_filtered.persist()
@@ -221,7 +221,7 @@ class Spotter:
             # Track Blobs without any special merging or splitting
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
             
-        print('Finished tracking all blobs ! \n\n')
+        print('Finished Tracking All Blobs ! \n\n')
         
         
         ## Save Some BlObby Stats
@@ -1292,7 +1292,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        print('Finished finding overlapping blobs.')
+        print('Finished Finding Overlapping Blobs.')
         
         
         #################################
@@ -1573,7 +1573,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        print('Finished finding overlapping blobs.')
+        print('Finished Finding Overlapping Blobs.')
         
         
         ## Initialise merge tracking lists to build DataArray later
@@ -1748,7 +1748,7 @@ class Spotter:
         global_id_counter = blob_props.ID.max().item() + 1
         
         while merging_blobs and iteration < max_iterations:
-            print(f"Processing iteration {iteration + 1} with {len(merging_blobs)} merging blobs...")
+            print(f"Processing Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
             
             blob_id_field_unique = blob_id_field_unique.persist()
             
@@ -1933,7 +1933,7 @@ class Spotter:
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
         blob_id_field = blob_id_field.persist()
-        print('Finished blob identification.')
+        print('Finished Blob Identification.')
         
         
         if self.unstructured_grid:
@@ -1944,14 +1944,13 @@ class Spotter:
         
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
-        print('Finished calculating blob properties.')
-        
+        print('Finished Calculating Blob Properties.')
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... 
         #          In v2.0 unstructured, this loop has been painstakingly parallelised
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
-        print('Finished splitting and merging blobs.')
+        print('Finished Splitting and Merging Blobs.')
         
         # Clean Up & Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = persist(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
@@ -1961,9 +1960,8 @@ class Spotter:
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
         split_merged_blobs_ds = split_merged_blobs_ds.persist()
-        print('Finished clustering and renaming blobs.')
+        print('Finished Clustering and Renaming Blobs.')
     
-        
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
     
