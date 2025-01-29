@@ -1,5 +1,6 @@
 import xarray as xr
 import numpy as np
+from dask.distributed import get_client
 from dask_image.ndmeasure import label
 from skimage.measure import regionprops_table
 from dask_image.ndmorph import binary_closing as binary_closing_dask
@@ -12,7 +13,7 @@ from dask import delayed
 from dask import compute as dask_compute
 import dask.array as dsa
 from dask.base import is_dask_collection
-from numba import jit, njit, int64, int32, prange
+from numba import jit, njit, prange
 import jax.numpy as jnp
 import warnings
 
@@ -36,6 +37,7 @@ class Spotter:
         self.ydim       = ydim   
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # If Structured, the units are pixels...
+        self.dask_client = get_client()
         
         if unstructured_grid:
             self.ydim = None
@@ -144,17 +146,30 @@ class Spotter:
         blob_id_field : xarray.DataArray
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
+        
+        
+        # Compute Area of Initial Binary Data
+        raw_area = self.compute_area(self.data_bin)  # This is e.g. the initial Hobday area
 
         # Fill Small Holes & Gaps between Objects
         data_bin_filled = self.fill_holes(self.data_bin)
 
         # Fill Small Time-Gaps between Objects
         data_bin_gap_filled = self.fill_time_gaps(data_bin_filled)
+        data_bin_gap_filled = data_bin_gap_filled.persist()
         print('Finished filling spatio-temporal holes.')
         
         # Remove Small Objects
-        data_bin_filtered, area_threshold, blob_areas, N_blobs_unfiltered = self.filter_small_blobs(data_bin_gap_filled)
+        data_bin_filtered, area_threshold, N_blobs_prefiltered = self.filter_small_blobs(data_bin_gap_filled)
         print('Finished filtering small blobs.')
+        
+        # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
+        data_bin_filtered = data_bin_filtered.persist()
+        del data_bin_filled
+        del data_bin_gap_filled
+        
+        # Compute Area of Morphologically-Processed & Filtered Data
+        processed_area = self.compute_area(data_bin_filtered)
         
         if self.allow_merging or self.unstructured_grid:
             # Track Blobs _with_ Merging & Splitting (or, manually anyways for unstructured grid...)
@@ -167,17 +182,21 @@ class Spotter:
         
         
         ## Save Some BlObby Stats
-
-        total_id_area = int(blob_areas.sum().item())  # Percent of total object area retained after size filtering
+        blob_areas = blObs_ds.area
+        total_id_area = int(blob_areas.sum().compute().item())  # Percent of total object area retained after size filtering
         
         rejected_area = blob_areas.where(blob_areas <= area_threshold, drop=True).sum().item()
         rejected_area_fraction = rejected_area / total_id_area
 
         accepted_area = blob_areas.where(blob_areas > area_threshold, drop=True).sum().item()
         accepted_area_fraction = accepted_area / total_id_area
+        
+        total_hobday_area = raw_area.sum().item()
+        total_processed_area = processed_area.sum().item()
+        preprocessed_area_fraction = total_hobday_area / total_processed_area
 
         blObs_ds.attrs['allow_merging'] = int(self.allow_merging)
-        blObs_ds.attrs['N_blobs_unfiltered'] = int(N_blobs_unfiltered)
+        blObs_ds.attrs['N_blobs_prefiltered'] = int(N_blobs_prefiltered)
         blObs_ds.attrs['N_blobs_final'] = int(N_blobs_final)
         blObs_ds.attrs['R_fill'] = self.R_fill
         blObs_ds.attrs['T_fill'] = self.T_fill
@@ -185,14 +204,16 @@ class Spotter:
         blObs_ds.attrs['area_threshold'] = area_threshold
         blObs_ds.attrs['rejected_area_fraction'] = rejected_area_fraction
         blObs_ds.attrs['accepted_area_fraction'] = accepted_area_fraction
+        blObs_ds.attrs['preprocessed_area_fraction'] = preprocessed_area_fraction
         
 
         ## Print Some BlObby Stats
         
         print(f'Total Object Area: {total_id_area}')
-        print(f'Number of Initial Blobs: {N_blobs_unfiltered}')
+        print(f'Number of Initial Pre-Filtered Blobs: {N_blobs_prefiltered}')
         print(f'Area Cutoff Threshold: {area_threshold}')
         print(f'Rejected Area Fraction: {rejected_area_fraction}')
+        print(f'Preprocessing Area Fraction: {preprocessed_area_fraction}')
         print(f'Total Blobs Tracked: {N_blobs_final}')
         
         if self.allow_merging:
@@ -214,6 +235,23 @@ class Spotter:
         else:
             return blObs_ds
     
+    
+    def compute_area(self, data_bin):
+        '''
+        Computes the total area of the binary data at each time.
+        
+        Returns
+        -------
+        raw_area: xarray.DataArray
+            Total area at each time. The units are pixels (for structured data) and matching self.cell_area (for unstructured data).
+        '''
+        
+        if self.unstructured_grid:
+            raw_area = (data_bin * self.cell_area).sum(dim=[self.xdim])
+        else:
+            raw_area = data_bin.sum(dim=[self.ydim, self.xdim])
+        
+        return raw_area
     
 
     def fill_holes(self, data_bin, R_fill=None): 
@@ -535,6 +573,7 @@ class Spotter:
                 # Compute Areas
                 total_areas = np.zeros(n_ids, dtype=np.float32)
                 np.add.at(total_areas, mapped_indices, area[valid_mask])
+                valid_mapped_mask = total_areas > 0.
                 
                 # Compute weighted coordinates
                 weighted_x = np.zeros(n_ids, dtype=np.float32)
@@ -547,15 +586,17 @@ class Spotter:
                 
                 # Normalise vectors
                 norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
-                norm[0] = 1.  # For ID = 0
                 
-                weighted_x /= norm
-                weighted_y /= norm
-                weighted_z /= norm
+                weighted_x[valid_mapped_mask] /= norm[valid_mapped_mask]
+                weighted_y[valid_mapped_mask] /= norm[valid_mapped_mask]
+                weighted_z[valid_mapped_mask] /= norm[valid_mapped_mask]
                 
                 # Convert back to lat/lon
-                centroid_lat = np.degrees(np.arcsin(weighted_z))
-                centroid_lon = np.degrees(np.arctan2(weighted_y, weighted_x))
+                centroid_lat = np.zeros(n_ids, dtype=np.float32)
+                centroid_lon = np.zeros(n_ids, dtype=np.float32)
+                centroid_lat[valid_mapped_mask] = np.degrees(np.arcsin(weighted_z[valid_mapped_mask]))
+                centroid_lon[valid_mapped_mask] = np.degrees(np.arctan2(weighted_y[valid_mapped_mask], 
+                                                                        weighted_x[valid_mapped_mask]))
                 
                 # Fix longitude range to [-180, 180]
                 centroid_lon = np.where(centroid_lon > 180., centroid_lon - 360.,
@@ -593,7 +634,7 @@ class Spotter:
                                                 input_core_dims=[[self.xdim], [self.xdim], [self.xdim], [self.xdim]],
                                                 output_core_dims=[['prop', 'ID']],
                                                 output_dtypes=[np.float32],
-                                                output_sizes={'ID': max_ID, 'prop': 3}, 
+                                                dask_gufunc_kwargs={'output_sizes': {'ID': max_ID, 'prop': 3}},
                                                 vectorize=True,
                                                 dask='parallelized').sum(dim=self.timedim)
                 ids_list = np.arange(0, max_ID)
@@ -693,7 +734,7 @@ class Spotter:
                                     blob_id_field, 
                                     input_core_dims=[[self.xdim]],
                                     output_core_dims=[['ID'],['ID']],
-                                    output_sizes={'ID': max_ID}, 
+                                    dask_gufunc_kwargs={'output_sizes': {'ID': max_ID}},
                                     output_dtypes=(np.int32, np.int32),
                                     vectorize=True,
                                     dask='parallelized')
@@ -704,6 +745,7 @@ class Spotter:
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
             blob_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
+            
             ## Filter small areas: 
             
             N_blobs = len(blob_areas)
@@ -724,7 +766,7 @@ class Spotter:
                                     output_dtypes=[data_bin.dtype],
                                     vectorize=True,
                                     dask='parallelized')
-
+            
             
         else: # Structured Grid is Straightforward...
             
@@ -739,7 +781,7 @@ class Spotter:
             data_bin_filtered = blob_id_field.isin(blob_ids_keep)
         
         
-        return data_bin_filtered, area_threshold, blob_areas, N_blobs
+        return data_bin_filtered, area_threshold, N_blobs
     
     
     def check_overlap_slice(self, ids_t0, ids_next):
@@ -1667,7 +1709,7 @@ class Spotter:
         global_id_counter = blob_props.ID.max().item() + 1
         
         while merging_blobs and iteration < max_iterations:
-            print(f"Processing iteration {iteration + 1} with {len(merging_blobs)} merging blobs")
+            print(f"Processing iteration {iteration + 1} with {len(merging_blobs)} merging blobs...")
             
             blob_id_field_unique = blob_id_field_unique.persist()
             
@@ -1775,7 +1817,7 @@ class Spotter:
         
         parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
         child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
-        overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
+        overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.float32 if self.unstructured_grid else np.int32)
         
         for i, parents in enumerate(merge_parent_ids):
             parent_ids_array[i, :len(parents)] = parents
@@ -1836,31 +1878,39 @@ class Spotter:
         
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
+        blob_id_field = blob_id_field.persist()
         print('Finished blob identification.')
         
         
         if self.unstructured_grid:
             # Make the blob_id_field unique across time
             cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
-            blob_id_field = xr.where(blob_id_field > 0, 
-                                                    blob_id_field + cumsum_ids, 0)
+            blob_id_field = xr.where(blob_id_field > 0, blob_id_field + cumsum_ids, 0)
+            blob_id_field = blob_id_field.persist()
         
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
         print('Finished calculating blob properties.')
         
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            
-            # Apply Splitting & Merging Logic to `overlap_blobs`
-            #   N.B. This is the longest step due to loop-wise dependencies... 
-            #          In v2.0 unstructured, this loop has been painstakingly parallelised
-            split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
-            print('Finished splitting and merging blobs.')
-            
-            # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-            split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
-            print('Finished clustering and renaming blobs.')
+        # with warnings.catch_warnings():
+        #     warnings.simplefilter("ignore", UserWarning)
+        
+        # Apply Splitting & Merging Logic to `overlap_blobs`
+        #   N.B. This is the longest step due to loop-wise dependencies... 
+        #          In v2.0 unstructured, this loop has been painstakingly parallelised
+        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
+        print('Finished splitting and merging blobs.')
+        
+        # Clean Up & Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
+        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = persist(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
+        del blob_id_field
+        del blob_props
+        
+        # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
+        split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
+        split_merged_blobs_ds = split_merged_blobs_ds.persist()
+        print('Finished clustering and renaming blobs.')
+        
         
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
