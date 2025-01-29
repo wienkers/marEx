@@ -1575,13 +1575,6 @@ class Spotter:
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
         print('Finished Finding Overlapping Blobs.')
         
-        
-        ## Initialise merge tracking lists to build DataArray later
-        merge_times = []       # When the merge occurred
-        merge_child_ids = []   # Resulting child ID
-        merge_parent_ids = []  # List of parent IDs that merged
-        merge_areas = []       # Areas of overlap
-        
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
         merging_blobs = set(unique_children[children_counts > 1])
@@ -1595,10 +1588,12 @@ class Spotter:
             '''
 
             # Initialise tracking variables for this chunk
-            chunk_merge_times = []
-            chunk_merge_child_ids = []
-            chunk_merge_parent_ids = []
-            chunk_merge_areas = []
+            chunk_merge_events = {
+                'times': [],
+                'child_ids': [],
+                'parent_ids': [],
+                'areas': []
+            }
             next_new_id = next_id_start
             new_merging_blobs = set()
             id_mapping = {}  # Track local to global ID mapping
@@ -1701,11 +1696,12 @@ class Spotter:
                 blob_id_time = blob_id_time.where(~child_mask_2d, temp)
                 chunk_data[{self.timedim: relative_time_idx}] = blob_id_time
                 
-                # Update tracking
-                chunk_merge_times.append(chunk_data.isel({self.timedim: relative_time_idx}).time.values)
-                chunk_merge_child_ids.append(child_ids)
-                chunk_merge_parent_ids.append(parent_ids)
-                chunk_merge_areas.append(merge_group[:, 2])
+                # Update merge event tracking with exact timestamps
+                chunk_merge_events['times'].append(
+                                                chunk_data.isel({self.timedim: relative_time_idx}).time.values)
+                chunk_merge_events['child_ids'].append(child_ids)
+                chunk_merge_events['parent_ids'].append(parent_ids)
+                chunk_merge_events['areas'].append(merge_group[:, 2])
                 
                 # Update blob_props_local
                 blob_props_local = xr.merge([
@@ -1736,9 +1732,11 @@ class Spotter:
                                 child_time_idxs = sorted(child_time_idxs)
             
             
-            return (chunk_data[:(chunk_end-1-chunk_start)], next_new_id, new_merging_blobs,
-                    (chunk_merge_times, chunk_merge_child_ids, chunk_merge_parent_ids, chunk_merge_areas),
-                    id_mapping)
+            return (chunk_data[:(chunk_end-1-chunk_start)], 
+                        next_new_id, 
+                        new_merging_blobs,
+                        chunk_merge_events,
+                        id_mapping)
         
         
         ## Process chunks iteratively until no new merging blobs remain
@@ -1747,8 +1745,16 @@ class Spotter:
         processed_chunks = set()
         global_id_counter = blob_props.ID.max().item() + 1
         
+        # Initialise global merge event tracking
+        all_merge_events = {
+            'times': [],
+            'child_ids': [],
+            'parent_ids': [],
+            'areas': []
+        }
+        
         while merging_blobs and iteration < max_iterations:
-            print(f"Processing Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
+            print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
             
             blob_id_field_unique = blob_id_field_unique.persist()
             
@@ -1810,50 +1816,135 @@ class Spotter:
             
             
             ### Consolidate Data ###
-            
+
             # Consolidate Data: 1: Collect all temporary IDs and create global mapping
-            all_temp_ids = set()
-            for _, (_, _, _, _, id_mapping) in zip(chunk_futures, results):
-                all_temp_ids.update(id_mapping.keys())
+            temp_id_arrays = [np.array(list(results[i][4].keys()), dtype=np.int64)   # Quick check if any chunks have temporary IDs
+                            for i in range(len(results)) 
+                            if results[i][4]]
             
-            global_id_mapping = {temp_id: global_id_counter + i 
-                            for i, temp_id in enumerate(sorted(all_temp_ids))}
-            global_id_counter += len(all_temp_ids)
+            if temp_id_arrays:
+                all_temp_ids = np.unique(np.concatenate(temp_id_arrays))
+                if all_temp_ids.size > 0:
+                    id_lookup = np.zeros(all_temp_ids.max() + 1, dtype=np.int32)
+                    new_ids = np.arange(global_id_counter,
+                                    global_id_counter + len(all_temp_ids),
+                                    dtype=np.int32)
+                    id_lookup[all_temp_ids] = new_ids
+                    global_id_counter += len(all_temp_ids)
+
             
-            # Consolidate Data: 2: Process results and update global state
-            new_merging_blobs = set()
-            
-            for (chunk_idx, _), (chunk_data, _, chunk_new_merging, chunk_merge_events, id_mapping) in zip(chunk_futures, results):
-                # Update IDs in chunk data
-                for temp_id, global_id in global_id_mapping.items():
-                    chunk_data = xr.where(chunk_data == temp_id, global_id, chunk_data)
+            # Consolidate Data: 2: Post-process results in parallel and update global state
+            def postprocess_chunk(chunk_idx, chunk_data, chunk_new_merging, chunk_merge_events, id_mapping, 
+                                all_temp_ids, id_lookup, chunk_boundaries):
+                """Process a single chunk's results and prepare updates."""
+                processed_data = chunk_data
+                if len(all_temp_ids) > 0 and id_mapping:
+                    unique_vals = np.unique(chunk_data.values)
+                    mask = np.isin(unique_vals, list(id_mapping.keys()))
+                    if mask.any():
+                        for old_val in unique_vals[mask]:
+                            new_val = id_lookup[old_val]
+                            processed_data = xr.where(processed_data == old_val, new_val, processed_data)
                 
-                # Update chunk in main array
+                # Process merge events
+                times = chunk_merge_events['times']
+                child_ids = chunk_merge_events['child_ids']
+                parent_ids = chunk_merge_events['parent_ids']
+                areas = chunk_merge_events['areas']
+                
+                # Update IDs in merge events
+                updated_child_ids = []
+                updated_parent_ids = []
+                
+                if len(all_temp_ids) > 0:
+                    for cids, pids in zip(child_ids, parent_ids):
+                        cids = np.asarray(cids, dtype=np.int32)
+                        pids = np.asarray(pids, dtype=np.int32)
+                        
+                        # Update child IDs
+                        mask = np.isin(cids, list(id_mapping.keys()))
+                        if mask.any():
+                            cids = np.where(mask, id_lookup[cids], cids)
+                        updated_child_ids.append(cids)
+                        
+                        # Update parent IDs
+                        mask = np.isin(pids, list(id_mapping.keys()))
+                        if mask.any():
+                            pids = np.where(mask, id_lookup[pids], pids)
+                        updated_parent_ids.append(pids)
+                else:
+                    updated_child_ids = child_ids
+                    updated_parent_ids = parent_ids
+                
+                # Handle merging blobs
+                updated_merging_blobs = set()
+                if chunk_new_merging:
+                    if len(all_temp_ids) > 0:
+                        updated_merging_blobs.update(
+                            id_lookup[blob_id] if blob_id in id_mapping else blob_id 
+                            for blob_id in chunk_new_merging
+                        )
+                    else:
+                        updated_merging_blobs.update(chunk_new_merging)
+                
                 chunk_start = chunk_boundaries[chunk_idx]
                 chunk_end = chunk_boundaries[chunk_idx + 1]
-                blob_id_field_unique[{self.timedim: slice(chunk_start, chunk_end)}] = chunk_data
                 
-                # Update merge events with new global IDs
-                times, child_ids, parent_ids, areas = chunk_merge_events
-                updated_child_ids = []
-                for ids in child_ids:
-                    updated_ids = np.array([global_id_mapping.get(id_, id_) for id_ in ids])
-                    updated_child_ids.append(updated_ids)
-                updated_parent_ids = []
-                for ids in parent_ids:
-                    updated_ids = np.array([global_id_mapping.get(id_, id_) for id_ in ids])
-                    updated_parent_ids.append(updated_ids)
-                
-                merge_times.extend(times)
-                merge_child_ids.extend(updated_child_ids)
-                merge_parent_ids.extend(updated_parent_ids)
-                merge_areas.extend(areas)
-                
-                # Track new merging blobs (using updated global IDs)
-                new_merging_blobs.update(
-                    global_id_mapping.get(blob_id, blob_id) 
-                    for blob_id in chunk_new_merging
+                return {
+                    'chunk_idx': chunk_idx,
+                    'chunk_start': chunk_start,
+                    'chunk_end': chunk_end,
+                    'processed_data': processed_data,
+                    'merge_times': times,
+                    'merge_child_ids': updated_child_ids,
+                    'merge_parent_ids': updated_parent_ids,
+                    'merge_areas': areas,
+                    'merging_blobs': updated_merging_blobs
+                }
+
+            # Create delayed computations for each chunk
+            delayed_results = []
+            for (chunk_idx, _), (chunk_data, _, chunk_new_merging, chunk_merge_events, id_mapping) in zip(chunk_futures, results):
+                delayed_result = delayed(postprocess_chunk)(
+                    chunk_idx, chunk_data, chunk_new_merging, chunk_merge_events, id_mapping,
+                    all_temp_ids, id_lookup, chunk_boundaries
                 )
+                delayed_results.append(delayed_result)
+
+            preprocessed_chunks = dask_compute(*delayed_results)
+
+            # Initialise collection variables
+            updates_by_chunk = {}
+            new_merging_blobs = set()
+
+            # Consolidate results
+            for chunk_result in preprocessed_chunks:
+                chunk_idx = chunk_result['chunk_idx']
+                updates_by_chunk[chunk_idx] = (
+                    chunk_result['chunk_start'],
+                    chunk_result['chunk_end'],
+                    chunk_result['processed_data']
+                )
+                
+                # Accumulate merge events
+                all_merge_events['times'].extend(chunk_result['merge_times'])
+                all_merge_events['child_ids'].extend(chunk_result['merge_child_ids'])
+                all_merge_events['parent_ids'].extend(chunk_result['merge_parent_ids'])
+                all_merge_events['areas'].extend(chunk_result['merge_areas'])
+                
+                new_merging_blobs.update(chunk_result['merging_blobs'])
+
+            # Update the main array chunk by chunk
+            if updates_by_chunk:
+                for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
+                    chunk_start = chunk_boundaries[chunk_idx]
+                    chunk_end = chunk_boundaries[chunk_idx + 1]
+                    
+                    if chunk_idx in updates_by_chunk:
+                        _, _, chunk_data = updates_by_chunk[chunk_idx]
+                        blob_id_field_unique[{self.timedim: slice(chunk_start, chunk_end)}] = chunk_data
+                
+                blob_id_field_unique = blob_id_field_unique.persist()
             
             
             # Prepare for next iteration
@@ -1865,21 +1956,24 @@ class Spotter:
         if iteration == max_iterations:
             warnings.warn(f"Reached maximum iterations ({max_iterations}) in split_and_merge_blobs_parallel")
         
-        ### Process the Merge Events (same as original function)
-        max_parents = max(len(ids) for ids in merge_parent_ids)
-        max_children = max(len(ids) for ids in merge_child_ids)
+        ### Process the Merge Events ###
+        max_parents = max(len(ids) for ids in all_merge_events['parent_ids'])
+        max_children = max(len(ids) for ids in all_merge_events['child_ids'])
         
-        parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
-        child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
-        overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.float32 if self.unstructured_grid else np.int32)
+        # Create arrays for merge events
+        parent_ids_array = np.full((len(all_merge_events['parent_ids']), max_parents), -1, dtype=np.int32)
+        child_ids_array = np.full((len(all_merge_events['child_ids']), max_children), -1, dtype=np.int32)
+        overlap_areas_array = np.full((len(all_merge_events['areas']), max_parents), 
+                                    -1, dtype=np.float32 if self.unstructured_grid else np.int32)
         
-        for i, parents in enumerate(merge_parent_ids):
+        
+        for i, parents in enumerate(all_merge_events['parent_ids']):
             parent_ids_array[i, :len(parents)] = parents
         
-        for i, children in enumerate(merge_child_ids):
+        for i, children in enumerate(all_merge_events['child_ids']):
             child_ids_array[i, :len(children)] = children
         
-        for i, areas in enumerate(merge_areas):
+        for i, areas in enumerate(all_merge_events['areas']):
             overlap_areas_array[i, :len(areas)] = areas
         
         merge_events = xr.Dataset(
@@ -1887,9 +1981,9 @@ class Spotter:
             'parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
             'child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
             'overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
-            'merge_time': ('merge_ID', merge_times),
-            'n_parents': ('merge_ID', np.array([len(p) for p in merge_parent_ids], dtype=np.int8)),
-            'n_children': ('merge_ID', np.array([len(c) for c in merge_child_ids], dtype=np.int8))
+            'merge_time': ('merge_ID', all_merge_events['times']),
+            'n_parents': ('merge_ID', np.array([len(p) for p in all_merge_events['parent_ids']], dtype=np.int8)),
+            'n_children': ('merge_ID', np.array([len(c) for c in all_merge_events['child_ids']], dtype=np.int8))
             },
             attrs={
                 'fill_value': -1
@@ -1898,7 +1992,7 @@ class Spotter:
         
         # Re-compute New (now-merged) Blob Properties
         blob_id_field_unique = blob_id_field_unique.persist()
-        blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid'])
+        blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid']).persist()
         
         # Re-compute New (now-merged) Overlap Blob List & Filter Small Overlaps (again)
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)
@@ -1912,7 +2006,7 @@ class Spotter:
         overlap_blobs_list_redact = overlap_blobs_list[:, :2].astype(np.int32)
         
         return (blob_id_field_unique,
-                blob_props.persist(),
+                blob_props,
                 overlap_blobs_list_redact,
                 merge_events)
         
@@ -1956,9 +2050,10 @@ class Spotter:
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = persist(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
         del blob_id_field
         del blob_props
-    
+        
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
+        split_merged_blobs_ds = split_merged_blobs_ds.chunk({self.timedim: self.data_bin.chunks[self.timedim][0], 'ID': -1, 'component':-1, 'ncells': -1, 'sibling_ID' : -1})
         split_merged_blobs_ds = split_merged_blobs_ds.persist()
         print('Finished Clustering and Renaming Blobs.')
     
@@ -2290,7 +2385,7 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
         
         unassigned_points = np.where(unassigned_mask)[0]
         for point in unassigned_points:
-            # Vectorized haversine calculation
+            # Vectorised haversine calculation
             dlat = parent_lat_rad - lat_rad[point]
             dlon = parent_lon_rad - lon_rad[point]
             a = np.sin(dlat/2)**2 + cos_lat[point] * cos_parent_lat * np.sin(dlon/2)**2
