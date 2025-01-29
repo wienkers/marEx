@@ -1,6 +1,6 @@
 import xarray as xr
 import numpy as np
-from dask.distributed import get_client
+from dask.distributed import wait
 from dask_image.ndmeasure import label
 from skimage.measure import regionprops_table
 from dask_image.ndmorph import binary_closing as binary_closing_dask
@@ -16,13 +16,14 @@ from dask.base import is_dask_collection
 from numba import jit, njit, prange
 import jax.numpy as jnp
 import warnings
+import logging
 
 class Spotter:
     '''
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -37,7 +38,6 @@ class Spotter:
         self.ydim       = ydim   
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # If Structured, the units are pixels...
-        self.dask_client = get_client()
         
         if unstructured_grid:
             self.ydim = None
@@ -77,7 +77,7 @@ class Spotter:
         
         if unstructured_grid:
             
-            self.cell_area = cell_areas  # In square metres !
+            self.cell_area = cell_areas.persist()  # In square metres !
             self.mean_cell_area = cell_areas.mean().compute().item()
             
             ## Initialise the dilation array
@@ -107,6 +107,47 @@ class Spotter:
             # _Need to add identity!!!_  >_<
             identity = eye(self.neighbours_int.shape[1], dtype=bool, format='csr')
             self.dilate_sparse = self.dilate_sparse + identity
+
+            
+        ## Suppress Various Dask Warnings:  These are related to running optimised low-level threaded code in Dask
+        #    Debug level for warning suppression:
+        #       0 : Suppress both `run_spec`` and large graph warnings
+        #       1 : Suppress only `run_spec`` warnings
+        #       2 : No warning suppression
+        
+        if debug < 2:
+            
+            logging.getLogger('distributed.scheduler').setLevel(logging.ERROR)
+            def filter_dask_warnings(record):
+                msg = str(record.msg)
+                
+                if debug == 0:
+                    # Suppress both run_spec and large graph warnings
+                    if any(pattern in msg for pattern in [
+                        'Detected different `run_spec`',
+                        'Sending large graph',
+                        'This may cause some slowdown'
+                    ]):
+                        return False
+                    return True
+                else:
+                    # Suppress only run_spec warnings
+                    if 'Detected different `run_spec`' in msg:
+                        return False
+                    return True
+
+            logging.getLogger('distributed.scheduler').addFilter(filter_dask_warnings)
+            
+            if debug == 0:
+                warnings.filterwarnings('ignore', 
+                                    category=UserWarning,
+                                    module='distributed.client')
+                # Add a more specific filter for the large graph warning
+                warnings.filterwarnings('ignore', 
+                                    message='.*Sending large graph.*\n.*This may cause some slowdown.*',
+                                    category=UserWarning)
+            
+            
         
         
             
@@ -150,21 +191,23 @@ class Spotter:
         
         # Compute Area of Initial Binary Data
         raw_area = self.compute_area(self.data_bin)  # This is e.g. the initial Hobday area
-
+        
         # Fill Small Holes & Gaps between Objects
-        data_bin_filled = self.fill_holes(self.data_bin)
+        data_bin_filled = self.fill_holes(self.data_bin).persist()
+        wait(data_bin_filled)
 
         # Fill Small Time-Gaps between Objects
-        data_bin_gap_filled = self.fill_time_gaps(data_bin_filled)
-        data_bin_gap_filled = data_bin_gap_filled.persist()
+        data_bin_gap_filled = self.fill_time_gaps(data_bin_filled).persist()
+        wait(data_bin_gap_filled)
         print('Finished filling spatio-temporal holes.')
         
         # Remove Small Objects
-        data_bin_filtered, area_threshold, N_blobs_prefiltered = self.filter_small_blobs(data_bin_gap_filled)
+        data_bin_filtered, area_threshold, blob_areas, N_blobs_prefiltered = self.filter_small_blobs(data_bin_gap_filled)
         print('Finished filtering small blobs.')
         
         # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
         data_bin_filtered = data_bin_filtered.persist()
+        wait(data_bin_filtered)
         del data_bin_filled
         del data_bin_gap_filled
         
@@ -178,21 +221,18 @@ class Spotter:
             # Track Blobs without any special merging or splitting
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
             
-        print('Finished tracking blobs.')
+        print('Finished tracking all blobs ! \n\n')
         
         
         ## Save Some BlObby Stats
-        blob_areas = blObs_ds.area
-        total_id_area = int(blob_areas.sum().compute().item())  # Percent of total object area retained after size filtering
-        
-        rejected_area = blob_areas.where(blob_areas <= area_threshold, drop=True).sum().item()
-        rejected_area_fraction = rejected_area / total_id_area
+        blob_areas = blob_areas.compute()
+        total_area_IDed = blob_areas.sum().item()
 
         accepted_area = blob_areas.where(blob_areas > area_threshold, drop=True).sum().item()
-        accepted_area_fraction = accepted_area / total_id_area
+        accepted_area_fraction = accepted_area / total_area_IDed
         
-        total_hobday_area = raw_area.sum().item()
-        total_processed_area = processed_area.sum().item()
+        total_hobday_area = raw_area.sum().compute().item()
+        total_processed_area = processed_area.sum().compute().item()
         preprocessed_area_fraction = total_hobday_area / total_processed_area
 
         blObs_ds.attrs['allow_merging'] = int(self.allow_merging)
@@ -201,23 +241,21 @@ class Spotter:
         blObs_ds.attrs['R_fill'] = self.R_fill
         blObs_ds.attrs['T_fill'] = self.T_fill
         blObs_ds.attrs['area_filter_quartile'] = self.area_filter_quartile
-        blObs_ds.attrs['area_threshold'] = area_threshold
-        blObs_ds.attrs['rejected_area_fraction'] = rejected_area_fraction
+        blObs_ds.attrs['area_threshold (cells)'] = area_threshold
         blObs_ds.attrs['accepted_area_fraction'] = accepted_area_fraction
         blObs_ds.attrs['preprocessed_area_fraction'] = preprocessed_area_fraction
         
 
         ## Print Some BlObby Stats
-        
-        print(f'Total Object Area: {total_id_area}')
-        print(f'Number of Initial Pre-Filtered Blobs: {N_blobs_prefiltered}')
-        print(f'Area Cutoff Threshold: {area_threshold}')
-        print(f'Rejected Area Fraction: {rejected_area_fraction}')
-        print(f'Preprocessing Area Fraction: {preprocessed_area_fraction}')
-        print(f'Total Blobs Tracked: {N_blobs_final}')
+        print('Tracking Statistics:')
+        print(f'   Binary Hobday to Processed Area Fraction: {preprocessed_area_fraction}')
+        print(f'   Total Object Area IDed (cells): {total_area_IDed}')
+        print(f'   Number of Initial Pre-Filtered Blobs: {N_blobs_prefiltered}')
+        print(f'   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}')
+        print(f'   Accepted Area Fraction: {accepted_area_fraction}')
+        print(f'   Total Blobs Tracked: {N_blobs_final}')
         
         if self.allow_merging:
-            
             
             blObs_ds.attrs['overlap_threshold'] = self.overlap_threshold
             blObs_ds.attrs['nn_partitioning'] = int(self.nn_partitioning)
@@ -226,9 +264,7 @@ class Spotter:
             blObs_ds.attrs['total_merges'] = len(merges_ds.merge_ID)
             blObs_ds.attrs['multi_parent_merges'] = (merges_ds.n_parents > 2).sum().item()
             
-            print(f"Total Merging Events: {blObs_ds.attrs['total_merges']}")
-            print(f"Multi-Parent Merging Events: {blObs_ds.attrs['multi_parent_merges']}")
-        
+            print(f"   Total Merging Events Recorded: {blObs_ds.attrs['total_merges']}")
         
         if self.allow_merging and return_merges:
             return blObs_ds, merges_ds
@@ -317,8 +353,8 @@ class Spotter:
                                         output_dtypes=[np.bool_],
                                         vectorize=False,
                                         dask='parallelized')
-            
-            
+        
+        
         else: # Structured Grid dask-powered morphological operations
             
             # Generate Structuring Element
@@ -337,7 +373,6 @@ class Spotter:
         
             # Mask out edge features arising from Morphological Operations
             data_bin_filled_mask = data_bin_filled.where(self.mask, drop=False, other=False)
-            
             
         
         return data_bin_filled_mask
@@ -360,7 +395,8 @@ class Spotter:
             time_kernel = time_kernel[:, np.newaxis, np.newaxis]
         
         # Pad in time
-        binary_data_padded = data_bin.pad({self.timedim: kernel_size}, mode='constant', constant_values=False)
+        binary_data_padded = data_bin.pad({self.timedim: kernel_size}, mode='constant', constant_values=False).persist()
+        wait(binary_data_padded)
         
         data_bin_closed = binary_closing_dask(binary_data_padded.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
         
@@ -368,7 +404,8 @@ class Spotter:
         data_bin_timegap_filled_pad = xr.DataArray(data_bin_closed, coords=binary_data_padded.coords, dims=binary_data_padded.dims)
         
         # Remove padding
-        data_bin_timegap_filled = data_bin_timegap_filled_pad.isel({self.timedim: slice(kernel_size, -kernel_size)})
+        data_bin_timegap_filled = data_bin_timegap_filled_pad.isel({self.timedim: slice(kernel_size, -kernel_size)}).persist()
+        wait(data_bin_timegap_filled)
         
         # Finally, fill newly-created spatial holes
         data_bin_space_and_timegap_filled = self.fill_holes(data_bin_timegap_filled, R_fill=self.R_fill//2)
@@ -767,6 +804,8 @@ class Spotter:
                                     vectorize=True,
                                     dask='parallelized')
             
+            blobs_areas = cluster_sizes # The pre-pre-filtered areas
+            
             
         else: # Structured Grid is Straightforward...
             
@@ -781,7 +820,7 @@ class Spotter:
             data_bin_filtered = blob_id_field.isin(blob_ids_keep)
         
         
-        return data_bin_filtered, area_threshold, N_blobs
+        return data_bin_filtered, area_threshold, blobs_areas, N_blobs
     
     
     def check_overlap_slice(self, ids_t0, ids_next):
@@ -1731,7 +1770,8 @@ class Spotter:
             chunk_futures = []
             next_id_offset = 0
             previous_last_timeslice = None
-
+            
+            
             timeslices = blob_id_field_unique.isel({self.timedim: chunk_boundaries[1:-1]-1}).persist()
             for chunk_idx in sorted(blobs_by_chunk.keys()):
                 chunk_blobs = [b for b in merging_blobs if chunk_idx == np.searchsorted(chunk_boundaries, time_index_map[b], side='right') - 1]
@@ -1740,19 +1780,33 @@ class Spotter:
                 
                 chunk_start = chunk_boundaries[chunk_idx]
                 chunk_end = chunk_boundaries[chunk_idx + 1] + 1
-                chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
                 
+                chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
                 previous_last_timeslice = timeslices[chunk_idx-1] if chunk_idx > 0 else None
                 
+                # _Instead_ try to embed data directly into the dask task graph...
+                # chunk_data = delayed(lambda x: x.isel({self.timedim: slice(chunk_start, chunk_end)}).compute())(blob_id_field_unique)
+                # previous_last_timeslice = (delayed(lambda x: x.isel({self.timedim: chunk_boundaries[chunk_idx]-1}).compute())(blob_id_field_unique) 
+                #                                 if chunk_idx > 0 else None)
+                
                 blob_time_idxs = [time_index_map[b] for b in chunk_blobs]
-                                    
+                
                 future = delayed(process_chunk)(chunk_start, chunk_end, chunk_data, chunk_blobs, blob_time_idxs, previous_last_timeslice,
                                             global_id_counter + next_id_offset)
                 chunk_futures.append((chunk_idx, future))
                 chunk_size = blob_id_field_unique.chunks[0][chunk_idx]
                 next_id_offset += len(chunk_blobs) * chunk_size  # Conservative estimate
-                
+            
+            
             results = dask_compute(*[f[1] for f in chunk_futures])
+            
+            # Process futures in batches
+            # batch_size = 4  # Adjust this based on memory constraints
+            # results = []
+            # for i in range(0, len(chunk_futures), batch_size):
+            #     batch = chunk_futures[i:i + batch_size]
+            #     batch_results = dask_compute(*[f[1] for f in batch])
+            #     results.extend(batch_results)
             
             
             ### Consolidate Data ###
@@ -1892,8 +1946,6 @@ class Spotter:
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
         print('Finished calculating blob properties.')
         
-        # with warnings.catch_warnings():
-        #     warnings.simplefilter("ignore", UserWarning)
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... 
@@ -1905,12 +1957,12 @@ class Spotter:
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = persist(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
         del blob_id_field
         del blob_props
-        
+    
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
         split_merged_blobs_ds = split_merged_blobs_ds.persist()
         print('Finished clustering and renaming blobs.')
-        
+    
         
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
@@ -2137,7 +2189,7 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
 @jit(nopython=True, fastmath=True)
 def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
     """
-    Optimized version of nearest parent label assignment for unstructured grids.
+    Optimised version of nearest parent label assignment for unstructured grids.
     Uses numpy arrays throughout to ensure Numba compatibility.
     
     Parameters
@@ -2162,6 +2214,11 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
     new_labels : np.ndarray
         1D array containing the assigned child_ids for each True point in child_mask
     """
+    
+    # Force contiguous arrays in memory for optimal vectorised performance (from indexing)
+    child_mask = np.ascontiguousarray(child_mask)
+    parent_masks = np.ascontiguousarray(parent_masks)
+    
     n_points = len(child_mask)
     n_parents = len(parent_masks)
     
@@ -2170,7 +2227,7 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
     parent_assignments = np.full(n_points, -1, dtype=np.int32)
     visited = np.zeros((n_parents, n_points), dtype=np.bool_)
     
-    # Initialize with direct overlaps
+    # Initialise with direct overlaps
     for parent_idx in range(n_parents):
         overlap_mask = parent_masks[parent_idx] & child_mask
         if np.any(overlap_mask):
