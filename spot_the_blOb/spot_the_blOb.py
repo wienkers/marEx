@@ -23,7 +23,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0, verbosity=0):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -38,6 +38,10 @@ class Spotter:
         self.ydim       = ydim   
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # If Structured, the units are pixels...
+        
+        self.debug      = debug
+        self.verbosity  = verbosity
+        
         
         if unstructured_grid:
             self.ydim = None
@@ -106,7 +110,7 @@ class Spotter:
             identity = eye(self.neighbours_int.shape[1], dtype=bool, format='csr')
             self.dilate_sparse = self.dilate_sparse + identity
             
-            print('Finished Constructing the Sparse Dilation Matrix.')
+            if self.verbosity > 0:    print('Finished Constructing the Sparse Dilation Matrix.')
 
             
         ## Suppress Various Dask Warnings:  These are related to running optimised low-level threaded code in Dask
@@ -115,13 +119,13 @@ class Spotter:
         #       1 : Suppress only `run_spec`` warnings
         #       2 : No warning suppression
         
-        if debug < 2:
+        if self.debug < 2:
             
             logging.getLogger('distributed.scheduler').setLevel(logging.ERROR)
             def filter_dask_warnings(record):
                 msg = str(record.msg)
                 
-                if debug == 0:
+                if self.debug == 0:
                     # Suppress both run_spec and large graph warnings
                     if any(pattern in msg for pattern in [
                         'Detected different `run_spec`',
@@ -138,7 +142,7 @@ class Spotter:
 
             logging.getLogger('distributed.scheduler').addFilter(filter_dask_warnings)
             
-            if debug == 0:
+            if self.debug == 0:
                 warnings.filterwarnings('ignore', 
                                     category=UserWarning,
                                     module='distributed.client')
@@ -195,15 +199,16 @@ class Spotter:
         # Fill Small Holes & Gaps between Objects
         data_bin_filled = self.fill_holes(self.data_bin).persist()
         wait(data_bin_filled)
+        if self.verbosity > 0:    print('Finished Filling Spatial Holes')
 
         # Fill Small Time-Gaps between Objects
         data_bin_gap_filled = self.fill_time_gaps(data_bin_filled).persist()
         wait(data_bin_gap_filled)
-        print('Finished Filling Spatio-temporal Holes.')
+        if self.verbosity > 0:    print('Finished Filling Spatio-temporal Holes.')
         
         # Remove Small Objects
         data_bin_filtered, area_threshold, blob_areas, N_blobs_prefiltered = self.filter_small_blobs(data_bin_gap_filled)
-        print('Finished Filtering Small Blobs.')
+        if self.verbosity > 0:    print('Finished Filtering Small Blobs.')
         
         # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
         data_bin_filtered = data_bin_filtered.persist()
@@ -221,7 +226,7 @@ class Spotter:
             # Track Blobs without any special merging or splitting
             blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
             
-        print('Finished Tracking All Blobs ! \n\n')
+        if self.verbosity > 0:    print('Finished Tracking All Blobs ! \n\n')
         
         
         ## Save Some BlObby Stats
@@ -838,8 +843,8 @@ class Spotter:
                             dtype=np.float32 if self.unstructured_grid else np.int32)
         
         # Extract only the overlapping points
-        ids_t0_valid = ids_t0[combined_mask].astype(np.int64)
-        ids_next_valid = ids_next[combined_mask].astype(np.int64)
+        ids_t0_valid = ids_t0[combined_mask].astype(np.int32)
+        ids_next_valid = ids_next[combined_mask].astype(np.int32)
         
         # Create a unique identifier for each pair
         # This is faster than using np.unique with axis=1
@@ -916,7 +921,7 @@ class Spotter:
                             vectorize=True,
                             dask="parallelized",
                             output_dtypes=[object]
-                        ).compute()
+                        ).persist()
         
         
         # Concatenate all pairs (with their chunk-level values) from different chunks
@@ -1292,7 +1297,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        print('Finished Finding Overlapping Blobs.')
+        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
         
         
         #################################
@@ -1467,13 +1472,13 @@ class Spotter:
                     blob_props.loc[dict(ID=child_id)] = new_child_props.sel(ID=child_id)
                 else:  # Delete child_id:  The blob has split/morphed such that it doesn't get a partition of this child...
                     blob_props = blob_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
-                    print(f"Deleted child_id {child_id} because parents have split/morphed in the meantime...")
+                    if self.verbosity > 0:    print(f"Deleted child_id {child_id} because parents have split/morphed in the meantime...")
                 # Add the properties for the N-1 other new child ID
                 new_blob_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_blob_id), drop=True).ID
                 blob_props = xr.concat([blob_props, new_child_props.sel(ID=new_blob_ids_still)], dim='ID')
                 missing_ids = set(new_blob_id) - set(new_blob_ids_still.values)
                 if len(missing_ids) > 0:
-                    print(f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime...")
+                    if self.verbosity > 0:    print(f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime...")
 
                 
                 ## Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
@@ -1505,7 +1510,7 @@ class Spotter:
             updated_chunks.append((chunk_start, chunk_end-1, chunk_data[:(chunk_end-1-chunk_start)]))
             
             if chunk_idx % 10 == 0:
-                print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
+                if self.verbosity > 0:    print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
                 
                 # Periodically update the main array to prevent memory buildup
                 if len(updated_chunks) > 1:  # Keep the last chunk for potential blob_id_time_m1 reference
@@ -1573,7 +1578,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        print('Finished Finding Overlapping Blobs.')
+        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
         
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
@@ -1754,7 +1759,7 @@ class Spotter:
         }
         
         while merging_blobs and iteration < max_iterations:
-            print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
+            if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
             
             blob_id_field_unique = blob_id_field_unique.persist()
             
@@ -1805,14 +1810,8 @@ class Spotter:
             
             
             results = dask_compute(*[f[1] for f in chunk_futures])
-            
-            # Process futures in batches
-            # batch_size = 4  # Adjust this based on memory constraints
-            # results = []
-            # for i in range(0, len(chunk_futures), batch_size):
-            #     batch = chunk_futures[i:i + batch_size]
-            #     batch_results = dask_compute(*[f[1] for f in batch])
-            #     results.extend(batch_results)
+            wait(results)
+            if self.verbosity > 1:    print('  Finished Batch Processing Step.')
             
             
             ### Consolidate Data ###
@@ -1831,7 +1830,8 @@ class Spotter:
                                     dtype=np.int32)
                     id_lookup[all_temp_ids] = new_ids
                     global_id_counter += len(all_temp_ids)
-
+            
+            if self.verbosity > 1:    print('  Finished Data Consolidation Step 1.')
             
             # Consolidate Data: 2: Post-process results in parallel and update global state
             def postprocess_chunk(chunk_idx, chunk_data, chunk_new_merging, chunk_merge_events, id_mapping, 
@@ -1912,6 +1912,8 @@ class Spotter:
                 delayed_results.append(delayed_result)
 
             preprocessed_chunks = dask_compute(*delayed_results)
+            
+            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.1: Parallel post-processing.')
 
             # Initialise collection variables
             updates_by_chunk = {}
@@ -1934,17 +1936,33 @@ class Spotter:
                 
                 new_merging_blobs.update(chunk_result['merging_blobs'])
 
+            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.2: Result Consolidation.')
+            
             # Update the main array chunk by chunk
             if updates_by_chunk:
+                # Maintain Distributed Memory: Create a list of DataArrays
+                updated_chunks = []
                 for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
                     chunk_start = chunk_boundaries[chunk_idx]
                     chunk_end = chunk_boundaries[chunk_idx + 1]
                     
                     if chunk_idx in updates_by_chunk:
+                        # Use the updated chunk data
                         _, _, chunk_data = updates_by_chunk[chunk_idx]
-                        blob_id_field_unique[{self.timedim: slice(chunk_start, chunk_end)}] = chunk_data
+                        updated_chunks.append(chunk_data)
+                    else:
+                        # Keep the original chunk data
+                        chunk_slice = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
+                        updated_chunks.append(chunk_slice)
+
+                # Concatenate all chunks along the time dimension
+                blob_id_field_unique = xr.concat(updated_chunks, dim=self.timedim)
                 
-                blob_id_field_unique = blob_id_field_unique.persist()
+                blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: blob_id_field_unique.chunks[0]})
+
+            blob_id_field_unique = blob_id_field_unique.persist()
+            
+            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.3: Data Field Update.')
             
             
             # Prepare for next iteration
@@ -2010,9 +2028,6 @@ class Spotter:
                 overlap_blobs_list_redact,
                 merge_events)
         
-        
-    
-    
     
     
     def track_blObs(self, data_bin):
@@ -2027,7 +2042,7 @@ class Spotter:
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
         blob_id_field = blob_id_field.persist()
-        print('Finished Blob Identification.')
+        if self.verbosity > 0:    print('Finished Blob Identification.')
         
         
         if self.unstructured_grid:
@@ -2035,16 +2050,20 @@ class Spotter:
             cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
             blob_id_field = xr.where(blob_id_field > 0, blob_id_field + cumsum_ids, 0)
             blob_id_field = blob_id_field.persist()
+            wait(blob_id_field)
+            if self.verbosity > 0:    print('Finished Making Blobs Globally Unique.')
         
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
-        print('Finished Calculating Blob Properties.')
+        blob_props = blob_props.persist()
+        wait(blob_props)
+        if self.verbosity > 0:    print('Finished Calculating Blob Properties.')
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... 
         #          In v2.0 unstructured, this loop has been painstakingly parallelised
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
-        print('Finished Splitting and Merging Blobs.')
+        if self.verbosity > 0:    print('Finished Splitting and Merging Blobs.')
         
         # Clean Up & Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
         split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = persist(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
@@ -2055,7 +2074,7 @@ class Spotter:
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events)
         split_merged_blobs_ds = split_merged_blobs_ds.chunk({self.timedim: self.data_bin.chunks[self.timedim][0], 'ID': -1, 'component':-1, 'ncells': -1, 'sibling_ID' : -1})
         split_merged_blobs_ds = split_merged_blobs_ds.persist()
-        print('Finished Clustering and Renaming Blobs.')
+        if self.verbosity > 0:    print('Finished Clustering and Renaming Blobs.')
     
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
