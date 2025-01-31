@@ -1576,6 +1576,295 @@ class Spotter:
         Parameters are the same as split_and_merge_blobs()
         '''
         
+        def process_chunk(chunk_data, chunk_data_m1, chunk_data_p1, merging_blobs, next_id_start, lat, lon, area, neighbours_int):
+            """Process a single chunk of merging blobs.
+            
+            Parameters
+            ----------
+            chunk_data : numpy.ndarray
+                Array of shape (n_time, ncells) for unstructured or (n_time, ny, nx) for structured
+            chunk_data_m1 & chunk_data_p1 : numpy.ndarray
+                Same as chunk_data but shifted by 1 in time
+            merging_blobs : numpy.ndarray
+                Array of shape (n_time, max_merges) containing merging blob IDs (0=none)
+            next_id_start : numpy.ndarray
+                Array of shape (n_time, max_merges) containing ID offsets
+            
+            Returns
+            -------
+            dict
+                Dictionary containing updates for each timestep
+            """
+            n_time = chunk_data.shape[0]
+            
+            updates_by_time = []
+            merge_events_by_time = []
+            new_merging_blobs_just_end = []
+            id_mappings_by_time = []
+            
+            # Pre-Convert lat/lon to Cartesian
+            x = np.cos(np.radians(lat)) * np.cos(np.radians(lon))
+            y = np.cos(np.radians(lat)) * np.sin(np.radians(lon))
+            z = np.sin(np.radians(lat))
+
+            # Process each timestep
+            for t in range(n_time):
+                # Initialise tracking variables
+                updates = []
+                merge_events = {
+                    'child_ids': [],
+                    'parent_ids': [],
+                    'areas': []
+                }
+                new_merging_blobs = set()
+                id_mapping = {}
+                next_new_id = next_id_start[t]  # Use the offset for this timestep
+                
+                # Get current time slice data
+                if t == 0:
+                    data_m1 = chunk_data_m1[t]
+                    data_t = chunk_data[t]
+                else:
+                    data_m1 = data_t
+                    data_t = data_p1
+                data_p1 = chunk_data_p1[t]
+                
+                # Get non-zero merging blobs for this timestep
+                merging_blobs_t = merging_blobs[t]
+                merging_blobs_t = merging_blobs_t[merging_blobs_t > 0]
+                
+                if len(merging_blobs_t) == 0:
+                    # Store empty results for this timestep
+                    updates_by_time.append(updates)
+                    merge_events_by_time.append(merge_events)
+                    id_mappings_by_time.append(id_mapping)
+                    new_merging_blobs_just_end.append(set())
+                    continue
+                
+                # Process each merging blob at this timestep
+                blobs_to_process = list(merging_blobs_t)
+                
+                
+                while blobs_to_process:
+                    child_id = blobs_to_process.pop(0)
+                    
+                    # Get child mask and find overlapping parents
+                    child_mask_2d = (data_t == child_id)
+                    
+                    # Find parent blobs that overlap with this child
+                    parent_masks = []
+                    parent_centroids = []
+                    parent_ids = []
+                    parent_areas = []
+                    overlap_areas = []
+                    
+                    # Find all unique parent IDs that overlap with the child
+                    potential_parents = np.unique(data_m1[child_mask_2d])
+                    for parent_id in potential_parents[potential_parents > 0]:
+                        parent_mask = (data_m1 == parent_id)
+                        if np.any(parent_mask & child_mask_2d):
+                            
+                            # Check if overlap area is large enough
+                            area_0 = area[parent_mask].sum()  # Parent area
+                            area_1 = area[child_mask_2d].sum()
+                            min_area = np.minimum(area_0, area_1)
+                            overlap_area = area[parent_mask & child_mask_2d].sum()
+                            overlap_fraction = overlap_area / min_area
+                            
+                            if overlap_fraction < self.overlap_threshold:
+                                continue
+                            
+                            overlap_areas.append(overlap_area)
+                            parent_masks.append(parent_mask)
+                            parent_ids.append(parent_id)
+                            
+                            # Calculate centroid for this parent
+                            mask_area = area[parent_mask]
+                            weighted_x = np.sum(mask_area * x[parent_mask])
+                            weighted_y = np.sum(mask_area * y[parent_mask])
+                            weighted_z = np.sum(mask_area * z[parent_mask])
+                            
+                            norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
+                            
+                            # Convert back to lat/lon
+                            centroid_lat = np.degrees(np.arcsin(weighted_z/norm))
+                            centroid_lon = np.degrees(np.arctan2(weighted_y, weighted_x))
+                            
+                            # Fix longitude range to [-180, 180]
+                            if centroid_lon > 180:
+                                centroid_lon -= 360
+                            elif centroid_lon < -180:
+                                centroid_lon += 360
+                            
+                            parent_centroids.append([centroid_lat, centroid_lon])
+                            parent_areas.append(area_0) 
+                    
+                    if len(parent_ids) < 2:  # Need at least 2 parents for merging
+                        continue
+                        
+                    parent_masks = np.array(parent_masks)
+                    parent_centroids = np.array(parent_centroids, dtype=np.float32)
+                    parent_ids = np.array(parent_ids)
+                    parent_areas = np.array(parent_areas)
+                    overlap_areas = np.array(overlap_areas)
+                    
+                    # Create new IDs for each partition
+                    new_child_ids = np.arange(next_new_id, next_new_id + (len(parent_ids) - 1), dtype=np.int32)
+                    child_ids = np.concatenate((np.array([child_id], dtype=np.int32), new_child_ids))
+                    
+                    # Update ID tracking
+                    for new_id in child_ids[1:]:
+                        id_mapping[new_id] = None
+                    next_new_id += len(parent_ids) - 1
+                    
+                    # Get new labels based on partitioning method
+                    if self.nn_partitioning:
+                        # Estimate max_area from number of cells
+                        max_area = parent_areas.max() / self.mean_cell_area
+                        max_distance = int(np.sqrt(max_area) * 2.0)
+                        
+                        new_labels = get_nearest_parent_labels_unstructured(
+                            child_mask_2d,
+                            parent_masks,
+                            child_ids,
+                            parent_centroids,
+                            neighbours_int,
+                            lat,
+                            lon,
+                            max_distance=max(max_distance, 20)*2
+                        )
+                    else:
+                        new_labels = unstructured_centroid_partition(
+                            child_mask_2d,
+                            parent_centroids,
+                            child_ids,
+                            lat,
+                            lon
+                        )
+                    
+                    # Update slice data
+                    data_t[child_mask_2d] = new_labels
+                    spatial_indices_all = np.where(child_mask_2d)[0]
+                    
+                    for new_id in child_ids[1:]:
+                        # Get spatial indices where we need to update
+                        new_id_mask = (new_labels == new_id)
+                        spatial_indices = spatial_indices_all[new_id_mask]
+                        
+                        # Store the updates
+                        updates.append({
+                            'spatial_indices': spatial_indices,
+                            'new_label': new_id
+                        })
+                    
+                    # Record merge event
+                    merge_events['child_ids'].append(child_ids)
+                    merge_events['parent_ids'].append(parent_ids)
+                    merge_events['areas'].append(overlap_areas)
+                    
+                    # Find all child blobs in the next timestep that overlap with our newly labeled regions
+                    new_merging = []
+                    for new_id in child_ids:
+                        parent_mask = (data_t == new_id)                        
+                        potential_children = np.unique(data_p1[parent_mask])
+                        area_0 = area[parent_mask].sum()
+                        
+                        for potential_child in potential_children:
+                            # Check if overlap area is large enough
+                            potential_child_mask = (data_p1==potential_child)
+                            area_1 = area[potential_child_mask].sum()
+                            min_area = np.minimum(area_0, area_1)
+                            overlap_area = area[parent_mask & potential_child_mask].sum()
+                            overlap_fraction = overlap_area / min_area
+                            
+                            if overlap_fraction > self.overlap_threshold:
+                                new_merging.append(potential_child)                        
+                    
+                    # Add to new merging blobs set
+                    new_merging_blobs.update(new_merging)
+                    
+                    # Add to processing queue if not already processed
+                    for new_blob_id in new_merging:
+                        if new_blob_id not in blobs_to_process and new_blob_id not in merging_blobs_t:
+                            blobs_to_process.append(new_blob_id)
+                
+
+                # Store results for this timestep
+                updates_by_time.append(updates)
+                merge_events_by_time.append(merge_events)
+                id_mappings_by_time.append(id_mapping)
+                if t < n_time - 1:
+                    new_merging_blobs_just_end.append(set())
+                else:
+                    new_merging_blobs_just_end.append(new_merging_blobs)
+            
+            # Outputs need to be an array with dimension n_time:
+            
+            results_dict = {
+                'merge_events': merge_events_by_time,
+                'id_mappings': id_mappings_by_time,
+                'next_chunk_merge': new_merging_blobs_just_end
+            }
+
+            # Create a list to hold dictionaries for each time step
+            time_step_dicts = []
+
+            for t in range(n_time):
+                time_step_dict = {key: value[t] for key, value in results_dict.items()}
+                time_step_dicts.append(time_step_dict)
+
+            time_step_array = np.array(time_step_dicts, dtype=object)
+            updates_by_time_array = np.array(updates_by_time, dtype=object)
+            
+            return time_step_array, updates_by_time_array
+        
+
+        def update_blob_field(blob_id_field_unique, id_lookup, updates):
+            """Update the blob field with chunk results using xarray operations.
+            
+            Parameters
+            ----------
+            blob_id_field_unique : xarray.DataArray
+                The full blob field to update
+            id_lookup : Dictionary
+                Dictionary mapping temporary IDs to new IDs
+            updates : xarray.DataArray
+                DataArray of Dictionaries containing updates: 'spatial_indices' for each 'new_label'
+            
+            Returns
+            -------
+            xarray.DataArray
+                Updated blob field
+            """
+            
+            def apply_updates(data, updates):
+                """Apply updates to a single chunk of data."""
+                result = data.copy()
+                for update in updates:
+                    
+                    spatial_indices = update['spatial_indices']
+                    new_label = id_lookup[update['new_label']]
+                    result[spatial_indices] = new_label
+                
+                return result
+
+            result = xr.apply_ufunc(apply_updates,
+                                    blob_id_field_unique,
+                                    updates,
+                                    input_core_dims=[[self.xdim], []],
+                                    output_core_dims=[[self.xdim]],
+                                    dask='parallelized',
+                                    output_dtypes=[blob_id_field_unique.dtype],
+                                    vectorize=True).persist()
+            
+            return result
+        
+        
+        
+        #############
+        # Main Loop #
+        #############
+        
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
         if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
@@ -1583,165 +1872,6 @@ class Spotter:
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
         merging_blobs = set(unique_children[children_counts > 1])
-        
-        
-        @delayed
-        def process_chunk(chunk_start, chunk_end, chunk_data, chunk_blobs, blob_time_idxs, previous_last_timeslice, next_id_start):
-            '''Process a single chunk of merging blobs.
-            blob_time_idxs :
-                The time index of each blob in the chunk_blobs
-            '''
-
-            # Initialise tracking variables for this chunk
-            chunk_merge_events = {
-                'times': [],
-                'child_ids': [],
-                'parent_ids': [],
-                'areas': []
-            }
-            next_new_id = next_id_start
-            new_merging_blobs = set()
-            id_mapping = {}  # Track local to global ID mapping
-            
-            
-            # Process each blob in the chunk
-            blobs_to_process = chunk_blobs.copy()
-            child_time_idxs = blob_time_idxs.copy()
-            loaded_time_idx = -1         
-            while blobs_to_process:
-                child_id = blobs_to_process.pop(0)
-                child_time_idx = child_time_idxs.pop(0)
-                relative_time_idx = child_time_idx - chunk_start
-                
-                # Load relative time slices, if they're not already loaded for this time
-                if relative_time_idx != loaded_time_idx:
-                    loaded_time_idx = relative_time_idx
-                    
-                    blob_id_time = chunk_data.isel({self.timedim: relative_time_idx})
-                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim]:
-                        blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx + 1})
-                    else:
-                        blob_id_time_p1 = xr.full_like(blob_id_time, 0)
-                        
-                    if relative_time_idx - 1 >= 0:
-                        blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx - 1})
-                    elif previous_last_timeslice is not None:
-                        blob_id_time_m1 = previous_last_timeslice
-                    else:
-                        blob_id_time_m1 = xr.full_like(blob_id_time, 0)
-                
-                # Compute local blob_props
-                blob_props_local = xr.merge([
-                    self.calculate_blob_properties(blob_id_time, properties=['area', 'centroid'], full_array=False), 
-                    self.calculate_blob_properties(blob_id_time_m1, properties=['area', 'centroid'], full_array=False)
-                ])
-                
-                # Compute local overlap blobs list & enforce minimum overlap
-                overlap_blobs_local = self.check_overlap_slice_threshold(blob_id_time_m1.values, blob_id_time.values, blob_props_local)
-                
-                # Process merging logic
-                child_mask_2d = (blob_id_time == child_id).values
-                child_mask = overlap_blobs_local[:, 1] == child_id
-                merge_group = overlap_blobs_local[child_mask]
-                parent_ids = merge_group[:, 0]
-                
-                # Create parent masks and get centroids
-                parent_masks = np.array([(blob_id_time_m1 == pid).values for pid in parent_ids])
-                parent_centroids = blob_props_local.sel(ID=parent_ids).centroid.values
-                child_ids = np.concatenate((np.array([child_id]), 
-                                        np.arange(next_new_id, next_new_id + (len(parent_ids) - 1), dtype=np.int32)))
-                
-                # Update ID tracking
-                for new_id in child_ids[1:]:
-                    id_mapping[new_id] = None  # Will be assigned global ID later
-                next_new_id += len(parent_ids) - 1
-                
-                # Partition child blob based on method
-                if self.nn_partitioning:
-                    
-                    max_area = np.max(blob_props_local.sel(ID=parent_ids).area.values) / self.mean_cell_area
-                    max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
-                    
-                    if self.unstructured_grid:
-                        new_labels = get_nearest_parent_labels_unstructured(
-                            child_mask_2d.astype(np.bool_),
-                            parent_masks.astype(np.bool_),
-                            child_ids.astype(np.int32),
-                            parent_centroids.astype(np.float64),
-                            self.neighbours_int.values.astype(np.int32),
-                            self.data_bin.lat.values.astype(np.float64),
-                            self.data_bin.lon.values.astype(np.float64),
-                            max_distance=max(max_distance, 20)*2  # Set minimum threshold, in cells
-                        )
-                    else:
-                        new_labels = get_nearest_parent_labels(
-                            child_mask_2d.astype(np.bool_),
-                            parent_masks.astype(np.bool_),
-                            child_ids.astype(np.int32),
-                            parent_centroids.astype(np.float64),
-                            self.data_bin[self.xdim].size,
-                            max_distance=max(max_distance, 20)  # Set minimum threshold, in pixels
-                        )
-                else:
-                    if self.unstructured_grid:
-                        new_labels = unstructured_centroid_partition(
-                            child_mask_2d,
-                            parent_centroids,
-                            child_ids,
-                            self.data_bin.lat.values,
-                            self.data_bin.lon.values
-                        )
-                    else:
-                        distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, self.data_bin[self.xdim].size)
-                        new_labels = child_ids[np.argmin(distances, axis=1)]
-                
-                # Update chunk data
-                temp = np.zeros_like(blob_id_time)
-                temp[child_mask_2d] = new_labels
-                blob_id_time = blob_id_time.where(~child_mask_2d, temp)
-                chunk_data[{self.timedim: relative_time_idx}] = blob_id_time
-                
-                # Update merge event tracking with exact timestamps
-                chunk_merge_events['times'].append(
-                                                chunk_data.isel({self.timedim: relative_time_idx}).time.values)
-                chunk_merge_events['child_ids'].append(child_ids)
-                chunk_merge_events['parent_ids'].append(parent_ids)
-                chunk_merge_events['areas'].append(merge_group[:, 2])
-                
-                # Update blob_props_local
-                blob_props_local = xr.merge([
-                    self.calculate_blob_properties(blob_id_time, properties=['area', 'centroid'], full_array=False), 
-                    self.calculate_blob_properties(blob_id_time_p1, properties=['area', 'centroid'], full_array=False)
-                ])
-                
-                # Check for new merging blobs
-                overlap_blobs_local = self.check_overlap_slice_threshold(blob_id_time.values, blob_id_time_p1.values, blob_props_local)
-                if len(overlap_blobs_local) > 0:
-                    new_unique_children, new_children_counts = np.unique(overlap_blobs_local[:, 1], return_counts=True)
-                    current_new_merging = set(new_unique_children[new_children_counts > 1])
-                    
-                    # Add to overall set of new merging blobs for this chunk
-                    new_merging_blobs.update(current_new_merging)
-                    
-                    # Add to processing queue if they're in the next timeslice of this chunk
-                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim] - 1:
-                        for new_blob_id in current_new_merging:
-                            if new_blob_id not in blobs_to_process:  # Avoid duplicates
-                                blobs_to_process.append(new_blob_id)
-                                
-                                # Append to child_time_idxs (as the current child_time_idx+1)
-                                child_time_idxs.append(child_time_idx + 1)
-
-                                # Sort blobs_to_process (and child_time_idxs) by child_time_idxs
-                                blobs_to_process = [b for _, b in sorted(zip(child_time_idxs, blobs_to_process))]
-                                child_time_idxs = sorted(child_time_idxs)
-            
-            
-            return (chunk_data[:(chunk_end-1-chunk_start)], 
-                        next_new_id, 
-                        new_merging_blobs,
-                        chunk_merge_events,
-                        id_mapping)
         
         
         ## Process chunks iteratively until no new merging blobs remain
@@ -1758,211 +1888,103 @@ class Spotter:
             'areas': []
         }
         
+        n_time = len(blob_id_field_unique[self.timedim])        
         while merging_blobs and iteration < max_iterations:
             if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
-            
-            blob_id_field_unique = blob_id_field_unique.persist()
             
             # Pre-compute the child_time_idx for merging_blobs
             time_index_map = self.compute_id_time_dict(blob_id_field_unique, list(merging_blobs), global_id_counter)
             
-            # Group blobs by time-chunk
-            chunk_boundaries = np.cumsum([0] + list(blob_id_field_unique.chunks[0]))
-            blobs_by_chunk = {}
-            for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
-                blobs_by_chunk[chunk_idx] = []
+            # Create the uniform merging blobs array
+            max_merges = max(len([b for b in merging_blobs if time_index_map.get(b, -1) == t]) for t in range(n_time))
+
+            uniform_merging_blobs_array = np.array([
+                np.pad([b for b in merging_blobs if time_index_map.get(b, -1) == t], (0, max_merges - len([b for b in merging_blobs if time_index_map.get(b, -1) == t])), 'constant')
+                for t in range(n_time)
+            ])
+            merging_blobs_da = xr.DataArray(
+                uniform_merging_blobs_array,
+                dims=[self.timedim, 'merges'],
+                coords={self.timedim: blob_id_field_unique[self.timedim]})
             
-            for blob_id in merging_blobs:
-                chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[blob_id], side='right') - 1
-                blobs_by_chunk[chunk_idx].append(blob_id)
+            next_id_offsets = np.arange(n_time) * max_merges
+            next_id_offsets_da = xr.DataArray(next_id_offsets,
+                                           dims=[self.timedim, 'merges'],
+                                           coords={self.timedim: blob_id_field_unique[self.timedim]})
             
+            blob_id_field_unique_p1 = blob_id_field_unique.shift({self.timedim: -1}, fill_value=0)
+            blob_id_field_unique_m1 = blob_id_field_unique.shift({self.timedim: 1}, fill_value=0)
             
-            # Compute all chunks in parallel
-            chunk_futures = []
-            next_id_offset = 0
-            previous_last_timeslice = None
+            # Align chunks...
+            chunk_size = blob_id_field_unique.chunks[0][0]
+            blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_size})
+            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: chunk_size})
+            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: chunk_size})
+            merging_blobs_da = merging_blobs_da.chunk({self.timedim: chunk_size})
+            next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: chunk_size})
             
+            results, updates = xr.apply_ufunc(process_chunk,
+                                 blob_id_field_unique,
+                                 blob_id_field_unique_m1,
+                                 blob_id_field_unique_p1,
+                                 merging_blobs_da,
+                                 next_id_offsets_da,
+                                 blob_id_field_unique.lat,
+                                 blob_id_field_unique.lon,
+                                 self.cell_area,
+                                 self.neighbours_int,
+                                 input_core_dims=[[self.xdim], [self.xdim], [self.xdim], [], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
+                                 output_core_dims=[[], []],
+                                 output_dtypes=[object, object],
+                                 vectorize=False,
+                                 dask='parallelized')
+
+            results, updates = persist(results, updates)
             
-            timeslices = blob_id_field_unique.isel({self.timedim: chunk_boundaries[1:-1]-1}).persist()
-            for chunk_idx in sorted(blobs_by_chunk.keys()):
-                chunk_blobs = [b for b in merging_blobs if chunk_idx == np.searchsorted(chunk_boundaries, time_index_map[b], side='right') - 1]
-                if not chunk_blobs:
-                    continue
-                
-                chunk_start = chunk_boundaries[chunk_idx]
-                chunk_end = chunk_boundaries[chunk_idx + 1] + 1
-                
-                chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
-                previous_last_timeslice = timeslices[chunk_idx-1] if chunk_idx > 0 else None
-                
-                # _Instead_ try to embed data directly into the dask task graph...
-                # chunk_data = delayed(lambda x: x.isel({self.timedim: slice(chunk_start, chunk_end)}).compute())(blob_id_field_unique)
-                # previous_last_timeslice = (delayed(lambda x: x.isel({self.timedim: chunk_boundaries[chunk_idx]-1}).compute())(blob_id_field_unique) 
-                #                                 if chunk_idx > 0 else None)
-                
-                blob_time_idxs = [time_index_map[b] for b in chunk_blobs]
-                
-                future = delayed(process_chunk)(chunk_start, chunk_end, chunk_data, chunk_blobs, blob_time_idxs, previous_last_timeslice,
-                                            global_id_counter + next_id_offset)
-                chunk_futures.append((chunk_idx, future))
-                chunk_size = blob_id_field_unique.chunks[0][chunk_idx]
-                next_id_offset += len(chunk_blobs) * chunk_size  # Conservative estimate
-            
-            
-            results = dask_compute(*[f[1] for f in chunk_futures])
-            wait(results)
             if self.verbosity > 1:    print('  Finished Batch Processing Step.')
             
             
-            ### Consolidate Data ###
-
-            # Consolidate Data: 1: Collect all temporary IDs and create global mapping
-            temp_id_arrays = [np.array(list(results[i][4].keys()), dtype=np.int64)   # Quick check if any chunks have temporary IDs
-                            for i in range(len(results)) 
-                            if results[i][4]]
+            ### Global Consolidatation of Data ###
             
-            if temp_id_arrays:
-                all_temp_ids = np.unique(np.concatenate(temp_id_arrays))
-                if all_temp_ids.size > 0:
-                    id_lookup = np.zeros(all_temp_ids.max() + 1, dtype=np.int32)
-                    new_ids = np.arange(global_id_counter,
-                                    global_id_counter + len(all_temp_ids),
-                                    dtype=np.int32)
-                    id_lookup[all_temp_ids] = new_ids
-                    global_id_counter += len(all_temp_ids)
+            # 1:  Collect all temporary IDs and create global mapping
+            temp_id_arrays = np.concatenate((np.array(list(res['id_mappings'].keys()), dtype=np.int64) for res in results))
+            all_temp_ids = np.unique(temp_id_arrays)
             
-            if self.verbosity > 1:    print('  Finished Data Consolidation Step 1.')
+            if all_temp_ids.size > 0:
+                id_lookup = {temp_id: new_id for temp_id, new_id in zip(
+                    all_temp_ids,
+                    range(global_id_counter, global_id_counter + len(all_temp_ids))
+                )}
+                global_id_counter += len(all_temp_ids)
             
-            # Consolidate Data: 2: Post-process results in parallel and update global state
-            def postprocess_chunk(chunk_idx, chunk_data, chunk_new_merging, chunk_merge_events, id_mapping, 
-                                all_temp_ids, id_lookup, chunk_boundaries):
-                """Process a single chunk's results and prepare updates."""
-                processed_data = chunk_data
-                if len(all_temp_ids) > 0 and id_mapping:
-                    unique_vals = np.unique(chunk_data.values)
-                    mask = np.isin(unique_vals, list(id_mapping.keys()))
-                    if mask.any():
-                        for old_val in unique_vals[mask]:
-                            new_val = id_lookup[old_val]
-                            processed_data = xr.where(processed_data == old_val, new_val, processed_data)
-                
-                # Process merge events
-                times = chunk_merge_events['times']
-                child_ids = chunk_merge_events['child_ids']
-                parent_ids = chunk_merge_events['parent_ids']
-                areas = chunk_merge_events['areas']
-                
-                # Update IDs in merge events
-                updated_child_ids = []
-                updated_parent_ids = []
-                
-                if len(all_temp_ids) > 0:
-                    for cids, pids in zip(child_ids, parent_ids):
-                        cids = np.asarray(cids, dtype=np.int32)
-                        pids = np.asarray(pids, dtype=np.int32)
-                        
-                        # Update child IDs
-                        mask = np.isin(cids, list(id_mapping.keys()))
-                        if mask.any():
-                            cids = np.where(mask, id_lookup[cids], cids)
-                        updated_child_ids.append(cids)
-                        
-                        # Update parent IDs
-                        mask = np.isin(pids, list(id_mapping.keys()))
-                        if mask.any():
-                            pids = np.where(mask, id_lookup[pids], pids)
-                        updated_parent_ids.append(pids)
-                else:
-                    updated_child_ids = child_ids
-                    updated_parent_ids = parent_ids
-                
-                # Handle merging blobs
-                updated_merging_blobs = set()
-                if chunk_new_merging:
-                    if len(all_temp_ids) > 0:
-                        updated_merging_blobs.update(
-                            id_lookup[blob_id] if blob_id in id_mapping else blob_id 
-                            for blob_id in chunk_new_merging
-                        )
-                    else:
-                        updated_merging_blobs.update(chunk_new_merging)
-                
-                chunk_start = chunk_boundaries[chunk_idx]
-                chunk_end = chunk_boundaries[chunk_idx + 1]
-                
-                return {
-                    'chunk_idx': chunk_idx,
-                    'chunk_start': chunk_start,
-                    'chunk_end': chunk_end,
-                    'processed_data': processed_data,
-                    'merge_times': times,
-                    'merge_child_ids': updated_child_ids,
-                    'merge_parent_ids': updated_parent_ids,
-                    'merge_areas': areas,
-                    'merging_blobs': updated_merging_blobs
-                }
-
-            # Create delayed computations for each chunk
-            delayed_results = []
-            for (chunk_idx, _), (chunk_data, _, chunk_new_merging, chunk_merge_events, id_mapping) in zip(chunk_futures, results):
-                delayed_result = delayed(postprocess_chunk)(
-                    chunk_idx, chunk_data, chunk_new_merging, chunk_merge_events, id_mapping,
-                    all_temp_ids, id_lookup, chunk_boundaries
-                )
-                delayed_results.append(delayed_result)
-
-            preprocessed_chunks = dask_compute(*delayed_results)
             
-            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.1: Parallel post-processing.')
-
-            # Initialise collection variables
-            updates_by_chunk = {}
+            if self.verbosity > 1:    print('  Finished Consolidation Step 1: Temporary ID Mapping')
+            
+            # 2:  Update Field with new IDs
+            blob_id_field_unique = update_blob_field(blob_id_field_unique, id_lookup, updates)            
+            if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
+            
+            # 3:  Update Merge Events
             new_merging_blobs = set()
+            for result_t in results:  # For each time
+                if result_t:
+                    for i in range(len(result_t['merge_events'])):  # For each recorded Merging Event at this time
+                        
+                        merge_event = result_t['merge_events'][i]  # Dictionary contains:  child_ids, parent_ids, areas
+                        
+                        all_merge_events['times'].extend(result_t['merge_times'][i])
+                        
+                        # Apply id_mapping
+                        mapped_child_ids = [id_lookup.get(id_, id_) for id_ in merge_event['child_ids'][i]]
+                        mapped_parent_ids = [id_lookup.get(id_, id_) for id_ in merge_event['parent_ids'][i]]
+                        
+                        all_merge_events['child_ids'].extend(mapped_child_ids)
+                        all_merge_events['parent_ids'].extend(mapped_parent_ids)
+                        all_merge_events['areas'].extend(result_t['merge_areas'][i])
+                        
+                    new_merging_blobs.update(result_t['next_chunk_merge'])
 
-            # Consolidate results
-            for chunk_result in preprocessed_chunks:
-                chunk_idx = chunk_result['chunk_idx']
-                updates_by_chunk[chunk_idx] = (
-                    chunk_result['chunk_start'],
-                    chunk_result['chunk_end'],
-                    chunk_result['processed_data']
-                )
-                
-                # Accumulate merge events
-                all_merge_events['times'].extend(chunk_result['merge_times'])
-                all_merge_events['child_ids'].extend(chunk_result['merge_child_ids'])
-                all_merge_events['parent_ids'].extend(chunk_result['merge_parent_ids'])
-                all_merge_events['areas'].extend(chunk_result['merge_areas'])
-                
-                new_merging_blobs.update(chunk_result['merging_blobs'])
-
-            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.2: Result Consolidation.')
-            
-            # Update the main array chunk by chunk
-            if updates_by_chunk:
-                # Maintain Distributed Memory: Create a list of DataArrays
-                updated_chunks = []
-                for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
-                    chunk_start = chunk_boundaries[chunk_idx]
-                    chunk_end = chunk_boundaries[chunk_idx + 1]
-                    
-                    if chunk_idx in updates_by_chunk:
-                        # Use the updated chunk data
-                        _, _, chunk_data = updates_by_chunk[chunk_idx]
-                        updated_chunks.append(chunk_data)
-                    else:
-                        # Keep the original chunk data
-                        chunk_slice = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)})
-                        updated_chunks.append(chunk_slice)
-
-                # Concatenate all chunks along the time dimension
-                blob_id_field_unique = xr.concat(updated_chunks, dim=self.timedim)
-                
-                blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: blob_id_field_unique.chunks[0]})
-
-            blob_id_field_unique = blob_id_field_unique.persist()
-            
-            if self.verbosity > 1:    print('  Finished Data Consolidation Step 2.3: Data Field Update.')
+            if self.verbosity > 1:    print('  Finished Consolidation Step 3: Merge List Dictionary Consolidation.')
             
             
             # Prepare for next iteration
@@ -2062,7 +2084,8 @@ class Spotter:
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... 
         #          In v2.0 unstructured, this loop has been painstakingly parallelised
-        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge_blobs_parallel(blob_id_field, blob_props)
+        split_and_merge = self.split_and_merge_blobs_parallel if self.unstructured else self.split_and_merge_blobs
+        split_merged_blob_id_field_unique, merged_blobs_props, split_merged_blobs_list, merge_events = self.split_and_merge(blob_id_field, blob_props)
         if self.verbosity > 0:    print('Finished Splitting and Merging Blobs.')
         
         # Clean Up & Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
