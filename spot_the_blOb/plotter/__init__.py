@@ -3,7 +3,10 @@ from .structured import StructuredPlotter
 from .unstructured import UnstructuredPlotter
 import xarray as xr
 
-def get_plotter(data_type='structured'):
+# Global variable to store the grid path
+_UNSTRUCT_GRID_PATH = None
+
+def marEx_plotter(data_type='structured'):
     """
     Factory function to return the appropriate plotter based on data type.
     
@@ -17,7 +20,7 @@ def get_plotter(data_type='structured'):
         return UnstructuredPlotter
     return StructuredPlotter
 
-# Register the appropriate plotter based on data structure
+
 def register_plotter(xarray_obj):
     """
     Determine the appropriate plotter to use based on the data structure.
@@ -36,8 +39,25 @@ def register_plotter(xarray_obj):
     # For unstructured data, lat/lon are coordinates but not dimensions
     is_unstructured = (has_lat_lon_coords and not has_lat_lon_dims)
     
-    plotter_class = get_plotter('unstructured' if is_unstructured else 'structured')
-    return plotter_class(xarray_obj)
+    plotter_class = marEx_plotter('unstructured' if is_unstructured else 'structured')
+    
+    # Set grid path if available
+    plotter = plotter_class(xarray_obj)
+    if is_unstructured and _UNSTRUCT_GRID_PATH is not None:
+        plotter.set_grid_path(_UNSTRUCT_GRID_PATH)
+    
+    return plotter
+
+
+def set_grid_path(path):
+    """
+    Set the global ICON grid path that will be used by all unstructured plotters.
+    
+    Args:
+        path: Path to the ICON grid file
+    """
+    global _UNSTRUCT_GRID_PATH
+    _UNSTRUCT_GRID_PATH = path
 
 
 # Register the accessor
