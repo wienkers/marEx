@@ -1,64 +1,83 @@
-from .base import PlotterBase
+from .base import PlotterBase, PlotConfig
 from .structured import StructuredPlotter
 from .unstructured import UnstructuredPlotter, clear_cache
 import xarray as xr
+import warnings
 
-# Global variable to store the grid path
+# Global variables to store grid information
 _fpath_tgrid = None
 _fpath_ckdtree = None
+_grid_type = None
 
-def marEx_plotter(data_type='structured'):
+def _detect_grid_type(xarray_obj):
     """
-    Factory function to return the appropriate plotter based on data type.
-    
-    Args:
-        data_type (str): Either 'structured' or 'unstructured'
+    Deduce grid type based on coordinate structure.
     
     Returns:
-        Appropriate plotter class
+        str: 'structured' or 'unstructured'
     """
-    if data_type.lower() == 'unstructured':
-        return UnstructuredPlotter
-    return StructuredPlotter
+    has_lat_lon_coords = 'lat' in xarray_obj.coords and 'lon' in xarray_obj.coords
+    has_lat_lon_dims = 'lat' in xarray_obj.dims and 'lon' in xarray_obj.dims
+    
+    # For unstructured data, lat/lon are coordinates but not dimensions
+    return 'unstructured' if (has_lat_lon_coords and not has_lat_lon_dims) else 'structured'
 
 def register_plotter(xarray_obj):
     """
     Determine the appropriate plotter to use based on the data structure.
     This function is called automatically by xarray's accessor system.
     
-    The determination is based on how lat/lon coordinates are structured:
-    - Unstructured: lat and lon exist as 1D coordinates but not as dimensions
-    - Structured: lat and lon exist as both coordinates and dimensions
+    First checks if grid type was specified via specify_grid(),
+    then falls back to coordinate-based detection if needed.
     
     Returns:
         Appropriate plotter instance for the data structure
     """
-    has_lat_lon_coords = 'lat' in xarray_obj.coords and 'lon' in xarray_obj.coords
-    has_lat_lon_dims = 'lat' in xarray_obj.dims and 'lon' in xarray_obj.dims
+    global _grid_type
     
-    # For unstructured data, lat/lon are coordinates but not dimensions
-    is_unstructured = (has_lat_lon_coords and not has_lat_lon_dims)
+    # Determine grid type
+    detected_type = _detect_grid_type(xarray_obj)
     
-    plotter_class = marEx_plotter('unstructured' if is_unstructured else 'structured')
+    # If grid type was explicitly specified, check for consistency
+    if _grid_type is not None:
+        if _grid_type != detected_type:
+            warnings.warn(
+                f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
+                f"based on coordinate structure. Using specified type '{_grid_type}'."
+            )
+        final_type = _grid_type
+    else:
+        final_type = detected_type
     
-    # Set grid path if available
+    # Create appropriate plotter
+    plotter_class = UnstructuredPlotter if final_type.lower() == 'unstructured' else StructuredPlotter
     plotter = plotter_class(xarray_obj)
-    if is_unstructured and _fpath_tgrid is not None and _fpath_ckdtree is not None:
+    
+    # Set grid path if available for unstructured grids
+    if final_type == 'unstructured' and _fpath_tgrid is not None and _fpath_ckdtree is not None:
         plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
     
     return plotter
 
-def specify_grid(fpath_tgrid=None, fpath_ckdtree=None):
+def specify_grid(grid_type=None, fpath_tgrid=None, fpath_ckdtree=None):
     """
-    Set the global unstructured grid path that will be used by all unstructured plotters.
+    Set the global grid specification that will be used by all plotters.
     
     Args:
+        grid_type: str, either 'structured' or 'unstructured'.
+                  If specified, this will be used as the primary method
+                  to determine grid type.
         fpath_tgrid: Path to the triangulation grid file
         fpath_ckdtree: Path to the pre-computed KDTree indices directory
     """
-    global _fpath_tgrid, _fpath_ckdtree
-    _fpath_tgrid = str(fpath_tgrid)
-    _fpath_ckdtree = str(fpath_ckdtree)
+    global _fpath_tgrid, _fpath_ckdtree, _grid_type
+    
+    if grid_type is not None and grid_type.lower() not in ['structured', 'unstructured']:
+        raise ValueError("grid_type must be either 'structured' or 'unstructured'")
+    
+    _fpath_tgrid = str(fpath_tgrid) if fpath_tgrid else None
+    _fpath_ckdtree = str(fpath_ckdtree) if fpath_ckdtree else None
+    _grid_type = grid_type.lower() if grid_type else None
 
 # Register the accessor
-xr.register_dataarray_accessor('plotter')(register_plotter)
+xr.register_dataarray_accessor('xplot')(register_plotter)

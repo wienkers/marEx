@@ -42,7 +42,7 @@ def _load_triangulation(fpath_tgrid):
     return _GRID_CACHE['triangulation'][fpath_tgrid]
 
 def _load_ckdtree(fpath_ckdtree, res):
-    """Load and cache ckdtree data globally for a specific resolution."""
+    """Load and cache ckdtree data globally."""
     cache_key = (str(fpath_ckdtree), res)  # Convert Path to string for dict key
     
     if cache_key not in _GRID_CACHE['ckdtree']:
@@ -65,27 +65,18 @@ def _load_ckdtree(fpath_ckdtree, res):
 class UnstructuredPlotter(PlotterBase):
     def __init__(self, xarray_obj):
         super().__init__(xarray_obj)
-        # Paths
-        self.fpath_tgrid = None
-        self.fpath_ckdtree = None
+        
+        from . import _fpath_tgrid, _fpath_ckdtree
+        self.fpath_tgrid = _fpath_tgrid
+        self.fpath_ckdtree = _fpath_ckdtree
         
     def specify_grid(self, fpath_tgrid=None, fpath_ckdtree=None):
-        """Set the path to the unstructured grid files.
-        
-        Optional Parameters
-        ----------
-        fpath_tgrid : str or Path
-            Path to triangulation grid file
-        fpath_ckdtree : str or Path
-            Path to directory containing ckdtree files
-            Expected structure: fpath_ckdtree/rectgrids/res{resolution}.nc
-        """
-        self.fpath_tgrid = Path(fpath_tgrid)
-        self.fpath_ckdtree = Path(fpath_ckdtree)
+        """Set the path to the unstructured grid files."""
+        self.fpath_tgrid = Path(fpath_tgrid) if fpath_tgrid else None
+        self.fpath_ckdtree = Path(fpath_ckdtree) if fpath_ckdtree else None
 
-    def plot(self, ax, cmap='viridis', clim=None, norm=None, show_colorbar=True, extend='both'):
+    def plot(self, ax, cmap='viridis', clim=None, norm=None):
         """Implement plotting for unstructured data."""
-        
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
             grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=0.3)
@@ -131,21 +122,10 @@ class UnstructuredPlotter(PlotterBase):
             
             im = ax.tripcolor(triang, native_data, **plot_kwargs)
         
-        cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=extend) if show_colorbar else None
-        
-        return ax, cb
+        return ax, im
 
     def _interpolate_with_ckdtree(self, data, res):
-        """
-        Interpolate unstructured data using pre-computed KDTree indices.
-        
-        Parameters
-        ----------
-        data : np.ndarray
-            Data to interpolate
-        res : float
-            Resolution for interpolation grid (e.g., 0.02, 0.1, 0.3, 1.0)
-        """
+        """Interpolate unstructured data using pre-computed KDTree indices."""
         if self.fpath_ckdtree is None:
             raise ValueError("ckdtree path not specified")
             

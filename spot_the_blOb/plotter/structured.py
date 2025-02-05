@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
-import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
 
 from .base import PlotterBase
 
@@ -24,7 +24,7 @@ class StructuredPlotter(PlotterBase):
             return wrapped_data
         return data
 
-    def plot(self, ax, cmap='viridis', clim=None, norm=None, show_colorbar=True, extend='both'):
+    def plot(self, ax, cmap='viridis', clim=None, norm=None):
         """Implement plotting for structured (regular grid) data."""
         dimensions = {'ydim': 'lat', 'xdim': 'lon'}
         data = self.wrap_lon(self.da, dimensions)
@@ -49,6 +49,5 @@ class StructuredPlotter(PlotterBase):
             plot_kwargs['vmax'] = clim[1]
             
         im = ax.imshow(data.values, **plot_kwargs)
-        cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=extend) if show_colorbar else None
         
-        return ax, cb
+        return ax, im
