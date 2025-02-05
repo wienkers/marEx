@@ -4,7 +4,8 @@ from .unstructured import UnstructuredPlotter
 import xarray as xr
 
 # Global variable to store the grid path
-_UNSTRUCT_GRID_PATH = None
+_fpath_tgrid   = None
+_fpath_ckdtree = None
 
 def marEx_plotter(data_type='structured'):
     """
@@ -43,21 +44,22 @@ def register_plotter(xarray_obj):
     
     # Set grid path if available
     plotter = plotter_class(xarray_obj)
-    if is_unstructured and _UNSTRUCT_GRID_PATH is not None:
-        plotter.set_grid_path(_UNSTRUCT_GRID_PATH)
+    if is_unstructured and _fpath_tgrid is not None and _fpath_ckdtree is not None:
+        plotter.set_grid_path(_fpath_tgrid, _fpath_ckdtree)
     
     return plotter
 
 
-def set_grid_path(path):
+def set_grid_path(fpath_tgrid, fpath_ckdtree):
     """
     Set the global ICON grid path that will be used by all unstructured plotters.
     
     Args:
-        path: Path to the ICON grid file
+        path: Paths to the ICON grid file
     """
-    global _UNSTRUCT_GRID_PATH
-    _UNSTRUCT_GRID_PATH = path
+    global _fpath_tgrid, _fpath_ckdtree
+    _fpath_tgrid = str(fpath_tgrid)
+    _fpath_ckdtree = str(fpath_ckdtree)
 
 
 # Register the accessor
