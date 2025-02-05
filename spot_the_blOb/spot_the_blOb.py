@@ -82,7 +82,7 @@ class Spotter:
         
         if unstructured_grid:
             
-            self.cell_area = cell_areas.persist()  # In square metres !
+            self.cell_area = cell_areas.astype(np.float32).persist()  # In square metres !
             self.mean_cell_area = cell_areas.mean().compute().item()
             
             ## Initialise the dilation array
@@ -1417,7 +1417,7 @@ class Spotter:
                     max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
                     
                     if self.unstructured_grid:
-                        new_labels = get_nearest_parent_labels_unstructured(
+                        new_labels = partition_nn_unstructured(
                             child_mask_2d,
                             parent_masks,
                             child_ids,
@@ -1428,7 +1428,7 @@ class Spotter:
                             max_distance=max(max_distance, 20)*2  # Set minimum threshold, in cells
                         )
                     else:
-                        new_labels = get_nearest_parent_labels(
+                        new_labels = partition_nn_grid(
                             child_mask_2d,
                             parent_masks, 
                             child_ids,
@@ -1440,7 +1440,7 @@ class Spotter:
                 else: 
                     # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Centroid_
                     if self.unstructured_grid:
-                        new_labels = unstructured_centroid_partition(
+                        new_labels = partition_centroid_unstructured(
                             child_mask_2d,
                             parent_centroids,
                             child_ids,
@@ -1577,15 +1577,13 @@ class Spotter:
         Parameters are the same as split_and_merge_blobs()
         '''
         
-        def process_chunk(chunk_data, chunk_data_m1, chunk_data_p1, merging_blobs, next_id_start, lat, lon, area, neighbours_int):
+        def process_chunk(chunk_data_m1, chunk_data_p1, merging_blobs, next_id_start, lat, lon, area, neighbours_int):
             """Process a single chunk of merging blobs.
             
             Parameters
             ----------
-            chunk_data : numpy.ndarray
-                Array of shape (n_time, ncells) for unstructured or (n_time, ny, nx) for structured
             chunk_data_m1 & chunk_data_p1 : numpy.ndarray
-                Same as chunk_data but shifted by 1 in time
+                Array of shape (n_time, ncells) for unstructured or (n_time, ny, nx) for structured, shifted by +-1 in time
             merging_blobs : numpy.ndarray
                 Array of shape (n_time, max_merges) containing merging blob IDs (0=none)
             next_id_start : numpy.ndarray
@@ -1601,8 +1599,8 @@ class Spotter:
             #    Remove extra dimension if present while preserving time chunks
             #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting... (i.e. 'nv' dimension gets injected into all the other arrays!)
             
-            chunk_data = chunk_data.squeeze()[0]
-            chunk_data_m1 = chunk_data_m1.squeeze()[0] # Immediately release t and t+1 data !
+            chunk_data = chunk_data_m1.squeeze()[1]
+            chunk_data_m1 = chunk_data_m1.squeeze()[0] # Immediately release t+1 data !
             chunk_data_p1 = chunk_data_p1.squeeze()
             
             lat = lat.squeeze()
@@ -1737,7 +1735,7 @@ class Spotter:
                         max_area = parent_areas.max() / self.mean_cell_area
                         max_distance = int(np.sqrt(max_area) * 2.0)
                         
-                        new_labels = get_nearest_parent_labels_unstructured(
+                        new_labels = partition_nn_unstructured(
                             child_mask,
                             parent_masks,
                             child_ids,
@@ -1748,7 +1746,7 @@ class Spotter:
                             max_distance=max(max_distance, 20)*2
                         )
                     else:
-                        new_labels = unstructured_centroid_partition(
+                        new_labels = partition_centroid_unstructured(
                             child_mask,
                             parent_centroids,
                             child_ids,
@@ -1758,7 +1756,7 @@ class Spotter:
                     
                     # Update slice data
                     data_t[child_mask] = new_labels
-                    spatial_indices_all = np.where(child_mask)[0]
+                    spatial_indices_all = np.where(child_mask)[0].astype(np.int32)
                     
                     for new_id in child_ids[1:]:
                         # Get spatial indices where we need to update
@@ -1868,7 +1866,7 @@ class Spotter:
         
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
-        merging_blobs = set(unique_children[children_counts > 1].astype(np.int64))
+        merging_blobs = set(unique_children[children_counts > 1].astype(np.int32))
         
         
         ## Process chunks iteratively until no new merging blobs remain
@@ -1894,6 +1892,7 @@ class Spotter:
             
             # Pre-compute the child_time_idx for merging_blobs
             time_index_map = self.compute_id_time_dict(blob_id_field_unique, list(merging_blobs), global_id_counter)
+            if self.verbosity > 1:    print('  Finished Mapping Children to Time Indices.')
             
             # Create the uniform merging blobs array
             max_merges = max(len([b for b in merging_blobs if time_index_map.get(b, -1) == t]) for t in range(n_time))
@@ -1917,7 +1916,6 @@ class Spotter:
             
             # Align chunks...
             chunk_size = blob_id_field_unique.chunks[0][0]
-            blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: chunk_size})
             blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: chunk_size})
             blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: chunk_size})
             merging_blobs_da = merging_blobs_da.chunk({self.timedim: chunk_size})
@@ -1925,16 +1923,15 @@ class Spotter:
             neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
             
             results, has_merge, updates = xr.apply_ufunc(process_chunk,
-                                 blob_id_field_unique,
                                  blob_id_field_unique_m1,
                                  blob_id_field_unique_p1,
                                  merging_blobs_da,
                                  next_id_offsets_da,
-                                 blob_id_field_unique.lat,
-                                 blob_id_field_unique.lon,
+                                 blob_id_field_unique_p1.lat,
+                                 blob_id_field_unique_p1.lon,
                                  self.cell_area,
                                  neighbours_int,
-                                 input_core_dims=[[self.xdim], [self.xdim], [self.xdim], ['merges'], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
+                                 input_core_dims=[[self.xdim], [self.xdim], ['merges'], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
                                  output_core_dims=[[], [], []],
                                  output_dtypes=[object, np.bool_, object],
                                  vectorize=False,
@@ -1951,7 +1948,7 @@ class Spotter:
             ### Global Consolidatation of Data ###
             
             # 1:  Collect all temporary IDs and create global mapping
-            temp_id_arrays = np.concatenate([np.array(list(res['id_mappings'].keys()), dtype=np.int64)  for res in results])
+            temp_id_arrays = np.concatenate([np.array(list(res['id_mappings'].keys()), dtype=np.int32)  for res in results])
             all_temp_ids = np.unique(temp_id_arrays)
             
             if all_temp_ids.size > 0:
@@ -1965,7 +1962,7 @@ class Spotter:
             if self.verbosity > 1:    print('  Finished Consolidation Step 1: Temporary ID Mapping')
             
             # 2:  Update Field with new IDs
-            blob_id_field_unique = update_blob_field(blob_id_field_unique, id_lookup, updates)
+            blob_id_field_unique = update_blob_field(blob_id_field_unique, id_lookup, updates).persist()
             if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
             
             # 3:  Update Merge Events
@@ -2076,7 +2073,7 @@ class Spotter:
         
         # Cluster & ID Binary Data at each Time Step
         blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
-        blob_id_field = blob_id_field.persist()
+        blob_id_field = blob_id_field.astype(np.int32).persist()  # We have already filtered out small events so use smaller datatype
         if self.verbosity > 0:    print('Finished Blob Identification.')
         
         
@@ -2222,7 +2219,7 @@ def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
     return np.sqrt(dy * dy + dx * dx)
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
+def partition_nn_grid(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
     """
     Assigns labels based on nearest parent blob points.
     This is quite computationally-intensive, so we utilise many optimisations here...
@@ -2335,7 +2332,7 @@ def get_nearest_parent_labels(child_mask, parent_masks, child_ids, parent_centro
 
 
 @jit(nopython=True, fastmath=True)
-def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
     """
     Optimised version of nearest parent label assignment for unstructured grids.
     Uses numpy arrays throughout to ensure Numba compatibility.
@@ -2453,7 +2450,7 @@ def get_nearest_parent_labels_unstructured(child_mask, parent_masks, child_ids, 
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def unstructured_centroid_partition(child_mask, parent_centroids, child_ids, lat, lon):
+def partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon):
     """
     Assigns labels to child cells based on closest parent centroid using great circle distances.
     
