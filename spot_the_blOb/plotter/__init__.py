@@ -1,10 +1,10 @@
 from .base import PlotterBase
 from .structured import StructuredPlotter
-from .unstructured import UnstructuredPlotter
+from .unstructured import UnstructuredPlotter, clear_cache
 import xarray as xr
 
 # Global variable to store the grid path
-_fpath_tgrid   = None
+_fpath_tgrid = None
 _fpath_ckdtree = None
 
 def marEx_plotter(data_type='structured'):
@@ -20,7 +20,6 @@ def marEx_plotter(data_type='structured'):
     if data_type.lower() == 'unstructured':
         return UnstructuredPlotter
     return StructuredPlotter
-
 
 def register_plotter(xarray_obj):
     """
@@ -45,22 +44,21 @@ def register_plotter(xarray_obj):
     # Set grid path if available
     plotter = plotter_class(xarray_obj)
     if is_unstructured and _fpath_tgrid is not None and _fpath_ckdtree is not None:
-        plotter.set_grid_path(_fpath_tgrid, _fpath_ckdtree)
+        plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
     
     return plotter
 
-
-def set_grid_path(fpath_tgrid, fpath_ckdtree):
+def specify_grid(fpath_tgrid=None, fpath_ckdtree=None):
     """
-    Set the global ICON grid path that will be used by all unstructured plotters.
+    Set the global unstructured grid path that will be used by all unstructured plotters.
     
     Args:
-        path: Paths to the ICON grid file
+        fpath_tgrid: Path to the triangulation grid file
+        fpath_ckdtree: Path to the pre-computed KDTree indices directory
     """
     global _fpath_tgrid, _fpath_ckdtree
     _fpath_tgrid = str(fpath_tgrid)
     _fpath_ckdtree = str(fpath_ckdtree)
-
 
 # Register the accessor
 xr.register_dataarray_accessor('plotter')(register_plotter)
