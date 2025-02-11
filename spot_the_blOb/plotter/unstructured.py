@@ -95,7 +95,6 @@ class UnstructuredPlotter(PlotterBase):
             
             # Mask NaNs
             grid_data = np.ma.masked_invalid(grid_data)
-            
             im = ax.pcolormesh(grid_lon, grid_lat, grid_data, **plot_kwargs)
             
         else:

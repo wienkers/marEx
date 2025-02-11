@@ -968,14 +968,14 @@ class Spotter:
         return overlap_blobs_list_unique_filtered
     
         
-    def cluster_rename_blobs_and_props(self, blob_id_field_unique, blobs_props, overlap_blobs_list, merge_events):
+    def cluster_rename_blobs_and_props(self, blob_id_field_unique, blob_props, overlap_blobs_list, merge_events):
         '''Cluster the blob pairs to determine the final IDs, and relabel the blobs.
         
         Parameters
         ----------
         blob_id_field_unique : xarray.DataArray
             Field of unique blob IDs. IDs must not be repeated across time.
-        blobs_props : xarray.Dataset
+        blob_props : xarray.Dataset
             Properties of each blob that also need to be relabeled.
         overlap_blobs_list : (N x 2) np.ndarray
             Array of Blob IDs that indicate which blobs are the same. The blob in the first column precedes the second column in time.
@@ -985,7 +985,7 @@ class Spotter:
         Merged DataSet including:
             split_merged_relabeled_blob_id_field : xarray.DataArray
                 Field of renamed blob IDs which track & ID blobs across time. ID = 0 indicates no object.
-            blobs_props_extended : xarray.Dataset
+            blob_props_extended : xarray.Dataset
                 Properties of each blob, with the updated IDs.
                 Contains all original properties, as well as "global_ID" (the original ID), and which puts blobs & properties in the time-dimension
         '''
@@ -994,16 +994,15 @@ class Spotter:
         ## Cluster the overlap_pairs into groups of IDs that are actually the same blob
         
         # Get unique IDs from the overlap pairs
-        IDs = np.unique(overlap_blobs_list) # 1D sorted unique
-                
-        # Create a mapping from ID to indices
-        ID_to_index = {ID: index for index, ID in enumerate(IDs)}
+        #IDs = np.unique(overlap_blobs_list) # 1D sorted unique
+        max_ID = blob_id_field_unique.max().compute().values + 1
+        IDs = np.arange(max_ID)
         
         # Convert overlap pairs to indices
-        overlap_pairs_indices = np.array([(ID_to_index[pair[0]], ID_to_index[pair[1]]) for pair in overlap_blobs_list])
+        overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_blobs_list])
         
         # Create a sparse matrix representation of the graph
-        n = len(IDs)
+        n = max_ID
         row_indices, col_indices = overlap_pairs_indices.T
         data = np.ones(len(overlap_pairs_indices), dtype=np.bool_)
         graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n), dtype=np.bool_)
@@ -1036,8 +1035,8 @@ class Spotter:
         # Fill the lookup array with cluster indices
         for index, cluster in enumerate(ID_clusters):
             for ID in cluster:
-                ID_to_cluster_index_array[ID] = np.int32(index+1) # Because these are the connected IDs, there are many fewer!
-                                                                  #  Add 1 so that ID = 0 is still invalid/no object
+                ID_to_cluster_index_array[ID] = np.int32(index) # Because these are the connected IDs, there are many fewer!
+                                                                  #  ID = 0 is still invalid/no object
         
         # N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly with large shared-mem numpy arrays**
         ID_to_cluster_index_da = xr.DataArray(ID_to_cluster_index_array, dims='ID', coords={'ID': np.arange(max_old_ID + 1)})
@@ -1062,13 +1061,13 @@ class Spotter:
         
         
         
-        ### Relabel the blobs_props to match the new IDs (and add time dimension!)
+        ### Relabel the blob_props to match the new IDs (and add time dimension!)
         
         max_new_ID = num_components + 1  # New IDs range from 0 to max_new_ID...
         new_ids = np.arange(1, max_new_ID+1, dtype=np.int32)
         
-        # New blobs_props DataSet Structure
-        blobs_props_extended = xr.Dataset(coords={
+        # New blob_props DataSet Structure
+        blob_props_extended = xr.Dataset(coords={
             'ID': new_ids,
             self.timedim: blob_id_field_unique[self.timedim]
         })
@@ -1123,20 +1122,19 @@ class Spotter:
             ).assign_coords(ID=new_ids).compute()
         
 
-        blobs_props_extended['global_ID'] = global_id_mapping
+        blob_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
         
-        ## Transfer and transform all variables from original blobs_props:
+        ## Transfer and transform all variables from original blob_props:
                 
         # Add a value of ID = 0 to this coordinate ID
-        if not self.unstructured_grid:
-            dummy = blobs_props.isel(ID=0) * np.nan
-            blobs_props = xr.concat([dummy.assign_coords(ID=0), blobs_props], dim='ID')
+        dummy = blob_props.isel(ID=0) * np.nan
+        blob_props = xr.concat([dummy.assign_coords(ID=0), blob_props], dim='ID')
         
-        for var_name in blobs_props.data_vars:
+        for var_name in blob_props.data_vars:
             
-            temp = (blobs_props[var_name]
+            temp = (blob_props[var_name]
                               .sel(ID=global_id_mapping.rename({'ID':'new_id'}))
                               .drop_vars('ID').rename({'new_id':'ID'}))
             
@@ -1145,7 +1143,7 @@ class Spotter:
             else:
                 temp = temp.astype(np.float32)
                 
-            blobs_props_extended[var_name] = temp
+            blob_props_extended[var_name] = temp
         
         
         ## Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx) 
@@ -1208,15 +1206,15 @@ class Spotter:
         
         ## Finish up:
         # Add start and end time indices for each ID
-        valid_presence = blobs_props_extended['global_ID'] > 0  # Where we have valid data
+        valid_presence = blob_props_extended['global_ID'] > 0  # Where we have valid data
         
-        blobs_props_extended['presence'] = valid_presence
-        blobs_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
-        blobs_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
+        blob_props_extended['presence'] = valid_presence
+        blob_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
+        blob_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
                 
-        # Combine blobs_props_extended with split_merged_relabeled_blob_id_field
+        # Combine blob_props_extended with split_merged_relabeled_blob_id_field
         split_merged_relabeled_blobs_ds = xr.merge([split_merged_relabeled_blob_id_field.rename('ID_field'), 
-                                                    blobs_props_extended,
+                                                    blob_props_extended,
                                                     merge_ledger])
         
         
@@ -1929,7 +1927,9 @@ class Spotter:
                 dims=[self.timedim, 'merges'],
                 coords={self.timedim: blob_id_field_unique[self.timedim]})
             
-            next_id_offsets = np.arange(n_time) * max_merges + global_id_counter
+            next_id_offsets = np.arange(n_time) * max_merges * self.timechunks + global_id_counter    
+            # N.B.: We also need to account for possibility of newly-split blobs then creating more than max_merges by the end of the iteration through the chunk
+            #         !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
             next_id_offsets_da = xr.DataArray(next_id_offsets,
                                            dims=[self.timedim],
                                            coords={self.timedim: blob_id_field_unique[self.timedim]})
@@ -2032,8 +2032,8 @@ class Spotter:
             merge_times.extend([times[time_idx]] * len(all_merge_events[time_idx]['child_ids']))
         
         # Convert to numpy arrays
-        max_parents = max(len(ids) for ids in all_merge_events['parent_ids'])
-        max_children = max(len(ids) for ids in all_merge_events['child_ids'])
+        max_parents = max(len(ids) for ids in merged_parent_ids)
+        max_children = max(len(ids) for ids in merged_child_ids)
         
         # Create arrays for merge events
         parent_ids_array = np.full((len(merged_parent_ids), max_parents), -1, dtype=np.int32)
