@@ -1610,15 +1610,15 @@ class Spotter:
             #    Remove extra dimension if present while preserving time chunks
             #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting... (i.e. 'nv' dimension gets injected into all the other arrays!)
             
-            chunk_data_m1 = chunk_data_m1_full.squeeze()[0]
-            chunk_data    = chunk_data_m1_full.squeeze()[1]
+            chunk_data_m1 = chunk_data_m1_full.squeeze()[0].astype(np.int32).copy()
+            chunk_data    = chunk_data_m1_full.squeeze()[1].astype(np.int32).copy()
             del chunk_data_m1_full # Immediately release t+1 data !
-            chunk_data_p1 = chunk_data_p1_full.squeeze()
+            chunk_data_p1 = chunk_data_p1_full.squeeze().astype(np.int32).copy()
             del chunk_data_p1_full
             
-            lat = lat.squeeze()
-            lon = lon.squeeze()
-            area = area.squeeze()
+            lat = lat.squeeze().astype(np.float32)
+            lon = lon.squeeze().astype(np.float32)
+            area = area.squeeze().astype(np.float32)
             next_id_start = next_id_start.squeeze()
             
             # Handle neighbours_int with correct dimensions (nv, ncells)
@@ -1633,9 +1633,9 @@ class Spotter:
                 merging_blobs = merging_blobs[:, None]
             
             # Pre-Convert lat/lon to Cartesian
-            x = np.cos(np.radians(lat)) * np.cos(np.radians(lon))
-            y = np.cos(np.radians(lat)) * np.sin(np.radians(lon))
-            z = np.sin(np.radians(lat))
+            x = (np.cos(np.radians(lat)) * np.cos(np.radians(lon))).astype(np.float32)
+            y = (np.cos(np.radians(lat)) * np.sin(np.radians(lon))).astype(np.float32)
+            z = np.sin(np.radians(lat)).astype(np.float32)
             
             # Process each timestep
             n_time = chunk_data_p1.shape[0]
@@ -1705,15 +1705,17 @@ class Spotter:
                             
                             # Calculate centroid for this parent
                             mask_area = area[parent_mask]
-                            weighted_x = np.sum(mask_area * x[parent_mask])
-                            weighted_y = np.sum(mask_area * y[parent_mask])
-                            weighted_z = np.sum(mask_area * z[parent_mask])
+                            weighted_coords = np.array([
+                                np.sum(mask_area * x[parent_mask]),
+                                np.sum(mask_area * y[parent_mask]),
+                                np.sum(mask_area * z[parent_mask])
+                            ], dtype=np.float32)
                             
-                            norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
-                            
+                            norm = np.sqrt(np.sum(weighted_coords * weighted_coords))
+                                        
                             # Convert back to lat/lon
-                            centroid_lat = np.degrees(np.arcsin(weighted_z/norm))
-                            centroid_lon = np.degrees(np.arctan2(weighted_y, weighted_x))
+                            centroid_lat = np.degrees(np.arcsin(weighted_coords[2]/norm))
+                            centroid_lon = np.degrees(np.arctan2(weighted_coords[1], weighted_coords[0]))
                             
                             # Fix longitude range to [-180, 180]
                             if centroid_lon > 180:
@@ -1892,7 +1894,7 @@ class Spotter:
         
         ## Process chunks iteratively until no new merging blobs remain
         iteration = 0
-        max_iterations = 10
+        max_iterations = 20  # i.e. 80 days (maximum event duration...)
         processed_chunks = set()
         global_id_counter = blob_props.ID.max().item() + 1
         
@@ -1918,10 +1920,12 @@ class Spotter:
             # Create the uniform merging blobs array
             max_merges = max(len([b for b in merging_blobs if time_index_map.get(b, -1) == t]) for t in range(n_time))
 
-            uniform_merging_blobs_array = np.array([
-                np.pad([b for b in merging_blobs if time_index_map.get(b, -1) == t], (0, max_merges - len([b for b in merging_blobs if time_index_map.get(b, -1) == t])), 'constant')
-                for t in range(n_time)
-            ])
+            uniform_merging_blobs_array = np.zeros((n_time, max_merges), dtype=np.int64)
+            for t in range(n_time):
+                blobs_at_t = [b for b in merging_blobs if time_index_map.get(b, -1) == t]
+                if blobs_at_t:  # Only fill if there are blobs at this time
+                    uniform_merging_blobs_array[t, :len(blobs_at_t)] = np.array(blobs_at_t, dtype=np.int64)
+
             merging_blobs_da = xr.DataArray(
                 uniform_merging_blobs_array,
                 dims=[self.timedim, 'merges'],
@@ -1949,9 +1953,9 @@ class Spotter:
                                  blob_id_field_unique_p1,
                                  merging_blobs_da,
                                  next_id_offsets_da,
-                                 blob_id_field_unique_p1.lat,
-                                 blob_id_field_unique_p1.lon,
-                                 self.cell_area,
+                                 blob_id_field_unique_p1.lat.astype(np.float32),
+                                 blob_id_field_unique_p1.lon.astype(np.float32),
+                                 self.cell_area.astype(np.float32),
                                  neighbours_int,
                                  input_core_dims=[[self.xdim], [self.xdim], ['merges'], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
                                  output_core_dims=[[], [], []],
@@ -1988,6 +1992,7 @@ class Spotter:
             
             # 2:  Update Field with new IDs
             blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates, has_merge).persist()
+            del updates
             if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
             
             # 3:  Update Merge Events
@@ -2014,7 +2019,7 @@ class Spotter:
         
         
         if iteration == max_iterations:
-            warnings.warn(f"Reached maximum iterations ({max_iterations}) in split_and_merge_blobs_parallel")
+            raise RuntimeError(f"Reached maximum iterations ({max_iterations}) in split_and_merge_blobs_parallel")
         
         ### Process the Merge Events ###
         
@@ -2463,6 +2468,9 @@ def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centro
     # Return only the assignments for points in child_mask
     child_points = np.where(child_mask)[0]
     return child_ids[parent_assignments[child_points]]
+
+
+
 
 
 @jit(nopython=True, parallel=True, fastmath=True)

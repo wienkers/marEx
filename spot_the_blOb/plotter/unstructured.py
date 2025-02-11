@@ -25,10 +25,14 @@ def _load_triangulation(fpath_tgrid):
         # Only load required variables
         grid_data = xr.open_dataset(
             fpath_tgrid,
-            chunks={},  # Load as numpy array
+            chunks={},
             drop_variables=[v for v in xr.open_dataset(fpath_tgrid).variables 
                           if v not in ['vertex_of_cell', 'clon', 'clat']]
-        )
+        );
+        
+        if 'vertex_of_cell' not in grid_data.variables or 'clon' not in grid_data.variables or 'clat' not in grid_data.variables:
+            raise ValueError("Triangulation Grid File must contain 'vertex_of_cell', 'clon', and 'clat' variables")
+        
         # Extract triangulation vertices - convert to 0-based indexing
         triangles = grid_data.vertex_of_cell.values.T - 1
         # Create matplotlib triangulation object
