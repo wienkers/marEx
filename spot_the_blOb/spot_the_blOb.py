@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from collections import defaultdict
 import warnings
 import logging
+import gc
 
 class Spotter:
     '''
@@ -1641,7 +1642,8 @@ class Spotter:
             n_time = chunk_data_p1.shape[0]
             n_points = chunk_data_p1.shape[1]
             time_step_array = np.zeros(n_time, dtype=object)
-            updates_array = np.zeros(n_time, dtype=object)
+            updates_array = np.full((n_time, n_points), 255, dtype=np.uint8)
+            updates_ids   = np.full((n_time, 255), -1, dtype=np.int32)
             has_merge_array = np.zeros(n_time, dtype=np.bool_)
             
             merging_blobs_list = [list(merging_blobs[i][merging_blobs[i]>0]) for i in range(merging_blobs.shape[0])]
@@ -1654,7 +1656,6 @@ class Spotter:
                     'parent_ids': [],
                     'areas': []
                 }
-                time_updates = []
                 id_mapping = {}
 
                 next_new_id = next_id_start[t]  # Use the offset for this timestep
@@ -1758,14 +1759,13 @@ class Spotter:
                         new_labels_uint = partition_nn_unstructured_optimised(
                             child_mask,
                             parent_masks_uint,
-                            child_ids,
                             parent_centroids,
                             neighbours_int,
                             lat,
                             lon,
                             max_distance=max(max_distance, 20)*2
                         )
-                        # Returned 'new_labels' is just the index of the child_ids
+                        # Returned 'new_labels_uint' is just the index of the child_ids
                         new_labels = child_ids[new_labels_uint]
                     else:
                         new_labels = partition_centroid_unstructured(
@@ -1776,19 +1776,15 @@ class Spotter:
                             lon
                         )
                     
-                    # Update slice data
+                    # Update slice data for subsequent merging in process_chunk
                     data_t[child_mask] = new_labels
                     spatial_indices_all = np.where(child_mask)[0].astype(np.int32)
                     
                     for new_id in child_ids[1:]:
-                        # Get spatial indices where we need to update
-                        new_id_mask = (new_labels == new_id)
-                                                
                         # Store the updates
-                        time_updates.append({
-                            'spatial_indices': spatial_indices_all[new_id_mask],
-                            'new_label': new_id
-                        })
+                        update_idx = np.where(updates_ids[t] == -1)[0][0]  # Find next non-negative index in updates_ids
+                        updates_ids[t, update_idx] = new_id
+                        updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
                     
                     # Record merge event
                     merge_events['child_ids'].append(child_ids)
@@ -1830,12 +1826,11 @@ class Spotter:
                     'next_chunk_merge': final_merging_blobs if t == n_time - 1 else set()
                 }
                 time_step_array[t] = time_step_dict
-                updates_array[t] = time_updates
-            
-            return time_step_array, has_merge_array, updates_array
+                            
+            return time_step_array, has_merge_array, updates_array, updates_ids
         
 
-        def update_blob_field_inplace(blob_id_field, id_lookup, updates, has_merge):
+        def update_blob_field_inplace(blob_id_field, id_lookup, updates_array, updates_ids, has_merge):
             """Update the blob field with chunk results using xarray operations.
                  N.B.: This is much more memory efficient because we don't need to make new copies of blob_id_field !
             
@@ -1860,23 +1855,30 @@ class Spotter:
                 if not ds.presence.any():
                     return ds.data
                 
-                updates = ds.updates.compute()
-                for t in range(len(ds.presence)):
+                for t in range(ds.presence.shape[0]):
                     if ds.presence[t]:
-                        update_t = updates[t].item()
-                        for update in update_t:
-                            if update is not None:
-                                spatial_indices = update['spatial_indices']
-                                new_label = id_lookup[update['new_label']]
-                                ds.data[t, spatial_indices] = new_label
-                
+                        update_t = ds.updates_array.isel({self.timedim: t})
+                        update_ids_t = ds.updates_ids.isel({self.timedim: t}).where(
+                            ds.updates_ids.isel({self.timedim: t}) > -1, 
+                            drop=True
+                        ).compute().values
+                        
+                        # Create a mapping array initialised with original values
+                        new_values = ds.data[t].copy()
+                        
+                        # For each unique update index, apply the new label
+                        for idx, update_id in enumerate(update_ids_t):
+                            new_values = xr.where(update_t == idx, id_lookup[update_id], new_values)
+                        
+                        ds.data[t] = new_values
                 
                 return ds.data
             
             # Combine data into single DataSet to map blocks altogether
             ds = xr.Dataset({
                 'data': blob_id_field,
-                'updates': updates,
+                'updates_array': updates_array.chunk({self.timedim: self.timechunks, self.xdim: -1}),
+                'updates_ids': updates_ids.chunk({self.timedim: self.timechunks, 'update_idx': -1}),
                 'presence': has_merge.chunk({self.timedim: self.timechunks})
             })
             
@@ -1916,7 +1918,10 @@ class Spotter:
             all_merge_events[time]['parent_ids'].append(parent_ids)
             all_merge_events[time]['areas'].append(areas)
         
-        n_time = len(blob_id_field_unique[self.timedim])     
+        n_time = len(blob_id_field_unique[self.timedim])   
+        
+        neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
+          
         while merging_blobs and iteration < max_iterations:
             if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
             
@@ -1953,9 +1958,8 @@ class Spotter:
             blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks})
             merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks})
             next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks})
-            neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
             
-            results, has_merge, updates = xr.apply_ufunc(process_chunk,
+            results, has_merge, updates_array, updates_ids = xr.apply_ufunc(process_chunk,
                                  blob_id_field_unique_m1,
                                  blob_id_field_unique_p1,
                                  merging_blobs_da,
@@ -1965,16 +1969,18 @@ class Spotter:
                                  self.cell_area.astype(np.float32),
                                  neighbours_int,
                                  input_core_dims=[[self.xdim], [self.xdim], ['merges'], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
-                                 output_core_dims=[[], [], []],
-                                 output_dtypes=[object, np.bool_, object],
+                                 output_core_dims=[[], [], [self.xdim], ['update_idx']],
+                                 output_dtypes=[object, np.bool_, np.uint8, np.int32],
+                                 dask_gufunc_kwargs={'output_sizes': {'update_idx': 255}},
                                  vectorize=False,
                                  dask='parallelized')
 
-            results, has_merge, updates = persist(results, has_merge, updates)
+            results, has_merge, updates_array, updates_ids = persist(results, has_merge, updates_array, updates_ids)
             has_merge = has_merge.compute()
             results = results.where(has_merge, drop=True).compute().values
             time_indices = np.where(has_merge)[0]
             
+            del blob_id_field_unique_p1, blob_id_field_unique_m1, merging_blobs_da, next_id_offsets_da
             if self.verbosity > 1:    print('  Finished Batch Processing Step.')
             
             
@@ -1998,8 +2004,9 @@ class Spotter:
             if self.verbosity > 1:    print('  Finished Consolidation Step 1: Temporary ID Mapping')
             
             # 2:  Update Field with new IDs
-            blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates, has_merge).persist()
-            del updates
+            blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge).persist()
+            del updates_array, updates_ids
+            gc.collect()
             if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
             
             # 3:  Update Merge Events
@@ -2023,6 +2030,10 @@ class Spotter:
             merging_blobs = new_merging_blobs - processed_chunks
             processed_chunks.update(new_merging_blobs)
             iteration += 1
+            
+            # Clean up memory
+            del results, has_merge, merge_events
+            
         
         
         if iteration == max_iterations:
@@ -2079,7 +2090,7 @@ class Spotter:
         )
         
         # Re-compute New (now-merged) Blob Properties
-        blob_id_field_unique = blob_id_field_unique.persist()
+        blob_id_field_unique = blob_id_field_unique.persist(optimize_graph=True)
         blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid']).persist()
         
         # Re-compute New (now-merged) Overlap Blob List & Filter Small Overlaps (again)
@@ -2479,7 +2490,7 @@ def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centro
 
 
 @jit(nopython=True, fastmath=True)
-def partition_nn_unstructured_optimised(child_mask, parent_frontiers, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+def partition_nn_unstructured_optimised(child_mask, parent_frontiers, parent_centroids, neighbours_int, lat, lon, max_distance=20):
     """
     Memory-optimised version of nearest parent label assignment for unstructured grids.
     Uses numpy arrays throughout to ensure Numba compatibility.
@@ -2493,14 +2504,7 @@ def partition_nn_unstructured_optimised(child_mask, parent_frontiers, child_ids,
     # parent_frontiers is a compressed version of parent_masks
     #  It holds the parent iter number, and will be used also to mark the frontiers
     
-    n_points = len(child_mask)
     n_parents = np.max(parent_frontiers[parent_frontiers < 255]) + 1
-    
-    # Pre-allocate arrays with minimal sizes
-    distances = np.full(n_points, 2e9, dtype=np.int32)
-    
-    # Initialise with direct overlaps
-    distances[parent_frontiers < 255] = 0
     
     # Pre-compute trig values
     lat_rad = np.deg2rad(lat)
@@ -2533,7 +2537,6 @@ def partition_nn_unstructured_optimised(child_mask, parent_frontiers, child_ids,
                 
                 new_points = valid_points[unvisited]
                 parent_frontiers[new_points] = parent_idx
-                distances[new_points] = current_distance
                 
                 # Check if we made any updates to child points
                 if np.any(child_mask[new_points]):
