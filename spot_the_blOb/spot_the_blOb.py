@@ -1639,6 +1639,7 @@ class Spotter:
             
             # Process each timestep
             n_time = chunk_data_p1.shape[0]
+            n_points = chunk_data_p1.shape[1]
             time_step_array = np.zeros(n_time, dtype=object)
             updates_array = np.zeros(n_time, dtype=object)
             has_merge_array = np.zeros(n_time, dtype=np.bool_)
@@ -1677,7 +1678,9 @@ class Spotter:
                     child_mask = (data_t == child_id)
                     
                     # Find parent blobs that overlap with this child
-                    parent_masks = []
+                    #parent_masks = []
+                    parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
+                    parent_iterator = 0
                     parent_centroids = []
                     parent_ids = []
                     parent_areas = []
@@ -1700,7 +1703,9 @@ class Spotter:
                                 continue
                             
                             overlap_areas.append(overlap_area)
-                            parent_masks.append(parent_mask)
+                            #parent_masks.append(parent_mask)
+                            parent_masks_uint[parent_mask] = parent_iterator
+                            parent_iterator += 1
                             parent_ids.append(parent_id)
                             
                             # Calculate centroid for this parent
@@ -1729,7 +1734,7 @@ class Spotter:
                     if len(parent_ids) < 2:  # Need at least 2 parents for merging
                         continue
                         
-                    parent_masks = np.array(parent_masks)
+                    #parent_masks = np.array(parent_masks)
                     parent_centroids = np.array(parent_centroids, dtype=np.float32)
                     parent_ids = np.array(parent_ids)
                     parent_areas = np.array(parent_areas)
@@ -1750,9 +1755,9 @@ class Spotter:
                         max_area = parent_areas.max() / self.mean_cell_area
                         max_distance = int(np.sqrt(max_area) * 2.0)
                         
-                        new_labels = partition_nn_unstructured(
+                        new_labels_uint = partition_nn_unstructured_optimised(
                             child_mask,
-                            parent_masks,
+                            parent_masks_uint,
                             child_ids,
                             parent_centroids,
                             neighbours_int,
@@ -1760,6 +1765,8 @@ class Spotter:
                             lon,
                             max_distance=max(max_distance, 20)*2
                         )
+                        # Returned 'new_labels' is just the index of the child_ids
+                        new_labels = child_ids[new_labels_uint]
                     else:
                         new_labels = partition_centroid_unstructured(
                             child_mask,
@@ -2469,6 +2476,90 @@ def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centro
     child_points = np.where(child_mask)[0]
     return child_ids[parent_assignments[child_points]]
 
+
+
+@jit(nopython=True, fastmath=True)
+def partition_nn_unstructured_optimised(child_mask, parent_frontiers, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+    """
+    Memory-optimised version of nearest parent label assignment for unstructured grids.
+    Uses numpy arrays throughout to ensure Numba compatibility.
+    
+    Key optimisations:
+    - Uses uint8 for visited array to store both visitation and parent assignment
+    - Uses 255 as sentinel value for unvisited points
+    - Maintains full connectivity through non-child points
+    """
+    
+    # parent_frontiers is a compressed version of parent_masks
+    #  It holds the parent iter number, and will be used also to mark the frontiers
+    
+    n_points = len(child_mask)
+    n_parents = np.max(parent_frontiers[parent_frontiers < 255]) + 1
+    
+    # Pre-allocate arrays with minimal sizes
+    distances = np.full(n_points, 2e9, dtype=np.int32)
+    
+    # Initialise with direct overlaps
+    distances[parent_frontiers < 255] = 0
+    
+    # Pre-compute trig values
+    lat_rad = np.deg2rad(lat)
+    lon_rad = np.deg2rad(lon)
+    cos_lat = np.cos(lat_rad)
+    
+    # Graph traversal
+    current_distance = 0
+    any_unassigned = np.any(child_mask & (parent_frontiers == 255))
+    
+    while current_distance < max_distance and any_unassigned:
+        current_distance += 1
+        updates_made = False
+        
+        for parent_idx in range(n_parents):
+            if not np.any(parent_frontiers == parent_idx):
+                continue
+            
+            # Process neighbors
+            for i in range(3):
+                neighbors = neighbours_int[i, parent_frontiers == parent_idx]
+                valid_neighbors = neighbors >= 0
+                if not np.any(valid_neighbors):
+                    continue
+                
+                valid_points = neighbors[valid_neighbors]
+                unvisited = parent_frontiers[valid_points] == 255
+                if not np.any(unvisited):
+                    continue
+                
+                new_points = valid_points[unvisited]
+                parent_frontiers[new_points] = parent_idx
+                distances[new_points] = current_distance
+                
+                # Check if we made any updates to child points
+                if np.any(child_mask[new_points]):
+                    updates_made = True            
+                
+        if not updates_made:
+            break
+            
+        any_unassigned = np.any(child_mask & (parent_frontiers == 255))
+    
+    # Handle remaining unassigned points using great circle distances
+    if np.any(child_mask & (parent_frontiers == 255)):
+        parent_lat_rad = np.deg2rad(parent_centroids[:, 0])
+        parent_lon_rad = np.deg2rad(parent_centroids[:, 1])
+        cos_parent_lat = np.cos(parent_lat_rad)
+        
+        unassigned_points = np.where(child_mask & (parent_frontiers == 255))[0]
+        for point in unassigned_points:
+            dlat = parent_lat_rad - lat_rad[point]
+            dlon = parent_lon_rad - lon_rad[point]
+            a = np.sin(dlat/2)**2 + cos_lat[point] * cos_parent_lat * np.sin(dlon/2)**2
+            dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+            parent_frontiers[point] = np.argmin(dist)
+    
+    # Return only assignments for points in child_mask
+    return parent_frontiers[child_mask]
 
 
 
