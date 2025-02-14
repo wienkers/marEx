@@ -1684,7 +1684,7 @@ class Spotter:
                     potential_parents = np.unique(data_m1[child_mask])
                     parent_iterator = 0
                     parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
-                    parent_centroids = np.zeros((MAX_PARENTS, 2), dtype=np.float32)
+                    parent_centroids = np.full((MAX_PARENTS, 2), -1.e10, dtype=np.float32)
                     parent_ids = np.full(MAX_PARENTS, -1, dtype=np.int32)
                     parent_areas = np.zeros(MAX_PARENTS, dtype=np.float32)
                     overlap_areas = np.zeros(MAX_PARENTS, dtype=np.float32)
@@ -1760,16 +1760,20 @@ class Spotter:
                         max_distance = int(np.sqrt(max_area) * 2.0)
                         
                         new_labels_uint = partition_nn_unstructured_optimised(
-                            child_mask,
-                            parent_masks_uint,
-                            parent_centroids[:n_parents],
-                            neighbours_int,
+                            child_mask.copy(),
+                            parent_masks_uint.copy(),
+                            parent_centroids,
+                            neighbours_int.copy(),
                             lat,
                             lon,
                             max_distance=max(max_distance, 20)*2
                         )
                         # Returned 'new_labels_uint' is just the index of the child_ids
                         new_labels = child_ids[new_labels_uint]
+                        
+                        # Force Number JIT Cleanup
+                        new_labels_uint = None
+                        
                     else:
                         new_labels = partition_centroid_unstructured(
                             child_mask,
@@ -1784,6 +1788,9 @@ class Spotter:
                     
                     # Record Updates
                     spatial_indices_all = np.where(child_mask)[0]
+                    child_mask = None
+                    gc.collect()
+                    
                     for new_id in child_ids[1:]:
                         update_idx = np.where(updates_ids[t] == -1)[0][0]  # Find next non-negative index in updates_ids
                         updates_ids[t, update_idx] = new_id
@@ -1894,36 +1901,18 @@ class Spotter:
             return result
         
         
-        
-        #############
-        # Main Loop #
-        #############
-        
-        # Compile List of Overlapping Blob ID Pairs Across Time
-        overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
-        
-        # Find initial merging blobs
-        unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
-        merging_blobs = set(unique_children[children_counts > 1].astype(np.int32))
-        
-        
-        ## Process chunks iteratively until no new merging blobs remain
-        iteration = 0
-        max_iterations = 20  # i.e. 80 days (maximum event duration...)
-        processed_chunks = set()
-        global_id_counter = blob_props.ID.max().item() + 1
-        
-        # Initialise global merge event tracking
-        all_merge_events = defaultdict(lambda: {
-            'child_ids': [],  # List of child ID arrays for this time
-            'parent_ids': [], # List of parent ID arrays for this time
-            'areas': []       # List of areas for this time
-        })
-        
-        n_time = len(blob_id_field_unique[self.timedim])   
-        neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
-        while merging_blobs and iteration < max_iterations:
+        def merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter):
+            """Perform a single iteration of the parallel merging process."""
+            
+            all_merge_events_chunk = defaultdict(lambda: {
+                'child_ids': [],  # List of child ID arrays for this time
+                'parent_ids': [], # List of parent ID arrays for this time
+                'areas': []       # List of areas for this time
+            })
+            
+            n_time = len(blob_id_field_unique[self.timedim])
+            neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
+            
             if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
             
             # Pre-compute the child_time_idx for merging_blobs
@@ -1954,10 +1943,11 @@ class Spotter:
             blob_id_field_unique_m1 = blob_id_field_unique.shift({self.timedim: 1}, fill_value=0)
             
             # Align chunks
-            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: self.timechunks})
-            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks})
-            merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks})
-            next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks})
+            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: self.timechunks}).persist()
+            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks}).persist()
+            merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks}).persist()
+            next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks}).persist()
+            wait(blob_id_field_unique_p1)
             
             results = xr.apply_ufunc(process_chunk,
                                  blob_id_field_unique_m1,
@@ -2043,9 +2033,9 @@ class Spotter:
                     mapped_child_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in child_ids]
                     mapped_parent_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in parent_ids]
                     
-                    all_merge_events[time_idx]['child_ids'].append(mapped_child_ids)
-                    all_merge_events[time_idx]['parent_ids'].append(mapped_parent_ids)
-                    all_merge_events[time_idx]['areas'].append(areas)
+                    all_merge_events_chunk[time_idx]['child_ids'].append(mapped_child_ids)
+                    all_merge_events_chunk[time_idx]['parent_ids'].append(mapped_parent_ids)
+                    all_merge_events_chunk[time_idx]['areas'].append(areas)
 
             
             final_merging_blobs = final_merging_blobs.compute().values
@@ -2055,14 +2045,63 @@ class Spotter:
             
             if self.verbosity > 1:    print('  Finished Consolidation Step 3: Merge List Dictionary Consolidation.')
             
+            
+            # Clean up memory
+            del merge_child_ids, merge_parent_ids, merge_areas, merge_counts, has_merge
+            gc.collect()
+                        
+            
+            return blob_id_field_unique, all_merge_events_chunk, new_merging_blobs, global_id_counter
+        
+        
+        
+        
+        
+        
+        #############
+        # Main Loop #
+        #############
+        
+        # Compile List of Overlapping Blob ID Pairs Across Time
+        overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
+        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
+        
+        # Find initial merging blobs
+        unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
+        merging_blobs = set(unique_children[children_counts > 1].astype(np.int32))
+        
+        
+        ## Process chunks iteratively until no new merging blobs remain
+        iteration = 0
+        max_iterations = 20  # i.e. 80 days (maximum event duration...)
+        processed_chunks = set()
+        global_id_counter = blob_props.ID.max().item() + 1
+        
+        # Initialise global merge event tracking
+        all_merge_events = defaultdict(lambda: {
+            'child_ids': [],  # List of child ID arrays for this time
+            'parent_ids': [], # List of parent ID arrays for this time
+            'areas': []       # List of areas for this time
+        })
+        
+        
+        while merging_blobs and iteration < max_iterations:
+            
+            blob_id_field_new, all_merge_events_chunk, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
+            del blob_id_field_unique
+            gc.collect()
+            blob_id_field_unique = blob_id_field_new.persist(optimize_graph=True)
+            
+            # Merge all_merge_events_chunk into all_merge_events
+            for time_idx in all_merge_events_chunk.keys():
+                all_merge_events[time_idx]['child_ids'].extend(all_merge_events_chunk[time_idx]['child_ids'])
+                all_merge_events[time_idx]['parent_ids'].extend(all_merge_events_chunk[time_idx]['parent_ids'])
+                all_merge_events[time_idx]['areas'].extend(all_merge_events_chunk[time_idx]['areas'])
+            
             # Prepare for next iteration
             merging_blobs = new_merging_blobs - processed_chunks
             processed_chunks.update(new_merging_blobs)
             iteration += 1
-            
-            # Clean up memory
-            del merge_child_ids, merge_parent_ids, merge_areas, merge_counts, has_merge
-            gc.collect()            
         
         
         if iteration == max_iterations:
@@ -2524,75 +2563,99 @@ def partition_nn_unstructured_optimised(child_mask, parent_frontiers, parent_cen
     Memory-optimised version of nearest parent label assignment for unstructured grids.
     Uses numpy arrays throughout to ensure Numba compatibility.
     
-    Key optimisations:
-    - Uses uint8 for visited array to store both visitation and parent assignment
-    - Uses 255 as sentinel value for unvisited points
-    - Maintains full connectivity through non-child points
+    Parameters
+    ----------
+    child_mask : np.ndarray
+        1D boolean array where True indicates points in the child blob
+    parent_frontiers : np.ndarray
+        1D uint8 array with parent indices (255 for unvisited points)
+    parent_centroids : np.ndarray
+        Array of shape (n_parents, 2) containing (lat, lon) coordinates
+    neighbours_int : np.ndarray
+        2D array of shape (3, n_points) containing indices of neighboring cells
+    lat / lon : np.ndarray
+        1D arrays of latitude/longitude in degrees
+    max_distance : int
+        Maximum number of edge hops to search for parent points
+    
+    Returns
+    -------
+    result : np.ndarray
+        1D array containing the assigned parent indices for points in child_mask
     """
     
-    # parent_frontiers is a compressed version of parent_masks
-    #  It holds the parent iter number, and will be used also to mark the frontiers
+    # Create working copies to ensure memory cleanup
+    parent_frontiers_working = parent_frontiers.copy()
+    child_mask_working = child_mask.copy()
     
-    n_parents = np.max(parent_frontiers[parent_frontiers < 255]) + 1
-    
-    # Pre-compute trig values
-    lat_rad = np.deg2rad(lat)
-    lon_rad = np.deg2rad(lon)
-    cos_lat = np.cos(lat_rad)
+    n_parents = np.max(parent_frontiers_working[parent_frontiers_working < 255]) + 1
     
     # Graph traversal
     current_distance = 0
-    any_unassigned = np.any(child_mask & (parent_frontiers == 255))
+    any_unassigned = np.any(child_mask_working & (parent_frontiers_working == 255))
     
     while current_distance < max_distance and any_unassigned:
         current_distance += 1
         updates_made = False
         
         for parent_idx in range(n_parents):
-            if not np.any(parent_frontiers == parent_idx):
+            # Skip if no frontier points for this parent
+            if not np.any(parent_frontiers_working == parent_idx):
                 continue
             
-            # Process neighbors
+            # Process neighbours for current parent's frontier
             for i in range(3):
-                neighbors = neighbours_int[i, parent_frontiers == parent_idx]
+                neighbors = neighbours_int[i, parent_frontiers_working == parent_idx]
                 valid_neighbors = neighbors >= 0
+                
                 if not np.any(valid_neighbors):
                     continue
                 
                 valid_points = neighbors[valid_neighbors]
-                unvisited = parent_frontiers[valid_points] == 255
+                unvisited = parent_frontiers_working[valid_points] == 255
+                
                 if not np.any(unvisited):
                     continue
                 
+                # Update new frontier points
                 new_points = valid_points[unvisited]
-                parent_frontiers[new_points] = parent_idx
+                parent_frontiers_working[new_points] = parent_idx
                 
-                # Check if we made any updates to child points
-                if np.any(child_mask[new_points]):
-                    updates_made = True            
-                
+                if np.any(child_mask_working[new_points]):
+                    updates_made = True
+        
         if not updates_made:
             break
             
-        any_unassigned = np.any(child_mask & (parent_frontiers == 255))
+        any_unassigned = np.any(child_mask_working & (parent_frontiers_working == 255))
     
     # Handle remaining unassigned points using great circle distances
-    if np.any(child_mask & (parent_frontiers == 255)):
+    unassigned_mask = child_mask_working & (parent_frontiers_working == 255)
+    if np.any(unassigned_mask):
+        # Pre-compute parent coordinates in radians
         parent_lat_rad = np.deg2rad(parent_centroids[:, 0])
         parent_lon_rad = np.deg2rad(parent_centroids[:, 1])
         cos_parent_lat = np.cos(parent_lat_rad)
         
-        unassigned_points = np.where(child_mask & (parent_frontiers == 255))[0]
+        # Process each unassigned point
+        unassigned_points = np.where(unassigned_mask)[0]
         for point in unassigned_points:
-            dlat = parent_lat_rad - lat_rad[point]
-            dlon = parent_lon_rad - lon_rad[point]
-            a = np.sin(dlat/2)**2 + cos_lat[point] * cos_parent_lat * np.sin(dlon/2)**2
+            dlat = parent_lat_rad - np.deg2rad(lat[point])
+            dlon = parent_lon_rad - np.deg2rad(lon[point])
+            
+            a = np.sin(dlat/2)**2 + np.cos(np.deg2rad(lat[point])) * cos_parent_lat * np.sin(dlon/2)**2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-            parent_frontiers[point] = np.argmin(dist)
+            
+            parent_frontiers_working[point] = np.argmin(dist)
     
-    # Return only assignments for points in child_mask
-    return parent_frontiers[child_mask]
-
+    # Extract result for child points only
+    result = parent_frontiers_working[child_mask_working].copy()
+    
+    # Explicitly clear working arrays
+    parent_frontiers_working = None
+    child_mask_working = None
+    
+    return result
 
 
 
