@@ -287,9 +287,9 @@ class Spotter:
             (y_centroid, x_centroid)
         '''
         
-        # Check if blob touches either edge of x dimension
-        touches_left_BC = np.any(binary_mask[:, 0])
-        touches_right_BC = np.any(binary_mask[:, -1])
+        # Check if blob is (anywhere remotely) near either edge of x dimension
+        near_left_BC = np.any(binary_mask[:, :100])
+        near_right_BC = np.any(binary_mask[:, -100:])
         
         
         if original_centroid is None: # Then calculate y-centroid from scratch
@@ -300,8 +300,9 @@ class Spotter:
             y_centroid = original_centroid[0]
         
         
-        # If blob touches both edges, then recalculate x-centroid
-        if touches_left_BC and touches_right_BC:
+        # If blob is near both edges, then recalculate x-centroid
+        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the blob may be split and straddling the boundary !
+        if near_left_BC and near_right_BC:
             # Adjust x coordinates that are near right edge
             x_indices = np.nonzero(binary_mask)[1]
             x_indices_adj = x_indices.copy()
@@ -739,6 +740,15 @@ class Spotter:
 
         # Final formatting
         merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').persist()
+        
+        # Convert centroid from pixel units to lat/lon units
+        y_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.ydim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.ydim]))], dims=['pixels'])
+        x_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.xdim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.xdim]))], dims=['pixels'])
+        
+        blobs_props_extended['centroid'] = xr.concat([
+            y_values.interp(pixels=blobs_props_extended['centroid'].sel(component=0)),
+            x_values.interp(pixels=blobs_props_extended['centroid'].sel(component=1))
+        ], dim='component')
         
         
         ## Finish up:
