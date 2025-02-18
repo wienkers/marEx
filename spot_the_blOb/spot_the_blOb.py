@@ -1591,7 +1591,8 @@ class Spotter:
         
         MAX_MERGES = 20 # per timestep
         MAX_PARENTS = 10 # per merge
-        
+        MAX_CHILDREN = MAX_PARENTS
+                
         def process_chunk(chunk_data_m1_full, chunk_data_p1_full, merging_blobs, next_id_start, lat, lon, area, neighbours_int):
             """Process a single chunk of merging blobs.
             
@@ -1856,47 +1857,50 @@ class Spotter:
                 Updated blob field
             """
             
-            def apply_updates_block(ds):
-                """Process a single block."""
+            def update_timeslice(data, updates, update_ids, lookup_values):
+                """Process a single timeslice."""
+                # Extract valid update IDs
+                valid_ids = update_ids[update_ids > -1]
+                if len(valid_ids) == 0:
+                    return data
+                    
+                # Create result array starting with original values
+                result = data.copy()
                 
-                if not ds.presence.any():
-                    return ds.data
-                
-                result_chunk = ds.data.copy()
-                
-                for t in range(ds.presence.shape[0]):
-                    if ds.presence[t]:
-                        update_t = ds.updates_array.isel({self.timedim: t})
-                        update_ids_t = ds.updates_ids.isel({self.timedim: t}).where(
-                            ds.updates_ids.isel({self.timedim: t}) > -1, 
-                            drop=True
-                        ).compute().values
+                # Apply each update
+                for idx, update_id in enumerate(valid_ids):
+                    mask = updates == idx
+                    if mask.any():
+                        result = np.where(mask, lookup_values[update_id], result)
                         
-                        # Create a mapping array initialised with original values
-                        new_values = result_chunk[t]
+                return result
+            
                         
-                        # For each unique update index, apply the new label
-                        for idx, update_id in enumerate(update_ids_t):
-                            new_values = xr.where(update_t == idx, id_lookup[update_id], new_values)
-                        
-                        new_values = new_values.compute()
-                        result_chunk[t] = new_values
-                
-                return result_chunk
+            # Convert lookup dict to array for vectorized access
+            max_id = max(id_lookup.keys()) + 1
+            lookup_array = np.full(max_id, -1, dtype=np.int32)
+            for temp_id, new_id in id_lookup.items():
+                lookup_array[temp_id] = new_id
             
-            # Combine data into single DataSet to map blocks altogether
-            ds = xr.Dataset({
-                'data': blob_id_field,
-                'updates_array': updates_array.chunk({self.timedim: self.timechunks, self.xdim: -1}),
-                'updates_ids': updates_ids.chunk({self.timedim: self.timechunks, 'update_idx': -1}),
-                'presence': has_merge.chunk({self.timedim: self.timechunks})
-            })
+            result = xr.apply_ufunc(
+                update_timeslice,
+                blob_id_field,
+                updates_array,
+                updates_ids,
+                kwargs={'lookup_values': lookup_array},
+                input_core_dims=[[self.xdim],
+                                [self.xdim],
+                                ['update_idx']],
+                output_core_dims=[[self.xdim]],
+                vectorize=True, 
+                dask='parallelized',
+                output_dtypes=[np.int32]
+            )
             
+            #result = xr.where(has_merge, result, blob_id_field)
+            #del blob_id_field
             
-            result = ds.map_blocks(apply_updates_block, template=blob_id_field)
             result = result.persist(optimize_graph=True)
-            del ds
-            gc.collect()
             
             return result
         
@@ -1904,13 +1908,13 @@ class Spotter:
         def merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter):
             """Perform a single iteration of the parallel merging process."""
             
-            all_merge_events_chunk = defaultdict(lambda: {
-                'child_ids': [],  # List of child ID arrays for this time
-                'parent_ids': [], # List of parent ID arrays for this time
-                'areas': []       # List of areas for this time
-            })
-            
             n_time = len(blob_id_field_unique[self.timedim])
+            
+            child_ids_iter = np.full((n_time, MAX_MERGES, MAX_CHILDREN), -1, dtype=np.int32)     # List of child ID arrays for this time
+            parent_ids_iter = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.int32)     # List of parent ID arrays for this time
+            merge_areas_iter = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.float32)  # List of areas for this time
+            merge_counts_iter = np.zeros(n_time, dtype=np.int32)
+            
             neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
             
             if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
@@ -1943,11 +1947,10 @@ class Spotter:
             blob_id_field_unique_m1 = blob_id_field_unique.shift({self.timedim: 1}, fill_value=0)
             
             # Align chunks
-            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: self.timechunks}).persist()
-            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks}).persist()
-            merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks}).persist()
-            next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks}).persist()
-            wait(blob_id_field_unique_p1)
+            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: self.timechunks})
+            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks})
+            merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks})
+            next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks})
             
             results = xr.apply_ufunc(process_chunk,
                                  blob_id_field_unique_m1,
@@ -2017,26 +2020,31 @@ class Spotter:
             # 3:  Update Merge Events
             new_merging_blobs = set()
             merge_counts = merge_counts.compute()
-            for time_idx in time_indices:
-                count = merge_counts.isel({self.timedim: time_idx}).item()
-                
-                for merge_idx in range(count):
-                    # Get valid child and parent IDs for this merge event
-                    child_ids = merge_child_ids.isel({self.timedim: time_idx, 'merge': merge_idx}).compute().values
-                    child_ids = child_ids[child_ids>=0]
-                    parent_ids = merge_parent_ids.isel({self.timedim: time_idx,'merge': merge_idx}).compute().values
-                    parent_ids = parent_ids[parent_ids>=0]
-                    areas = merge_areas.isel({self.timedim: time_idx,'merge': merge_idx}).compute().values
-                    areas = areas[areas>=0]
+            for t in time_indices:
+                count = merge_counts.isel({self.timedim: t}).item()
+                if count > 0:
+                    merge_counts_iter[t] = count
                     
-                    # Map IDs and add to merge events
-                    mapped_child_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in child_ids]
-                    mapped_parent_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in parent_ids]
-                    
-                    all_merge_events_chunk[time_idx]['child_ids'].append(mapped_child_ids)
-                    all_merge_events_chunk[time_idx]['parent_ids'].append(mapped_parent_ids)
-                    all_merge_events_chunk[time_idx]['areas'].append(areas)
-
+                    # Extract valid IDs and areas
+                    for merge_idx in range(count):
+                        child_ids = merge_child_ids.isel({self.timedim: t, 'merge': merge_idx}).compute().values
+                        child_ids = child_ids[child_ids >= 0]
+                        
+                        parent_ids = merge_parent_ids.isel({self.timedim: t, 'merge': merge_idx}).compute().values
+                        areas = merge_areas.isel({self.timedim: t, 'merge': merge_idx}).compute().values
+                        valid_mask = parent_ids >= 0
+                        parent_ids = parent_ids[valid_mask]
+                        areas = areas[valid_mask]
+                        
+                        # Map IDs and add to merge events
+                        mapped_child_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in child_ids]
+                        mapped_parent_ids = [id_lookup.get(id_.item(), id_.item()) for id_ in parent_ids]
+                        
+                        # Store in pre-allocated arrays
+                        child_ids_iter[t, merge_idx, :len(mapped_child_ids)] = mapped_child_ids
+                        parent_ids_iter[t, merge_idx, :len(mapped_parent_ids)] = mapped_parent_ids
+                        merge_areas_iter[t, merge_idx, :len(areas)] = areas
+            
             
             final_merging_blobs = final_merging_blobs.compute().values
             final_merging_blobs = final_merging_blobs[final_merging_blobs > 0]
@@ -2051,7 +2059,9 @@ class Spotter:
             gc.collect()
                         
             
-            return blob_id_field_unique, all_merge_events_chunk, new_merging_blobs, global_id_counter
+            return (blob_id_field_unique,  
+                    (child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter),
+                    new_merging_blobs, global_id_counter)
         
         
         
@@ -2069,7 +2079,7 @@ class Spotter:
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
         merging_blobs = set(unique_children[children_counts > 1].astype(np.int32))
-        
+        del overlap_blobs_list
         
         ## Process chunks iteratively until no new merging blobs remain
         iteration = 0
@@ -2078,25 +2088,43 @@ class Spotter:
         global_id_counter = blob_props.ID.max().item() + 1
         
         # Initialise global merge event tracking
-        all_merge_events = defaultdict(lambda: {
-            'child_ids': [],  # List of child ID arrays for this time
-            'parent_ids': [], # List of parent ID arrays for this time
-            'areas': []       # List of areas for this time
-        })
-        
+        global_child_ids = []
+        global_parent_ids = []
+        global_merge_areas = []
+        global_merge_tidx = []
         
         while merging_blobs and iteration < max_iterations:
             
-            blob_id_field_new, all_merge_events_chunk, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
+            blob_id_field_new, merge_data_iter, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
             del blob_id_field_unique
-            gc.collect()
             blob_id_field_unique = blob_id_field_new.persist(optimize_graph=True)
+            del blob_id_field_new
+            gc.collect()
+            
+            child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
             
             # Merge all_merge_events_chunk into all_merge_events
-            for time_idx in all_merge_events_chunk.keys():
-                all_merge_events[time_idx]['child_ids'].extend(all_merge_events_chunk[time_idx]['child_ids'])
-                all_merge_events[time_idx]['parent_ids'].extend(all_merge_events_chunk[time_idx]['parent_ids'])
-                all_merge_events[time_idx]['areas'].extend(all_merge_events_chunk[time_idx]['areas'])
+            for t in range(len(merge_counts_iter)):
+                count = merge_counts_iter[t]
+                if count > 0:
+                    for merge_idx in range(count):
+                        # Get valid children
+                        children = child_ids_iter[t, merge_idx]
+                        children = children[children >= 0]
+                        
+                        # Get valid parents and areas
+                        parents = parent_ids_iter[t, merge_idx]
+                        areas = merge_areas_iter[t, merge_idx]
+                        valid_mask = parents >= 0
+                        parents = parents[valid_mask]
+                        areas = areas[valid_mask]
+                        
+                        if len(children) > 0 and len(parents) > 0:
+                            global_child_ids.append(children)
+                            global_parent_ids.append(parents)
+                            global_merge_areas.append(areas)
+                            global_merge_tidx.append(t)
+            
             
             # Prepare for next iteration
             merging_blobs = new_merging_blobs - processed_chunks
@@ -2108,35 +2136,23 @@ class Spotter:
             raise RuntimeError(f"Reached maximum iterations ({max_iterations}) in split_and_merge_blobs_parallel")
         
         ### Process the Merge Events ###
-        
-        # Flatten merge ledger
-        merged_child_ids = []
-        merged_parent_ids = []
-        merged_areas = []
-        merge_times = []
         times = blob_id_field_unique[self.timedim].values
-
-        for time_idx in sorted(all_merge_events.keys()):
-            merged_child_ids.extend(all_merge_events[time_idx]['child_ids'])
-            merged_parent_ids.extend(all_merge_events[time_idx]['parent_ids'])
-            merged_areas.extend(all_merge_events[time_idx]['areas'])
-            merge_times.extend([times[time_idx]] * len(all_merge_events[time_idx]['child_ids']))
         
         # Convert to numpy arrays
-        max_parents = max(len(ids) for ids in merged_parent_ids)
-        max_children = max(len(ids) for ids in merged_child_ids)
+        max_parents = max(len(ids) for ids in global_parent_ids)
+        max_children = max(len(ids) for ids in global_child_ids)
         
         # Create arrays for merge events
-        parent_ids_array = np.full((len(merged_parent_ids), max_parents), -1, dtype=np.int32)
-        child_ids_array = np.full((len(merged_child_ids), max_children), -1, dtype=np.int32)
+        parent_ids_array = np.full((len(global_parent_ids), max_parents), -1, dtype=np.int32)
+        child_ids_array = np.full((len(global_child_ids), max_children), -1, dtype=np.int32)
         overlap_areas_array = np.full((len(merged_areas), max_parents), 
                                     -1, dtype=np.float32 if self.unstructured_grid else np.int32)
         
         
-        for i, parents in enumerate(merged_parent_ids):
+        for i, parents in enumerate(global_parent_ids):
             parent_ids_array[i, :len(parents)] = parents
 
-        for i, children in enumerate(merged_child_ids):
+        for i, children in enumerate(global_child_ids):
             child_ids_array[i, :len(children)] = children
 
         for i, areas in enumerate(merged_areas):
@@ -2148,9 +2164,9 @@ class Spotter:
             'parent_IDs': (('merge_ID', 'parent_idx'), parent_ids_array),
             'child_IDs': (('merge_ID', 'child_idx'), child_ids_array),
             'overlap_areas': (('merge_ID', 'parent_idx'), overlap_areas_array),
-            'merge_time': ('merge_ID', merge_times),
-            'n_parents': ('merge_ID', np.array([len(p) for p in merged_parent_ids], dtype=np.int8)),
-            'n_children': ('merge_ID', np.array([len(c) for c in merged_child_ids], dtype=np.int8))
+            'merge_time': ('merge_ID', times[global_merge_tidx]),
+            'n_parents': ('merge_ID', np.array([len(p) for p in global_parent_ids], dtype=np.int8)),
+            'n_children': ('merge_ID', np.array([len(c) for c in global_child_ids], dtype=np.int8))
             },
             attrs={
                 'fill_value': -1
