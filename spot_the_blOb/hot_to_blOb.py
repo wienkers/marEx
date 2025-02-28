@@ -70,18 +70,34 @@ def rechunk_for_cohorts(da, chunksize=100, dim='time'):
     return da
 
 
-def compute_normalised_anomaly(da, std_normalise=False, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def compute_normalised_anomaly(da, std_normalise=False, detrend_orders=[1], 
+                        dask_chunks={'time': 25}, 
+                        dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'},
+                        force_zero_mean=True):
     """
     Standardise data by:
-    1. Removing trend and seasonal cycle using a 6-coefficient model (mean, trend, annual & semi-annual harmonics)
-    2. Dividing by 30-day rolling standard deviation
+    1. Removing trend and seasonal cycle using a model with:
+       - Mean
+       - Polynomial trends of specified orders
+       - Annual & semi-annual harmonics
+    2. Optionally dividing by 30-day rolling standard deviation
     
     Parameters
     ----------
-    sst : xarray.DataArray
+    da : xarray.DataArray
         Input data with dimensions (time, lat, lon)
+    std_normalise : bool, optional
+        Whether to normalize by standard deviation
+    detrend_orders : list, optional
+        List of polynomial orders to use for detrending.
+        Example: [1] for linear only, [1,2] for linear+quadratic,
+        [1,2,3] for linear+quadratic+cubic
     dask_chunks : dict, optional
         Chunking specification for dask arrays
+    dimensions : dict, optional
+        Dictionary mapping dimension names
+    force_zero_mean : bool, optional
+        Whether to explicitly force zero mean in detrended data
         
     Returns
     -------
@@ -99,39 +115,57 @@ def compute_normalised_anomaly(da, std_normalise=False, dask_chunks={'time': 25}
     # Add decimal year coordinate to data array
     da = add_decimal_year(da)
     
-    # Construct model for detrending
-    # 6 coefficient model: mean, trend, annual & semi-annual harmonics
-    model = np.array([
-        np.ones(len(da.decimal_year)),
-        da.decimal_year - np.mean(da.decimal_year),
+    # Start with constant term for the model
+    model_components = [np.ones(len(da.decimal_year))]
+    
+    # Add polynomial trend terms based on detrend_orders
+    centered_time = da.decimal_year - np.mean(da.decimal_year)
+    for order in detrend_orders:
+        model_components.append(centered_time ** order)
+    
+    # Add annual and semi-annual harmonics
+    model_components.extend([
         np.sin(2 * np.pi * da.decimal_year),
         np.cos(2 * np.pi * da.decimal_year),
         np.sin(4 * np.pi * da.decimal_year),
         np.cos(4 * np.pi * da.decimal_year)
     ])
     
+    # Convert to numpy array
+    model = np.array(model_components)
+    
+    # Orthogonalise model components to ensure higher-order terms have 0-mean
+    for i in range(1, model.shape[0]):
+        # Remove projection onto constant term
+        model[i] = model[i] - np.mean(model[i]) * model[0]
+    
     # Take pseudo-inverse of model
     pmodel = np.linalg.pinv(model)
+    
+    # Number of coefficients
+    n_coeffs = len(model_components)
     
     # Convert to xarray DataArrays
     model_da = xr.DataArray(
         model.T, 
         dims=[dimensions['time'],'coeff'], 
-        coords={dimensions['time']: da[dimensions['time']].values, 'coeff': np.arange(1,7,1)}
+        coords={dimensions['time']: da[dimensions['time']].values, 
+                'coeff': np.arange(1, n_coeffs+1)}
     ).chunk({dimensions['time']: da.chunks[0]})
     
     pmodel_da = xr.DataArray(
         pmodel.T,
-        dims=['coeff',dimensions['time']],
-        coords={'coeff': np.arange(1,7,1), dimensions['time']: da[dimensions['time']].values}
+        dims=['coeff', dimensions['time']],
+        coords={'coeff': np.arange(1, n_coeffs+1), 
+                dimensions['time']: da[dimensions['time']].values}
     )
     
     # Calculate model coefficients
     model_fit_da = xr.DataArray(
         pmodel_da.dot(da),
-        dims=['coeff',dimensions['ydim'],dimensions['xdim']],
+        dims=['coeff', dimensions['ydim'], dimensions['xdim']],
         coords={
-            'coeff': np.arange(1,7,1),
+            'coeff': np.arange(1, n_coeffs+1),
             dimensions['ydim']: da[dimensions['ydim']].values,
             dimensions['xdim']: da[dimensions['xdim']].values
         }
@@ -140,17 +174,26 @@ def compute_normalised_anomaly(da, std_normalise=False, dask_chunks={'time': 25}
     # Remove trend and seasonal cycle
     da_detrend = (da - model_da.dot(model_fit_da))
     
+    # Force zero mean if requested
+    if force_zero_mean:
+        da_detrend = da_detrend - da_detrend.mean(dim=dimensions['time'])
+    
     # Rechunk the data
-    da_detrend = da_detrend.chunk({'time':dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
+    da_detrend = da_detrend.chunk({
+        'time': dask_chunks['time'], 
+        dimensions['ydim']: -1, 
+        dimensions['xdim']: -1
+    })
     
     # Create mask from first timestep
-    mask = np.isfinite(da.isel({dimensions['time']:0})).chunk({dimensions['ydim']:-1, dimensions['xdim']:-1}).drop_vars({'decimal_year', 'time'})
-
+    mask = np.isfinite(da.isel({dimensions['time']: 0})).\
+           chunk({dimensions['ydim']: -1, dimensions['xdim']: -1}).\
+           drop_vars({'decimal_year', 'time'})
     
     data_vars = {
         'dat_detrend': da_detrend.drop_vars({'decimal_year'}),
         'mask': mask
-    }    
+    }
     
     ## Standardise Data Anomalies
     #  This step places equal variance on anomaly at all spatial points
@@ -171,31 +214,39 @@ def compute_normalised_anomaly(da, std_normalise=False, dask_chunks={'time': 25}
             (std_day_wrap**2)
             .rolling(dayofyear=30, center=True)
             .mean()
-        ).isel(dayofyear=slice(16,366+16))
+        ).isel(dayofyear=slice(16, 366+16))
         
         # STD Normalised anomalies
         da_stn = da_detrend.groupby(da_detrend[dimensions['time']].dt.dayofyear) / std_rolling
         
         # Rechunk the data
-        da_stn = da_stn.chunk({'time':dask_chunks['time'], dimensions['ydim']:-1, dimensions['xdim']:-1})
-        std_rolling = std_rolling.chunk({'dayofyear':-1, dimensions['ydim']:-1, dimensions['xdim']:-1})
+        da_stn = da_stn.chunk({
+            'time': dask_chunks['time'], 
+            dimensions['ydim']: -1, 
+            dimensions['xdim']: -1
+        })
+        std_rolling = std_rolling.chunk({
+            'dayofyear': -1, 
+            dimensions['ydim']: -1, 
+            dimensions['xdim']: -1
+        })
         
         data_vars['dat_stn'] = da_stn.drop_vars({'dayofyear', 'decimal_year'})
         data_vars['STD'] = std_rolling
-    
-    
-    
     
     return xr.Dataset(
         data_vars=data_vars,
         attrs={
             'description': 'Standardised & Detrended Data',
             'preprocessing_steps': [
-                'Removed trend & seasonal cycle',
-                'Normalise by 30-day rolling STD'
-            ]
+                f'Removed {"polynomial trend orders=" + str(detrend_orders)} & seasonal cycle',
+                'Normalise by 30-day rolling STD' if std_normalise else 'No STD normalization'
+            ],
+            'detrend_orders': detrend_orders,
+            'force_zero_mean': force_zero_mean
         }
     )
+
 
 
 def identify_extremes(da, threshold_percentile=95, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
@@ -230,7 +281,11 @@ def identify_extremes(da, threshold_percentile=95, dask_chunks={'time': 25}, dim
     return extremes
 
 
-def preprocess_data(da, std_normalise=False, threshold_percentile=95, dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+
+def preprocess_data(da, std_normalise=False, threshold_percentile=95, 
+                   detrend_orders=[1], force_zero_mean=True,
+                   dask_chunks={'time': 25}, 
+                   dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Complete preprocessing pipeline from raw Data to extreme event identification.
     
@@ -238,12 +293,18 @@ def preprocess_data(da, std_normalise=False, threshold_percentile=95, dask_chunk
     ----------
     da : xarray.DataArray
         Raw input data
-    std_normalise=True : bool, optional
+    std_normalise : bool, optional
         Additionally compute the Normalised/Standardised (by STD) Anomalies
     threshold_percentile : float, optional
         Percentile threshold for extremes
+    detrend_orders : list, optional
+        List of polynomial orders to use for detrending
+    force_zero_mean : bool, optional
+        Whether to explicitly force zero mean in detrended data
     dask_chunks : dict, optional
         Chunking specification
+    dimensions : dict, optional
+        Dictionary mapping dimension names
         
     Returns
     -------
@@ -252,7 +313,13 @@ def preprocess_data(da, std_normalise=False, threshold_percentile=95, dask_chunk
     """
     
     # Compute Anomalies and Normalise/Standardise
-    ds = compute_normalised_anomaly(da, std_normalise, dask_chunks=dask_chunks, dimensions=dimensions)
+    ds = compute_normalised_anomaly(
+        da, std_normalise, 
+        detrend_orders=detrend_orders,
+        force_zero_mean=force_zero_mean,
+        dask_chunks=dask_chunks, 
+        dimensions=dimensions
+    )
     
     # Identify extreme events:  
     extremes_detrend = identify_extremes(
@@ -274,7 +341,10 @@ def preprocess_data(da, std_normalise=False, threshold_percentile=95, dask_chunk
     
     # Add processing parameters to attributes
     ds.attrs.update({
-        'threshold_percentile': threshold_percentile
+        'threshold_percentile': threshold_percentile,
+        'detrend_orders': detrend_orders,
+        'force_zero_mean': force_zero_mean,
+        'std_normalise': std_normalise
     })
     
     return ds
