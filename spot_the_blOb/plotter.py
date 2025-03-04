@@ -67,12 +67,12 @@ class PlotterAccessor:
         
         data = wrap_lon(self.da, dimensions)
         
-        regular_grid = True
+        regular_grid = False
         
         plot_kwargs = {
             'transform': ccrs.PlateCarree(),
             'cmap': cmap,
-            'interpolation': 'nearest'
+            #'interpolation': 'nearest'
         }
         
         if norm is not None:
