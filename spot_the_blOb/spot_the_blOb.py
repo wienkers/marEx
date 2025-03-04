@@ -41,6 +41,8 @@ class Spotter:
         self.timechunks = data_bin.chunks[data_bin.dims.index(timedim)][0]
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # If Structured, the units are pixels...
+        self.lat = data_bin.lat.persist()
+        self.lon = data_bin.lon.persist()
         
         self.debug      = debug
         self.verbosity  = verbosity
@@ -79,13 +81,21 @@ class Spotter:
         if (T_fill % 2 != 0):
             raise ValueError('Filling time-gaps must be even (for symmetry).')
         
-        if ((data_bin.lon.max().compute().item() - data_bin.lon.min().compute().item()) < 100):
+        if ((self.lon.max().compute().item() - self.lon.min().compute().item()) < 100):
             raise ValueError('Lat/Lon coordinates must be in degrees...')
         
         if unstructured_grid:
             
-            self.cell_area = cell_areas.astype(np.float32).persist()  # In square metres !
+            ## Holding the lat/lon coordinate in every instance causes problems...
+            self.data_bin = self.data_bin.drop_vars({'lat','lon'})
+            self.mask     = self.mask.drop_vars({'lat','lon'})
+            self.lat = self.lat.drop_vars(self.lat.coords)
+            self.lon = self.lon.drop_vars(self.lon.coords)
+            neighbours    = neighbours.drop_vars({'lat','lon', 'nv'})
+            
+            self.cell_area = cell_areas.astype(np.float32).drop_vars({'lat','lon'}).persist()  # In square metres !
             self.mean_cell_area = cell_areas.mean().compute().item()
+            
             
             ## Initialise the dilation array
             self.neighbours_int = neighbours.astype(np.int32) - 1 # Convert to 0-based indexing (negative values will be dropped)
@@ -273,6 +283,10 @@ class Spotter:
             
             print(f"   Total Merging Events Recorded: {blObs_ds.attrs['total_merges']}")
         
+        if self.unstructured_grid:
+            blObs_ds['lat'] = self.lat
+            blObs_ds['lon'] = self.lon
+        
         if self.allow_merging and return_merges:
             return blObs_ds, merges_ds
         else:
@@ -364,24 +378,47 @@ class Spotter:
         
         else: # Structured Grid dask-powered morphological operations
             
+            use_dask_morph = True  ## N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+            
             # Generate Structuring Element
             y, x = np.ogrid[-R_fill:R_fill+1, -R_fill:R_fill+1]
             r = x**2 + y**2
             diameter = 2 * R_fill
             se_kernel = r < (R_fill**2)+1
             
-            # Pad Data
-            data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
-            data_coords = data_bin.coords
-            data_dims   = data_bin.dims
+            if use_dask_morph:
+                
+                # Pad Data
+                data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter, }, mode='wrap')
+                data_coords = data_bin.coords
+                data_dims   = data_bin.dims
+                
+                data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+                data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
+                
+                # Convert back to xarray.DataArray
+                data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
+                data_bin = data_bin.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
+
+            else:
+                
+                def binary_open_close(bitmap_binary):
+                    bitmap_binary_padded = np.pad(bitmap_binary,
+                                                    ((diameter, diameter), (diameter, diameter)),
+                                                    mode='wrap')
+                    s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
+                    s2 = binary_opening(s1, se_kernel, iterations=1)
+                    unpadded= s2[diameter:-diameter, diameter:-diameter]
+                    return unpadded
+
+                data_bin = xr.apply_ufunc(binary_open_close, self.data_bin,
+                                        input_core_dims=[[self.ydim, self.xdim]],
+                                        output_core_dims=[[self.ydim, self.xdim]],
+                                        output_dtypes=[self.data_bin.dtype],
+                                        vectorize=True,
+                                        dask='parallelized')
             
-            data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :])  # N.B.: Need to extract dask.array.Array from xarray.DataArray
-            data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
             
-            # Convert back to xarray.DataArray
-            data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
-            data_bin    = data_bin.isel({self.ydim: slice(diameter, -diameter), self.xdim: slice(diameter, -diameter)})
-        
             # Mask out edge features arising from Morphological Operations
             data_bin = data_bin.where(self.mask, drop=False, other=False)
             
@@ -393,7 +430,7 @@ class Spotter:
         '''Fills temporal gaps. N.B.: We only perform binary closing (i.e. dilation then erosion, to fill small gaps -- we don't want to remove small objects!)
            After filling temporal gaps, we re-fill small spatial gaps with R_fill/2.
         '''
-        
+                
         if (self.T_fill == 0):
             return data_bin
         
@@ -407,21 +444,25 @@ class Spotter:
         
         # Pad in time
         data_bin = data_bin.pad({self.timedim: kernel_size}, mode='constant', constant_values=False)
-        data_coords = data_bin.coords
-        data_dims   = data_bin.dims
-        
-        data_bin = binary_closing_dask(data_bin.data, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
+                
+        data_bin_dask = data_bin.data
+        closed_dask_array = binary_closing_dask(data_bin_dask, structure=time_kernel)  # N.B.: Need to extract dask.array.Array from xarray.DataArray
         
         # Convert back to xarray.DataArray
-        data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
+        data_bin_filled = xr.DataArray(
+            closed_dask_array,
+            coords=data_bin.coords,
+            dims=data_bin.dims,
+            attrs=data_bin.attrs
+        )
         
         # Remove padding
-        data_bin = data_bin.isel({self.timedim: slice(kernel_size, -kernel_size)})
-                
-        # Finally, fill newly-created spatial holes
-        data_bin = self.fill_holes(data_bin, R_fill=self.R_fill//2)
+        data_bin_filled = data_bin_filled.isel({self.timedim: slice(kernel_size, -kernel_size)}).persist()
         
-        return data_bin
+        # Finally, fill newly-created spatial holes
+        data_bin_filled = self.fill_holes(data_bin_filled, R_fill=self.R_fill//2)
+        
+        return data_bin_filled
     
 
     def identify_blobs(self, data_bin, time_connectivity):
@@ -499,7 +540,8 @@ class Spotter:
             blob_id_field, N_blobs = label(data_bin,           # Apply dask-powered ndimage & persist in memory
                                             structure=neighbours, 
                                             wrap_axes=(2,))       # Wrap in x-direction
-            blob_id_field, N_blobs = persist(blob_id_field, N_blobs)
+            results = persist(blob_id_field, N_blobs)
+            blob_id_field, N_blobs = results
             
             N_blobs = N_blobs.compute()
             # DataArray (same shape as data_bin) but with integer IDs for each connected object: 
@@ -594,8 +636,8 @@ class Spotter:
         if self.unstructured_grid: 
             ## Compute only Centroid & Area on the Unstructured Grid
             
-            lat_rad = np.radians(blob_id_field.lat)
-            lon_rad = np.radians(blob_id_field.lon)
+            lat_rad = np.radians(self.lat)
+            lon_rad = np.radians(self.lon)
             
             # Calculate buffer size for IDs in chunks
             max_ID = blob_id_field.max().compute().item()+1
@@ -689,7 +731,8 @@ class Spotter:
                                                 dask_gufunc_kwargs={'output_sizes': {'prop': 3, 'out_id': ID_buffer_size}},
                                                 vectorize=True,
                                                 dask='parallelized')
-                props_buffer, ids_buffer = persist(props_buffer, ids_buffer)
+                results = persist(props_buffer, ids_buffer)
+                props_buffer, ids_buffer = results
                 ids_buffer = ids_buffer.compute().values.reshape(-1)
                 # Get valid IDs (non-zero) and their corresponding properties
                 valid_ids_mask = ids_buffer > 0
@@ -796,7 +839,8 @@ class Spotter:
                                     vectorize=True,
                                     dask='parallelized')
                     
-            cluster_sizes, unique_cluster_IDs = persist(cluster_sizes, unique_cluster_IDs)
+            results = persist(cluster_sizes, unique_cluster_IDs)
+            cluster_sizes, unique_cluster_IDs = results
             
             cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data  # Pre-filter < 50 cells
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
@@ -1435,8 +1479,8 @@ class Spotter:
                             child_ids,
                             parent_centroids,
                             self.neighbours_int.values,
-                            blob_id_field_unique.lat.values,  # Need to pass these as NumPy arrays for JIT compatibility
-                            blob_id_field_unique.lon.values,
+                            self.lat.values,  # Need to pass these as NumPy arrays for JIT compatibility
+                            self.lon.values,
                             max_distance=max(max_distance, 20)*2  # Set minimum threshold, in cells
                         )
                     else:
@@ -1456,8 +1500,8 @@ class Spotter:
                             child_mask_2d,
                             parent_centroids,
                             child_ids,
-                            blob_id_field_unique.lat.values,
-                            blob_id_field_unique.lon.values
+                            self.lat.values,
+                            self.lon.values
                         )                      
                     else:
                         distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)  # **Deals with wrapping**
@@ -1957,9 +2001,9 @@ class Spotter:
                                  blob_id_field_unique_p1,
                                  merging_blobs_da,
                                  next_id_offsets_da,
-                                 blob_id_field_unique_p1.lat.astype(np.float32),
-                                 blob_id_field_unique_p1.lon.astype(np.float32),
-                                 self.cell_area.astype(np.float32),
+                                 self.lat,
+                                 self.lon,
+                                 self.cell_area,
                                  neighbours_int,
                                  input_core_dims=[[self.xdim], [self.xdim], ['merges'], [], [self.xdim], [self.xdim], [self.xdim], ['nv', self.xdim]],
                                  output_core_dims=[['merge', 'parent'], ['merge', 'parent'], 
@@ -1979,11 +2023,12 @@ class Spotter:
             (merge_child_ids, merge_parent_ids, merge_areas, merge_counts,
                 has_merge, updates_array, updates_ids, final_merging_blobs) = results
             
-            merge_child_ids, merge_parent_ids, merge_areas, merge_counts, \
-                has_merge, updates_array, updates_ids, final_merging_blobs = persist(
-                    merge_child_ids, merge_parent_ids, merge_areas, merge_counts,
-                    has_merge, updates_array, updates_ids, final_merging_blobs
+            results = persist(merge_child_ids, merge_parent_ids, merge_areas, merge_counts,
+                              has_merge, updates_array, updates_ids, final_merging_blobs
                 )
+            (merge_child_ids, merge_parent_ids, merge_areas, merge_counts, 
+                has_merge, updates_array, updates_ids, final_merging_blobs) = results
+            
             
             has_merge = has_merge.compute()
             time_indices = np.where(has_merge)[0]
@@ -2145,7 +2190,7 @@ class Spotter:
         # Create arrays for merge events
         parent_ids_array = np.full((len(global_parent_ids), max_parents), -1, dtype=np.int32)
         child_ids_array = np.full((len(global_child_ids), max_children), -1, dtype=np.int32)
-        overlap_areas_array = np.full((len(merged_areas), max_parents), 
+        overlap_areas_array = np.full((len(global_merge_areas), max_parents), 
                                     -1, dtype=np.float32 if self.unstructured_grid else np.int32)
         
         
@@ -2155,9 +2200,8 @@ class Spotter:
         for i, children in enumerate(global_child_ids):
             child_ids_array[i, :len(children)] = children
 
-        for i, areas in enumerate(merged_areas):
+        for i, areas in enumerate(global_merge_areas):
             overlap_areas_array[i, :len(areas)] = areas
-        del merged_areas
         
         merge_events = xr.Dataset(
             {
@@ -2224,7 +2268,8 @@ class Spotter:
         if self.verbosity > 0:    print('Finished Splitting and Merging Blobs.')
         
         # Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
-        blob_id_field, blob_props, blobs_list, merge_events = persist(blob_id_field, blob_props, blobs_list, merge_events)
+        results = persist(blob_id_field, blob_props, blobs_list, merge_events)
+        blob_id_field, blob_props, blobs_list, merge_events = results
 
         # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(blob_id_field, blob_props, blobs_list, merge_events)
