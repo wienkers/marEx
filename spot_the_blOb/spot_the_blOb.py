@@ -9,13 +9,10 @@ from scipy.ndimage import binary_closing, binary_opening
 from scipy.sparse import coo_matrix, csr_matrix, eye
 from scipy.sparse.csgraph import connected_components
 from dask import persist
-from dask import delayed
-from dask import compute as dask_compute
 import dask.array as dsa
 from dask.base import is_dask_collection
 from numba import jit, njit, prange
 import jax.numpy as jnp
-from collections import defaultdict
 import warnings
 import logging
 import os, shutil
@@ -295,8 +292,9 @@ class Spotter:
             print(f"   Total Merging Events Recorded: {blObs_ds.attrs['total_merges']}")
         
         if self.unstructured_grid:
-            blObs_ds['lat'] = self.lat
-            blObs_ds['lon'] = self.lon
+            # Add lat & lon back as coordinates
+            blObs_ds = blObs_ds.assign_coords(lat=self.lat.compute(), lon=self.lon.compute())
+            blObs_ds = blObs_ds.chunk({self.timedim: 1}) # Rechunk to size 1:  This fixes tuple bug in dask (after we inject particular chunks), but also this makes generally better-sized chunks for post-processing
         
         if self.allow_merging and return_merges:
             return blObs_ds, merges_ds
@@ -2075,7 +2073,7 @@ class Spotter:
             # 1:  Collect all temporary IDs and create global mapping
             all_temp_ids = np.unique(merge_child_ids.where(merge_child_ids >= global_id_counter, other=0).compute().values)
             all_temp_ids = all_temp_ids[all_temp_ids>0] # Remove the 0...
-            if not all_temp_ids.size:  # If no temporary IDs exist
+            if not len(all_temp_ids):  # If no temporary IDs exist
                 id_lookup = {}
             else:            
                 id_lookup = {temp_id: np.int32(new_id) for temp_id, new_id in zip(
@@ -2204,7 +2202,7 @@ class Spotter:
             if not iteration % 3 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
                 blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
             else:
-                blob_id_field_unique = blob_id_field_new #.persist()
+                blob_id_field_unique = blob_id_field_new
             del blob_id_field_new
         
         
