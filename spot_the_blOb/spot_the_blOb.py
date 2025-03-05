@@ -279,6 +279,7 @@ class Spotter:
         print(f'   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}')
         print(f'   Accepted Area Fraction: {accepted_area_fraction}')
         print(f'   Total Blobs Tracked: {N_blobs_final}')
+        print('\n\n')
         
         if self.allow_merging:
             
@@ -1949,7 +1950,7 @@ class Spotter:
                 return result
             
                         
-            # Convert lookup dict to array for vectorized access
+            # Convert lookup dict to array for vectorised access
             max_id = max(id_lookup.keys()) + 1
             lookup_array = np.full(max_id, -1, dtype=np.int32)
             for temp_id, new_id in id_lookup.items():
@@ -1976,6 +1977,116 @@ class Spotter:
             #result = result.persist(optimize_graph=True)
             
             return result
+        
+        
+        def update_blob_field_zarr(blob_id_field, id_lookup, updates_array, updates_ids, has_merge):
+            """Update the blob field with chunk results directly into temporary zarr store.
+            
+            Parameters
+            ----------
+            blob_id_field : xarray.DataArray
+                The full blob field to update
+            id_lookup : Dictionary
+                Dictionary mapping temporary IDs to new IDs
+            updates : xarray.DataArray
+                DataArray of Dictionaries containing updates: 'spatial_indices' for each 'new_label'
+            
+            Returns
+            -------
+            xarray.DataArray
+                Updated blob field
+            """
+            
+            if not has_merge.any():  # If no merges -- then id_lookup is empty too
+                return blob_id_field
+            
+            if not os.path.exists(self.scratch_dir+'/temp_field.zarr/'): # If we haven't written it before, then we need to write everything
+                blob_id_field.name = 'temp'
+                blob_id_field.to_zarr(self.scratch_dir+'/temp_field.zarr/', mode='w')
+            
+            
+            def update_timechunk(ds_chunk, lookup_dict):
+                """Process a single chunk of time data and write directly to zarr."""
+                # Extract arrays from the dataset
+                chunk_data = ds_chunk['blob_field']
+                chunk_updates = ds_chunk['updates']
+                chunk_update_ids = ds_chunk['update_ids']
+                chunk_has_merge = ds_chunk['has_merge']
+                
+                # Get integer indices for zarr region
+                time_idx_start = ds_chunk['time_indices'].values[0]
+                time_idx_end = ds_chunk['time_indices'].values[-1] + 1  # +1 because slice end is exclusive
+                
+                # Skip processing if no merges in this chunk
+                if not chunk_has_merge.any():
+                    return chunk_data
+                
+                # Make a copy of the chunk data to modify
+                updated_chunk = chunk_data.copy()
+                
+                # Directly process each time slice in the chunk
+                for t in range(chunk_data.sizes[self.timedim]):
+                    # Skip if no merges at this time
+                    if not chunk_has_merge.values[t]:
+                        continue
+                        
+                    # Get data for this time slice
+                    result_slice = updated_chunk.isel({self.timedim: t}).values
+                    updates_slice = chunk_updates.isel({self.timedim: t}).values
+                    update_ids_slice = chunk_update_ids.isel({self.timedim: t}).values
+                    
+                    # Get valid update IDs
+                    valid_ids_slice = update_ids_slice[update_ids_slice > -1]
+                    if len(valid_ids_slice) == 0:
+                        continue
+                    
+                    # Process each valid ID
+                    for idx, update_id in enumerate(valid_ids_slice):
+                        mask = updates_slice == idx
+                        
+                        if mask.any():
+                            new_id = lookup_dict.get(int(update_id), update_id)
+                            result_slice[mask] = new_id
+                    
+                    updated_chunk[{self.timedim: t}] = result_slice
+                
+                # Write updated chunk directly to zarr
+                updated_chunk.name = 'temp'
+                updated_chunk.to_zarr(self.scratch_dir+'/temp_field.zarr/', 
+                                    region={self.timedim: slice(time_idx_start, time_idx_end)})
+                
+                return chunk_data  # Return original for dask graph consistency
+            
+            # Create time indices for each coordinate (integer positions)
+            time_coords = blob_id_field[self.timedim].values
+            time_indices = np.arange(len(time_coords))
+            
+            # Add time indices as a coordinate
+            time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timedim: time_coords})
+            
+            
+            ds = xr.Dataset({
+                'blob_field': blob_id_field,
+                'updates': updates_array,
+                'update_ids': updates_ids.rename({'update_idx': 'update_dim'}),
+                'has_merge': has_merge,
+                'time_indices': time_index_da
+            })
+            
+            # Process all chunks in parallel
+            _ = xr.map_blocks(
+                update_timechunk,
+                ds,
+                kwargs={"lookup_dict": id_lookup},
+                template=blob_id_field
+            )
+            
+            # Force computation to ensure all writes complete
+            _ = _.persist()
+            wait(_)
+            
+            # Load and return the updated data from zarr
+            return xr.open_zarr(self.scratch_dir+'/temp_field.zarr/', chunks={}).temp
         
         
         def merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter):
@@ -2085,8 +2196,9 @@ class Spotter:
             if self.verbosity > 1:    print('  Finished Consolidation Step 1: Temporary ID Mapping')
             
             # 2:  Update Field with new IDs
-            blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
-            blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: self.timechunks}) # Rechunk to avoid accumulating chunks...
+            #blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
+            #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: self.timechunks}) # Rechunk to avoid accumulating chunks...
+            blob_id_field_unique = update_blob_field_zarr(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
             del updates_array, updates_ids
             gc.collect()
             if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
@@ -2199,10 +2311,10 @@ class Spotter:
             processed_chunks.update(new_merging_blobs)
             iteration += 1
             
-            if not iteration % 3 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
-                blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
-            else:
-                blob_id_field_unique = blob_id_field_new
+            # if not iteration % 3 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
+                # blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
+            # else:
+            blob_id_field_unique = blob_id_field_new
             del blob_id_field_new
         
         
@@ -2280,7 +2392,8 @@ class Spotter:
             # Make the blob_id_field unique across time
             cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
             blob_id_field = xr.where(blob_id_field > 0, blob_id_field + cumsum_ids, 0)
-            blob_id_field = blob_id_field.persist()
+            #blob_id_field = blob_id_field.persist()
+            blob_id_field = self.refresh_dask_graph(blob_id_field)
             if self.verbosity > 0:    print('Finished Making Blobs Globally Unique.')
         
         # Calculate Properties of each Blob
