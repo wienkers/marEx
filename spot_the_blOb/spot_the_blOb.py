@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from collections import defaultdict
 import warnings
 import logging
+import os, shutil
 import gc
 
 class Spotter:
@@ -25,7 +26,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0, verbosity=0):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0, verbosity=0):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -85,6 +86,14 @@ class Spotter:
             raise ValueError('Lat/Lon coordinates must be in degrees...')
         
         if unstructured_grid:
+            
+            if not temp_dir:
+                raise ValueError('Unstructured grid requires a temporary directory for memory-efficient processing.')
+            self.scratch_dir = temp_dir
+            
+            # Clear the temporary zarr store
+            if os.path.exists(self.scratch_dir+'/temp_field.zarr/'):
+                shutil.rmtree(self.scratch_dir+'/temp_field.zarr/')
             
             ## Holding the lat/lon coordinate in every instance causes problems...
             self.data_bin = self.data_bin.drop_vars({'lat','lon'})
@@ -240,6 +249,8 @@ class Spotter:
             
         if self.verbosity > 0:    print('Finished Tracking All Blobs ! \n\n')
         
+        # Set all filler IDs < 0 to 0
+        blObs_ds['ID_field'] = blObs_ds.ID_field.where(blObs_ds.ID_field > 0, drop=False, other=0)
         
         ## Save Some BlObby Stats
         blob_areas = blob_areas.compute()
@@ -463,6 +474,22 @@ class Spotter:
         data_bin_filled = self.fill_holes(data_bin_filled, R_fill=self.R_fill//2)
         
         return data_bin_filled
+    
+    
+    def refresh_dask_graph(self, data_bin):
+        '''Clear & Reset the Dask Graph
+           N.B.: There is a bug in dask where "Unmanaged Memory" build up within a while loop.
+           Therefore, we must save & re-load this data...'''
+           
+        if self.verbosity > 1:    print('  Refreshing Dask Task Graph...')
+        
+        data_bin.name = 'temp'
+        data_bin.to_zarr(self.scratch_dir+'/temp_field.zarr', mode='w')
+        del data_bin
+        gc.collect()
+        
+        data_new = xr.open_zarr(self.scratch_dir+'/temp_field.zarr', chunks={}).temp
+        return data_new
     
 
     def identify_blobs(self, data_bin, time_connectivity):
@@ -1901,6 +1928,10 @@ class Spotter:
                 Updated blob field
             """
             
+            if not has_merge.any():  # If no merges -- then id_lookup is empty too
+                return blob_id_field
+            
+            
             def update_timeslice(data, updates, update_ids, lookup_values):
                 """Process a single timeslice."""
                 # Extract valid update IDs
@@ -1944,7 +1975,7 @@ class Spotter:
             #result = xr.where(has_merge, result, blob_id_field)
             #del blob_id_field
             
-            result = result.persist(optimize_graph=True)
+            #result = result.persist(optimize_graph=True)
             
             return result
         
@@ -2141,11 +2172,6 @@ class Spotter:
         while merging_blobs and iteration < max_iterations:
             
             blob_id_field_new, merge_data_iter, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
-            del blob_id_field_unique
-            blob_id_field_unique = blob_id_field_new.persist(optimize_graph=True)
-            del blob_id_field_new
-            gc.collect()
-            
             child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
             
             # Merge all_merge_events_chunk into all_merge_events
@@ -2170,11 +2196,16 @@ class Spotter:
                             global_merge_areas.append(areas)
                             global_merge_tidx.append(t)
             
-            
             # Prepare for next iteration
             merging_blobs = new_merging_blobs - processed_chunks
             processed_chunks.update(new_merging_blobs)
             iteration += 1
+            
+            if not iteration % 3 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
+                blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
+            else:
+                blob_id_field_unique = blob_id_field_new #.persist()
+            del blob_id_field_new
         
         
         if iteration == max_iterations:
