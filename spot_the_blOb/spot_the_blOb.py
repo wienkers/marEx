@@ -23,7 +23,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, debug=0, verbosity=0):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, checkpoint='None', debug=0, verbosity=0):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -41,6 +41,7 @@ class Spotter:
         self.mean_cell_area = 1.0  # If Structured, the units are pixels...
         self.lat = data_bin.lat.persist()
         self.lon = data_bin.lon.persist()
+        self.checkpoint = checkpoint
         
         self.debug      = debug
         self.verbosity  = verbosity
@@ -211,6 +212,37 @@ class Spotter:
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
+        ## Run Binary Pre-Processing (Requires Many Workers)
+        data_bin_preprocessed, blob_stats = self.run_preprocess()
+        
+        ## Run ID & Tracking Algorithm (Requires Lots of Memory)
+        blObs_ds, merges_ds, N_blobs_final = self.run_tracking(data_bin_preprocessed)
+        
+        ## Output Statistics & Save
+        blObs_ds = self.run_stats_attributes(blObs_ds, merges_ds, blob_stats, N_blobs_final)
+        
+        
+        if self.allow_merging and return_merges:
+            return blObs_ds, merges_ds
+        else:
+            return blObs_ds
+        
+        
+    
+    def run_preprocess(self, checkpoint=None):
+        
+        if not checkpoint:
+            checkpoint = self.checkpoint
+        
+        if checkpoint == 'load':
+            
+            print('Loading Preprocessed Data & Stats...')
+            data_bin_preprocessed = xr.open_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', chunks={self.timedim: self.timechunks})['data_bin_preproc']
+            blob_stats_npz = np.load(self.scratch_dir+'/checkpoint_stats.npz')
+            blob_stats = [blob_stats_npz[key] for key in ['total_area_IDed', 'N_blobs_prefiltered', 'area_threshold', 
+                                                          'accepted_area_fraction', 'preprocessed_area_fraction']]
+            return data_bin_preprocessed, blob_stats
+        
         
         # Compute Area of Initial Binary Data
         raw_area = self.compute_area(self.data_bin)  # This is e.g. the initial Hobday area
@@ -223,12 +255,12 @@ class Spotter:
 
         # Fill Small Time-Gaps between Objects
         data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
-        if self.verbosity > 0:    print('Finished Filling Spatio-temporal Holes.')
+        if self.verbosity > 0:    print('Finished Filling Spatio-temporal Holes')
         
         # Remove Small Objects
         data_bin_filtered, area_threshold, blob_areas, N_blobs_prefiltered = self.filter_small_blobs(data_bin_filled)
         del data_bin_filled
-        if self.verbosity > 0:    print('Finished Filtering Small Blobs.')
+        if self.verbosity > 0:    print('Finished Filtering Small Blobs')
         
         # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
         data_bin_filtered = data_bin_filtered.persist()
@@ -236,20 +268,10 @@ class Spotter:
                 
         # Compute Area of Morphologically-Processed & Filtered Data
         processed_area = self.compute_area(data_bin_filtered)
+
         
-        if self.allow_merging or self.unstructured_grid:
-            # Track Blobs _with_ Merging & Splitting
-            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_filtered)
-        else: 
-            # Track Blobs without any special Merging or Splitting
-            blObs_ds, N_blobs_final = self.identify_blobs(data_bin_filtered, time_connectivity=True)
-            
-        if self.verbosity > 0:    print('Finished Tracking All Blobs ! \n\n')
+        ## Compute Stats
         
-        # Set all filler IDs < 0 to 0
-        blObs_ds['ID_field'] = blObs_ds.ID_field.where(blObs_ds.ID_field > 0, drop=False, other=0)
-        
-        ## Save Some BlObby Stats
         blob_areas = blob_areas.compute()
         total_area_IDed = blob_areas.sum().item()
 
@@ -259,6 +281,36 @@ class Spotter:
         total_hobday_area = raw_area.sum().compute().item()
         total_processed_area = processed_area.sum().compute().item()
         preprocessed_area_fraction = total_hobday_area / total_processed_area
+        
+        if checkpoint == 'save':
+            print('Saving Preprocessed Data & Stats...')
+            data_bin_filtered.name = 'data_bin_preproc'
+            data_bin_filtered.to_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', mode='w')
+            np.savez(self.scratch_dir+'/checkpoint_stats.npz', total_area_IDed=total_area_IDed, N_blobs_prefiltered=N_blobs_prefiltered, area_threshold=area_threshold, accepted_area_fraction=accepted_area_fraction, preprocessed_area_fraction=preprocessed_area_fraction)
+        
+        return data_bin_filtered, (total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction)
+    
+    
+    def run_tracking(self, data_bin_preprocessed):
+        
+        if self.allow_merging or self.unstructured_grid:
+            # Track Blobs _with_ Merging & Splitting
+            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_preprocessed)
+        else: 
+            # Track Blobs without any special Merging or Splitting
+            blObs_ds, merges_ds, N_blobs_final = self.identify_blobs(data_bin_preprocessed, time_connectivity=True)
+        
+        # Set all filler IDs < 0 to 0
+        blObs_ds['ID_field'] = blObs_ds.ID_field.where(blObs_ds.ID_field > 0, drop=False, other=0)
+        
+        if self.verbosity > 0:    print('Finished Tracking All Blobs ! \n\n')
+        
+        return blObs_ds, merges_ds, N_blobs_final
+    
+    
+    def run_stats_attributes(self, blObs_ds, merges_ds, blob_stats, N_blobs_final):
+        
+        total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction = blob_stats
 
         blObs_ds.attrs['allow_merging'] = int(self.allow_merging)
         blObs_ds.attrs['N_blobs_prefiltered'] = int(N_blobs_prefiltered)
@@ -270,8 +322,6 @@ class Spotter:
         blObs_ds.attrs['accepted_area_fraction'] = accepted_area_fraction
         blObs_ds.attrs['preprocessed_area_fraction'] = preprocessed_area_fraction
         
-
-        ## Print Some BlObby Stats
         print('Tracking Statistics:')
         print(f'   Binary Hobday to Processed Area Fraction: {preprocessed_area_fraction}')
         print(f'   Total Object Area IDed (cells): {total_area_IDed}')
@@ -297,10 +347,7 @@ class Spotter:
             blObs_ds = blObs_ds.assign_coords(lat=self.lat.compute(), lon=self.lon.compute())
             blObs_ds = blObs_ds.chunk({self.timedim: 1}) # Rechunk to size 1:  This fixes tuple bug in dask (after we inject particular chunks), but also this makes generally better-sized chunks for post-processing
         
-        if self.allow_merging and return_merges:
-            return blObs_ds, merges_ds
-        else:
-            return blObs_ds
+        return blObs_ds
     
     
     def compute_area(self, data_bin):
@@ -573,7 +620,7 @@ class Spotter:
             # DataArray (same shape as data_bin) but with integer IDs for each connected object: 
             blob_id_field = xr.DataArray(blob_id_field, coords=data_bin.coords, dims=data_bin.dims, attrs=data_bin.attrs).rename('ID_field').astype(np.int32)
         
-        return blob_id_field, N_blobs
+        return blob_id_field, None, N_blobs
     
     
     def calculate_centroid(self, binary_mask, original_centroid=None):
@@ -628,7 +675,6 @@ class Spotter:
         
         # N.B.: Returns original centroid if not touching both edges
         return (y_centroid, x_centroid)
-        
     
     def calculate_blob_properties(self, blob_id_field, properties=None):
         '''
@@ -760,16 +806,34 @@ class Spotter:
                 results = persist(props_buffer, ids_buffer)
                 props_buffer, ids_buffer = results
                 ids_buffer = ids_buffer.compute().values.reshape(-1)
+                
                 # Get valid IDs (non-zero) and their corresponding properties
                 valid_ids_mask = ids_buffer > 0
-                ids = ids_buffer[valid_ids_mask]
-                props = props_buffer.stack(combined=('time', 'out_id')).isel(combined=valid_ids_mask)
+                
+                # Check if we have any valid IDs before stacking
+                if np.any(valid_ids_mask):
+                    ids = ids_buffer[valid_ids_mask]
+                    props = props_buffer.stack(combined=('time', 'out_id')).isel(combined=valid_ids_mask)
+                else:
+                    # No valid IDs found, create empty arrays
+                    ids = np.array([], dtype=np.int32)
+                    props = xr.DataArray(np.zeros((3, 0), dtype=np.float32), dims=['prop', 'out_id'])
 
-            blob_props = xr.Dataset({'area': ('out_id', props.isel(prop=0).data),
-                                    'centroid-0': ('out_id', props.isel(prop=1).data),
-                                    'centroid-1': ('out_id', props.isel(prop=2).data)},
-                                    coords={'ID': ('out_id', ids)}
-                                ).set_index(out_id='ID').rename({'out_id': 'ID'})
+            # Create the blob properties dataset
+            if len(ids) > 0:
+                blob_props = xr.Dataset({'area': ('out_id', props.isel(prop=0).data),
+                                        'centroid-0': ('out_id', props.isel(prop=1).data),
+                                        'centroid-1': ('out_id', props.isel(prop=2).data)},
+                                        coords={'ID': ('out_id', ids)}
+                                    ).set_index(out_id='ID').rename({'out_id': 'ID'})
+            else:
+                # Create an empty dataset with the correct structure
+                blob_props = xr.Dataset(
+                    {'area': ('ID', []), 
+                    'centroid-0': ('ID', []), 
+                    'centroid-1': ('ID', [])},
+                    coords={'ID': []}
+                )
             
         
         else: # Structured Grid
@@ -823,23 +887,19 @@ class Spotter:
             blob_props = blob_props.set_index(ID='label')
         
         
-        # if blob_props.ID.size == 0:
-        #     raise ValueError(f'No objects were detected.')
-        
-        
         # Combine centroid-0 and centroid-1 into a single centroid variable
-        if 'centroid' in properties:
+        if 'centroid' in properties and len(blob_props.ID) > 0:
             blob_props['centroid'] = xr.concat([blob_props['centroid-0'], blob_props['centroid-1']], dim='component')
             blob_props = blob_props.drop_vars(['centroid-0', 'centroid-1'])
         
-        return blob_props
+        return blob_props   
     
 
     def filter_small_blobs(self, data_bin):
         '''Filters out smallest ojects in the binary data.'''
         
         # Cluster & Label Binary Data: Time-independent in 2D (i.e. no time connectivity!)
-        blob_id_field, N_blobs = self.identify_blobs(data_bin, time_connectivity=False)
+        blob_id_field, _, N_blobs = self.identify_blobs(data_bin, time_connectivity=False)
         
         
         if self.unstructured_grid:
@@ -1380,7 +1440,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
+        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs')
         
         
         #################################
@@ -1978,115 +2038,109 @@ class Spotter:
             
             return result
         
-        
         def update_blob_field_zarr(blob_id_field, id_lookup, updates_array, updates_ids, has_merge):
             """Update the blob field with chunk results directly into temporary zarr store.
-            
-            Parameters
-            ----------
-            blob_id_field : xarray.DataArray
-                The full blob field to update
-            id_lookup : Dictionary
-                Dictionary mapping temporary IDs to new IDs
-            updates : xarray.DataArray
-                DataArray of Dictionaries containing updates: 'spatial_indices' for each 'new_label'
-            
-            Returns
-            -------
-            xarray.DataArray
-                Updated blob field
+            Memory-optimized version for efficiently processing chunks with merges in parallel.
             """
             
-            if not has_merge.any():  # If no merges -- then id_lookup is empty too
+            # Early return if no merges to save memory
+            if not has_merge.any().compute().item():
                 return blob_id_field
             
-            if not os.path.exists(self.scratch_dir+'/temp_field.zarr/'): # If we haven't written it before, then we need to write everything
+            zarr_path = self.scratch_dir+'/temp_field.zarr/'
+            
+            # Initialise zarr store if needed
+            if not os.path.exists(zarr_path):
                 blob_id_field.name = 'temp'
-                blob_id_field.to_zarr(self.scratch_dir+'/temp_field.zarr/', mode='w')
+                blob_id_field.to_zarr(zarr_path, mode='w')
             
             
-            def update_timechunk(ds_chunk, lookup_dict):
-                """Process a single chunk of time data and write directly to zarr."""
+            def update_time_chunk(ds_chunk, lookup_dict):
+                """Process a single chunk with optimised memory usage."""
+                
+                # Check if we make a quick exit:
+                needs_update = ds_chunk['has_merge'].any().compute().item()
+                if not needs_update:
+                    return ds_chunk['blob_field']
+                
                 # Extract arrays from the dataset
                 chunk_data = ds_chunk['blob_field']
                 chunk_updates = ds_chunk['updates']
                 chunk_update_ids = ds_chunk['update_ids']
-                chunk_has_merge = ds_chunk['has_merge']
                 
                 # Get integer indices for zarr region
-                time_idx_start = ds_chunk['time_indices'].values[0]
-                time_idx_end = ds_chunk['time_indices'].values[-1] + 1  # +1 because slice end is exclusive
+                time_idx_start = int(ds_chunk['time_indices'].values[0])
+                time_idx_end = int(ds_chunk['time_indices'].values[-1]) + 1
                 
-                # Skip processing if no merges in this chunk
-                if not chunk_has_merge.any():
-                    return chunk_data
-                
-                # Make a copy of the chunk data to modify
                 updated_chunk = chunk_data.copy()
                 
-                # Directly process each time slice in the chunk
+                # Process each time slice in the chunk
                 for t in range(chunk_data.sizes[self.timedim]):
-                    # Skip if no merges at this time
-                    if not chunk_has_merge.values[t]:
-                        continue
-                        
-                    # Get data for this time slice
-                    result_slice = updated_chunk.isel({self.timedim: t}).values
+                    # Get update information
                     updates_slice = chunk_updates.isel({self.timedim: t}).values
                     update_ids_slice = chunk_update_ids.isel({self.timedim: t}).values
                     
                     # Get valid update IDs
-                    valid_ids_slice = update_ids_slice[update_ids_slice > -1]
-                    if len(valid_ids_slice) == 0:
+                    valid_mask = update_ids_slice > -1
+                    if not np.any(valid_mask):
                         continue
-                    
-                    # Process each valid ID
-                    for idx, update_id in enumerate(valid_ids_slice):
-                        mask = updates_slice == idx
                         
-                        if mask.any():
-                            new_id = lookup_dict.get(int(update_id), update_id)
-                            result_slice[mask] = new_id
+                    valid_ids = update_ids_slice[valid_mask]
                     
-                    updated_chunk[{self.timedim: t}] = result_slice
+                    # Get the time slice data (view, not copy)
+                    result_slice = updated_chunk.isel({self.timedim: t})
+                    
+                    # Apply updates with optimized numpy operations
+                    for idx, update_id in enumerate(valid_ids):
+                        mask = updates_slice == idx
+                        if np.any(mask):
+                            new_id = lookup_dict.get(int(update_id), update_id)
+                            #result_slice[mask] = new_id
+                            result_slice = xr.where(mask, new_id, result_slice)
+                    
+                    # Put back into the updated chunk
+                    updated_chunk[t] = result_slice
                 
-                # Write updated chunk directly to zarr
+                # Write the updated chunk directly to zarr
                 updated_chunk.name = 'temp'
-                updated_chunk.to_zarr(self.scratch_dir+'/temp_field.zarr/', 
+                updated_chunk.to_zarr(zarr_path, 
                                     region={self.timedim: slice(time_idx_start, time_idx_end)})
                 
-                return chunk_data  # Return original for dask graph consistency
+                return chunk_data  # Return original data for dask graph consistency
             
-            # Create time indices for each coordinate (integer positions)
+            # Create time indices for each coordinate
             time_coords = blob_id_field[self.timedim].values
             time_indices = np.arange(len(time_coords))
-            
-            # Add time indices as a coordinate
             time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timedim: time_coords})
             
-            
+            # Create dataset with all necessary components
             ds = xr.Dataset({
                 'blob_field': blob_id_field,
                 'updates': updates_array,
-                'update_ids': updates_ids.rename({'update_idx': 'update_dim'}),
-                'has_merge': has_merge,
-                'time_indices': time_index_da
-            })
+                'update_ids': updates_ids,
+                'time_indices': time_index_da,
+                'has_merge': has_merge
+            }).chunk({self.timedim: self.timechunks})
             
-            # Process all chunks in parallel
-            _ = xr.map_blocks(
-                update_timechunk,
+            # Process chunks in parallel
+            result = xr.map_blocks(
+                update_time_chunk,
                 ds,
                 kwargs={"lookup_dict": id_lookup},
                 template=blob_id_field
             )
             
             # Force computation to ensure all writes complete
-            _ = _.persist()
-            wait(_)
+            result = result.persist()
+            wait(result)
             
-            # Load and return the updated data from zarr
-            return xr.open_zarr(self.scratch_dir+'/temp_field.zarr/', chunks={}).temp
+            # Release resources
+            del result, ds, blob_id_field
+            gc.collect()
+            
+            blob_id_field_new = xr.open_zarr(zarr_path, chunks={self.timedim: self.timechunks}).temp
+            
+            return blob_id_field_new
         
         
         def merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter):
@@ -2105,7 +2159,7 @@ class Spotter:
             
             # Pre-compute the child_time_idx for merging_blobs
             time_index_map = self.compute_id_time_dict(blob_id_field_unique, list(merging_blobs), global_id_counter)
-            if self.verbosity > 1:    print('  Finished Mapping Children to Time Indices.')
+            if self.verbosity > 1:    print('  Finished Mapping Children to Time Indices')
             
             # Create the uniform merging blobs array
             max_merges = max(len([b for b in merging_blobs if time_index_map.get(b, -1) == t]) for t in range(n_time))
@@ -2176,7 +2230,7 @@ class Spotter:
             # Clean up temporary arrays
             del blob_id_field_unique_p1, blob_id_field_unique_m1, merging_blobs_da, next_id_offsets_da
             gc.collect()
-            if self.verbosity > 1:    print('  Finished Batch Processing Step.')
+            if self.verbosity > 1:    print('  Finished Batch Processing Step')
             
             
             ### Global Consolidatation of Data ###
@@ -2201,7 +2255,7 @@ class Spotter:
             blob_id_field_unique = update_blob_field_zarr(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
             del updates_array, updates_ids
             gc.collect()
-            if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update.')
+            if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update')
             
             # 3:  Update Merge Events
             new_merging_blobs = set()
@@ -2237,7 +2291,7 @@ class Spotter:
             mapped_final_blobs = [id_lookup.get(id_, id_) for id_ in final_merging_blobs]
             new_merging_blobs.update(mapped_final_blobs)
             
-            if self.verbosity > 1:    print('  Finished Consolidation Step 3: Merge List Dictionary Consolidation.')
+            if self.verbosity > 1:    print('  Finished Consolidation Step 3: Merge List Dictionary Consolidation')
             
             
             # Clean up memory
@@ -2260,7 +2314,7 @@ class Spotter:
         
         # Compile List of Overlapping Blob ID Pairs Across Time
         overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs.')
+        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs')
         
         # Find initial merging blobs
         unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
@@ -2311,9 +2365,9 @@ class Spotter:
             processed_chunks.update(new_merging_blobs)
             iteration += 1
             
-            # if not iteration % 3 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
-                # blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
-            # else:
+            #if not iteration % 2 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
+            #    blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
+            #else:
             blob_id_field_unique = blob_id_field_new
             del blob_id_field_new
         
@@ -2383,10 +2437,10 @@ class Spotter:
         '''
         
         # Cluster & ID Binary Data at each Time Step
-        blob_id_field, _ = self.identify_blobs(data_bin, time_connectivity=False)
+        blob_id_field, _, _ = self.identify_blobs(data_bin, time_connectivity=False)
         blob_id_field = blob_id_field.persist()
         del data_bin
-        if self.verbosity > 0:    print('Finished Blob Identification.')
+        if self.verbosity > 0:    print('Finished Blob Identification')
         
         if self.unstructured_grid:
             # Make the blob_id_field unique across time
@@ -2394,20 +2448,20 @@ class Spotter:
             blob_id_field = xr.where(blob_id_field > 0, blob_id_field + cumsum_ids, 0)
             #blob_id_field = blob_id_field.persist()
             blob_id_field = self.refresh_dask_graph(blob_id_field)
-            if self.verbosity > 0:    print('Finished Making Blobs Globally Unique.')
+            if self.verbosity > 0:    print('Finished Making Blobs Globally Unique')
         
         # Calculate Properties of each Blob
         blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
         blob_props = blob_props.persist()
         wait(blob_props)
-        if self.verbosity > 0:    print('Finished Calculating Blob Properties.')
+        if self.verbosity > 0:    print('Finished Calculating Blob Properties')
         
         # Apply Splitting & Merging Logic to `overlap_blobs`
         #   N.B. This is the longest step due to loop-wise dependencies... 
         #          In v2.0 unstructured, this loop has been painstakingly parallelised
         split_and_merge = self.split_and_merge_blobs_parallel if self.unstructured_grid else self.split_and_merge_blobs
         blob_id_field, blob_props, blobs_list, merge_events = split_and_merge(blob_id_field, blob_props)
-        if self.verbosity > 0:    print('Finished Splitting and Merging Blobs.')
+        if self.verbosity > 0:    print('Finished Splitting and Merging Blobs')
         
         # Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
         results = persist(blob_id_field, blob_props, blobs_list, merge_events)
@@ -2417,7 +2471,7 @@ class Spotter:
         split_merged_blobs_ds = self.cluster_rename_blobs_and_props(blob_id_field, blob_props, blobs_list, merge_events)
         split_merged_blobs_ds = split_merged_blobs_ds.chunk({self.timedim: self.timechunks, 'ID': -1, 'component': -1, 'ncells': -1, 'sibling_ID' : -1})
         split_merged_blobs_ds = split_merged_blobs_ds.persist()
-        if self.verbosity > 0:    print('Finished Clustering and Renaming Blobs.')
+        if self.verbosity > 0:    print('Finished Clustering and Renaming Blobs')
     
         # Count Number of Blobs (This may have increased due to splitting)
         N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
