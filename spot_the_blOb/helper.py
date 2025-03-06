@@ -15,18 +15,26 @@ from dask import persist
 # Dask Cluster Wrappers
 
 # Dask Config
-cluster_scratch = Path('/scratch') / getuser()[0] / getuser() / 'clients'
-dask_tmp_dir = TemporaryDirectory(dir=cluster_scratch)
+dask_scratch = Path('/scratch') / getuser()[0] / getuser() / 'clients' ## N.B.: This is only for DKRZ Machine
+dask_tmp_dir = TemporaryDirectory(dir=dask_scratch)
 dask.config.set(temporary_directory=dask_tmp_dir.name)
 dask.config.set({'array.slicing.split_large_chunks': False})
+dask.config.set({
+    'distributed.comm.timeouts.connect': '120s',  # Increase from default
+    'distributed.comm.timeouts.tcp': '240s',      # Double the connection timeout
+    'distributed.comm.retry.count': 10,           # More retries before giving up
+})
 
 # Make LocalCluster
-def StartLocalCluster(n_workers=4, n_threads=1):
+def StartLocalCluster(n_workers=4, n_threads=1, dask_scratch=None):
+    
+    if not dask_scratch:
+        dask_tmp_dir = TemporaryDirectory(dir=dask_scratch)
+        dask.config.set(temporary_directory=dask_tmp_dir.name)
     
     physical_cores = psutil.cpu_count(logical=False)
     logical_cores = psutil.cpu_count(logical=True)
     memory = psutil.virtual_memory()
-    
     
     if n_workers * n_threads > physical_cores:
         print(f"Warning: Requested {n_workers} workers with {n_threads} threads each, but there are only {physical_cores} physical cores.")
@@ -49,8 +57,13 @@ def StartLocalCluster(n_workers=4, n_threads=1):
     
     return client
 
+
 # Make Distributed Cluster
-def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=256, dashboard_address=8889, queue='compute'):
+def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=256, dashboard_address=8889, queue='compute', cluster_scratch=None):
+    
+    if not cluster_scratch:
+        dask_tmp_dir = TemporaryDirectory(dir=cluster_scratch)
+        dask.config.set(temporary_directory=dask_tmp_dir.name)
 
     if node_memory == 256:
         client_memory = '250GB'
@@ -73,7 +86,7 @@ def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=
                                         memory=client_memory,
                                         processes=workers_per_node,  # Only 1 thread
                                         interface='ib0',
-                                        queue='compute',
+                                        queue=queue,
                                         account='bk1377',
                                         walltime=f'{runtime_hrs:02d}:{runtime_mins:02d}:00',
                                         asynchronous=0,
