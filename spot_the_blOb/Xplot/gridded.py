@@ -5,7 +5,7 @@ import cartopy.crs as ccrs
 
 from .base import PlotterBase
 
-class StructuredPlotter(PlotterBase):
+class GriddedPlotter(PlotterBase):
     def __init__(self, xarray_obj):
         super().__init__(xarray_obj)
     
@@ -25,7 +25,7 @@ class StructuredPlotter(PlotterBase):
         return data
 
     def plot(self, ax, cmap='viridis', clim=None, norm=None):
-        """Implement plotting for structured (regular grid) data."""
+        """Implement plotting for gridded (i.e. regular grid) data."""
         dimensions = {'ydim': 'lat', 'xdim': 'lon'}
         data = self.wrap_lon(self.da, dimensions)
         

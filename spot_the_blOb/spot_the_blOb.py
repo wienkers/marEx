@@ -23,7 +23,7 @@ class Spotter:
     Spotter Identifies and Tracks Arbitrary Binary Blobs.
     '''
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, checkpoint='None', debug=0, verbosity=0):
+    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, max_iteration=40, checkpoint='None', debug=0, verbosity=0):
         
         self.data_bin           = data_bin
         self.mask               = mask
@@ -99,6 +99,8 @@ class Spotter:
             self.lat = self.lat.drop_vars(self.lat.coords)
             self.lon = self.lon.drop_vars(self.lon.coords)
             neighbours    = neighbours.drop_vars({'lat','lon', 'nv'})
+            
+            self.max_iteration = max_iteration
             
             self.cell_area = cell_areas.astype(np.float32).drop_vars({'lat','lon'}).persist()  # In square metres !
             self.mean_cell_area = cell_areas.mean().compute().item()
@@ -640,9 +642,9 @@ class Spotter:
             (y_centroid, x_centroid)
         '''
         
-        # Check if blob touches either edge of x dimension
-        touches_left_BC = np.any(binary_mask[:, 0])
-        touches_right_BC = np.any(binary_mask[:, -1])
+        # Check if blob is (anywhere remotely) near either edge of x dimension
+        near_left_BC = np.any(binary_mask[:, :100])
+        near_right_BC = np.any(binary_mask[:, -100:])
         
         
         if original_centroid is None: # Then calculate y-centroid from scratch
@@ -653,8 +655,9 @@ class Spotter:
             y_centroid = original_centroid[0]
         
         
-        # If blob touches both edges, then recalculate x-centroid
-        if touches_left_BC and touches_right_BC:
+        # If blob is near both edges, then recalculate x-centroid
+        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the blob may be split and straddling the boundary !
+        if near_left_BC and near_right_BC:
             # Adjust x coordinates that are near right edge
             x_indices = np.nonzero(binary_mask)[1]
             x_indices_adj = x_indices.copy()
@@ -1333,6 +1336,16 @@ class Spotter:
 
         # Final formatting
         merge_ledger = merge_ledger.rename('merge_ledger').transpose(self.timedim, 'ID', 'sibling_ID').persist()
+        
+        if not self.unstructured_grid:
+            # Convert centroid from pixel units to lat/lon units
+            y_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.ydim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.ydim]))], dims=['pixels'])
+            x_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.xdim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.xdim]))], dims=['pixels'])
+            
+            blob_props_extended['centroid'] = xr.concat([
+                y_values.interp(pixels=blob_props_extended['centroid'].sel(component=0)),
+                x_values.interp(pixels=blob_props_extended['centroid'].sel(component=1))
+            ], dim='component')
         
         
         ## Finish up:
@@ -2323,7 +2336,6 @@ class Spotter:
         
         ## Process chunks iteratively until no new merging blobs remain
         iteration = 0
-        max_iterations = 20  # i.e. 80 days (maximum event duration...)
         processed_chunks = set()
         global_id_counter = blob_props.ID.max().item() + 1
         
@@ -2333,7 +2345,7 @@ class Spotter:
         global_merge_areas = []
         global_merge_tidx = []
         
-        while merging_blobs and iteration < max_iterations:
+        while merging_blobs and iteration < self.max_iteration:
             
             blob_id_field_new, merge_data_iter, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
             child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
@@ -2365,15 +2377,12 @@ class Spotter:
             processed_chunks.update(new_merging_blobs)
             iteration += 1
             
-            #if not iteration % 2 or not merging_blobs or iteration == max_iterations:  # Every few iterations & on last iteration
-            #    blob_id_field_unique = self.refresh_dask_graph(blob_id_field_new)
-            #else:
             blob_id_field_unique = blob_id_field_new
             del blob_id_field_new
         
         
-        if iteration == max_iterations:
-            raise RuntimeError(f"Reached maximum iterations ({max_iterations}) in split_and_merge_blobs_parallel")
+        if iteration == self.max_iteration:
+            raise RuntimeError(f"Reached maximum iterations ({self.max_iteration}) in split_and_merge_blobs_parallel. Set optional argument 'max_iteration' to a higher value.")
         
         ### Process the Merge Events ###
         times = blob_id_field_unique[self.timedim].values

@@ -1,3 +1,8 @@
+"""
+This helper module contains useful routines for HPC Dask. 
+Some details are specific to the DKRZ Levante Supercomputer.
+"""
+
 from tempfile import TemporaryDirectory
 from getpass import getuser
 from pathlib import Path
