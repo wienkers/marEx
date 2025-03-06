@@ -1,5 +1,5 @@
 from .base import PlotterBase, PlotConfig
-from .structured import StructuredPlotter
+from .gridded import GriddedPlotter
 from .unstructured import UnstructuredPlotter, clear_cache
 import xarray as xr
 import warnings
@@ -14,13 +14,13 @@ def _detect_grid_type(xarray_obj):
     Deduce grid type based on coordinate structure.
     
     Returns:
-        str: 'structured' or 'unstructured'
+        str: 'gridded' or 'unstructured'
     """
     has_lat_lon_coords = 'lat' in xarray_obj.coords and 'lon' in xarray_obj.coords
     has_lat_lon_dims = 'lat' in xarray_obj.dims and 'lon' in xarray_obj.dims
     
     # For unstructured data, lat/lon are coordinates but not dimensions
-    return 'unstructured' if (has_lat_lon_coords and not has_lat_lon_dims) else 'structured'
+    return 'unstructured' if (has_lat_lon_coords and not has_lat_lon_dims) else 'gridded'
 
 def register_plotter(xarray_obj):
     """
@@ -50,7 +50,7 @@ def register_plotter(xarray_obj):
         final_type = detected_type
     
     # Create appropriate plotter
-    plotter_class = UnstructuredPlotter if final_type.lower() == 'unstructured' else StructuredPlotter
+    plotter_class = UnstructuredPlotter if final_type.lower() == 'unstructured' else GriddedPlotter
     plotter = plotter_class(xarray_obj)
     
     # Set grid path if available for unstructured grids
@@ -64,7 +64,7 @@ def specify_grid(grid_type=None, fpath_tgrid=None, fpath_ckdtree=None):
     Set the global grid specification that will be used by all plotters.
     
     Args:
-        grid_type: str, either 'structured' or 'unstructured'.
+        grid_type: str, either 'gridded' or 'unstructured'.
                   If specified, this will be used as the primary method
                   to determine grid type.
         fpath_tgrid: Path to the triangulation grid file
@@ -72,12 +72,12 @@ def specify_grid(grid_type=None, fpath_tgrid=None, fpath_ckdtree=None):
     """
     global _fpath_tgrid, _fpath_ckdtree, _grid_type
     
-    if grid_type is not None and grid_type.lower() not in ['structured', 'unstructured']:
-        raise ValueError("grid_type must be either 'structured' or 'unstructured'")
+    if grid_type is not None and grid_type.lower() not in ['gridded', 'unstructured']:
+        raise ValueError("grid_type must be either 'gridded' or 'unstructured'")
     
     _fpath_tgrid = str(fpath_tgrid) if fpath_tgrid else None
     _fpath_ckdtree = str(fpath_ckdtree) if fpath_ckdtree else None
     _grid_type = grid_type.lower() if grid_type else None
 
 # Register the accessor
-xr.register_dataarray_accessor('xplot')(register_plotter)
+xr.register_dataarray_accessor('Xplot')(register_plotter)

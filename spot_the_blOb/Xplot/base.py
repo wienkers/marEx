@@ -174,13 +174,16 @@ class PlotterBase:
         return fig, axes
     
 
-    def animate(self, config: PlotConfig, plot_dir='./'):
+    def animate(self, config: PlotConfig, plot_dir='./', file_name=None):
         """Create an animation from time series data"""
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(exist_ok=True)
         temp_dir = plot_dir / "blobs_seq"
         temp_dir.mkdir(exist_ok=True)
-        output_file = plot_dir / f"movie_{self.da.name}.mp4"
+        if not file_name:
+            file_name = f"movie_{self.da.name}.mp4"
+        
+        output_file = plot_dir / f'{file_name}.mp4'
         
         # Set up plotting parameters
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
