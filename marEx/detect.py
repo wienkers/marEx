@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import dask
+from dask.base import is_dask_collection
 import flox.xarray
 from xhistogram.xarray import histogram
 import logging
@@ -421,8 +422,8 @@ def preprocess_data(da, std_normalise=False, threshold_percentile=95,
         Processed dataset with anomalies and extreme event identification
     """
     # Check if input data is dask-backed
-    if not hasattr(da, 'chunks') or da.chunks is None:
-        raise RuntimeError('Input data is not dask-backed. Ensure the input data is chunked, e.g. with chunks={}.')
+    if not is_dask_collection(da.data):
+        raise ValueError('The input DataArray must be backed by a Dask array. Ensure the input data is chunked, e.g. with chunks={}')
     
     # Step 1: Compute anomalies with detrending and optional standardisation
     ds = compute_normalised_anomaly(
