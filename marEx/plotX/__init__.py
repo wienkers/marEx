@@ -80,4 +80,4 @@ def specify_grid(grid_type=None, fpath_tgrid=None, fpath_ckdtree=None):
     _grid_type = grid_type.lower() if grid_type else None
 
 # Register the accessor
-xr.register_dataarray_accessor('Xplot')(register_plotter)
+xr.register_dataarray_accessor('plotX')(register_plotter)
