@@ -14,15 +14,14 @@ import psutil
 
 import dask
 from dask_jobqueue import SLURMCluster
-from dask.distributed import Client, LocalCluster, wait
-from dask import persist
+from dask.distributed import Client, LocalCluster
 
 # Dask Cluster Wrappers
 
 # Dask Config
-dask_scratch = Path('/scratch') / getuser()[0] / getuser() / 'clients' ## N.B.: This is only for DKRZ Machine
-dask_tmp_dir = TemporaryDirectory(dir=dask_scratch)
-dask.config.set(temporary_directory=dask_tmp_dir.name)
+dask_scratch_dkrz = Path('/scratch') / getuser()[0] / getuser() / 'clients' ## N.B.: This is only for DKRZ Machine
+dask_tmp_dir_dkrz = TemporaryDirectory(dir=dask_scratch_dkrz)
+dask.config.set(temporary_directory=dask_tmp_dir_dkrz.name)
 dask.config.set({'array.slicing.split_large_chunks': False})
 dask.config.set({
     'distributed.comm.timeouts.connect': '120s',  # Increase from default
@@ -33,7 +32,7 @@ dask.config.set({
 # Make LocalCluster
 def StartLocalCluster(n_workers=4, n_threads=1, dask_scratch=None):
     
-    if not dask_scratch:
+    if dask_scratch:
         dask_tmp_dir = TemporaryDirectory(dir=dask_scratch)
         dask.config.set(temporary_directory=dask_tmp_dir.name)
     
@@ -64,10 +63,10 @@ def StartLocalCluster(n_workers=4, n_threads=1, dask_scratch=None):
 
 
 # Make Distributed Cluster
-def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=256, dashboard_address=8889, queue='compute', cluster_scratch=None):
+def StartDistributedCluster(n_workers, workers_per_node, runtime=9, node_memory=256, dashboard_address=8889, queue='compute', dask_scratch=None):
     
-    if not cluster_scratch:
-        dask_tmp_dir = TemporaryDirectory(dir=cluster_scratch)
+    if dask_scratch:
+        dask_tmp_dir = TemporaryDirectory(dir=dask_scratch)
         dask.config.set(temporary_directory=dask_tmp_dir.name)
 
     if node_memory == 256:
