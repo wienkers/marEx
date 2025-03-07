@@ -177,7 +177,7 @@ class Spotter:
         
         
             
-    def run(self, return_merges=False):
+    def run(self, return_merges=False, checkpoint=None):
         '''
         Cluster, ID, filter, and track objects in a binary field with optional merging & splitting. 
         
@@ -215,7 +215,7 @@ class Spotter:
         '''
         
         ## Run Binary Pre-Processing (Requires Many Workers)
-        data_bin_preprocessed, blob_stats = self.run_preprocess()
+        data_bin_preprocessed, blob_stats = self.run_preprocess(checkpoint=checkpoint)
         
         ## Run ID & Tracking Algorithm (Requires Lots of Memory)
         blObs_ds, merges_ds, N_blobs_final = self.run_tracking(data_bin_preprocessed)
@@ -236,13 +236,17 @@ class Spotter:
         if not checkpoint:
             checkpoint = self.checkpoint
         
-        if checkpoint == 'load':
-            
-            print('Loading Preprocessed Data & Stats...')
+        def load_from_checkpoint():
             data_bin_preprocessed = xr.open_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', chunks={self.timedim: self.timechunks})['data_bin_preproc']
             blob_stats_npz = np.load(self.scratch_dir+'/checkpoint_stats.npz')
             blob_stats = [blob_stats_npz[key] for key in ['total_area_IDed', 'N_blobs_prefiltered', 'area_threshold', 
                                                           'accepted_area_fraction', 'preprocessed_area_fraction']]
+            return data_bin_preprocessed, blob_stats
+        
+        
+        if checkpoint == 'load': # Load previously saved checkpoint
+            print('Loading Preprocessed Data & Stats...')
+            data_bin_preprocessed, blob_stats = load_from_checkpoint()
             return data_bin_preprocessed, blob_stats
         
         
@@ -284,13 +288,16 @@ class Spotter:
         total_processed_area = processed_area.sum().compute().item()
         preprocessed_area_fraction = total_hobday_area / total_processed_area
         
-        if checkpoint == 'save':
+        blob_stats = (total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction)
+        
+        if 'save' in checkpoint:
             print('Saving Preprocessed Data & Stats...')
             data_bin_filtered.name = 'data_bin_preproc'
             data_bin_filtered.to_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', mode='w')
             np.savez(self.scratch_dir+'/checkpoint_stats.npz', total_area_IDed=total_area_IDed, N_blobs_prefiltered=N_blobs_prefiltered, area_threshold=area_threshold, accepted_area_fraction=accepted_area_fraction, preprocessed_area_fraction=preprocessed_area_fraction)
+            data_bin_preprocessed, blob_stats = load_from_checkpoint() # Re-load data to refresh the dask graph
         
-        return data_bin_filtered, (total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction)
+        return data_bin_filtered, blob_stats
     
     
     def run_tracking(self, data_bin_preprocessed):
