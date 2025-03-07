@@ -57,13 +57,9 @@ __all__ = [
 ]
 
 # Version information
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import version
 try:
     __version__ = version("marEx")
-except PackageNotFoundError:
+except ImportError:
     # Package is not installed
-    try:
-        from setuptools_scm import get_version
-        __version__ = get_version(root="..", relative_to=__file__)
-    except (ImportError, LookupError):
-        __version__ = "unknown"
+    __version__ = "unknown"
