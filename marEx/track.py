@@ -18,9 +18,9 @@ import logging
 import os, shutil
 import gc
 
-class Spotter:
+class tracker:
     '''
-    Spotter Identifies and Tracks Arbitrary Binary Blobs.
+    Tracker Identifies and Tracks Arbitrary Binary Objects
     '''
         
     def __init__(self, data_bin, mask, R_fill, area_filter_quartile, temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, overlap_threshold=0.5, unstructured_grid=False, timedim='time', xdim='lon', ydim='lat', neighbours=None, cell_areas=None, max_iteration=40, checkpoint='None', debug=0, verbosity=0):
@@ -53,14 +53,14 @@ class Spotter:
                 try:
                     data_bin = data_bin.transpose(timedim, xdim) 
                 except:
-                    raise ValueError(f'Unstructured Spot_the_blOb currently only supports 2D DataArrays. The dimensions should only contain ({timedim} and {xdim}). Found {list(data_bin.dims)}')
+                    raise ValueError(f'Unstructured marEx currently only supports 2D DataArrays. The dimensions should only contain ({timedim} and {xdim}). Found {list(data_bin.dims)}')
             
         else:
             if ((timedim, ydim, xdim) != data_bin.dims):
                 try:
                     data_bin = data_bin.transpose(timedim, ydim, xdim) 
                 except:
-                    raise ValueError(f'Structured Spot_the_blOb currently only supports 3D DataArrays. The dimensions should only contain ({timedim}, {xdim}, and {ydim}). Found {list(data_bin.dims)}')
+                    raise ValueError(f'Gridded (structured) marEx currently only supports 3D DataArrays. The dimensions should only contain ({timedim}, {xdim}, and {ydim}). Found {list(data_bin.dims)}')
         
         if (data_bin.data.dtype != bool):
             raise ValueError('The input DataArray is not binary. Please convert to a binary array, and try again.  :)')
@@ -109,7 +109,7 @@ class Spotter:
             ## Initialise the dilation array
             self.neighbours_int = neighbours.astype(np.int32) - 1 # Convert to 0-based indexing (negative values will be dropped)
             if self.neighbours_int.shape[0] != 3:
-                raise ValueError('Unstrucutred Spot_the_blOb currently only supports triangular grids. Therefore the neighbours array must have a shape of (3, ncells).')
+                raise ValueError('Unstructured marEx currently only supports triangular grids. Therefore the neighbours array must have a shape of (3, ncells).')
             if self.neighbours_int.dims != ('nv', self.xdim):
                 raise ValueError('The neighbours array must have dimensions of (nv, xdim).')
             
@@ -196,38 +196,37 @@ class Spotter:
             The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained. Value should be between 0 and 1.
         
         T_fill : int
-            The number of days of a time-gap that is permitted to continue tracking the blobs. For time-symmetry, this number should be even.
+            The number of days of a time-gap that is permitted to continue tracking as the same event. For time-symmetry, this number should be even.
         
         allow_merging : bool, optional
-            Whether to allow splitting & merging of blobs across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
+            Whether to allow splitting & merging of objects across time. False defaults to classical `ndmeasure.label` with straight time connectivity, i.e. Scannell et al. 
         
         nn_partitioning : bool, optional
             If True, then implement a better merged child partitioning calculation based on closest parent cell.
             If False, then the centroid is used to determine partitioning between new child labels, e.g. Di Sun & Bohai Zhang 2023
         
         overlap_threshold : float, optional
-            The minimum fraction of overlap between blobs across time to consider them the same object. Value should be between 0 and 1.
+            The minimum fraction of overlap between objects across time to consider them the same object. Value should be between 0 and 1.
         
         Returns
         -------
-        blob_id_field : xarray.DataArray
+        object_id_field : xarray.DataArray
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
-        ## Run Binary Pre-Processing (Requires Many Workers)
-        data_bin_preprocessed, blob_stats = self.run_preprocess(checkpoint=checkpoint)
+        # Run Binary Pre-Processing (Requires Many Workers)
+        data_bin_preprocessed, object_stats = self.run_preprocess(checkpoint=checkpoint)
         
-        ## Run ID & Tracking Algorithm (Requires Lots of Memory)
-        blObs_ds, merges_ds, N_blobs_final = self.run_tracking(data_bin_preprocessed)
+        # Run ID & Tracking Algorithm (Requires Lots of Memory)
+        events_ds, merges_ds, N_events_final = self.run_tracking(data_bin_preprocessed)
         
-        ## Output Statistics & Save
-        blObs_ds = self.run_stats_attributes(blObs_ds, merges_ds, blob_stats, N_blobs_final)
-        
+        # Output Statistics & Save
+        events_ds = self.run_stats_attributes(events_ds, merges_ds, object_stats, N_events_final)
         
         if self.allow_merging and return_merges:
-            return blObs_ds, merges_ds
+            return events_ds, merges_ds
         else:
-            return blObs_ds
+            return events_ds
         
         
     
@@ -238,16 +237,16 @@ class Spotter:
         
         def load_from_checkpoint():
             data_bin_preprocessed = xr.open_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', chunks={self.timedim: self.timechunks})['data_bin_preproc']
-            blob_stats_npz = np.load(self.scratch_dir+'/checkpoint_stats.npz')
-            blob_stats = [blob_stats_npz[key] for key in ['total_area_IDed', 'N_blobs_prefiltered', 'area_threshold', 
+            object_stats_npz = np.load(self.scratch_dir+'/checkpoint_stats.npz')
+            object_stats = [object_stats_npz[key] for key in ['total_area_IDed', 'N_objects_prefiltered', 'N_objects_filtered', 'area_threshold', 
                                                           'accepted_area_fraction', 'preprocessed_area_fraction']]
-            return data_bin_preprocessed, blob_stats
+            return data_bin_preprocessed, object_stats
         
         
         if checkpoint == 'load': # Load previously saved checkpoint
             print('Loading Preprocessed Data & Stats...')
-            data_bin_preprocessed, blob_stats = load_from_checkpoint()
-            return data_bin_preprocessed, blob_stats
+            data_bin_preprocessed, object_stats = load_from_checkpoint()
+            return data_bin_preprocessed, object_stats
         
         
         # Compute Area of Initial Binary Data
@@ -264,9 +263,9 @@ class Spotter:
         if self.verbosity > 0:    print('Finished Filling Spatio-temporal Holes')
         
         # Remove Small Objects
-        data_bin_filtered, area_threshold, blob_areas, N_blobs_prefiltered = self.filter_small_blobs(data_bin_filled)
+        data_bin_filtered, area_threshold, object_areas, N_objects_prefiltered, N_objects_filtered = self.filter_small_objects(data_bin_filled)
         del data_bin_filled
-        if self.verbosity > 0:    print('Finished Filtering Small Blobs')
+        if self.verbosity > 0:    print('Finished Filtering Small Objects')
         
         # Clean Up & Persist Preprocessing (This helps avoid block-wise task fusion run_spec issues with dask)
         data_bin_filtered = data_bin_filtered.persist()
@@ -278,85 +277,87 @@ class Spotter:
         
         ## Compute Stats
         
-        blob_areas = blob_areas.compute()
-        total_area_IDed = blob_areas.sum().item()
+        object_areas = object_areas.compute()
+        total_area_IDed = object_areas.sum().item()
 
-        accepted_area = blob_areas.where(blob_areas > area_threshold, drop=True).sum().item()
+        accepted_area = object_areas.where(object_areas > area_threshold, drop=True).sum().item()
         accepted_area_fraction = accepted_area / total_area_IDed
         
         total_hobday_area = raw_area.sum().compute().item()
         total_processed_area = processed_area.sum().compute().item()
         preprocessed_area_fraction = total_hobday_area / total_processed_area
         
-        blob_stats = (total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction)
+        object_stats = (total_area_IDed, N_objects_prefiltered, N_objects_filtered, area_threshold, accepted_area_fraction, preprocessed_area_fraction)
         
         if 'save' in checkpoint:
-            print('Saving Preprocessed Data & Stats...')
+            print('Saving Pre-processed Data & Stats...')
             data_bin_filtered.name = 'data_bin_preproc'
             data_bin_filtered.to_zarr(self.scratch_dir+'/checkpoint_preprocessed.zarr', mode='w')
-            np.savez(self.scratch_dir+'/checkpoint_stats.npz', total_area_IDed=total_area_IDed, N_blobs_prefiltered=N_blobs_prefiltered, area_threshold=area_threshold, accepted_area_fraction=accepted_area_fraction, preprocessed_area_fraction=preprocessed_area_fraction)
-            data_bin_preprocessed, blob_stats = load_from_checkpoint() # Re-load data to refresh the dask graph
+            np.savez(self.scratch_dir+'/checkpoint_stats.npz', total_area_IDed=total_area_IDed, N_objects_prefiltered=N_objects_prefiltered, N_objects_filtered=N_objects_filtered, area_threshold=area_threshold, accepted_area_fraction=accepted_area_fraction, preprocessed_area_fraction=preprocessed_area_fraction)
+            data_bin_preprocessed, object_stats = load_from_checkpoint() # Re-load data to refresh the dask graph
         
-        return data_bin_filtered, blob_stats
+        return data_bin_filtered, object_stats
     
     
     def run_tracking(self, data_bin_preprocessed):
         
         if self.allow_merging or self.unstructured_grid:
-            # Track Blobs _with_ Merging & Splitting
-            blObs_ds, merges_ds, N_blobs_final = self.track_blObs(data_bin_preprocessed)
+            # Track Objects _with_ Merging & Splitting
+            events_ds, merges_ds, N_events_final = self.track_objects(data_bin_preprocessed)
         else: 
-            # Track Blobs without any special Merging or Splitting
-            blObs_ds, merges_ds, N_blobs_final = self.identify_blobs(data_bin_preprocessed, time_connectivity=True)
+            # Track Objects without any special Merging or Splitting
+            events_ds, merges_ds, N_events_final = self.identify_objects(data_bin_preprocessed, time_connectivity=True)
         
         # Set all filler IDs < 0 to 0
-        blObs_ds['ID_field'] = blObs_ds.ID_field.where(blObs_ds.ID_field > 0, drop=False, other=0)
+        events_ds['ID_field'] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
         
-        if self.verbosity > 0:    print('Finished Tracking All Blobs ! \n\n')
+        if self.verbosity > 0:    print('Finished Tracking All Extreme Events ! \n\n')
         
-        return blObs_ds, merges_ds, N_blobs_final
+        return events_ds, merges_ds, N_events_final
     
     
-    def run_stats_attributes(self, blObs_ds, merges_ds, blob_stats, N_blobs_final):
+    def run_stats_attributes(self, events_ds, merges_ds, object_stats, N_events_final):
         
-        total_area_IDed, N_blobs_prefiltered, area_threshold, accepted_area_fraction, preprocessed_area_fraction = blob_stats
+        total_area_IDed, N_objects_prefiltered, N_objects_filtered, area_threshold, accepted_area_fraction, preprocessed_area_fraction = object_stats
 
-        blObs_ds.attrs['allow_merging'] = int(self.allow_merging)
-        blObs_ds.attrs['N_blobs_prefiltered'] = int(N_blobs_prefiltered)
-        blObs_ds.attrs['N_blobs_final'] = int(N_blobs_final)
-        blObs_ds.attrs['R_fill'] = self.R_fill
-        blObs_ds.attrs['T_fill'] = self.T_fill
-        blObs_ds.attrs['area_filter_quartile'] = self.area_filter_quartile
-        blObs_ds.attrs['area_threshold (cells)'] = area_threshold
-        blObs_ds.attrs['accepted_area_fraction'] = accepted_area_fraction
-        blObs_ds.attrs['preprocessed_area_fraction'] = preprocessed_area_fraction
+        events_ds.attrs['allow_merging'] = int(self.allow_merging)
+        events_ds.attrs['N_objects_prefiltered'] = int(N_objects_prefiltered)
+        events_ds.attrs['N_objects_filtered'] = int(N_objects_filtered)
+        events_ds.attrs['N_events_final'] = int(N_events_final)
+        events_ds.attrs['R_fill'] = self.R_fill
+        events_ds.attrs['T_fill'] = self.T_fill
+        events_ds.attrs['area_filter_quartile'] = self.area_filter_quartile
+        events_ds.attrs['area_threshold (cells)'] = area_threshold
+        events_ds.attrs['accepted_area_fraction'] = accepted_area_fraction
+        events_ds.attrs['preprocessed_area_fraction'] = preprocessed_area_fraction
         
         print('Tracking Statistics:')
         print(f'   Binary Hobday to Processed Area Fraction: {preprocessed_area_fraction}')
         print(f'   Total Object Area IDed (cells): {total_area_IDed}')
-        print(f'   Number of Initial Pre-Filtered Blobs: {N_blobs_prefiltered}')
+        print(f'   Number of Initial Pre-Filtered Objects: {N_objects_prefiltered}')
+        print(f'   Number of Final Filtered Objects: {N_objects_filtered}')
         print(f'   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}')
         print(f'   Accepted Area Fraction: {accepted_area_fraction}')
-        print(f'   Total Blobs Tracked: {N_blobs_final}')
+        print(f'   Total Events Tracked: {N_events_final}')
         print('\n\n')
         
         if self.allow_merging:
             
-            blObs_ds.attrs['overlap_threshold'] = self.overlap_threshold
-            blObs_ds.attrs['nn_partitioning'] = int(self.nn_partitioning)
+            events_ds.attrs['overlap_threshold'] = self.overlap_threshold
+            events_ds.attrs['nn_partitioning'] = int(self.nn_partitioning)
             
             # Add merge-specific summary attributes 
-            blObs_ds.attrs['total_merges'] = len(merges_ds.merge_ID)
-            blObs_ds.attrs['multi_parent_merges'] = (merges_ds.n_parents > 2).sum().item()
+            events_ds.attrs['total_merges'] = len(merges_ds.merge_ID)
+            events_ds.attrs['multi_parent_merges'] = (merges_ds.n_parents > 2).sum().item()
             
-            print(f"   Total Merging Events Recorded: {blObs_ds.attrs['total_merges']}")
+            print(f"   Total Merging Events Recorded: {events_ds.attrs['total_merges']}")
         
         if self.unstructured_grid:
             # Add lat & lon back as coordinates
-            blObs_ds = blObs_ds.assign_coords(lat=self.lat.compute(), lon=self.lon.compute())
-            blObs_ds = blObs_ds.chunk({self.timedim: 1}) # Rechunk to size 1:  This fixes tuple bug in dask (after we inject particular chunks), but also this makes generally better-sized chunks for post-processing
+            events_ds = events_ds.assign_coords(lat=self.lat.compute(), lon=self.lon.compute())
+            events_ds = events_ds.chunk({self.timedim: 1}) # Rechunk to size 1:  This fixes tuple bug in dask (after we inject particular chunks), but also this makes generally better-sized chunks for post-processing
         
-        return blObs_ds
+        return events_ds
     
     
     def compute_area(self, data_bin):
@@ -366,7 +367,7 @@ class Spotter:
         Returns
         -------
         raw_area: xarray.DataArray
-            Total area at each time. The units are pixels (for structured data) and matching self.cell_area (for unstructured data).
+            Total area at each time. The units are pixels (for gridded, i.e. structured, data) and matching self.cell_area (for unstructured data).
         '''
         
         if self.unstructured_grid:
@@ -547,12 +548,12 @@ class Spotter:
         return data_new
     
 
-    def identify_blobs(self, data_bin, time_connectivity):
+    def identify_objects(self, data_bin, time_connectivity):
         '''IDs connected regions in the binary data.
         
         Returns
         -------
-        blob_id_field : xarray.DataArray
+        object_id_field : xarray.DataArray
             Field of integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
@@ -593,7 +594,7 @@ class Spotter:
             ## Label time-independent in 2D (i.e. no time connectivity!)
             data_bin = data_bin.where(self.mask, other=False)  # Mask land
             
-            blob_id_field = xr.apply_ufunc(cluster_true_values, 
+            object_id_field = xr.apply_ufunc(cluster_true_values, 
                                     data_bin, 
                                     self.neighbours_int, 
                                     input_core_dims=[[self.xdim],['nv',self.xdim]],
@@ -603,10 +604,10 @@ class Spotter:
                                     vectorize=False,
                                     dask='parallelized')
             
-            blob_id_field = blob_id_field.where(self.mask, other=0) # ID = 0 on land
-            blob_id_field = blob_id_field.persist()
-            blob_id_field = blob_id_field.rename('ID_field')
-            N_blobs = 1  # IDC
+            object_id_field = object_id_field.where(self.mask, other=0) # ID = 0 on land
+            object_id_field = object_id_field.persist()
+            object_id_field = object_id_field.rename('ID_field')
+            N_objects = 1  # IDC
             
         else:  # Structured Grid
         
@@ -614,31 +615,31 @@ class Spotter:
             neighbours[1,:,:] = 1           # Connectivity Kernel: All 8 neighbours, but ignore time
             
             if time_connectivity:
-                # ID blobs in 3D (i.e. space & time) -- N.B. IDs are unique across time
+                # ID objects in 3D (i.e. space & time) -- N.B. IDs are unique across time
                 neighbours[:,:,:] = 1 #                         including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
-            # else, ID blobs only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
+            # else, ID objects only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)    
             
             # Cluster & Label Binary Data
-            blob_id_field, N_blobs = label(data_bin,           # Apply dask-powered ndimage & persist in memory
+            object_id_field, N_objects = label(data_bin,           # Apply dask-powered ndimage & persist in memory
                                             structure=neighbours, 
                                             wrap_axes=(2,))       # Wrap in x-direction
-            results = persist(blob_id_field, N_blobs)
-            blob_id_field, N_blobs = results
+            results = persist(object_id_field, N_objects)
+            object_id_field, N_objects = results
             
-            N_blobs = N_blobs.compute()
+            N_objects = N_objects.compute()
             # DataArray (same shape as data_bin) but with integer IDs for each connected object: 
-            blob_id_field = xr.DataArray(blob_id_field, coords=data_bin.coords, dims=data_bin.dims, attrs=data_bin.attrs).rename('ID_field').astype(np.int32)
+            object_id_field = xr.DataArray(object_id_field, coords=data_bin.coords, dims=data_bin.dims, attrs=data_bin.attrs).rename('ID_field').astype(np.int32)
         
-        return blob_id_field, None, N_blobs
+        return object_id_field, None, N_objects
     
     
     def calculate_centroid(self, binary_mask, original_centroid=None):
-        '''Re-calculates the centroid of a binary data blob if it touches the edges in the x-dimension.
+        '''Re-calculates the centroid of a binary data object if it touches the edges in the x-dimension.
         
         Parameters:
         -----------
         binary_mask : numpy.ndarray
-            2D binary array where True indicates the blob. Dimensions are _exceptionally_ ordered (y,x) here...
+            2D binary array where True indicates the object. Dimensions are _exceptionally_ ordered (y,x) here...
         original_centroid : tuple
             (y_centroid, x_centroid) from regionprops_table
             If None, the centroid is entirely calculated from the binary_mask.
@@ -649,7 +650,7 @@ class Spotter:
             (y_centroid, x_centroid)
         '''
         
-        # Check if blob is (anywhere remotely) near either edge of x dimension
+        # Check if object is (anywhere remotely) near either edge of x dimension
         near_left_BC = np.any(binary_mask[:, :100])
         near_right_BC = np.any(binary_mask[:, -100:])
         
@@ -662,8 +663,8 @@ class Spotter:
             y_centroid = original_centroid[0]
         
         
-        # If blob is near both edges, then recalculate x-centroid
-        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the blob may be split and straddling the boundary !
+        # If object is near both edges, then recalculate x-centroid
+        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the object may be split and straddling the boundary !
         if near_left_BC and near_right_BC:
             # Adjust x coordinates that are near right edge
             x_indices = np.nonzero(binary_mask)[1]
@@ -686,14 +687,14 @@ class Spotter:
         # N.B.: Returns original centroid if not touching both edges
         return (y_centroid, x_centroid)
     
-    def calculate_blob_properties(self, blob_id_field, properties=None):
+    def calculate_object_properties(self, object_id_field, properties=None):
         '''
-        Calculates properties of the blobs from the blob_id_field.
+        Calculates properties of the objects from the object_id_field.
         
         Parameters:
         -----------
-        blob_id_field : xarray.DataArray
-            Field containing blob IDs
+        object_id_field : xarray.DataArray
+            Field containing object IDs
         properties : list, optional
             List of properties to calculate. If None, defaults to ['ID', 'area'].
             See skimage.measure.regionprops for available properties.
@@ -722,10 +723,10 @@ class Spotter:
             lon_rad = np.radians(self.lon)
             
             # Calculate buffer size for IDs in chunks
-            max_ID = blob_id_field.max().compute().item()+1
-            ID_buffer_size = int(max_ID / blob_id_field[self.timedim].shape[0])  *  4
+            max_ID = object_id_field.max().compute().item()+1
+            ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0])  *  4
             
-            def blob_properties_chunk(ids, lat, lon, area, buffer_IDs=True):
+            def object_properties_chunk(ids, lat, lon, area, buffer_IDs=True):
                 ## Efficient Vectorised Calculation over all IDs in the present chunk
                 # N.B.: lat/lon in radians now
                 
@@ -797,13 +798,13 @@ class Spotter:
             
             
             
-            if blob_id_field[self.timedim].size == 1:
-                props_np, ids = blob_properties_chunk(blob_id_field.values, lat_rad.values, lon_rad.values, self.cell_area.values, buffer_IDs=False)
+            if object_id_field[self.timedim].size == 1:
+                props_np, ids = object_properties_chunk(object_id_field.values, lat_rad.values, lon_rad.values, self.cell_area.values, buffer_IDs=False)
                 props = xr.DataArray(props_np, dims=['prop', 'out_id'])
             
             else:  
                 ## Run in parallel
-                props_buffer, ids_buffer = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
+                props_buffer, ids_buffer = xr.apply_ufunc(object_properties_chunk, object_id_field,
                                                 lat_rad,
                                                 lon_rad,
                                                 self.cell_area,
@@ -829,16 +830,16 @@ class Spotter:
                     ids = np.array([], dtype=np.int32)
                     props = xr.DataArray(np.zeros((3, 0), dtype=np.float32), dims=['prop', 'out_id'])
 
-            # Create the blob properties dataset
+            # Create the object properties dataset
             if len(ids) > 0:
-                blob_props = xr.Dataset({'area': ('out_id', props.isel(prop=0).data),
+                object_props = xr.Dataset({'area': ('out_id', props.isel(prop=0).data),
                                         'centroid-0': ('out_id', props.isel(prop=1).data),
                                         'centroid-1': ('out_id', props.isel(prop=2).data)},
                                         coords={'ID': ('out_id', ids)}
                                     ).set_index(out_id='ID').rename({'out_id': 'ID'})
             else:
                 # Create an empty dataset with the correct structure
-                blob_props = xr.Dataset(
+                object_props = xr.Dataset(
                     {'area': ('ID', []), 
                     'centroid-0': ('ID', []), 
                     'centroid-1': ('ID', [])},
@@ -850,19 +851,19 @@ class Spotter:
             # N.B.: These operations are simply done on a pixel grid — no cartesian conversion (therefore, polar regions are doubly biased)
         
             # Define wrapper function to run in parallel
-            def blob_properties_chunk(ids):
+            def object_properties_chunk(ids):
                 # N.B. Assumes the dimensions are ordered (y, x)
                 
                 # Calculate Standard Properties
                 props_slice = regionprops_table(ids, properties=properties)
                 
-                # Check Centroids if blob touches either edge (Need to account for x-dimension edge wrapping)
+                # Check Centroids if object touches either edge (Need to account for x-dimension edge wrapping)
                 if check_centroids and len(props_slice['label']) > 0:
                     # Get original centroids
                     centroids = list(zip(props_slice['centroid-0'], props_slice['centroid-1']))  # (y, x)
                     centroids_wrapped = []
                     
-                    # Process each blob
+                    # Process each object
                     for ID_idx, ID in enumerate(props_slice['label']):
                         binary_mask = ids == ID
                         centroids_wrapped.append(
@@ -875,12 +876,12 @@ class Spotter:
                 
                 return props_slice
             
-            if blob_id_field[self.timedim].size == 1:
-                blob_props = blob_properties_chunk(blob_id_field.values)
-                blob_props = xr.Dataset({key: (['ID'], value) for key, value in blob_props.items()})
+            if object_id_field[self.timedim].size == 1:
+                object_props = object_properties_chunk(object_id_field.values)
+                object_props = xr.Dataset({key: (['ID'], value) for key, value in object_props.items()})
             else:
                 # Run in parallel
-                blob_props = xr.apply_ufunc(blob_properties_chunk, blob_id_field,
+                object_props = xr.apply_ufunc(object_properties_chunk, object_id_field,
                                             input_core_dims=[[self.ydim, self.xdim]],
                                             output_core_dims=[[]],
                                             output_dtypes=[object],
@@ -888,38 +889,38 @@ class Spotter:
                                             dask='parallelized')
                 
                 # Concatenate and Convert to an xarray Dataset
-                blob_props = xr.concat([
+                object_props = xr.concat([
                     xr.Dataset({key: (['ID'], value) for key, value in item.items()}) 
-                    for item in blob_props.values
+                    for item in object_props.values
                 ], dim='ID')
             
             # Set ID as coordinate
-            blob_props = blob_props.set_index(ID='label')
+            object_props = object_props.set_index(ID='label')
         
         
         # Combine centroid-0 and centroid-1 into a single centroid variable
-        if 'centroid' in properties and len(blob_props.ID) > 0:
-            blob_props['centroid'] = xr.concat([blob_props['centroid-0'], blob_props['centroid-1']], dim='component')
-            blob_props = blob_props.drop_vars(['centroid-0', 'centroid-1'])
+        if 'centroid' in properties and len(object_props.ID) > 0:
+            object_props['centroid'] = xr.concat([object_props['centroid-0'], object_props['centroid-1']], dim='component')
+            object_props = object_props.drop_vars(['centroid-0', 'centroid-1'])
         
-        return blob_props   
+        return object_props   
     
 
-    def filter_small_blobs(self, data_bin):
+    def filter_small_objects(self, data_bin):
         '''Filters out smallest ojects in the binary data.'''
         
         # Cluster & Label Binary Data: Time-independent in 2D (i.e. no time connectivity!)
-        blob_id_field, _, N_blobs = self.identify_blobs(data_bin, time_connectivity=False)
+        object_id_field, _, N_objects_unfiltered = self.identify_objects(data_bin, time_connectivity=False)
         
         
         if self.unstructured_grid:
-            # N.B.: identify_blobs() starts at ID=0 for every time slice
-            max_ID = blob_id_field.max().compute().item()
+            # N.B.: identify_objects() starts at ID=0 for every time slice
+            max_ID = object_id_field.max().compute().item()
             
             ## Calculate areas: 
             
-            def count_cluster_sizes(blob_id_field):
-                unique, counts = np.unique(blob_id_field[blob_id_field > 0], return_counts=True)
+            def count_cluster_sizes(object_id_field):
+                unique, counts = np.unique(object_id_field[object_id_field > 0], return_counts=True)
                 padded_sizes = np.zeros(max_ID, dtype=np.int32)
                 padded_unique = np.zeros(max_ID, dtype=np.int32)
                 padded_sizes[:len(counts)] = counts
@@ -927,7 +928,7 @@ class Spotter:
                 return padded_sizes, padded_unique
             
             cluster_sizes, unique_cluster_IDs = xr.apply_ufunc(count_cluster_sizes, 
-                                    blob_id_field, 
+                                    object_id_field, 
                                     input_core_dims=[[self.xdim]],
                                     output_core_dims=[['ID'],['ID']],
                                     dask_gufunc_kwargs={'output_sizes': {'ID': max_ID}},
@@ -940,14 +941,17 @@ class Spotter:
             
             cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data  # Pre-filter < 50 cells
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
-            blob_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
+            object_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
             
             ## Filter small areas: 
             
-            N_blobs = len(blob_areas)
+            N_objects_unfiltered = len(object_areas)
             
-            area_threshold = np.percentile(blob_areas, self.area_filter_quartile*100)
+            area_threshold = np.percentile(object_areas, self.area_filter_quartile*100)
+            
+            # Count the number of objects after filtering
+            N_objects_filtered = np.sum(object_areas > area_threshold)
                         
             def filter_area_binary(cluster_IDs_0, keep_IDs_0):
                 keep_IDs_0 = keep_IDs_0[keep_IDs_0>0]
@@ -957,34 +961,37 @@ class Spotter:
             keep_IDs = xr.where(cluster_sizes > area_threshold, unique_cluster_IDs, 0)  # unique_cluster_IDs has been mapped in "count_cluster_sizes"
             
             data_bin_filtered = xr.apply_ufunc(filter_area_binary, 
-                                    blob_id_field, keep_IDs, 
+                                    object_id_field, keep_IDs, 
                                     input_core_dims=[[self.xdim],['ID']],
                                     output_core_dims=[[self.xdim]],
                                     output_dtypes=[data_bin.dtype],
                                     vectorize=True,
                                     dask='parallelized')
             
-            blobs_areas = cluster_sizes # The pre-pre-filtered areas
+            objects_areas = cluster_sizes # The pre-pre-filtered areas
             
             
         else: # Structured Grid is Straightforward...
             
-            # Compute Blob Areas
-            blob_props = self.calculate_blob_properties(blob_id_field)
-            blob_areas, blob_ids = blob_props.area, blob_props.ID
+            # Compute Object Areas
+            object_props = self.calculate_object_properties(object_id_field)
+            object_areas, object_ids = object_props.area, object_props.ID
             
-            # Remove Smallest Blobs
-            area_threshold = np.percentile(blob_areas, self.area_filter_quartile*100.0)
-            blob_ids_keep = xr.where(blob_areas >= area_threshold, blob_ids, -1)
-            blob_ids_keep[0] = -1  # Don't keep ID=0
-            data_bin_filtered = blob_id_field.isin(blob_ids_keep)
+            # Remove Smallest Objects
+            area_threshold = np.percentile(object_areas, self.area_filter_quartile*100.0)
+            object_ids_keep = xr.where(object_areas >= area_threshold, object_ids, -1)
+            object_ids_keep[0] = -1  # Don't keep ID=0
+            data_bin_filtered = object_id_field.isin(object_ids_keep)
+            
+            # Count the number of objects after filtering (using xarray functions)
+            N_objects_filtered = object_ids_keep.where(object_ids_keep > 0).count().item()
         
         
-        return data_bin_filtered, area_threshold, blobs_areas, N_blobs
+        return data_bin_filtered, area_threshold, objects_areas, N_objects_unfiltered, N_objects_filtered
     
     
     def check_overlap_slice(self, ids_t0, ids_next):
-        '''Finds overlapping blobs in a single time slice by looking at +1 in time.'''
+        '''Finds overlapping objects in a single time slice by looking at +1 in time.'''
         
         # Create masks for valid IDs
         mask_t0 = ids_t0 > 0
@@ -1031,15 +1038,15 @@ class Spotter:
         return result
     
     
-    def check_overlap_slice_threshold(self, ids_t0, ids_next, blob_props):
-        '''Finds overlapping blobs in a single time slice by looking at +1 in time.
+    def check_overlap_slice_threshold(self, ids_t0, ids_next, object_props):
+        '''Finds overlapping objects in a single time slice by looking at +1 in time.
            Additionally, applies thresholding on the overlap area.'''
         
         overlap_slice = self.check_overlap_slice(ids_t0, ids_next)
         
-        # _Before_ replacing the overlap_blobs_list, we need to re-assess the overlap fractions of just the new_child_overlaps_list
-        areas_0 = blob_props['area'].sel(ID=overlap_slice[:, 0]).values
-        areas_1 = blob_props['area'].sel(ID=overlap_slice[:, 1]).values
+        # _Before_ replacing the overlap_objects_list, we need to re-assess the overlap fractions of just the new_child_overlaps_list
+        areas_0 = object_props['area'].sel(ID=overlap_slice[:, 0]).values
+        areas_1 = object_props['area'].sel(ID=overlap_slice[:, 1]).values
         min_areas = np.minimum(areas_0, areas_1)
         overlap_fractions = overlap_slice[:, 2].astype(float) / min_areas
         overlap_slice_filtered = overlap_slice[overlap_fractions >= self.overlap_threshold]
@@ -1047,30 +1054,30 @@ class Spotter:
         return overlap_slice_filtered
     
     
-    def find_overlapping_blobs(self, blob_id_field, blob_props):
-        '''Finds overlapping blobs across time, filtered to require a minimum overlap threshold.
+    def find_overlapping_objects(self, object_id_field, object_props):
+        '''Finds overlapping objects across time, filtered to require a minimum overlap threshold.
         
         Returns
         -------
-        overlap_blobs_list_unique : (N x 3) np.ndarray
-            Array of Blob IDs that indicate which blobs are overlapping in time. 
-            The blob in the first column precedes the second column in time. 
+        overlap_objects_list_unique : (N x 3) np.ndarray
+            Array of Object IDs that indicate which objects are overlapping in time. 
+            The object in the first column precedes the second column in time. 
             The third column contains:
                 - For structured grid: number of overlapping pixels (int32)
                 - For unstructured grid: total overlapping area in m^2 (float32)
         '''
         
         ## Check just for overlap with next time slice.
-        #  Keep a running list of all blob IDs that overlap
+        #  Keep a running list of all object IDs that overlap
         
-        blob_id_field_next = blob_id_field.shift({self.timedim: -1}, fill_value=0)
+        object_id_field_next = object_id_field.shift({self.timedim: -1}, fill_value=0)
 
-        # ID Overlapping Blobs in Parallel
+        # ID Overlapping Objects in Parallel
         input_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
-        overlap_blob_pairs_list = xr.apply_ufunc(
+        overlap_object_pairs_list = xr.apply_ufunc(
                             self.check_overlap_slice,
-                            blob_id_field,
-                            blob_id_field_next,
+                            object_id_field,
+                            object_id_field_next,
                             input_core_dims=[input_dims, input_dims],
                             output_core_dims=[[]],
                             vectorize=True,
@@ -1080,7 +1087,7 @@ class Spotter:
         
         
         # Concatenate all pairs (with their chunk-level values) from different chunks
-        all_pairs_with_values = np.concatenate(overlap_blob_pairs_list.values)
+        all_pairs_with_values = np.concatenate(overlap_object_pairs_list.values)
         
         # Get unique pairs and their indices
         unique_pairs, inverse_indices = np.unique(all_pairs_with_values[:, :2], axis=0, return_inverse=True)
@@ -1091,56 +1098,56 @@ class Spotter:
         np.add.at(total_summed_values, inverse_indices, all_pairs_with_values[:, 2])
 
         # Stack the pairs with their summed counts
-        overlap_blobs_list_unique = np.column_stack((unique_pairs, total_summed_values))
+        overlap_objects_list_unique = np.column_stack((unique_pairs, total_summed_values))
         
         
-        ## Enforce all Blob Pairs overlap by at least `overlap_threshold` percent (in area)
+        ## Enforce all Object Pairs overlap by at least `overlap_threshold` percent (in area)
         
         # Vectorised computation of overlap fractions
-        areas_0 = blob_props['area'].sel(ID=overlap_blobs_list_unique[:, 0]).values
-        areas_1 = blob_props['area'].sel(ID=overlap_blobs_list_unique[:, 1]).values
+        areas_0 = object_props['area'].sel(ID=overlap_objects_list_unique[:, 0]).values
+        areas_1 = object_props['area'].sel(ID=overlap_objects_list_unique[:, 1]).values
         min_areas = np.minimum(areas_0, areas_1)
-        overlap_fractions = overlap_blobs_list_unique[:, 2].astype(float) / min_areas
+        overlap_fractions = overlap_objects_list_unique[:, 2].astype(float) / min_areas
         
         # Filter out the overlaps that are too small
-        overlap_blobs_list_unique_filtered = overlap_blobs_list_unique[overlap_fractions >= self.overlap_threshold]
+        overlap_objects_list_unique_filtered = overlap_objects_list_unique[overlap_fractions >= self.overlap_threshold]
         
         
-        return overlap_blobs_list_unique_filtered
+        return overlap_objects_list_unique_filtered
     
         
-    def cluster_rename_blobs_and_props(self, blob_id_field_unique, blob_props, overlap_blobs_list, merge_events):
-        '''Cluster the blob pairs to determine the final IDs, and relabel the blobs.
+    def cluster_rename_objects_and_props(self, object_id_field_unique, object_props, overlap_objects_list, merge_events):
+        '''Cluster the object pairs to determine the final IDs, and relabel the objects.
         
         Parameters
         ----------
-        blob_id_field_unique : xarray.DataArray
-            Field of unique blob IDs. IDs must not be repeated across time.
-        blob_props : xarray.Dataset
-            Properties of each blob that also need to be relabeled.
-        overlap_blobs_list : (N x 2) np.ndarray
-            Array of Blob IDs that indicate which blobs are the same. The blob in the first column precedes the second column in time.
+        object_id_field_unique : xarray.DataArray
+            Field of unique object IDs. IDs must not be repeated across time.
+        object_props : xarray.Dataset
+            Properties of each object that also need to be relabeled.
+        overlap_objects_list : (N x 2) np.ndarray
+            Array of Object IDs that indicate which objects are in the same event. The object in the first column precedes the second column in time.
         
         Returns
         -------
         Merged DataSet including:
-            split_merged_relabeled_blob_id_field : xarray.DataArray
-                Field of renamed blob IDs which track & ID blobs across time. ID = 0 indicates no object.
-            blob_props_extended : xarray.Dataset
-                Properties of each blob, with the updated IDs.
-                Contains all original properties, as well as "global_ID" (the original ID), and which puts blobs & properties in the time-dimension
+            split_merged_relabeled_object_id_field : xarray.DataArray
+                Field of renamed object IDs which track & ID objects across time. ID = 0 indicates no object.
+            object_props_extended : xarray.Dataset
+                Properties of each object, with the updated IDs.
+                Contains all original properties, as well as "global_ID" (the original ID), and which puts objects & properties in the time-dimension
         '''
         
         
-        ## Cluster the overlap_pairs into groups of IDs that are actually the same blob
+        ## Cluster the overlap_pairs into groups of IDs that are actually the same object
         
         # Get unique IDs from the overlap pairs
-        #IDs = np.unique(overlap_blobs_list) # 1D sorted unique
-        max_ID = blob_id_field_unique.max().compute().values + 1
+        #IDs = np.unique(overlap_objects_list) # 1D sorted unique
+        max_ID = object_id_field_unique.max().compute().values + 1
         IDs = np.arange(max_ID)
         
         # Convert overlap pairs to indices
-        overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_blobs_list])
+        overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_objects_list])
         
         # Create a sparse matrix representation of the graph
         n = max_ID
@@ -1165,12 +1172,12 @@ class Spotter:
         
         
         
-        ## ID_clusters now is a list of lists of equivalent blob IDs that have been tracked across time
-        #  We now need to replace all IDs in blob_id_field_unique that match the equivalent_IDs with the list index:  This is the new/final ID field.
+        ## ID_clusters now is a list of lists of equivalent object IDs that have been tracked across time
+        #  We now need to replace all IDs in object_id_field_unique that match the equivalent_IDs with the list index:  This is the new/final ID field.
         
         # Create a dictionary to map IDs to the new cluster indices
         min_int32 = np.iinfo(np.int32).min
-        max_old_ID = blob_id_field_unique.max().compute().data
+        max_old_ID = object_id_field_unique.max().compute().data
         ID_to_cluster_index_array = np.full(max_old_ID + 1, min_int32, dtype=np.int32)
 
         # Fill the lookup array with cluster indices
@@ -1189,9 +1196,9 @@ class Spotter:
             return new_block
         
         input_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
-        split_merged_relabeled_blob_id_field = xr.apply_ufunc(
+        split_merged_relabeled_object_id_field = xr.apply_ufunc(
             map_IDs_to_indices,
-            blob_id_field_unique, 
+            object_id_field_unique, 
             ID_to_cluster_index_da,
             input_core_dims=[input_dims,['ID']],
             output_core_dims=[input_dims],
@@ -1202,21 +1209,21 @@ class Spotter:
         
         
         
-        ### Relabel the blob_props to match the new IDs (and add time dimension!)
+        ### Relabel the object_props to match the new IDs (and add time dimension!)
         
         max_new_ID = num_components + 1  # New IDs range from 0 to max_new_ID...
         new_ids = np.arange(1, max_new_ID+1, dtype=np.int32)
         
-        # New blob_props DataSet Structure
-        blob_props_extended = xr.Dataset(coords={
+        # New object_props DataSet Structure
+        object_props_extended = xr.Dataset(coords={
             'ID': new_ids,
-            self.timedim: blob_id_field_unique[self.timedim]
+            self.timedim: object_id_field_unique[self.timedim]
         })
         
         ## Create a mapping from new IDs to the original IDs _at the corresponding time_
-        valid_new_ids = (split_merged_relabeled_blob_id_field > 0)      
-        original_ids_field = blob_id_field_unique.where(valid_new_ids)
-        new_ids_field = split_merged_relabeled_blob_id_field.where(valid_new_ids)
+        valid_new_ids = (split_merged_relabeled_object_id_field > 0)      
+        original_ids_field = object_id_field_unique.where(valid_new_ids)
+        new_ids_field = split_merged_relabeled_object_id_field.where(valid_new_ids)
         
         if not self.unstructured_grid:
             original_ids_field = original_ids_field.stack(z=(self.ydim, self.xdim), create_index=False)
@@ -1263,19 +1270,19 @@ class Spotter:
             ).assign_coords(ID=new_ids).compute()
         
 
-        blob_props_extended['global_ID'] = global_id_mapping
+        object_props_extended['global_ID'] = global_id_mapping
         # N.B.: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
         
         
-        ## Transfer and transform all variables from original blob_props:
+        ## Transfer and transform all variables from original object_props:
                 
         # Add a value of ID = 0 to this coordinate ID
-        dummy = blob_props.isel(ID=0) * np.nan
-        blob_props = xr.concat([dummy.assign_coords(ID=0), blob_props], dim='ID')
+        dummy = object_props.isel(ID=0) * np.nan
+        object_props = xr.concat([dummy.assign_coords(ID=0), object_props], dim='ID')
         
-        for var_name in blob_props.data_vars:
+        for var_name in object_props.data_vars:
             
-            temp = (blob_props[var_name]
+            temp = (object_props[var_name]
                               .sel(ID=global_id_mapping.rename({'ID':'new_id'}))
                               .drop_vars('ID').rename({'new_id':'ID'}))
             
@@ -1284,7 +1291,7 @@ class Spotter:
             else:
                 temp = temp.astype(np.float32)
                 
-            blob_props_extended[var_name] = temp
+            object_props_extended[var_name] = temp
         
         
         ## Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx) 
@@ -1346,52 +1353,52 @@ class Spotter:
         
         if not self.unstructured_grid:
             # Convert centroid from pixel units to lat/lon units
-            y_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.ydim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.ydim]))], dims=['pixels'])
-            x_values = xr.DataArray(split_merged_relabeled_blob_id_field[self.xdim].values, coords=[np.arange(len(split_merged_relabeled_blob_id_field[self.xdim]))], dims=['pixels'])
+            y_values = xr.DataArray(split_merged_relabeled_object_id_field[self.ydim].values, coords=[np.arange(len(split_merged_relabeled_object_id_field[self.ydim]))], dims=['pixels'])
+            x_values = xr.DataArray(split_merged_relabeled_object_id_field[self.xdim].values, coords=[np.arange(len(split_merged_relabeled_object_id_field[self.xdim]))], dims=['pixels'])
             
-            blob_props_extended['centroid'] = xr.concat([
-                y_values.interp(pixels=blob_props_extended['centroid'].sel(component=0)),
-                x_values.interp(pixels=blob_props_extended['centroid'].sel(component=1))
+            object_props_extended['centroid'] = xr.concat([
+                y_values.interp(pixels=object_props_extended['centroid'].sel(component=0)),
+                x_values.interp(pixels=object_props_extended['centroid'].sel(component=1))
             ], dim='component')
         
         
         ## Finish up:
         # Add start and end time indices for each ID
-        valid_presence = blob_props_extended['global_ID'] > 0  # Where we have valid data
+        valid_presence = object_props_extended['global_ID'] > 0  # Where we have valid data
         
-        blob_props_extended['presence'] = valid_presence
-        blob_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
-        blob_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
+        object_props_extended['presence'] = valid_presence
+        object_props_extended['time_start'] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
+        object_props_extended['time_end'] = valid_presence.time[(valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)]
                 
-        # Combine blob_props_extended with split_merged_relabeled_blob_id_field
-        split_merged_relabeled_blobs_ds = xr.merge([split_merged_relabeled_blob_id_field.rename('ID_field'), 
-                                                    blob_props_extended,
+        # Combine object_props_extended with split_merged_relabeled_object_id_field
+        split_merged_relabeled_events_ds = xr.merge([split_merged_relabeled_object_id_field.rename('ID_field'), 
+                                                    object_props_extended,
                                                     merge_ledger])
         
         
         # Remove the last ID -- it is all 0s        
-        return split_merged_relabeled_blobs_ds.isel(ID=slice(0, -1))
+        return split_merged_relabeled_events_ds.isel(ID=slice(0, -1))
     
     
-    def compute_id_time_dict(self, da, child_blobs, max_blobs, all_blobs=True):
-        '''Generate lookup table mapping blob IDs to their time index.
+    def compute_id_time_dict(self, da, child_objects, max_objects, all_objects=True):
+        '''Generate lookup table mapping object IDs to their time index.
         
         Parameters
         ----------
         da : xarray.DataArray
-            Field of unique blob IDs. IDs must not be repeated across time.
-        child_blobs: np.ndarray
-            Array of blob IDs to be the dictionary keys.
-        max_blobs: int
-            Maximum number of blobs in the entire data array
+            Field of unique object IDs. IDs must not be repeated across time.
+        child_objects: np.ndarray
+            Array of object IDs to be the dictionary keys.
+        max_objects: int
+            Maximum number of objects in the entire data array
         '''
             
         # First reduce x & y dimensions by determining unique IDs for each time slice
-        est_blobs_per_time_max = int(max_blobs / da[self.timedim].shape[0] * 100)
+        est_objects_per_time_max = int(max_objects / da[self.timedim].shape[0] * 100)
 
         def unique_pad(x):
             uniq = np.unique(x)
-            result = np.zeros(est_blobs_per_time_max, dtype=x.dtype) # Pad output to maximum size
+            result = np.zeros(est_objects_per_time_max, dtype=x.dtype) # Pad output to maximum size
             result[:len(uniq)] = uniq
             return result
 
@@ -1403,21 +1410,21 @@ class Spotter:
                 output_core_dims=[['unique_values']],
                 dask='parallelized',
                 vectorize=True,
-                dask_gufunc_kwargs={'output_sizes': {'unique_values': est_blobs_per_time_max}}
+                dask_gufunc_kwargs={'output_sizes': {'unique_values': est_objects_per_time_max}}
             )
         
-        if not all_blobs:  # Just index the blobs in "child_blobs"
+        if not all_objects:  # Just index the objects in "child_objects"
             search_ids = xr.DataArray(
-                child_blobs,
+                child_objects,
                 dims=['child_id'],
-                coords={'child_id': child_blobs}
+                coords={'child_id': child_objects}
             )
         else:
             search_ids = xr.DataArray(
-                np.arange(max_blobs, dtype=np.int32),
+                np.arange(max_objects, dtype=np.int32),
                 dims=['child_id'],
-                coords={'child_id': np.arange(max_blobs)}
-            ).chunk({'child_id': 10000}) # ~ max_blobs // 20
+                coords={'child_id': np.arange(max_objects)}
+            ).chunk({'child_id': 10000}) # ~ max_objects // 20
             
 
         # Reduce boolean array in spatial dimensions for all IDs at once
@@ -1434,37 +1441,37 @@ class Spotter:
         return time_index_map
     
     
-    def split_and_merge_blobs(self, blob_id_field_unique, blob_props):
-        '''Implements Blob Splitting & Merging.
+    def split_and_merge_objects(self, object_id_field_unique, object_props):
+        '''Implements Object Splitting & Merging.
         
         Parameters:
         -----------
-        blob_id_field_unique : xarray.DataArray
-            Field of unique blob IDs. IDs must not be repeated across time.
-        blob_props : xarray.Dataset
-            Properties of each blob, including 'area' and 'centroid'.
+        object_id_field_unique : xarray.DataArray
+            Field of unique object IDs. IDs must not be repeated across time.
+        object_props : xarray.Dataset
+            Properties of each object, including 'area' and 'centroid'.
             
         Returns
         -------
-        split_merged_blob_id_field_unique : xarray.DataArray
-            Field of unique blob IDs with any splitting or merging logic applied.
-        merged_blob_props : xarray.Dataset
-            Properties of each blob, now containing any new blob IDs & properties
-        split_merged_blobs_list : (? x 2) np.ndarray
-            Array of overlapping blob pairs, with any splitting or merging logic applied. May have removed or added pairs.
+        split_merged_object_id_field_unique : xarray.DataArray
+            Field of unique object IDs with any splitting or merging logic applied.
+        merged_object_props : xarray.Dataset
+            Properties of each object, now containing any new object IDs & properties
+        split_merged_objects_list : (? x 2) np.ndarray
+            Array of overlapping object pairs, with any splitting or merging logic applied. May have removed or added pairs.
             3rd column of overlap area is unnecessary and is removed.
         merge_ledger : list
-            List of tuples indicating which blobs have been merged.
+            List of tuples indicating which objects have been merged.
         '''
         
         
-        # Compile List of Overlapping Blob ID Pairs Across Time
-        overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs')
+        # Compile List of Overlapping Object ID Pairs Across Time
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)  # List object pairs that overlap by at least overlap_threshold percent
+        if self.verbosity > 0:    print('Finished Finding Overlapping Objects')
         
         
         #################################
-        ##### Consider Merging Blobs ####
+        ### Consider Merging Objects ####
         #################################
         
         ## Initialise merge tracking lists to build DataArray later
@@ -1472,111 +1479,111 @@ class Spotter:
         merge_child_ids = []  # Resulting child ID
         merge_parent_ids = [] # List of parent IDs that merged
         merge_areas = []      # Areas of overlap
-        next_new_id = blob_props.ID.max().item() + 1  # Start new IDs after highest existing ID
+        next_new_id = object_props.ID.max().item() + 1  # Start new IDs after highest existing ID
         
-        # Find all the Children (t+1 / RHS) elements that appear multiple times --> Indicates there are 2+ Parent Blobs...
-        unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
-        merging_blobs = unique_children[children_counts > 1]
+        # Find all the Children (t+1 / RHS) elements that appear multiple times --> Indicates there are 2+ Parent Objects...
+        unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)
+        merging_objects = unique_children[children_counts > 1]
         
-        # Pre-compute the child_time_idx & 2d_mask_id for each child_blob
-        time_index_map = self.compute_id_time_dict(blob_id_field_unique, merging_blobs, next_new_id)
-        Nx = blob_id_field_unique[self.xdim].size
+        # Pre-compute the child_time_idx & 2d_mask_id for each child_object
+        time_index_map = self.compute_id_time_dict(object_id_field_unique, merging_objects, next_new_id)
+        Nx = object_id_field_unique[self.xdim].size
         
-        # Group blobs by time-chunk
-        # -- Pre-condition: Blob IDs should be monotonically increasing in time...
-        chunk_boundaries = np.cumsum([0] + list(blob_id_field_unique.chunks[0] ))
-        blobs_by_chunk = {}
-        # Ensure that blobs_by_chunk has entry for every key
-        for chunk_idx in range(len(blob_id_field_unique.chunks[0])):
-            blobs_by_chunk.setdefault(chunk_idx, [])
+        # Group objects by time-chunk
+        # -- Pre-condition: Object IDs should be monotonically increasing in time...
+        chunk_boundaries = np.cumsum([0] + list(object_id_field_unique.chunks[0] ))
+        objects_by_chunk = {}
+        # Ensure that objects_by_chunk has entry for every key
+        for chunk_idx in range(len(object_id_field_unique.chunks[0])):
+            objects_by_chunk.setdefault(chunk_idx, [])
         
-        blob_id_field_unique = blob_id_field_unique.persist()
+        object_id_field_unique = object_id_field_unique.persist()
         
-        for blob_id in merging_blobs:
+        for object_id in merging_objects:
             # Find which chunk this time index belongs to
-            chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[blob_id], side='right') - 1
-            blobs_by_chunk.setdefault(chunk_idx, []).append(blob_id)
+            chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[object_id], side='right') - 1
+            objects_by_chunk.setdefault(chunk_idx, []).append(object_id)
         
         
         future_chunk_merges = []
         updated_chunks = []
-        for chunk_idx, chunk_blobs in blobs_by_chunk.items(): # Loop over each time-chunk
-            # We do this to avoid repetetively re-computing and injecting tiny changes into the full dask-backed DataArray blob_id_field_unique
+        for chunk_idx, chunk_objects in objects_by_chunk.items(): # Loop over each time-chunk
+            # We do this to avoid repetetively re-computing and injecting tiny changes into the full dask-backed DataArray object_id_field_unique
             
             ## Extract and Load an entire chunk into memory
             
-            chunk_start = sum(blob_id_field_unique.chunks[0][:chunk_idx])
-            chunk_end = chunk_start + blob_id_field_unique.chunks[0][chunk_idx] + 1  #  We also want access to the blob_id_time_p1...  But need to remember to remove the last time later
+            chunk_start = sum(object_id_field_unique.chunks[0][:chunk_idx])
+            chunk_end = chunk_start + object_id_field_unique.chunks[0][chunk_idx] + 1  #  We also want access to the object_id_time_p1...  But need to remember to remove the last time later
             
-            chunk_data = blob_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
+            chunk_data = object_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
             
-            # Create a working queue of blobs to process
-            blobs_to_process = chunk_blobs.copy()
-            # Combine only the future_chunk_merges that don't already appear in blobs_to_process
-            blobs_to_process = blobs_to_process + [blob_id for blob_id in future_chunk_merges if blob_id not in blobs_to_process]  # First, assess the new blobs from the end of the previous chunk...
+            # Create a working queue of objects to process
+            objects_to_process = chunk_objects.copy()
+            # Combine only the future_chunk_merges that don't already appear in objects_to_process
+            objects_to_process = objects_to_process + [object_id for object_id in future_chunk_merges if object_id not in objects_to_process]  # First, assess the new objects from the end of the previous chunk...
             future_chunk_merges = []
             
-            #for child_id in chunk_blobs: # Process each blob in this chunk
-            while blobs_to_process:  # Process until queue is empty
-                child_id = blobs_to_process.pop(0)  # Get next blob to process
+            #for child_id in chunk_objects: # Process each object in this chunk
+            while objects_to_process:  # Process until queue is empty
+                child_id = objects_to_process.pop(0)  # Get next object to process
                 
                 child_time_idx = time_index_map[child_id]
                 relative_time_idx = child_time_idx - chunk_start
                 
-                blob_id_time = chunk_data.isel({self.timedim: relative_time_idx})
+                object_id_time = chunk_data.isel({self.timedim: relative_time_idx})
                 try:
-                    blob_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
+                    object_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
                 except: # If this is the last chunk...
-                    blob_id_time_p1 = xr.full_like(blob_id_time, 0)
+                    object_id_time_p1 = xr.full_like(object_id_time, 0)
                 if relative_time_idx-1 >= 0:
-                    blob_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
+                    object_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
                 elif updated_chunks:  # Get the last time slice from the previous chunk (stored in updated_chunks)
                     _, _, last_chunk_data = updated_chunks[-1]
-                    blob_id_time_m1 = last_chunk_data[-1]
+                    object_id_time_m1 = last_chunk_data[-1]
                 else:
-                    blob_id_time_m1 = xr.full_like(blob_id_time, 0)
+                    object_id_time_m1 = xr.full_like(object_id_time, 0)
                 
-                child_mask_2d  = (blob_id_time == child_id).values
+                child_mask_2d  = (object_id_time == child_id).values
                 
-                # Find all pairs involving this Child Blob
-                child_mask = overlap_blobs_list[:, 1] == child_id
-                child_where = np.where(overlap_blobs_list[:, 1] == child_id)[0]  # Needed for assignment
-                merge_group = overlap_blobs_list[child_mask]
+                # Find all pairs involving this Child Object
+                child_mask = overlap_objects_list[:, 1] == child_id
+                child_where = np.where(overlap_objects_list[:, 1] == child_id)[0]  # Needed for assignment
+                merge_group = overlap_objects_list[child_mask]
                 
-                # Get all Parents (LHS) Blobs that overlap with this Child Blob -- N.B. This is now generalised for N-parent merging !
+                # Get all Parents (LHS) Objects that overlap with this Child Object -- N.B. This is now generalised for N-parent merging !
                 parent_ids = merge_group[:, 0]
                 num_parents = len(parent_ids)
                 
-                # Make a new ID for the other Half of the Child Blob & Record in the Merge Ledger
-                new_blob_id = np.arange(next_new_id, next_new_id + (num_parents - 1), dtype=np.int32)
+                # Make a new ID for the other Half of the Child Object & Record in the Merge Ledger
+                new_object_id = np.arange(next_new_id, next_new_id + (num_parents - 1), dtype=np.int32)
                 next_new_id += num_parents - 1
                 
-                # Replace the 2nd+ Child in the Overlap Blobs List with the new Child ID
-                overlap_blobs_list[child_where[1:], 1] = new_blob_id    #overlap_blobs_list[child_mask, 1][1:] = new_blob_id
-                child_ids = np.concatenate((np.array([child_id]), new_blob_id))    #np.array([child_id, new_blob_id])
+                # Replace the 2nd+ Child in the Overlap Objects List with the new Child ID
+                overlap_objects_list[child_where[1:], 1] = new_object_id    #overlap_objects_list[child_mask, 1][1:] = new_object_id
+                child_ids = np.concatenate((np.array([child_id]), new_object_id))    #np.array([child_id, new_object_id])
                 
                 # Record merge event data
                 merge_times.append(chunk_data.isel({self.timedim: relative_time_idx}).time.values)
                 merge_child_ids.append(child_ids)
                 merge_parent_ids.append(parent_ids)
-                merge_areas.append(overlap_blobs_list[child_mask, 2])
+                merge_areas.append(overlap_objects_list[child_mask, 2])
                 
-                ### Relabel the Original Child Blob ID Field to account for the New ID:
-                parent_centroids = blob_props.sel(ID=parent_ids).centroid.values.T  # (y, x), [:,0] are the y's
+                ### Relabel the Original Child Object ID Field to account for the New ID:
+                parent_centroids = object_props.sel(ID=parent_ids).centroid.values.T  # (y, x), [:,0] are the y's
                 
                 if self.nn_partitioning:
                     # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
                     if self.unstructured_grid:
-                        parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0]), dtype=bool)
+                        parent_masks = np.zeros((len(parent_ids), object_id_time.shape[0]), dtype=bool)
                     else:
-                        parent_masks = np.zeros((len(parent_ids), blob_id_time.shape[0], blob_id_time.shape[1]), dtype=bool)
+                        parent_masks = np.zeros((len(parent_ids), object_id_time.shape[0], object_id_time.shape[1]), dtype=bool)
                         
                     for idx, parent_id in enumerate(parent_ids):
-                        parent_masks[idx] = (blob_id_time_m1 == parent_id).values
+                        parent_masks[idx] = (object_id_time_m1 == parent_id).values
                     
-                    # Calculate typical blob size to set max_distance
-                    max_area = np.max(blob_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
-                    max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
+                    # Calculate typical object size to set max_distance
+                    max_area = np.max(object_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
+                    max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max object radius
                     
                     if self.unstructured_grid:
                         new_labels = partition_nn_unstructured(
@@ -1617,75 +1624,75 @@ class Spotter:
                 
                 
                 ## Update values in child_time_idx and assign the updated slice back to the original DataArray
-                temp = np.zeros_like(blob_id_time)
+                temp = np.zeros_like(object_id_time)
                 temp[child_mask_2d] = new_labels
-                blob_id_time = blob_id_time.where(~child_mask_2d, temp)
+                object_id_time = object_id_time.where(~child_mask_2d, temp)
                 ## ** Update directly into the chunk
-                chunk_data[{self.timedim: relative_time_idx}] = blob_id_time
+                chunk_data[{self.timedim: relative_time_idx}] = object_id_time
                 
                 
-                ## Add new entries to time_index_map for each of new_blob_id corresponding to the current time index
-                time_index_map.update({new_id: child_time_idx for new_id in new_blob_id})
+                ## Add new entries to time_index_map for each of new_object_id corresponding to the current time index
+                time_index_map.update({new_id: child_time_idx for new_id in new_object_id})
                 
-                ## Update the Properties of the N Children Blobs
-                new_child_props = self.calculate_blob_properties(blob_id_time, properties=['area', 'centroid'])
+                ## Update the Properties of the N Children Objects
+                new_child_props = self.calculate_object_properties(object_id_time, properties=['area', 'centroid'])
                 
-                # Update the blob_props DataArray:  (but first, check if the original Children still exists)
+                # Update the object_props DataArray:  (but first, check if the original Children still exists)
                 if child_id in new_child_props.ID:  # Update the entry
-                    blob_props.loc[dict(ID=child_id)] = new_child_props.sel(ID=child_id)
-                else:  # Delete child_id:  The blob has split/morphed such that it doesn't get a partition of this child...
-                    blob_props = blob_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
+                    object_props.loc[dict(ID=child_id)] = new_child_props.sel(ID=child_id)
+                else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
+                    object_props = object_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
                     if self.verbosity > 0:    print(f"Deleted child_id {child_id} because parents have split/morphed in the meantime...")
                 # Add the properties for the N-1 other new child ID
-                new_blob_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_blob_id), drop=True).ID
-                blob_props = xr.concat([blob_props, new_child_props.sel(ID=new_blob_ids_still)], dim='ID')
-                missing_ids = set(new_blob_id) - set(new_blob_ids_still.values)
+                new_object_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_object_id), drop=True).ID
+                object_props = xr.concat([object_props, new_child_props.sel(ID=new_object_ids_still)], dim='ID')
+                missing_ids = set(new_object_id) - set(new_object_ids_still.values)
                 if len(missing_ids) > 0:
                     if self.verbosity > 0:    print(f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime...")
 
                 
                 ## Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
                 
-                # Look at the overlap IDs between the original child_id and the next time-step, and also the new_blob_id and the next time-step
-                new_overlaps = self.check_overlap_slice_threshold(blob_id_time.values, blob_id_time_p1.values, blob_props)
-                new_child_overlaps_list = new_overlaps[(new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_blob_id)]
+                # Look at the overlap IDs between the original child_id and the next time-step, and also the new_object_id and the next time-step
+                new_overlaps = self.check_overlap_slice_threshold(object_id_time.values, object_id_time_p1.values, object_props)
+                new_child_overlaps_list = new_overlaps[(new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_object_id)]
                 
-                # Replace the lines in the overlap_blobs_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
-                child_mask_LHS = overlap_blobs_list[:, 0] == child_id
-                overlap_blobs_list = np.concatenate([overlap_blobs_list[~child_mask_LHS], new_child_overlaps_list])
+                # Replace the lines in the overlap_objects_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
+                child_mask_LHS = overlap_objects_list[:, 0] == child_id
+                overlap_objects_list = np.concatenate([overlap_objects_list[~child_mask_LHS], new_child_overlaps_list])
                 
                 
-                ## Finally, _FINALLY_, we need to ensure that of the new children blobs we made, they only overlap with their respective parent...
+                ## Finally, _FINALLY_, we need to ensure that of the new children objects we made, they only overlap with their respective parent...
                 new_unique_children, new_children_counts = np.unique(new_child_overlaps_list[:, 1], return_counts=True)
-                new_merging_blobs = new_unique_children[new_children_counts > 1]
-                if new_merging_blobs.size > 0:
+                new_merging_objects = new_unique_children[new_children_counts > 1]
+                if new_merging_objects.size > 0:
                     
                     if relative_time_idx + 1 < chunk_data.sizes[self.timedim]-1:  # If there is a next time-step in this chunk
-                        for new_child_id in new_merging_blobs:
-                            if new_child_id not in blobs_to_process: # We aren't already going to assess this blob
-                                blobs_to_process.insert(0, new_child_id)
+                        for new_child_id in new_merging_objects:
+                            if new_child_id not in objects_to_process: # We aren't already going to assess this object
+                                objects_to_process.insert(0, new_child_id)
                     
                     else: # This is out of our current jurisdiction: Defer this reassessment to the beginning of the next chunk
-                        future_chunk_merges.extend(new_merging_blobs)
+                        future_chunk_merges.extend(new_merging_objects)
                 
             
             # Store the processed chunk
             updated_chunks.append((chunk_start, chunk_end-1, chunk_data[:(chunk_end-1-chunk_start)]))
             
             if chunk_idx % 10 == 0:
-                if self.verbosity > 0:    print(f"Processing splitting and merging in chunk {chunk_idx} of {len(blobs_by_chunk)}")
+                if self.verbosity > 0:    print(f"Processing splitting and merging in chunk {chunk_idx} of {len(objects_by_chunk)}")
                 
                 # Periodically update the main array to prevent memory buildup
-                if len(updated_chunks) > 1:  # Keep the last chunk for potential blob_id_time_m1 reference
+                if len(updated_chunks) > 1:  # Keep the last chunk for potential object_id_time_m1 reference
                     for start, end, chunk_data in updated_chunks[:-1]:
-                        blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+                        object_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
                     updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
-                    blob_id_field_unique = blob_id_field_unique.persist() # Persist to collapse the dask graph !
+                    object_id_field_unique = object_id_field_unique.persist() # Persist to collapse the dask graph !
         
         # Final chunk updates
         for start, end, chunk_data in updated_chunks:
-            blob_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
-        blob_id_field_unique = blob_id_field_unique.persist()
+            object_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+        object_id_field_unique = object_id_field_unique.persist()
         
         
         
@@ -1723,35 +1730,35 @@ class Spotter:
         )
         
         
-        blob_props = blob_props.persist()
+        object_props = object_props.persist()
         
-        return (blob_id_field_unique, 
-                blob_props, 
-                overlap_blobs_list[:, :2],
+        return (object_id_field_unique, 
+                object_props, 
+                overlap_objects_list[:, :2],
                 merge_events)
     
     
     
     
-    def split_and_merge_blobs_parallel(self, blob_id_field_unique, blob_props):
-        '''Implements Blob Splitting & Merging with parallel processing of chunks.
+    def split_and_merge_objects_parallel(self, object_id_field_unique, object_props):
+        '''Implements Object Splitting & Merging with parallel processing of chunks.
         
-        Parameters are the same as split_and_merge_blobs()
+        Parameters are the same as split_and_merge_objects()
         '''
         
         MAX_MERGES = 20 # per timestep
         MAX_PARENTS = 10 # per merge
         MAX_CHILDREN = MAX_PARENTS
                 
-        def process_chunk(chunk_data_m1_full, chunk_data_p1_full, merging_blobs, next_id_start, lat, lon, area, neighbours_int):
-            """Process a single chunk of merging blobs.
+        def process_chunk(chunk_data_m1_full, chunk_data_p1_full, merging_objects, next_id_start, lat, lon, area, neighbours_int):
+            """Process a single chunk of merging objects.
             
             Parameters
             ----------
             chunk_data_m1 & chunk_data_p1 : numpy.ndarray
                 Array of shape (n_time, ncells) for unstructured or (n_time, ny, nx) for structured, shifted by +-1 in time
-            merging_blobs : numpy.ndarray
-                Array of shape (n_time, max_merges) containing merging blob IDs (0=none)
+            merging_objects : numpy.ndarray
+                Array of shape (n_time, max_merges) containing merging object IDs (0=none)
             next_id_start : numpy.ndarray
                 Array of shape (n_time, max_merges) containing ID offsets
             
@@ -1781,11 +1788,11 @@ class Spotter:
             if neighbours_int.shape[1] != lat.shape[0]:
                 neighbours_int = neighbours_int.T
             
-            # Handle multiple merging blobs:
-            merging_blobs = merging_blobs.squeeze()
-            if merging_blobs.ndim == 1:
+            # Handle multiple merging objects:
+            merging_objects = merging_objects.squeeze()
+            if merging_objects.ndim == 1:
                 # Add additional (last) dimension for max_merges
-                merging_blobs = merging_blobs[:, None]
+                merging_objects = merging_objects[:, None]
             
             # Pre-Convert lat/lon to Cartesian
             x = (np.cos(np.radians(lat)) * np.cos(np.radians(lon))).astype(np.float32)
@@ -1806,8 +1813,8 @@ class Spotter:
             has_merge = np.zeros(n_time, dtype=np.bool_)
             
             # Process each timestep
-            merging_blobs_list = [list(merging_blobs[i][merging_blobs[i]>0]) for i in range(merging_blobs.shape[0])]
-            final_merging_blobs = np.full((n_time, MAX_MERGES), -1, dtype=np.int32)
+            merging_objects_list = [list(merging_objects[i][merging_objects[i]>0]) for i in range(merging_objects.shape[0])]
+            final_merging_objects = np.full((n_time, MAX_MERGES), -1, dtype=np.int32)
             final_merge_count = 0
             for t in range(n_time):
                 
@@ -1824,14 +1831,14 @@ class Spotter:
                 data_p1 = chunk_data_p1[t]
                 
                 
-                # Process each merging blob at this timestep
-                while merging_blobs_list[t]:
-                    child_id = merging_blobs_list[t].pop(0)
+                # Process each merging object at this timestep
+                while merging_objects_list[t]:
+                    child_id = merging_objects_list[t].pop(0)
                     
                     # Get child mask and find overlapping parents
                     child_mask = (data_t == child_id)
                     
-                    # Find parent blobs that overlap with this child
+                    # Find parent objects that overlap with this child
                     potential_parents = np.unique(data_m1[child_mask])
                     parent_iterator = 0
                     parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
@@ -1950,7 +1957,7 @@ class Spotter:
                     next_new_id += n_parents - 1
                     
                     
-                    # Find all child blobs in the next timestep that overlap with our newly labeled regions
+                    # Find all child objects in the next timestep that overlap with our newly labeled regions
                     new_merging_list = []
                     for new_id in child_ids:
                         parent_mask = (data_t == new_id)
@@ -1969,33 +1976,33 @@ class Spotter:
                     
                     # Add to processing queue if not already processed
                     if t < n_time - 1:
-                        for new_blob_id in new_merging_list:
-                            if new_blob_id not in merging_blobs_list[t+1]:
-                                merging_blobs_list[t+1].append(new_blob_id)
+                        for new_object_id in new_merging_list:
+                            if new_object_id not in merging_objects_list[t+1]:
+                                merging_objects_list[t+1].append(new_object_id)
                     else:
-                        for new_blob_id in new_merging_list:
+                        for new_object_id in new_merging_list:
                             if final_merge_count > MAX_MERGES:
                                 raise RuntimeError(f"Reached maximum number of merges ({MAX_MERGES}) at timestep {t}")
                             
-                            # if new_blob_id is not in final_merging_blobs[t]
-                            if not np.any(final_merging_blobs[t][:final_merge_count] == new_blob_id):
-                                final_merging_blobs[t][final_merge_count] = new_blob_id
+                            # if new_object_id is not in final_merging_objects[t]
+                            if not np.any(final_merging_objects[t][:final_merge_count] == new_object_id):
+                                final_merging_objects[t][final_merge_count] = new_object_id
                                 final_merge_count += 1
                     
                             
             return (merge_child_ids, merge_parent_ids, merge_areas, merge_counts, 
                         has_merge, updates_array, updates_ids, 
-                        final_merging_blobs)
+                        final_merging_objects)
         
 
-        def update_blob_field_inplace(blob_id_field, id_lookup, updates_array, updates_ids, has_merge):
-            """Update the blob field with chunk results using xarray operations.
-                 N.B.: This is much more memory efficient because we don't need to make new copies of blob_id_field !
+        def update_object_id_field_inplace(object_id_field, id_lookup, updates_array, updates_ids, has_merge):
+            """Update the object field with chunk results using xarray operations.
+                 N.B.: This is much more memory efficient because we don't need to make new copies of object_id_field !
             
             Parameters
             ----------
-            blob_id_field : xarray.DataArray
-                The full blob field to update
+            object_id_field : xarray.DataArray
+                The full object field to update
             id_lookup : Dictionary
                 Dictionary mapping temporary IDs to new IDs
             updates : xarray.DataArray
@@ -2004,11 +2011,11 @@ class Spotter:
             Returns
             -------
             xarray.DataArray
-                Updated blob field
+                Updated object field
             """
             
             if not has_merge.any():  # If no merges -- then id_lookup is empty too
-                return blob_id_field
+                return object_id_field
             
             
             def update_timeslice(data, updates, update_ids, lookup_values):
@@ -2038,7 +2045,7 @@ class Spotter:
             
             result = xr.apply_ufunc(
                 update_timeslice,
-                blob_id_field,
+                object_id_field,
                 updates_array,
                 updates_ids,
                 kwargs={'lookup_values': lookup_array},
@@ -2051,28 +2058,23 @@ class Spotter:
                 output_dtypes=[np.int32]
             )
             
-            #result = xr.where(has_merge, result, blob_id_field)
-            #del blob_id_field
-            
-            #result = result.persist(optimize_graph=True)
-            
             return result
         
-        def update_blob_field_zarr(blob_id_field, id_lookup, updates_array, updates_ids, has_merge):
-            """Update the blob field with chunk results directly into temporary zarr store.
+        def update_object_id_field_zarr(object_id_field, id_lookup, updates_array, updates_ids, has_merge):
+            """Update the object field with chunk results directly into temporary zarr store.
             Memory-optimized version for efficiently processing chunks with merges in parallel.
             """
             
             # Early return if no merges to save memory
             if not has_merge.any().compute().item():
-                return blob_id_field
+                return object_id_field
             
             zarr_path = self.scratch_dir+'/temp_field.zarr/'
             
             # Initialise zarr store if needed
             if not os.path.exists(zarr_path):
-                blob_id_field.name = 'temp'
-                blob_id_field.to_zarr(zarr_path, mode='w')
+                object_id_field.name = 'temp'
+                object_id_field.to_zarr(zarr_path, mode='w')
             
             
             def update_time_chunk(ds_chunk, lookup_dict):
@@ -2081,10 +2083,10 @@ class Spotter:
                 # Check if we make a quick exit:
                 needs_update = ds_chunk['has_merge'].any().compute().item()
                 if not needs_update:
-                    return ds_chunk['blob_field']
+                    return ds_chunk['object_field']
                 
                 # Extract arrays from the dataset
-                chunk_data = ds_chunk['blob_field']
+                chunk_data = ds_chunk['object_field']
                 chunk_updates = ds_chunk['updates']
                 chunk_update_ids = ds_chunk['update_ids']
                 
@@ -2129,13 +2131,13 @@ class Spotter:
                 return chunk_data  # Return original data for dask graph consistency
             
             # Create time indices for each coordinate
-            time_coords = blob_id_field[self.timedim].values
+            time_coords = object_id_field[self.timedim].values
             time_indices = np.arange(len(time_coords))
             time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timedim: time_coords})
             
             # Create dataset with all necessary components
             ds = xr.Dataset({
-                'blob_field': blob_id_field,
+                'object_field': object_id_field,
                 'updates': updates_array,
                 'update_ids': updates_ids,
                 'time_indices': time_index_da,
@@ -2147,7 +2149,7 @@ class Spotter:
                 update_time_chunk,
                 ds,
                 kwargs={"lookup_dict": id_lookup},
-                template=blob_id_field
+                template=object_id_field
             )
             
             # Force computation to ensure all writes complete
@@ -2155,18 +2157,18 @@ class Spotter:
             wait(result)
             
             # Release resources
-            del result, ds, blob_id_field
+            del result, ds, object_id_field
             gc.collect()
             
-            blob_id_field_new = xr.open_zarr(zarr_path, chunks={self.timedim: self.timechunks}).temp
+            object_id_field_new = xr.open_zarr(zarr_path, chunks={self.timedim: self.timechunks}).temp
             
-            return blob_id_field_new
+            return object_id_field_new
         
         
-        def merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter):
+        def merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter):
             """Perform a single iteration of the parallel merging process."""
             
-            n_time = len(blob_id_field_unique[self.timedim])
+            n_time = len(object_id_field_unique[self.timedim])
             
             child_ids_iter = np.full((n_time, MAX_MERGES, MAX_CHILDREN), -1, dtype=np.int32)     # List of child ID arrays for this time
             parent_ids_iter = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.int32)     # List of parent ID arrays for this time
@@ -2175,45 +2177,45 @@ class Spotter:
             
             neighbours_int = self.neighbours_int.chunk({self.xdim: -1, 'nv':-1})
             
-            if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_blobs)} Merging Blobs...")
+            if self.verbosity > 0:    print(f"Processing Parallel Iteration {iteration + 1} with {len(merging_objects)} Merging Objects...")
             
-            # Pre-compute the child_time_idx for merging_blobs
-            time_index_map = self.compute_id_time_dict(blob_id_field_unique, list(merging_blobs), global_id_counter)
+            # Pre-compute the child_time_idx for merging_objects
+            time_index_map = self.compute_id_time_dict(object_id_field_unique, list(merging_objects), global_id_counter)
             if self.verbosity > 1:    print('  Finished Mapping Children to Time Indices')
             
-            # Create the uniform merging blobs array
-            max_merges = max(len([b for b in merging_blobs if time_index_map.get(b, -1) == t]) for t in range(n_time))
-            uniform_merging_blobs_array = np.zeros((n_time, max_merges), dtype=np.int64)
+            # Create the uniform merging objects array
+            max_merges = max(len([b for b in merging_objects if time_index_map.get(b, -1) == t]) for t in range(n_time))
+            uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int64)
             for t in range(n_time):
-                blobs_at_t = [b for b in merging_blobs if time_index_map.get(b, -1) == t]
-                if blobs_at_t:  # Only fill if there are blobs at this time
-                    uniform_merging_blobs_array[t, :len(blobs_at_t)] = np.array(blobs_at_t, dtype=np.int64)
+                objects_at_t = [b for b in merging_objects if time_index_map.get(b, -1) == t]
+                if objects_at_t:  # Only fill if there are objects at this time
+                    uniform_merging_objects_array[t, :len(objects_at_t)] = np.array(objects_at_t, dtype=np.int64)
 
-            merging_blobs_da = xr.DataArray(
-                uniform_merging_blobs_array,
+            merging_objects_da = xr.DataArray(
+                uniform_merging_objects_array,
                 dims=[self.timedim, 'merges'],
-                coords={self.timedim: blob_id_field_unique[self.timedim]})
+                coords={self.timedim: object_id_field_unique[self.timedim]})
             
             next_id_offsets = np.arange(n_time) * max_merges * self.timechunks + global_id_counter    
-            # N.B.: We also need to account for possibility of newly-split blobs then creating more than max_merges by the end of the iteration through the chunk
+            # N.B.: We also need to account for possibility of newly-split objects then creating more than max_merges by the end of the iteration through the chunk
             #         !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
             next_id_offsets_da = xr.DataArray(next_id_offsets,
                                            dims=[self.timedim],
-                                           coords={self.timedim: blob_id_field_unique[self.timedim]})
+                                           coords={self.timedim: object_id_field_unique[self.timedim]})
             
-            blob_id_field_unique_p1 = blob_id_field_unique.shift({self.timedim: -1}, fill_value=0)
-            blob_id_field_unique_m1 = blob_id_field_unique.shift({self.timedim: 1}, fill_value=0)
+            object_id_field_unique_p1 = object_id_field_unique.shift({self.timedim: -1}, fill_value=0)
+            object_id_field_unique_m1 = object_id_field_unique.shift({self.timedim: 1}, fill_value=0)
             
             # Align chunks
-            blob_id_field_unique_m1 = blob_id_field_unique_m1.chunk({self.timedim: self.timechunks})
-            blob_id_field_unique_p1 = blob_id_field_unique_p1.chunk({self.timedim: self.timechunks})
-            merging_blobs_da = merging_blobs_da.chunk({self.timedim: self.timechunks})
+            object_id_field_unique_m1 = object_id_field_unique_m1.chunk({self.timedim: self.timechunks})
+            object_id_field_unique_p1 = object_id_field_unique_p1.chunk({self.timedim: self.timechunks})
+            merging_objects_da = merging_objects_da.chunk({self.timedim: self.timechunks})
             next_id_offsets_da = next_id_offsets_da.chunk({self.timedim: self.timechunks})
             
             results = xr.apply_ufunc(process_chunk,
-                                 blob_id_field_unique_m1,
-                                 blob_id_field_unique_p1,
-                                 merging_blobs_da,
+                                 object_id_field_unique_m1,
+                                 object_id_field_unique_p1,
+                                 merging_objects_da,
                                  next_id_offsets_da,
                                  self.lat,
                                  self.lon,
@@ -2235,20 +2237,20 @@ class Spotter:
 
             # Unpack & persist results
             (merge_child_ids, merge_parent_ids, merge_areas, merge_counts,
-                has_merge, updates_array, updates_ids, final_merging_blobs) = results
+                has_merge, updates_array, updates_ids, final_merging_objects) = results
             
             results = persist(merge_child_ids, merge_parent_ids, merge_areas, merge_counts,
-                              has_merge, updates_array, updates_ids, final_merging_blobs
+                              has_merge, updates_array, updates_ids, final_merging_objects
                 )
             (merge_child_ids, merge_parent_ids, merge_areas, merge_counts, 
-                has_merge, updates_array, updates_ids, final_merging_blobs) = results
+                has_merge, updates_array, updates_ids, final_merging_objects) = results
             
             
             has_merge = has_merge.compute()
             time_indices = np.where(has_merge)[0]
             
             # Clean up temporary arrays
-            del blob_id_field_unique_p1, blob_id_field_unique_m1, merging_blobs_da, next_id_offsets_da
+            del object_id_field_unique_p1, object_id_field_unique_m1, merging_objects_da, next_id_offsets_da
             gc.collect()
             if self.verbosity > 1:    print('  Finished Batch Processing Step')
             
@@ -2270,15 +2272,20 @@ class Spotter:
             if self.verbosity > 1:    print('  Finished Consolidation Step 1: Temporary ID Mapping')
             
             # 2:  Update Field with new IDs
-            #blob_id_field_unique = update_blob_field_inplace(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
-            #blob_id_field_unique = blob_id_field_unique.chunk({self.timedim: self.timechunks}) # Rechunk to avoid accumulating chunks...
-            blob_id_field_unique = update_blob_field_zarr(blob_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
+            
+            update_on_disk = True # N.B.: This ultimately is much more memory efficient because we can refresh the dask graph every iteration
+            
+            if update_on_disk:
+                object_id_field_unique = update_object_id_field_zarr(object_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
+            else:
+                object_id_field_unique = update_object_id_field_inplace(object_id_field_unique, id_lookup, updates_array, updates_ids, has_merge)
+                object_id_field_unique = object_id_field_unique.chunk({self.timedim: self.timechunks}) # Rechunk to avoid accumulating chunks...
             del updates_array, updates_ids
             gc.collect()
             if self.verbosity > 1:    print('  Finished Consolidation Step 2: Data Field Update')
             
             # 3:  Update Merge Events
-            new_merging_blobs = set()
+            new_merging_objects = set()
             merge_counts = merge_counts.compute()
             for t in time_indices:
                 count = merge_counts.isel({self.timedim: t}).item()
@@ -2306,10 +2313,10 @@ class Spotter:
                         merge_areas_iter[t, merge_idx, :len(areas)] = areas
             
             
-            final_merging_blobs = final_merging_blobs.compute().values
-            final_merging_blobs = final_merging_blobs[final_merging_blobs > 0]
-            mapped_final_blobs = [id_lookup.get(id_, id_) for id_ in final_merging_blobs]
-            new_merging_blobs.update(mapped_final_blobs)
+            final_merging_objects = final_merging_objects.compute().values
+            final_merging_objects = final_merging_objects[final_merging_objects > 0]
+            mapped_final_objects = [id_lookup.get(id_, id_) for id_ in final_merging_objects]
+            new_merging_objects.update(mapped_final_objects)
             
             if self.verbosity > 1:    print('  Finished Consolidation Step 3: Merge List Dictionary Consolidation')
             
@@ -2319,9 +2326,9 @@ class Spotter:
             gc.collect()
                         
             
-            return (blob_id_field_unique,  
+            return (object_id_field_unique,  
                     (child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter),
-                    new_merging_blobs, global_id_counter)
+                    new_merging_objects, global_id_counter)
         
         
         
@@ -2332,19 +2339,19 @@ class Spotter:
         # Main Loop #
         #############
         
-        # Compile List of Overlapping Blob ID Pairs Across Time
-        overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)  # List blob pairs that overlap by at least overlap_threshold percent
-        if self.verbosity > 0:    print('Finished Finding Overlapping Blobs')
+        # Compile List of Overlapping Object ID Pairs Across Time
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)  # List object pairs that overlap by at least overlap_threshold percent
+        if self.verbosity > 0:    print('Finished Finding Overlapping Objects')
         
-        # Find initial merging blobs
-        unique_children, children_counts = np.unique(overlap_blobs_list[:, 1], return_counts=True)
-        merging_blobs = set(unique_children[children_counts > 1].astype(np.int32))
-        del overlap_blobs_list
+        # Find initial merging objects
+        unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)
+        merging_objects = set(unique_children[children_counts > 1].astype(np.int32))
+        del overlap_objects_list
         
-        ## Process chunks iteratively until no new merging blobs remain
+        ## Process chunks iteratively until no new merging objects remain
         iteration = 0
         processed_chunks = set()
-        global_id_counter = blob_props.ID.max().item() + 1
+        global_id_counter = object_props.ID.max().item() + 1
         
         # Initialise global merge event tracking
         global_child_ids = []
@@ -2352,9 +2359,9 @@ class Spotter:
         global_merge_areas = []
         global_merge_tidx = []
         
-        while merging_blobs and iteration < self.max_iteration:
+        while merging_objects and iteration < self.max_iteration:
             
-            blob_id_field_new, merge_data_iter, new_merging_blobs, global_id_counter = merge_blobs_parallel_iteration(blob_id_field_unique, merging_blobs, global_id_counter)
+            object_id_field_new, merge_data_iter, new_merging_objects, global_id_counter = merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter)
             child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
             
             # Merge all_merge_events_chunk into all_merge_events
@@ -2380,19 +2387,19 @@ class Spotter:
                             global_merge_tidx.append(t)
             
             # Prepare for next iteration
-            merging_blobs = new_merging_blobs - processed_chunks
-            processed_chunks.update(new_merging_blobs)
+            merging_objects = new_merging_objects - processed_chunks
+            processed_chunks.update(new_merging_objects)
             iteration += 1
             
-            blob_id_field_unique = blob_id_field_new
-            del blob_id_field_new
+            object_id_field_unique = object_id_field_new
+            del object_id_field_new
         
         
         if iteration == self.max_iteration:
-            raise RuntimeError(f"Reached maximum iterations ({self.max_iteration}) in split_and_merge_blobs_parallel. Set optional argument 'max_iteration' to a higher value.")
+            raise RuntimeError(f"Reached maximum iterations ({self.max_iteration}) in split_and_merge_objects_parallel. Set optional argument 'max_iteration' to a higher value.")
         
         ### Process the Merge Events ###
-        times = blob_id_field_unique[self.timedim].values
+        times = object_id_field_unique[self.timedim].values
         
         # Convert to numpy arrays
         max_parents = max(len(ids) for ids in global_parent_ids)
@@ -2428,71 +2435,71 @@ class Spotter:
             }
         )
         
-        # Re-compute New (now-merged) Blob Properties
-        blob_id_field_unique = blob_id_field_unique.persist(optimize_graph=True)
-        blob_props = self.calculate_blob_properties(blob_id_field_unique, properties=['area', 'centroid']).persist(optimize_graph=True)
+        # Re-compute New (now-merged) Object Properties
+        object_id_field_unique = object_id_field_unique.persist(optimize_graph=True)
+        object_props = self.calculate_object_properties(object_id_field_unique, properties=['area', 'centroid']).persist(optimize_graph=True)
         
-        # Re-compute New (now-merged) Overlap Blob List & Filter Small Overlaps (again)
-        overlap_blobs_list = self.find_overlapping_blobs(blob_id_field_unique, blob_props)
-        overlap_blobs_list = overlap_blobs_list[:, :2].astype(np.int32)
+        # Re-compute New (now-merged) Overlap Object List & Filter Small Overlaps (again)
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)
+        overlap_objects_list = overlap_objects_list[:, :2].astype(np.int32)
         
-        return (blob_id_field_unique,
-                blob_props,
-                overlap_blobs_list,
+        return (object_id_field_unique,
+                object_props,
+                overlap_objects_list,
                 merge_events)
         
     
     
-    def track_blObs(self, data_bin):
-        '''Identifies Blobs across time, accounting for splitting & merging logic.
+    def track_objects(self, data_bin):
+        '''Identifies Objects across time, accounting for splitting & merging logic.
         
         Returns
         -------
-        blob_id_field : xarray.DataArray
+        object_id_field : xarray.DataArray
             Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
         '''
         
         # Cluster & ID Binary Data at each Time Step
-        blob_id_field, _, _ = self.identify_blobs(data_bin, time_connectivity=False)
-        blob_id_field = blob_id_field.persist()
+        object_id_field, _, _ = self.identify_objects(data_bin, time_connectivity=False)
+        object_id_field = object_id_field.persist()
         del data_bin
-        if self.verbosity > 0:    print('Finished Blob Identification')
+        if self.verbosity > 0:    print('Finished Object Identification')
         
         if self.unstructured_grid:
-            # Make the blob_id_field unique across time
-            cumsum_ids = (blob_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
-            blob_id_field = xr.where(blob_id_field > 0, blob_id_field + cumsum_ids, 0)
-            #blob_id_field = blob_id_field.persist()
-            blob_id_field = self.refresh_dask_graph(blob_id_field)
-            if self.verbosity > 0:    print('Finished Making Blobs Globally Unique')
+            # Make the object_id_field unique across time
+            cumsum_ids = (object_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
+            object_id_field = xr.where(object_id_field > 0, object_id_field + cumsum_ids, 0)
+            #object_id_field = object_id_field.persist()
+            object_id_field = self.refresh_dask_graph(object_id_field)
+            if self.verbosity > 0:    print('Finished Making Objects Globally Unique')
         
-        # Calculate Properties of each Blob
-        blob_props = self.calculate_blob_properties(blob_id_field, properties=['area', 'centroid'])
-        blob_props = blob_props.persist()
-        wait(blob_props)
-        if self.verbosity > 0:    print('Finished Calculating Blob Properties')
+        # Calculate Properties of each Object
+        object_props = self.calculate_object_properties(object_id_field, properties=['area', 'centroid'])
+        object_props = object_props.persist()
+        wait(object_props)
+        if self.verbosity > 0:    print('Finished Calculating Object Properties')
         
-        # Apply Splitting & Merging Logic to `overlap_blobs`
+        # Apply Splitting & Merging Logic to `overlap_objects`
         #   N.B. This is the longest step due to loop-wise dependencies... 
         #          In v2.0 unstructured, this loop has been painstakingly parallelised
-        split_and_merge = self.split_and_merge_blobs_parallel if self.unstructured_grid else self.split_and_merge_blobs
-        blob_id_field, blob_props, blobs_list, merge_events = split_and_merge(blob_id_field, blob_props)
-        if self.verbosity > 0:    print('Finished Splitting and Merging Blobs')
+        split_and_merge = self.split_and_merge_objects_parallel if self.unstructured_grid else self.split_and_merge_objects
+        object_id_field, object_props, overlap_objects_list, merge_events = split_and_merge(object_id_field, object_props)
+        if self.verbosity > 0:    print('Finished Splitting and Merging Objects')
         
         # Persist Together (This helps avoid block-wise task fusion run_spec issues with dask)
-        results = persist(blob_id_field, blob_props, blobs_list, merge_events)
-        blob_id_field, blob_props, blobs_list, merge_events = results
+        results = persist(object_id_field, object_props, overlap_objects_list, merge_events)
+        object_id_field, object_props, overlap_objects_list, merge_events = results
 
-        # Cluster Blobs List to Determine Globally Unique IDs & Update Blob ID Field
-        split_merged_blobs_ds = self.cluster_rename_blobs_and_props(blob_id_field, blob_props, blobs_list, merge_events)
-        split_merged_blobs_ds = split_merged_blobs_ds.chunk({self.timedim: self.timechunks, 'ID': -1, 'component': -1, 'ncells': -1, 'sibling_ID' : -1})
-        split_merged_blobs_ds = split_merged_blobs_ds.persist()
-        if self.verbosity > 0:    print('Finished Clustering and Renaming Blobs')
+        # Cluster Objects List to Determine Globally Unique IDs & Update Object ID Field --> Events
+        split_merged_events_ds = self.cluster_rename_objects_and_props(object_id_field, object_props, overlap_objects_list, merge_events)
+        split_merged_events_ds = split_merged_events_ds.chunk({self.timedim: self.timechunks, 'ID': -1, 'component': -1, 'ncells': -1, 'sibling_ID' : -1})
+        split_merged_events_ds = split_merged_events_ds.persist()
+        if self.verbosity > 0:    print('Finished Clustering and Renaming Objects')
     
-        # Count Number of Blobs (This may have increased due to splitting)
-        N_blobs = split_merged_blobs_ds.ID_field.max().compute().data
+        # Count Number of Objects (This may have increased due to splitting)
+        N_events = split_merged_events_ds.ID_field.max().compute().data
     
-        return split_merged_blobs_ds, merge_events, N_blobs
+        return split_merged_events_ds, merge_events, N_events
 
 
 
@@ -2601,7 +2608,7 @@ def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
 @jit(nopython=True, parallel=True, fastmath=True)
 def partition_nn_grid(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
     """
-    Assigns labels based on nearest parent blob points.
+    Assigns labels based on nearest parent object points.
     This is quite computationally-intensive, so we utilise many optimisations here...
     """
     
@@ -2720,11 +2727,11 @@ def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centro
     Parameters
     ----------
     child_mask : np.ndarray
-        1D boolean array where True indicates points in the child blob
+        1D boolean array where True indicates points in the child object
     parent_masks : np.ndarray
-        2D boolean array of shape (n_parents, n_points) where True indicates points in each parent blob
+        2D boolean array of shape (n_parents, n_points) where True indicates points in each parent object
     child_ids : np.ndarray
-        1D array containing the IDs to assign to each partition of the child blob
+        1D array containing the IDs to assign to each partition of the child object
     parent_centroids : np.ndarray
         Array of shape (n_parents, 2) containing (lat, lon) coordinates of parent centroids in degrees
     neighbours_int : np.ndarray
@@ -2839,7 +2846,7 @@ def partition_nn_unstructured_optimised(child_mask, parent_frontiers, parent_cen
     Parameters
     ----------
     child_mask : np.ndarray
-        1D boolean array where True indicates points in the child blob
+        1D boolean array where True indicates points in the child object
     parent_frontiers : np.ndarray
         1D uint8 array with parent indices (255 for unvisited points)
     parent_centroids : np.ndarray
@@ -2940,11 +2947,11 @@ def partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat
     Parameters:
     -----------
     child_mask : np.ndarray
-        1D boolean array indicating which cells belong to the child blob
+        1D boolean array indicating which cells belong to the child object
     parent_centroids : np.ndarray
         Array of shape (n_parents, 2) containing (lat, lon) coordinates of parent centroids in degrees
     child_ids : np.ndarray
-        Array of IDs to assign to each partition of the child blob
+        Array of IDs to assign to each partition of the child object
     lat / lon : np.ndarray
         Latitude/Longitude in degrees
         
