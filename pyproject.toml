@@ -1,23 +1,57 @@
 [build-system]
-requires = ["setuptools>=42", "wheel", "setuptools_scm[toml]>=3.4"]
+requires = ["setuptools>=61.0", "wheel", "setuptools_scm[toml]>=6.0"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "marEx"
+authors = [
+    {name = "Aaron Wienkers", email = "aaron@wienkers.com"},
+]
+description = "Marine Extremes Detection and Tracking"
+readme = "README.md"
+requires-python = ">=3.6"
+license = 
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+]
+dynamic = ["version"]
+dependencies = [
+    "numpy",
+    "xarray",
+    "dask",
+    "scipy",
+    "scikit-image",
+    "dask_image",
+    "jax",
+    "jaxlib",
+    "pillow",
+    "xhistogram",
+    "flox",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+]
+viz = [
+    "matplotlib",
+    "cartopy",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/wienkers/spot_the_blOb"
+"Bug Tracker" = "https://github.com/wienkers/spot_the_blOb/issues"
 
 [tool.setuptools_scm]
 
-[tool.interrogate]
-ignore-init-method = true
-ignore-init-module = false
-ignore-magic = false
-ignore-semiprivate = true
-ignore-private = true
-ignore-property-decorators = true
-ignore-module = false
-fail-under = 95
-exclude = ["setup.py", "docs", "tests"]
-verbose = 1
-quiet = false
-color = true
-
-[tool.isort]
-known_third_party = ["numpy", "setuptools"]
-
+[tool.black]
+line-length = 88
+target-version = ['py38']

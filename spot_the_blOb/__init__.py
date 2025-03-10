@@ -1,1 +1,0 @@
-from .spot_the_blOb import Spotter
