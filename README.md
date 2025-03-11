@@ -1,18 +1,22 @@
-marEx
+
+![Logo](media/logo.png)
+
+
+Marine Extremes Python Package
 ==============================
 
-Efficient and scalable Marine Heatwave detection and tracking.
+Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale data.
 
 ## Features
 
 ### Data Pre-processing
 **Detrending & Anomaly Detection**:
-  - Removes trend and seasonal cycle using a 6-coefficient model (mean, trend, annual & semi-annual harmonics).
+  - Removes trend and seasonal cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends).
   - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
   - Identifies extreme events based on a global-in-time percentile threshold.
   - Utilises `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets.
   - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores...
-    - Takes ~2 wall-minutes per decade
+    - Takes ~5 wall-minutes per _century_
     - Requires only 1 Gb memory per core (when `dask`-backed data has chunks of 25 days) 
 
 
@@ -63,15 +67,14 @@ https://github.com/user-attachments/assets/462acafd-b2af-467c-b2c5-efec28ed24f1
 ```python
 import xarray as xr
 import dask
-import marEx.detect as detEx
+import marEx
 
 # Load SST data & rechunk for optimal processing
 file_name = 'path/to/sst/data'
-sst = xr.open_dataset(file_name, chunks={}).sst
-sst_rechunk = hot.rechunk_for_cohorts(sst)
+sst = xr.open_dataset(file_name, chunks={'time':500}).sst
 
 # Process Data
-extremes_ds = hot.preprocess_data(sst_rechunk, threshold_percentile=95)
+extremes_ds = hot.preprocess_data(sst, threshold_percentile=95)
 ```
 
 The resulting xarray dataset `extremes_ds` will have the following structure & entries:
@@ -87,13 +90,16 @@ Data variables:
     mask            (lat, lon)        bool      dask.array
     extreme_events  (time, lat, lon)  bool      dask.array
 ```
-where `dat_detrend` is the detrended SST data, `mask` is the provided land-sea mask, and `extreme_events` is the binary field locating extreme events. Additionally, the STD-renormalised anomalies, `extreme_events_stn`, will be output if `normalise=True` is set in `preprocess_data()`.
+where `dat_detrend` is the detrended SST data, `mask` is the deduced land-sea mask, and `extreme_events` is the binary field locating extreme events. Additionally, the STD-renormalised anomalies, `extreme_events_stn`, will be output if `normalise=True` is set in `preprocess_data()`.
 
 Optional arguments for `marEx.preprocess_data()` include:
 - `std_normalise`: Whether to normalise the anomalies using a 30-day rolling standard deviation. Default is `False`.
 - `threshold_percentile`: The percentile threshold for extreme event detection. Default is `95`.
-- `chunk_size`: The chunk size for the output dataset. Default is `{'time': 25}`.
+- `detrend_orders`: List of polynomial orders for detrending. Default is `[1]`, i.e. 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
 - `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
+- `dask_chunks`: The chunk size for the output dataset. Default is `{'time': 25}`.
+
+See, e.g. `./examples/unstructured data/01_preprocess_extremes.ipynb` for a detailed example of pre-processing on an _unstructured_ grid.
 
 ---
 ### 2. Identify & Track Marine Heatwaves: cf. `02_id_track_events.ipynb`
@@ -113,7 +119,7 @@ extreme_bin = ds_hot.dat_stn
 mask = ds_hot.mask.where((ds_hot.lat < 85) & (ds_hot.lat > -90), other=False)
 
 # ID, Track, & Merge
-tracker = marEx.tracker(extreme_bin, mask, R_fill=8, T_fill=2, area_filter_quartile=0.5, allow_merging=True, overlap_threshold=0.5)
+tracker = marEx.tracker(extreme_bin, mask, area_filter_quartile=0.5, R_fill=8, T_fill=2, allow_merging=True, overlap_threshold=0.5, nn_partitioning = True)
 extreme_events_ds, merges_ds = tracker.run(return_merges=True)
 ```
 
@@ -167,9 +173,9 @@ where
 Arguments for `marEx.tracker()` include: 
 - `data_bin`: The binary field of events to group & label. _Must represent an underlying `dask` array_.
 - `mask`: The land-sea mask to apply to the binary field, indicating points to keep.
+- `area_filter_quartile`: The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
 - `R_fill`: The size of the structuring element used in morphological opening & closing, relating to the largest hole that can be filled. In units of pixels.
 - `T_fill`: The permissible temporal gap between objects for tracking continuity to be maintained. Default is `2` days.
-- `area_filter_quartile`: The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
 - `allow_merging`:
   - `True`: (Default) Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
   - `False`: Classical `ndmeasure.label` with simple time connectivity, i.e. Scannell et al. 
@@ -179,19 +185,21 @@ Arguments for `marEx.tracker()` include:
 - `overlap_threshold`: The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event and continue tracking with the same ID. Default is `0.5`.
 - `timedim`, `xdim`, `ydim`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
 
+See, e.g. `./examples/unstructured data/02_id_track_events.ipynb` for a detailed example of identification, tracking, & merging on an _unstructured_ grid.
 
 ## Installation
 
 **PyPI**
 
-To install the core package run: `pip install git+https://github.com/wienkers/spot_the_blOb.git`
+To install the full package, run: `pip install marEx[full]`  
+Note: JAX may be difficult to install on some systems. If you encounter issues, you can install without JAX support by running: `pip install marEx`
 
 **GitHub**
 
-1. Clone `spot_the_blOb`: `git clone https://github.com/wienkers/spot_the_blOb.git`
-2. Change to the parent directory of `spot_the_blOb`
-3. Install `spot_the_blOb` with `pip install -e ./`spot_the_blOb`. This will allow
-   changes you make locally, to be reflected when you import the package in Python
+1. Clone `marEx`: `git clone https://github.com/wienkers/marEx.git`
+2. Change to the parent directory of `marEx`
+3. Install `marEx` with `pip install -e ./`marEx`.  
+This will allow changes you make locally, to be reflected when you import the package in Python
 
 ---
-Please contact [Aaron Wienkers](mailto:aaron.wienkers@usys.ethz.ch) with any questions, comments, issues, or bugs.
+Please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com) with any questions, comments, issues, or bugs.

@@ -69,6 +69,7 @@ def configure_dask(scratch_dir: Optional[Union[str, Path]] = None,
     
     # Apply default configuration
     dask.config.set(temporary_directory=temp_dir.name)
+    print(f"Dask Scratch: {repr(temp_dir.name)}")
     
     # Apply default settings
     for key, value in DEFAULT_DASK_CONFIG.items():
@@ -156,6 +157,9 @@ def start_local_cluster(n_workers: int = 4, threads_per_worker: int = 1,
     # Create cluster and client
     cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, **kwargs)
     client = Client(cluster)
+    
+    # Store temporary directory (so it isn't garbage collected)
+    client._temp_dir = temp_dir
 
     # Print connection information
     get_cluster_info(client)
@@ -237,6 +241,9 @@ def start_distributed_cluster(n_workers: int, workers_per_node: int,
     # Scale the cluster
     cluster.scale(n_workers)
     client = Client(cluster)
+    
+    # Store temporary directory (so it isn't garbage collected)
+    client._temp_dir = temp_dir
     
     # Print connection information
     get_cluster_info(client)

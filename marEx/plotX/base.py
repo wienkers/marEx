@@ -9,6 +9,8 @@ import subprocess
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Union, Tuple
+import shutil
+import warnings
 
 @dataclass
 class PlotConfig:
@@ -51,6 +53,7 @@ class PlotterBase:
             cmap, norm, var_units = self.setup_id_plot_params(config.cmap)
             clim = None
             extend = 'neither'
+            self.da = self.da.where(self.da > 0)  # Fill value to NaN (get rid of 0s)
         else:
             if config.cmap is None:
                 cmap = 'RdBu_r' if config.issym else 'viridis'
@@ -176,6 +179,18 @@ class PlotterBase:
 
     def animate(self, config: PlotConfig, plot_dir='./', file_name=None):
         """Create an animation from time series data"""
+        
+        # Check if ffmpeg is installed
+        if shutil.which('ffmpeg') is None:
+            warnings.warn(
+                "ffmpeg executable not found in system PATH. Cannot create animation.\n"
+                "Please install ffmpeg using one of the following methods:\n"
+                "  - Linux: sudo apt install ffmpeg (Ubuntu/Debian) or sudo yum install ffmpeg (CentOS/RHEL)\n"
+                "  - Conda: conda install -c conda-forge ffmpeg\n"
+                "Alternatively, use matplotlib for animation in Jupyter notebooks."
+            )
+            return None
+        
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(exist_ok=True)
         temp_dir = plot_dir / "blobs_seq"
@@ -289,9 +304,12 @@ def make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info=None):
     # Set up plot kwargs
     plot_kwargs = {
         'transform': ccrs.PlateCarree(),
-        'cmap': plot_params['cmap'],
-        'shading': 'auto'
+        'cmap': plot_params['cmap']
     }
+    
+    # For pcolormesh and tripcolor only
+    if grid_info and grid_info.get('type') == 'unstructured':
+        plot_kwargs['shading'] = 'auto'
     
     if plot_params.get('norm'):
         plot_kwargs['norm'] = plot_params['norm']
