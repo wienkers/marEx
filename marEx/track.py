@@ -344,13 +344,14 @@ class tracker:
         if not checkpoint:
             checkpoint = self.checkpoint
         
-        def load_from_checkpoint():
+        def load_data_from_checkpoint():
             """Load preprocessed data from checkpoint files."""
             data_bin_preprocessed = xr.open_zarr(
                 f'{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr', 
                 chunks={self.timedim: self.timechunks}
             )['data_bin_preproc']
-            
+            return data_bin_preprocessed
+        def load_stats_from_checkpoint():
             object_stats_npz = np.load(f'{self.scratch_dir}/marEx_checkpoint_stats.npz')
             object_stats = [
                 object_stats_npz[key] for key in [
@@ -358,11 +359,11 @@ class tracker:
                     'area_threshold', 'accepted_area_fraction', 'preprocessed_area_fraction'
                 ]
             ]
-            return data_bin_preprocessed, object_stats
+            return object_stats
         
         if checkpoint == 'load':
             print('Loading preprocessed data & stats...')
-            return load_from_checkpoint()
+            return load_data_from_checkpoint(), load_stats_from_checkpoint()
         
         
         # Compute area of initial binary data
@@ -387,9 +388,15 @@ class tracker:
         if self.verbosity > 0:
             print('Finished filtering small objects')
         
-        # Persist preprocessed data
-        data_bin_filtered = data_bin_filtered.persist()
-        wait(data_bin_filtered)
+        # Persist preprocessed data &/or Save checkpoint
+        if checkpoint and 'save' in checkpoint:
+            print('Saving preprocessed data & stats...')
+            data_bin_filtered.name = 'data_bin_preproc'
+            data_bin_filtered.to_zarr(f'{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr', mode='w') # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
+            data_bin_filtered = load_data_from_checkpoint()
+        else:
+            data_bin_filtered = data_bin_filtered.persist()
+            wait(data_bin_filtered)
                 
         # Compute area of processed data
         processed_area = self.compute_area(data_bin_filtered)
@@ -411,10 +418,7 @@ class tracker:
         )
         
         # Save checkpoint
-        if 'save' in checkpoint:
-            print('Saving preprocessed data & stats...')
-            data_bin_filtered.name = 'data_bin_preproc'
-            data_bin_filtered.to_zarr(f'{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr', mode='w')
+        if checkpoint and 'save' in checkpoint:
             np.savez(
                 f'{self.scratch_dir}/marEx_checkpoint_stats.npz', 
                 total_area_IDed=total_area_IDed, 
@@ -425,7 +429,8 @@ class tracker:
                 preprocessed_area_fraction=preprocessed_area_fraction
             )
             # Reload to refresh the dask graph
-            data_bin_filtered, object_stats = load_from_checkpoint()
+            data_bin_filtered = load_data_from_checkpoint()
+            object_stats = load_stats_from_checkpoint()
         
         return data_bin_filtered, object_stats
     
@@ -452,9 +457,11 @@ class tracker:
             events_ds, merges_ds, N_events_final = self.track_objects(data_bin_preprocessed)
         else: 
             # Track without merging or splitting
-            events_ds, merges_ds, N_events_final = self.identify_objects(
+            events_da, _, N_events_final = self.identify_objects(
                 data_bin_preprocessed, time_connectivity=True
             )
+            events_ds = xr.Dataset({'ID_field': events_da})
+            merges_ds = xr.Dataset()
         
         # Set all filler IDs < 0 to 0
         events_ds['ID_field'] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
@@ -845,7 +852,7 @@ class tracker:
                 dask='parallelized'
             )
             
-            objects_areas = cluster_sizes  # Store pre-filtered areas
+            object_areas = cluster_sizes  # Store pre-filtered areas
             
         else:
             # Structured grid approach
@@ -867,7 +874,7 @@ class tracker:
             # Count objects after filtering
             N_objects_filtered = object_ids_keep.where(object_ids_keep > 0).count().item()
         
-        return data_bin_filtered, area_threshold, objects_areas, N_objects_unfiltered, N_objects_filtered
+        return data_bin_filtered, area_threshold, object_areas, N_objects_unfiltered, N_objects_filtered
     
     # ============================
     # Object Identification Methods
@@ -1313,13 +1320,13 @@ class tracker:
             return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
         
         # Extract the overlapping points
-        ids_t0_valid = ids_t0[combined_mask].astype(np.int32)
-        ids_next_valid = ids_next[combined_mask].astype(np.int32)
+        ids_t0_valid = ids_t0[combined_mask]
+        ids_next_valid = ids_next[combined_mask]
         
         # Create a unique identifier for each pair
         # This is faster than using np.unique with axis=1
-        max_id = max(ids_t0.max(), ids_next.max()) + 1
-        pair_ids = ids_t0_valid * max_id + ids_next_valid
+        max_id = max(ids_t0.max(), ids_next.max() + 1).astype(np.int64)
+        pair_ids = ids_t0_valid.astype(np.int64) * max_id + ids_next_valid.astype(np.int64)
         
         if self.unstructured_grid:
             # Get unique pairs and their inverse indices
@@ -1343,39 +1350,7 @@ class tracker:
         
         return result
     
-    def check_overlap_slice_threshold(self, ids_t0, ids_next, object_props):
-        """
-        Find overlapping objects between time slices, filtering by overlap threshold.
-        
-        Parameters
-        ----------
-        ids_t0 : numpy.ndarray
-            Object IDs at current time
-        ids_next : numpy.ndarray
-            Object IDs at next time
-        object_props : xarray.Dataset
-            Object properties including area
-            
-        Returns
-        -------
-        numpy.ndarray
-            Filtered array of shape (n_overlaps, 3) with [id_t0, id_next, overlap_area]
-        """
-        # Get all overlaps
-        overlap_slice = self.check_overlap_slice(ids_t0, ids_next)
-        
-        # Calculate overlap fractions
-        areas_0 = object_props['area'].sel(ID=overlap_slice[:, 0]).values
-        areas_1 = object_props['area'].sel(ID=overlap_slice[:, 1]).values
-        min_areas = np.minimum(areas_0, areas_1)
-        overlap_fractions = overlap_slice[:, 2].astype(float) / min_areas
-        
-        # Filter by threshold
-        overlap_slice_filtered = overlap_slice[overlap_fractions >= self.overlap_threshold]
-        
-        return overlap_slice_filtered
-    
-    def find_overlapping_objects(self, object_id_field, object_props):
+    def find_overlapping_objects(self, object_id_field):
         """
         Find all overlapping objects across time.
         
@@ -1383,8 +1358,6 @@ class tracker:
         ----------
         object_id_field : xarray.DataArray
             Field containing object IDs
-        object_props : xarray.Dataset
-            Object properties including area
             
         Returns
         -------
@@ -1413,30 +1386,59 @@ class tracker:
         ).persist()
         
         # Concatenate all pairs from different chunks
-        all_pairs_with_values = np.concatenate(overlap_object_pairs_list.values)
+        all_pairs_with_areas = np.concatenate(overlap_object_pairs_list.values)
         
         # Get unique pairs and their indices
-        unique_pairs, inverse_indices = np.unique(all_pairs_with_values[:, :2], axis=0, return_inverse=True)
+        unique_pairs, inverse_indices = np.unique(all_pairs_with_areas[:, :2], axis=0, return_inverse=True)
 
         # Sum the overlap areas using the inverse indices
         output_dtype = np.float32 if self.unstructured_grid else np.int32
-        total_summed_values = np.zeros(len(unique_pairs), dtype=output_dtype)
-        np.add.at(total_summed_values, inverse_indices, all_pairs_with_values[:, 2])
+        total_summed_areas = np.zeros(len(unique_pairs), dtype=output_dtype)
+        np.add.at(total_summed_areas, inverse_indices, all_pairs_with_areas[:, 2])
 
         # Stack the pairs with their summed areas
-        overlap_objects_list_unique = np.column_stack((unique_pairs, total_summed_values))
+        overlap_objects_list_unique = np.column_stack((unique_pairs, total_summed_areas))
         
-        ## Enforce all Object Pairs overlap by at least `overlap_threshold` percent (in area)
-        # Apply overlap threshold filter
-        areas_0 = object_props['area'].sel(ID=overlap_objects_list_unique[:, 0]).values
-        areas_1 = object_props['area'].sel(ID=overlap_objects_list_unique[:, 1]).values
+        return overlap_objects_list_unique
+    
+    def enforce_overlap_threshold(self, overlap_objects_list, object_props):
+        """
+        Filter object pairs based on overlap threshold.
+        
+        Parameters
+        ----------
+        overlap_objects_list : (N x 3) numpy.ndarray
+            Array of object ID pairs with overlap area
+        object_props : xarray.Dataset
+            Object properties including area
+            
+        Returns
+        -------
+        overlap_objects_list_filtered : (M x 3) numpy.ndarray
+            Filtered array of object ID pairs that meet the overlap threshold
+        """
+        if len(overlap_objects_list) == 0:
+            return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
+        
+        # # Ensure all IDs exist in object_props
+        # valid_mask = np.isin(overlap_objects_list[:, 0], object_props.ID.values) & \
+        #             np.isin(overlap_objects_list[:, 1], object_props.ID.values)
+        
+        # valid_overlap_objects = overlap_objects_list[valid_mask]
+        
+        # if len(valid_overlap_objects) == 0:
+        #     return np.empty((0, 3), dtype=overlap_objects_list.dtype)
+        
+        # Calculate overlap fractions
+        areas_0 = object_props['area'].sel(ID=overlap_objects_list[:, 0]).values
+        areas_1 = object_props['area'].sel(ID=overlap_objects_list[:, 1]).values
         min_areas = np.minimum(areas_0, areas_1)
-        overlap_fractions = overlap_objects_list_unique[:, 2].astype(float) / min_areas
+        overlap_fractions = overlap_objects_list[:, 2].astype(float) / min_areas
         
         # Filter by threshold
-        overlap_objects_list_unique_filtered = overlap_objects_list_unique[overlap_fractions >= self.overlap_threshold]
+        overlap_objects_list_filtered = overlap_objects_list[overlap_fractions >= self.overlap_threshold]
         
-        return overlap_objects_list_unique_filtered
+        return overlap_objects_list_filtered
     
     def compute_id_time_dict(self, da, child_objects, max_objects, all_objects=True):
         """
@@ -1546,7 +1548,7 @@ class tracker:
             object_id_field = xr.where(object_id_field > 0, object_id_field + cumsum_ids, 0)
             object_id_field = self.refresh_dask_graph(object_id_field)
             if self.verbosity > 0:
-                print('Finished making objects globally unique')
+                print(f'Finished assigning c. {cumsum_ids.max().compute().values} globally unique object IDs')
         
         # Calculate object properties
         object_props = self.calculate_object_properties(object_id_field, properties=['area', 'centroid'])
@@ -1557,7 +1559,7 @@ class tracker:
         
         # Apply splitting & merging logic
         #  This is the most intricate step due to non-trivial loop-wise dependencies
-        #  In v2.0_unstruct, this loop as been painstakingly parallelised
+        #  In v2.0_unstruct, this loop has been painstakingly parallelised
         split_and_merge = self.split_and_merge_objects_parallel if self.unstructured_grid else self.split_and_merge_objects
         object_id_field, object_props, overlap_objects_list, merge_events = split_and_merge(object_id_field, object_props)
         if self.verbosity > 0:
@@ -1571,14 +1573,19 @@ class tracker:
         split_merged_events_ds = self.cluster_rename_objects_and_props(
             object_id_field, object_props, overlap_objects_list, merge_events
         )
-        split_merged_events_ds = split_merged_events_ds.chunk({
-            self.timedim: self.timechunks, 
-            'ID': -1, 
-            'component': -1, 
-            'ncells': -1, 
-            'sibling_ID': -1
-        })
-        split_merged_events_ds = split_merged_events_ds.persist()
+        
+        # Rechunk final output
+        chunk_dict = {
+            self.timedim: self.timechunks,
+            'ID': -1,
+            'component': -1,
+            'sibling_ID': -1,
+            self.xdim: -1
+        }
+        if self.unstructured_grid:
+            chunk_dict[self.ydim] = -1
+        
+        split_merged_events_ds = split_merged_events_ds.chunk(chunk_dict)#.persist()
         if self.verbosity > 0:
             print('Finished clustering and renaming objects into coherent consistent events')
     
@@ -1848,6 +1855,8 @@ class tracker:
                 y_values.interp(pixels=object_props_extended['centroid'].sel(component=0)),
                 x_values.interp(pixels=object_props_extended['centroid'].sel(component=1))
             ], dim='component')
+            
+            object_props_extended = object_props_extended.drop_vars('pixels')
         
         # Add start and end time indices for each ID
         valid_presence = object_props_extended['global_ID'] > 0  # i.e. where there is valid data
@@ -1892,7 +1901,8 @@ class tracker:
             (object_id_field, object_props, overlap_objects_list, merge_events)
         """
         # Find overlapping objects
-        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)  # List object pairs that overlap by at least overlap_threshold percent
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique)  # List object pairs that overlap by at least overlap_threshold percent
+        overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
         if self.verbosity > 0:
             print('Finished finding overlapping objects')
         
@@ -1960,14 +1970,14 @@ class tracker:
                 try:
                     object_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx+1})
                 except:
-                    # Last timestep
+                    # Last chunk
                     object_id_time_p1 = xr.full_like(object_id_time, 0)
                 
                 # Get previous timestep
                 if relative_time_idx-1 >= 0:
                     object_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx-1})
                 elif updated_chunks:
-                    # Get from previous chunk
+                    # Get the last time slice from the previous chunk (stored in updated_chunks)
                     _, _, last_chunk_data = updated_chunks[-1]
                     object_id_time_m1 = last_chunk_data[-1]
                 else:
@@ -2035,8 +2045,8 @@ class tracker:
                             parent_masks[idx] = (object_id_time_m1 == parent_id).values
                         
                         # Calculate maximum search distance
-                        max_area = np.max(object_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
-                        max_distance = int(np.sqrt(max_area) * 2.0)
+                        max_area = np.max(object_props.sel(ID=parent_ids).area.values)
+                        max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
                         
                         # Use optimised structured grid partitioning
                         new_labels = partition_nn_grid(
@@ -2100,14 +2110,9 @@ class tracker:
                 ## Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
                 
                 # Look at the overlap IDs between the original child_id and the next time-step, and also the new_object_id and the next time-step
-                new_overlaps = self.check_overlap_slice_threshold(
-                    object_id_time.values, 
-                    object_id_time_p1.values, 
-                    object_props
-                )
-                new_child_overlaps_list = new_overlaps[
-                    (new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_object_id)
-                ]
+                new_overlaps = self.check_overlap_slice(object_id_time.values, object_id_time_p1.values)
+                new_child_overlaps_list = new_overlaps[(new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_object_id)]
+                new_child_overlaps_list = self.enforce_overlap_threshold(new_child_overlaps_list, object_props)
                 
                 # Replace the lines in the overlap_objects_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
                 child_mask_LHS = overlap_objects_list[:, 0] == child_id
@@ -2909,7 +2914,8 @@ class tracker:
         # ============================
         
         # Find overlapping objects
-        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)  # List object pairs that overlap by at least overlap_threshold percent
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique)  # List object pairs that overlap by at least overlap_threshold percent
+        overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
         if self.verbosity > 0:
             print('Finished Finding Overlapping Objects')
         
@@ -3025,7 +3031,8 @@ class tracker:
         ).persist(optimize_graph=True)
         
         # Recompute overlaps based on final object configuration
-        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique, object_props)
+        overlap_objects_list = self.find_overlapping_objects(object_id_field_unique)
+        overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
         overlap_objects_list = overlap_objects_list[:, :2].astype(np.int32)
         
         return (

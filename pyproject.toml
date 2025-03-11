@@ -10,7 +10,6 @@ authors = [
 description = "Marine Extremes Detection and Tracking"
 readme = "README.md"
 requires-python = ">=3.6"
-license = 
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
@@ -47,10 +46,11 @@ viz = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/wienkers/spot_the_blOb"
-"Bug Tracker" = "https://github.com/wienkers/spot_the_blOb/issues"
+"Homepage" = "https://github.com/wienkers/marEx"
+"Bug Tracker" = "https://github.com/wienkers/marEx/issues"
 
-[tool.setuptools_scm]
+[tool.setuptools]
+packages = ["marEx"]
 
 [tool.black]
 line-length = 88
