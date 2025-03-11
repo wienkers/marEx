@@ -1,18 +1,18 @@
 marEx
 ==============================
 
-Efficient and scalable Marine Heatwave detection and tracking.
+Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale data.
 
 ## Features
 
 ### Data Pre-processing
 **Detrending & Anomaly Detection**:
-  - Removes trend and seasonal cycle using a 6-coefficient model (mean, trend, annual & semi-annual harmonics).
+  - Removes trend and seasonal cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends).
   - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
   - Identifies extreme events based on a global-in-time percentile threshold.
   - Utilises `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets.
   - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores...
-    - Takes ~2 wall-minutes per decade
+    - Takes ~5 wall-minutes per _century_
     - Requires only 1 Gb memory per core (when `dask`-backed data has chunks of 25 days) 
 
 
@@ -63,7 +63,7 @@ https://github.com/user-attachments/assets/462acafd-b2af-467c-b2c5-efec28ed24f1
 ```python
 import xarray as xr
 import dask
-import marEx.detect as detEx
+import marEx
 
 # Load SST data & rechunk for optimal processing
 file_name = 'path/to/sst/data'
@@ -184,13 +184,13 @@ Arguments for `marEx.tracker()` include:
 
 **PyPI**
 
-To install the core package run: `pip install git+https://github.com/wienkers/spot_the_blOb.git`
+To install the core package run: `pip install git+https://github.com/wienkers/marEx.git`
 
 **GitHub**
 
-1. Clone `spot_the_blOb`: `git clone https://github.com/wienkers/spot_the_blOb.git`
-2. Change to the parent directory of `spot_the_blOb`
-3. Install `spot_the_blOb` with `pip install -e ./`spot_the_blOb`. This will allow
+1. Clone `marEx`: `git clone https://github.com/wienkers/marEx.git`
+2. Change to the parent directory of `marEx`
+3. Install `marEx` with `pip install -e ./`marEx`. This will allow
    changes you make locally, to be reflected when you import the package in Python
 
 ---
