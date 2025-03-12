@@ -753,7 +753,7 @@ class tracker:
         data_bin_filled = data_bin_filled.isel({self.timedim: slice(kernel_size, -kernel_size)}).persist()
         
         # Fill newly-created spatial holes
-        data_bin_filled = self.fill_holes(data_bin_filled, R_fill=self.R_fill//2)
+        data_bin_filled = self.fill_holes(data_bin_filled)
         
         return data_bin_filled
     
