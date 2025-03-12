@@ -1,4 +1,8 @@
-marEx
+
+![Logo](media/logo.png)
+
+
+Marine Extremes Python Package
 ==============================
 
 Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale data.
