@@ -32,12 +32,27 @@ from dask import persist
 import dask.array as dsa
 from dask.base import is_dask_collection
 from numba import jit, njit, prange
-import jax.numpy as jnp
 import warnings
 import logging
 import os
 import shutil
 import gc
+import time
+
+try:
+    import jax.numpy as jnp
+    HAS_JAX = True
+except ImportError:
+    import numpy as np
+    jnp = np  # Alias for jnp
+    HAS_JAX = False
+    
+    warnings.warn(
+        "JAX not installed. Some functionality will be slower. "
+        "For best performance, install with: pip install marEx[jax]",
+        ImportWarning,
+        stacklevel=2
+    )
 
 
 # ============================
@@ -391,6 +406,7 @@ class tracker:
         # Persist preprocessed data &/or Save checkpoint
         if checkpoint and 'save' in checkpoint:
             print('Saving preprocessed data & stats...')
+            time.sleep(5)
             data_bin_filtered.name = 'data_bin_preproc'
             data_bin_filtered.to_zarr(f'{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr', mode='w') # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
             data_bin_filtered = load_data_from_checkpoint()
@@ -1420,15 +1436,6 @@ class tracker:
         if len(overlap_objects_list) == 0:
             return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
         
-        # # Ensure all IDs exist in object_props
-        # valid_mask = np.isin(overlap_objects_list[:, 0], object_props.ID.values) & \
-        #             np.isin(overlap_objects_list[:, 1], object_props.ID.values)
-        
-        # valid_overlap_objects = overlap_objects_list[valid_mask]
-        
-        # if len(valid_overlap_objects) == 0:
-        #     return np.empty((0, 3), dtype=overlap_objects_list.dtype)
-        
         # Calculate overlap fractions
         areas_0 = object_props['area'].sel(ID=overlap_objects_list[:, 0]).values
         areas_1 = object_props['area'].sel(ID=overlap_objects_list[:, 1]).values
@@ -1582,7 +1589,7 @@ class tracker:
             'sibling_ID': -1,
             self.xdim: -1
         }
-        if self.unstructured_grid:
+        if not self.unstructured_grid:
             chunk_dict[self.ydim] = -1
         
         split_merged_events_ds = split_merged_events_ds.chunk(chunk_dict)#.persist()
@@ -2588,7 +2595,7 @@ class tracker:
             if not has_merge.any().compute().item():
                 return object_id_field
             
-            zarr_path = f'{self.scratch_dir}/temp_field.zarr/'
+            zarr_path = f'{self.scratch_dir}/marEx_temp_field.zarr/'
             
             # Initialise zarr store if needed
             if not os.path.exists(zarr_path):
@@ -2917,7 +2924,7 @@ class tracker:
         overlap_objects_list = self.find_overlapping_objects(object_id_field_unique)  # List object pairs that overlap by at least overlap_threshold percent
         overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
         if self.verbosity > 0:
-            print('Finished Finding Overlapping Objects')
+            print('Finished finding overlapping objects')
         
         # Find initial merging objects
         unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)

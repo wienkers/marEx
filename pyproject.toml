@@ -27,8 +27,7 @@ dependencies = [
     "scipy",
     "scikit-image",
     "dask_image",
-    "jax",
-    "jaxlib",
+    "pandas",
     "pillow",
     "xhistogram",
     "flox",
@@ -43,6 +42,16 @@ dev = [
 viz = [
     "matplotlib",
     "cartopy",
+]
+jax = [
+    "jax",
+    "jaxlib",
+]
+full = [
+    "matplotlib",
+    "cartopy",
+    "jax",
+    "jaxlib",
 ]
 
 [project.urls]

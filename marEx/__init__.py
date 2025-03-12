@@ -24,6 +24,19 @@ Example
 >>> events_ds = tracker.run()
 """
 
+try:
+    import jax
+    HAS_JAX = True
+except ImportError:
+    HAS_JAX = False
+    import warnings
+    warnings.warn(
+        "JAX not installed. Some operations will be slower. "
+        "For best performance, install with: pip install marEx[jax]",
+        ImportWarning,
+        stacklevel=2
+    )
+
 # Import core functionality
 from .detect import (
     preprocess_data, 
