@@ -170,10 +170,14 @@ class PlotterBase:
         # Add single colorbar for all panels
         if config.show_colorbar:
             fig.subplots_adjust(right=0.9)
+            if norm is None and clim is not None:
+                # Create a proper norm from clim
+                from matplotlib.colors import Normalize
+                norm = Normalize(vmin=clim[0], vmax=clim[1])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
             self._setup_colorbar(fig, sm, True, var_units, extend,
-                               position=[0.92, 0.15, 0.02, 0.7])
+                            position=[0.92, 0.15, 0.02, 0.7])
         
         return fig, axes
     
