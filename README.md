@@ -5,7 +5,7 @@
 Marine Extremes Python Package
 ==============================
 
-Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale data.
+Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data.
 
 ## Features
 

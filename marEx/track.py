@@ -653,7 +653,7 @@ class tracker:
         
         else:
             # Structured grid using dask-powered morphological operations
-            use_dask_morph = True # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+            use_dask_morph = True
             
             # Generate structuring element (disk-shaped)
             y, x = np.ogrid[-R_fill:R_fill+1, -R_fill:R_fill+1]
@@ -668,7 +668,7 @@ class tracker:
                 data_dims = data_bin.dims
                 
                 # Apply morphological operations
-                data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :])
+                data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :]) # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
                 data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
                 
                 # Convert back to xarray.DataArray and trim padding
@@ -691,10 +691,10 @@ class tracker:
                     return unpadded
 
                 data_bin = xr.apply_ufunc(
-                    binary_open_close, self.data_bin,
+                    binary_open_close, data_bin,
                     input_core_dims=[[self.ydim, self.xdim]],
                     output_core_dims=[[self.ydim, self.xdim]],
-                    output_dtypes=[self.data_bin.dtype],
+                    output_dtypes=[data_bin.dtype],
                     vectorize=True,
                     dask='parallelized'
                 )
@@ -753,7 +753,7 @@ class tracker:
         data_bin_filled = data_bin_filled.isel({self.timedim: slice(kernel_size, -kernel_size)}).persist()
         
         # Fill newly-created spatial holes
-        data_bin_filled = self.fill_holes(data_bin_filled)
+        data_bin_filled = self.fill_holes(data_bin_filled, R_fill=self.R_fill//2)
         
         return data_bin_filled
     
