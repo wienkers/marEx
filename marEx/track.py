@@ -482,6 +482,9 @@ class tracker:
         # Set all filler IDs < 0 to 0
         events_ds['ID_field'] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
         
+        # Delete the last ID -- it is all 0s
+        events_ds = events_ds.isel(ID=slice(None,-1)) # At least for the gridded algorithm
+        
         if self.verbosity > 0:
             print('Finished tracking all extreme events!\n\n')
         
@@ -532,7 +535,6 @@ class tracker:
         print(f'   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}')
         print(f'   Accepted Area Fraction: {accepted_area_fraction}')
         print(f'   Total Events Tracked: {N_events_final}')
-        print('\n')
         
         # Add merge-specific attributes if applicable
         if self.allow_merging:
