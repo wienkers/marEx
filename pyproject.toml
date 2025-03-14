@@ -61,6 +61,10 @@ full = [
 [tool.setuptools]
 packages = ["marEx"]
 
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+
 [tool.black]
 line-length = 88
 target-version = ['py38']
