@@ -29,17 +29,14 @@ class GriddedPlotter(PlotterBase):
         dimensions = {'ydim': 'lat', 'xdim': 'lon'}
         data = self.wrap_lon(self.da, dimensions)
         
+         # Ensure data has only required dimensions for imshow
+        if 'time' in data.dims and len(data.time) == 1:
+            data = data.squeeze(dim='time')  # Remove time dimension if it's singular
+        
         plot_kwargs = {
             'transform': ccrs.PlateCarree(),
             'cmap': cmap,
-            'interpolation': 'nearest',
-            'extent': [
-                data[dimensions['xdim']].min(), 
-                data[dimensions['xdim']].max(),
-                data[dimensions['ydim']].min(), 
-                data[dimensions['ydim']].max()
-            ],
-            'origin': 'lower'
+            'shading': 'auto'
         }
         
         if norm is not None:
@@ -47,7 +44,12 @@ class GriddedPlotter(PlotterBase):
         elif clim is not None:
             plot_kwargs['vmin'] = clim[0]
             plot_kwargs['vmax'] = clim[1]
-            
-        im = ax.imshow(data.values, **plot_kwargs)
+        
+        lons = data[dimensions['xdim']].values
+        lats = data[dimensions['ydim']].values
+        values = data.values
+        
+        # imshow has some dimension issues with cartopy...
+        im = ax.pcolormesh(lons, lats, values, **plot_kwargs)
         
         return ax, im

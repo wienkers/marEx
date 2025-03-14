@@ -482,6 +482,9 @@ class tracker:
         # Set all filler IDs < 0 to 0
         events_ds['ID_field'] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
         
+        # Delete the last ID -- it is all 0s
+        events_ds = events_ds.isel(ID=slice(None,-1)) # At least for the gridded algorithm
+        
         if self.verbosity > 0:
             print('Finished tracking all extreme events!\n\n')
         
@@ -532,7 +535,6 @@ class tracker:
         print(f'   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}')
         print(f'   Accepted Area Fraction: {accepted_area_fraction}')
         print(f'   Total Events Tracked: {N_events_final}')
-        print('\n')
         
         # Add merge-specific attributes if applicable
         if self.allow_merging:
@@ -653,7 +655,7 @@ class tracker:
         
         else:
             # Structured grid using dask-powered morphological operations
-            use_dask_morph = True # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+            use_dask_morph = True
             
             # Generate structuring element (disk-shaped)
             y, x = np.ogrid[-R_fill:R_fill+1, -R_fill:R_fill+1]
@@ -668,7 +670,7 @@ class tracker:
                 data_dims = data_bin.dims
                 
                 # Apply morphological operations
-                data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :])
+                data_bin = binary_closing_dask(data_bin.data, structure=se_kernel[np.newaxis, :, :]) # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
                 data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
                 
                 # Convert back to xarray.DataArray and trim padding
@@ -691,10 +693,10 @@ class tracker:
                     return unpadded
 
                 data_bin = xr.apply_ufunc(
-                    binary_open_close, self.data_bin,
+                    binary_open_close, data_bin,
                     input_core_dims=[[self.ydim, self.xdim]],
                     output_core_dims=[[self.ydim, self.xdim]],
-                    output_dtypes=[self.data_bin.dtype],
+                    output_dtypes=[data_bin.dtype],
                     vectorize=True,
                     dask='parallelized'
                 )
@@ -753,7 +755,7 @@ class tracker:
         data_bin_filled = data_bin_filled.isel({self.timedim: slice(kernel_size, -kernel_size)}).persist()
         
         # Fill newly-created spatial holes
-        data_bin_filled = self.fill_holes(data_bin_filled)
+        data_bin_filled = self.fill_holes(data_bin_filled, R_fill=self.R_fill//2)
         
         return data_bin_filled
     
@@ -2053,7 +2055,7 @@ class tracker:
                         
                         # Calculate maximum search distance
                         max_area = np.max(object_props.sel(ID=parent_ids).area.values)
-                        max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
+                        max_distance = int(np.sqrt(max_area) * 3.0)  # Use 3x the max blob radius
                         
                         # Use optimised structured grid partitioning
                         new_labels = partition_nn_grid(
@@ -2062,7 +2064,7 @@ class tracker:
                             child_ids,
                             parent_centroids,
                             Nx,
-                            max_distance=max(max_distance, 20)  # Set minimum threshold, in cells
+                            max_distance=max(max_distance, 40)  # Set minimum threshold, in cells
                         )
                         
                 else:

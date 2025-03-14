@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Union, Tuple
 import shutil
 import warnings
+import os
 
 @dataclass
 class PlotConfig:
@@ -169,10 +170,14 @@ class PlotterBase:
         # Add single colorbar for all panels
         if config.show_colorbar:
             fig.subplots_adjust(right=0.9)
+            if norm is None and clim is not None:
+                # Create a proper norm from clim
+                from matplotlib.colors import Normalize
+                norm = Normalize(vmin=clim[0], vmax=clim[1])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
             self._setup_colorbar(fig, sm, True, var_units, extend,
-                               position=[0.92, 0.15, 0.02, 0.7])
+                            position=[0.92, 0.15, 0.02, 0.7])
         
         return fig, axes
     
@@ -194,6 +199,8 @@ class PlotterBase:
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(exist_ok=True)
         temp_dir = plot_dir / "blobs_seq"
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         temp_dir.mkdir(exist_ok=True)
         if not file_name:
             file_name = f"movie_{self.da.name}.mp4"
@@ -225,7 +232,7 @@ class PlotterBase:
         # Generate frames using dask for parallel processing
         delayed_tasks = []
         for time_ind in range(len(self.da[config.dimensions['time']])):
-            data_slice = self.da.isel({config.dimensions['time']: time_ind}).values
+            data_slice = self.da.isel({config.dimensions['time']: time_ind})
             plot_params['time_str'] = str(
                 self.da[config.dimensions['time']]
                 .isel({config.dimensions['time']: time_ind})
@@ -301,15 +308,14 @@ def make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info=None):
     fig = plt.figure(figsize=(7, 5))
     ax = plt.axes(projection=ccrs.Robinson())
     
+    data_slice_np = data_slice.values
+        
     # Set up plot kwargs
     plot_kwargs = {
         'transform': ccrs.PlateCarree(),
-        'cmap': plot_params['cmap']
+        'cmap': plot_params['cmap'],
+        'shading': 'auto'
     }
-    
-    # For pcolormesh and tripcolor only
-    if grid_info and grid_info.get('type') == 'unstructured':
-        plot_kwargs['shading'] = 'auto'
     
     if plot_params.get('norm'):
         plot_kwargs['norm'] = plot_params['norm']
@@ -323,7 +329,7 @@ def make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info=None):
         if grid_info.get('ckdtree_path'):
             # Use cached ckdtree data
             ckdt_data = _load_ckdtree(grid_info['ckdtree_path'], grid_info.get('res', 0.3))
-            grid_data = data_slice[ckdt_data['indices']].reshape(
+            grid_data = data_slice_np[ckdt_data['indices']].reshape(
                 ckdt_data['lat'].size,
                 ckdt_data['lon'].size
             )
@@ -335,11 +341,16 @@ def make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info=None):
         elif grid_info.get('tgrid_path'):
             # Use triangulation
             triang = _load_triangulation(grid_info['tgrid_path'])
-            data_masked = np.ma.masked_invalid(data_slice)
+            data_masked = np.ma.masked_invalid(data_slice_np)
             im = ax.tripcolor(triang, data_masked, **plot_kwargs)
     else:
         # Regular grid plotting
-        im = ax.imshow(data_slice, **plot_kwargs)
+        lat = data_slice.lat.values
+        lon = data_slice.lon.values
+        im = ax.pcolormesh(
+                lon, lat,
+                data_slice_np, **plot_kwargs
+            )
     
     time_str = plot_params.get('time_str', f'Frame {time_ind}')
     ax.set_title(time_str, size=12)
