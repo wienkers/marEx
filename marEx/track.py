@@ -2055,7 +2055,7 @@ class tracker:
                         
                         # Calculate maximum search distance
                         max_area = np.max(object_props.sel(ID=parent_ids).area.values)
-                        max_distance = int(np.sqrt(max_area) * 2.0)  # Use 2x the max blob radius
+                        max_distance = int(np.sqrt(max_area) * 3.0)  # Use 3x the max blob radius
                         
                         # Use optimised structured grid partitioning
                         new_labels = partition_nn_grid(
@@ -2064,7 +2064,7 @@ class tracker:
                             child_ids,
                             parent_centroids,
                             Nx,
-                            max_distance=max(max_distance, 20)  # Set minimum threshold, in cells
+                            max_distance=max(max_distance, 40)  # Set minimum threshold, in cells
                         )
                         
                 else:
