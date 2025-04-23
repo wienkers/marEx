@@ -53,11 +53,9 @@ Efficient & scalable Marine Extremes detection, identification, & tracking for E
 **Plotting**:
   - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
 
-cf. Old Method vs. New Tracking Algorithms (Centroidal & Nearest-Neighbour Partitioning):
+cf. Old (Basic) ID Method vs. New Tracking & Merging Algorithm:
 
-https://github.com/user-attachments/assets/9936fb43-f7a3-461e-aa82-9beb2826619c
-
-https://github.com/user-attachments/assets/462acafd-b2af-467c-b2c5-efec28ed24f1
+https://github.com/user-attachments/assets/074cfd20-d979-49a7-bda9-0c356c786b1d
 
 
 
