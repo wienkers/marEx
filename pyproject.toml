@@ -22,15 +22,19 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "numpy",
-    "xarray",
-    "dask",
+    "xarray[complete]",
+    "dask[complete]==2025.3.0",
+    "netcdf4",
     "scipy",
     "scikit-image",
     "dask_image",
     "pandas",
+    "numba",
     "pillow",
     "xhistogram",
     "flox",
+    "matplotlib",
+    "cartopy",
 ]
 
 [project.optional-dependencies]
@@ -39,19 +43,10 @@ dev = [
     "black",
     "flake8",
 ]
-viz = [
-    "matplotlib",
-    "cartopy",
-]
-jax = [
-    "jax",
-    "jaxlib",
-]
 full = [
-    "matplotlib",
-    "cartopy",
     "jax",
     "jaxlib",
+    "dask_jobqueue",
 ]
 
 [project.urls]
