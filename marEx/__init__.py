@@ -41,6 +41,7 @@ except ImportError:
 from .detect import (
     preprocess_data, 
     compute_normalised_anomaly,
+    smoothed_rolling_climatology,
     rechunk_for_cohorts,
     identify_extremes
 )
@@ -58,6 +59,7 @@ __all__ = [
     # Core data preprocessing
     'preprocess_data',
     'compute_normalised_anomaly',
+    'smoothed_rolling_climatology',
     'rechunk_for_cohorts',
     'identify_extremes',
     
