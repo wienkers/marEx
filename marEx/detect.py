@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import dask
+from dask import delayed
 from dask.base import is_dask_collection
 import flox.xarray
 from xhistogram.xarray import histogram
@@ -112,7 +113,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
         da, method_anomaly, dimensions, 
         window_year_baseline, smooth_days_baseline,
         std_normalise, detrend_orders, force_zero_mean
-    )
+    ).persist()
     
     # For shifting baseline, remove first window_year_baseline years (insufficient climatology data)
     if method_anomaly == 'shifting_baseline':
@@ -265,9 +266,9 @@ def compute_normalised_anomaly(da, method_anomaly='detrended_baseline',
         Dataset containing anomalies, mask, and metadata
     """
     if method_anomaly == 'detrended_baseline':
-        return _compute_detrended_anomaly(da, std_normalise, detrend_orders, dimensions, force_zero_mean).persist()
+        return _compute_detrended_anomaly(da, std_normalise, detrend_orders, dimensions, force_zero_mean)
     elif method_anomaly == 'shifting_baseline':
-        return _compute_shifting_baseline_anomaly(da, window_year_baseline, smooth_days_baseline, dimensions).persist()
+        return _compute_shifting_baseline_anomaly(da, window_year_baseline, smooth_days_baseline, dimensions)
     else:
         raise ValueError(f"Unknown method_anomaly '{method_anomaly}'. Choose 'detrended_baseline' or 'shifting_baseline'")
 
@@ -322,49 +323,63 @@ def identify_extremes(da, method_extreme='global_extreme',
 
 def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
     """
-    Compute a rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
+    Compute rolling climatology efficiently using flox cohorts.
+    Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
-    years = da[time_dim].dt.year
+    # Add year and day-of-year coordinates
+    da = da.assign_coords({
+        'year': (time_dim, da[time_dim].dt.year.data),
+        'dayofyear': (time_dim, da[time_dim].dt.dayofyear.data)
+    })
+    
+    # Get unique years
+    years = da.year.values
     unique_years = np.unique(years)
-
-    clim_reassembled = da.copy() * np.nan
-    chunks = da.chunks
-
-    for year in unique_years:
-        # Define the N-year window ending the year before current year
-        start_year = year - window_year_baseline
-        end_year = year - 1
-
-        # Skip if not enough previous years
-        if start_year < unique_years.min():
-            continue
-
-        # Select data for the N-year window
-        window_data = da.where(
-            (da[time_dim].dt.year >= start_year) & (da[time_dim].dt.year <= end_year),
-            drop=True
+    min_year = unique_years.min()
+    
+    # Pre-compute year mappings for all valid target years
+    year_mappings = {}
+    for target_year in unique_years:
+        start_year = target_year - window_year_baseline
+        if start_year >= min_year:
+            year_mappings[target_year] = np.arange(start_year, target_year)
+    
+    # Initialise output with NaN
+    result = xr.full_like(da, np.nan)
+    
+    # Process all years in parallel using flox
+    for target_year, source_years in year_mappings.items():
+        # Create mask for source years
+        source_mask = da.year.isin(source_years)
+        
+        # Compute climatology for this window using flox
+        window_clim = flox.xarray.xarray_reduce(
+            da.where(source_mask),
+            da.dayofyear.where(source_mask),
+            func='nanmean',
+            dim=time_dim,
+            expected_groups=np.arange(1, 367),
+            isbin=False,
+            method='cohorts',
+            engine='flox'
         )
-
-        # Compute climatology for this window
-        clim = window_data.groupby(f'{time_dim}.dayofyear').mean(time_dim)
-
-        ## Reassemble climatology:
-
-        # Get the data for current year to match time coordinates
-        year_data = da.where(da[time_dim].dt.year == year, drop=True)
-
-        if len(year_data[time_dim]) > 0:
-            # Match climatology values to the corresponding day of year
-            dayofyear = year_data[time_dim].dt.dayofyear
-
-            # Expand climatology to match the year's time structure
-            year_clim_expanded = clim.sel(dayofyear=dayofyear, method='nearest')
-
-            # Assign directly to the reassembled array
-            clim_reassembled.loc[{time_dim: year_data[time_dim]}] = year_clim_expanded
-
-    return clim_reassembled.chunk(chunks)
+        
+        # Assign to target year using groupby for efficiency
+        target_mask = da.year == target_year
+        target_doys = da.dayofyear.where(target_mask)
+        
+        # Map climatology to target year positions
+        result = xr.where(
+            target_mask,
+            window_clim.sel(dayofyear=da.dayofyear),
+            result
+        )
+    
+    # Clean up coordinates
+    result = result.drop_vars(['year', 'dayofyear'])
+    
+    return result.chunk(da.chunks)
 
 
 def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time'):
@@ -372,8 +387,20 @@ def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseli
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
-    clim = rolling_climatology(da, window_year_baseline, time_dim)
-    return clim.rolling({time_dim: smooth_days_baseline}, center=True).mean().chunk(da.chunks)
+    # Rechunk for efficient time operations using flox
+    da_rechunked = flox.xarray.rechunk_for_cohorts(
+        da,
+        dim=time_dim,
+        labels=da[time_dim].dt.year,
+        chunksize='auto',
+        ignore_old_chunks=False,
+        force_new_chunk_at=np.unique(da[time_dim].dt.year)
+    )
+    
+    clim = rolling_climatology(da_rechunked, window_year_baseline, time_dim)
+    clim_smoothed = clim.rolling({time_dim: smooth_days_baseline}, center=True).mean().chunk(da_rechunked.chunks)
+    
+    return clim_smoothed
 
 
 def _compute_shifting_baseline_anomaly(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
