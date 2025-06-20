@@ -38,7 +38,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
                    window_year_baseline=15, smooth_days_baseline=21,  # for shifting_baseline
                    window_days_hobday=11,                  # for hobday_extreme
                    std_normalise=False, detrend_orders=[1], force_zero_mean=True, # for detrended_baseline
-                   exact_percentile=False,         # for global_extreme
+                   exact_percentile=False,         # for both extremes algorithms
                    dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon'}, 
                    neighbours=None, cell_areas=None):
     """
@@ -95,9 +95,10 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     force_zero_mean : bool, optional
         Whether to enforce zero mean in detrended anomalies (detrended_baseline method only)
     
-    Global Extreme Method Parameters:
+    Extreme Method Parameters:
     exact_percentile : bool, optional
-        Whether to use exact or approximate percentile calculation (global_extreme method only)
+        Whether to use exact or approximate percentile calculation (both global_extreme & hobday_extreme methods)
+        N.B. Using exact percentile calculation requires both careful/thoughtful chunking & sufficient memory.
     
     Returns
     -------
@@ -266,9 +267,9 @@ def compute_normalised_anomaly(da, method_anomaly='detrended_baseline',
         Dataset containing anomalies, mask, and metadata
     """
     if method_anomaly == 'detrended_baseline':
-        return _compute_detrended_anomaly(da, std_normalise, detrend_orders, dimensions, force_zero_mean)
+        return _compute_anomaly_detrended(da, std_normalise, detrend_orders, dimensions, force_zero_mean)
     elif method_anomaly == 'shifting_baseline':
-        return _compute_shifting_baseline_anomaly(da, window_year_baseline, smooth_days_baseline, dimensions)
+        return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions)
     else:
         raise ValueError(f"Unknown method_anomaly '{method_anomaly}'. Choose 'detrended_baseline' or 'shifting_baseline'")
 
@@ -276,7 +277,7 @@ def compute_normalised_anomaly(da, method_anomaly='detrended_baseline',
 def identify_extremes(da, method_extreme='global_extreme', 
                      threshold_percentile=95, dimensions={'time':'time', 'xdim':'lon'},
                      window_days_hobday=11,  # for hobday_extreme
-                     exact_percentile=False):  # for global_extreme
+                     exact_percentile=False):
     """
     Identify extreme events exceeding a percentile threshold using specified method.
     
@@ -301,7 +302,7 @@ def identify_extremes(da, method_extreme='global_extreme',
     
     Global Extreme Method Parameters:
     exact_percentile : bool, optional
-        Whether to compute exact percentiles (global_extreme only)
+        Whether to compute exact percentiles
         
     Returns
     -------
@@ -310,9 +311,9 @@ def identify_extremes(da, method_extreme='global_extreme',
         identifying extreme events and thresholds contains the threshold values used
     """
     if method_extreme == 'global_extreme':
-        return _identify_extremes_detrended(da, threshold_percentile, exact_percentile, dimensions)
+        return _identify_extremes_constant(da, threshold_percentile, exact_percentile, dimensions)
     elif method_extreme == 'hobday_extreme':
-        return _identify_extremes_hobday(da, threshold_percentile, window_days_hobday, dimensions)
+        return _identify_extremes_hobday(da, threshold_percentile, window_days_hobday, exact_percentile, dimensions)
     else:
         raise ValueError(f"Unknown method_extreme '{method_extreme}'. Choose 'global_extreme' or 'hobday_extreme'")
 
@@ -382,30 +383,24 @@ def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
     return result.chunk(da.chunks)
 
 
-def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time'):
+def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time', flox_chunksize=8):
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
-    # Rechunk for efficient time operations using flox
-    da_rechunked = flox.xarray.rechunk_for_cohorts(
-        da,
-        dim=time_dim,
-        labels=da[time_dim].dt.year,
-        chunksize='auto',
-        ignore_old_chunks=False,
-        force_new_chunk_at=np.unique(da[time_dim].dt.year)
-    )
     
-    clim = rolling_climatology(da_rechunked, window_year_baseline, time_dim)
-    clim_smoothed = clim.rolling({time_dim: smooth_days_baseline}, center=True).mean().chunk(da_rechunked.chunks)
+    # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
+    da_smoothed = da.rolling({time_dim: smooth_days_baseline}, center=True).mean()
+
+    clim = rolling_climatology(da_smoothed, window_year_baseline, time_dim)
     
-    return clim_smoothed
+    return clim
 
 
-def _compute_shifting_baseline_anomaly(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}, flox_chunksize=8):
     """
-    Compute anomalies using shifting baseline method with rolling climatology.
+    Compute anomalies using shifting baseline method with smoothed rolling climatology.
+    Returned anomaly is chunked for cohorts.
     
     Returns
     -------
@@ -415,8 +410,18 @@ def _compute_shifting_baseline_anomaly(da, window_year_baseline=15, smooth_days_
     # Compute smoothed rolling climatology
     climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, time_dim=dimensions['time'])
     
+    # Rechunk for efficient time operations using flox
+    da_rechunked = flox.xarray.rechunk_for_cohorts(
+        da,
+        dim=dimensions['time'],
+        labels=da[dimensions['time']].dt.dayofyear,
+        chunksize=flox_chunksize,
+        ignore_old_chunks=True,
+        force_new_chunk_at=1
+    )
+    
     # Compute anomaly as difference from climatology
-    anomalies = da - climatology_smoothed
+    anomalies = da_rechunked - climatology_smoothed
     
     # Create ocean/land mask from first time step
     chunk_dict_mask = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
@@ -438,104 +443,63 @@ def _compute_shifting_baseline_anomaly(da, window_year_baseline=15, smooth_days_
 # Hobday Extreme Definition 
 # ==========================
 
-def compute_percentile_threshold(sst_anom, threshold_percentile=95, window_days_hobday=11, time_dim='time'):
+def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11, exact_percentile=False, 
+                             dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
-    Compute climatological percentile threshold for SST anomaly data.
+    Identify extreme events using day-of-year (i.e. climatological percentile threshold).
     
-    For each spatial point and day-of-year, computes the p-th percentile of values within a ±window_days_hobday day window across all years. 
+    For each spatial point and day-of-year, computes the p-th percentile of values within a window_days_hobday day window across all years. 
     This implements the standard methodology for marine heatwave detection threshold calculation.
-    
+        
     Parameters:
     -----------
-    sst_anom : xarray.DataArray
-        SST anomaly data with dimensions (time, lat, lon)
+    da : xarray.DataArray
+        Anomaly data with dimensions (time, lat, lon)
         Must be chunked with time dimension unbounded (time: -1)
     threshold_percentile : float, default 95
         Percentile to compute (0-100)
     window_days_hobday : int, default 11
         Window in days
+    exact_percentile : bool, optional
+        Whether to compute exact percentiles
     
     Returns:
     --------
-    xarray.DataArray
-        Threshold values with dimensions (dayofyear, lat, lon)
-        Preserves spatial chunking from input array
+    tuple
+        (extreme_bool, thresholds)
+        extreme_bool : xarray.DataArray
+            Boolean mask indicating extreme events (True for extreme days)
+        thresholds : xarray.DataArray
+            Threshold values with dimensions (dayofyear, lat, lon)
     """
-    # # Ensure proper chunking for dask efficiency
-    # if not hasattr(sst_anom.data, 'chunks'):
-    #     sst_anom = sst_anom.chunk({time_dim: -1})
+    # Add day-of-year coordinate
+    da = da.assign_coords(dayofyear=da[dimensions['time']].dt.dayofyear)
     
-    window_half_width = window_days_hobday // 2
-    
-    # day-of-year coordinate for groupby
-    dayofyear = sst_anom[time_dim].dt.dayofyear
-    sst_anom = sst_anom.assign_coords(dayofyear=(time_dim, dayofyear.data))
-    
-    def get_windowed_doys(target_doy, window_half_width, max_doy=366):
-        """Generate day-of-year values for windowed selection with year wrapping."""
-        window_doys = []
-        for offset in range(-window_half_width, window_half_width + 1):
-            doy = target_doy + offset
-            # Year boundary wrapping
-            if doy <= 0:
-                doy += max_doy
-            elif doy > max_doy:
-                doy -= max_doy
-            window_doys.append(doy)
-        return window_doys
-    
-    unique_doys = sorted(np.unique(sst_anom.dayofyear.values))
-    
-    # Compute threshold for each day-of-year
-    threshold_list = []
-    
-    for target_doy in unique_doys:
-        # Get all day-of-year values in the window_half_width window
-        window_doys = get_windowed_doys(target_doy, window_half_width)
+    # Group by day-of-year and compute percentile
+    if exact_percentile:
+        # Construct rolling window dimension
+        da_windowed = da.rolling({dimensions['time']: window_days_hobday}, center=True).construct('window')
         
-        # Select all time points within the window across all years
-        window_mask = sst_anom.dayofyear.isin(window_doys)
-        window_data = sst_anom.where(window_mask, drop=True)
-        
-        threshold = window_data.quantile(
-            threshold_percentile/100, 
-            dim=time_dim, 
-            skipna=True,
-            keep_attrs=True
-        )
-        
-        # Assign day-of-year coordinate to this threshold
-        threshold = threshold.assign_coords(dayofyear=target_doy)
-        threshold_list.append(threshold)
+        thresholds = da_windowed.groupby('dayofyear').reduce(
+                            np.nanpercentile,
+                            q=threshold_percentile,
+                            dim=('window', dimensions['time'])
+                        )
+    else:  # Optimised histogram approximation method
+        thresholds = compute_histogram_quantile_2d(da, threshold_percentile/100.0, window_days_hobday=window_days_hobday, dimensions=dimensions)
     
-    result = xr.concat(threshold_list, dim='dayofyear')
-    result = result.sortby('dayofyear')
     
-    result.attrs.update({
+    thresholds.attrs.update({
         'long_name': f'{threshold_percentile}th percentile threshold',
         'description': f'Climatological {threshold_percentile}th percentile computed using {window_days_hobday}-day rolling window',
         'window_size': f'{window_days_hobday} days',
         'percentile': threshold_percentile,
-        'method': 'day-of-year groupby with windowed percentile calculation'
+        'method': 'day-of-year histogram approximation' if not exact_percentile else 'exact percentile'
     })
     
-    return result
-
-
-def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11, 
-                             dimensions={'time':'time', 'xdim':'lon'}):
-    """
-    Identify extreme events using day-of-year specific thresholds (Hobday method).
-    
-    Returns both the extreme events boolean mask and the thresholds used.
-    """
-    # Compute day-of-year specific thresholds
-    thresholds = compute_percentile_threshold(da, threshold_percentile, window_days_hobday, time_dim=dimensions['time'])
-    
-    if 'quantile' in thresholds.coords:
-        thresholds = thresholds.drop_vars('quantile')
-    
-    thresholds = thresholds.chunk({'dayofyear': -1})
+    # Ensure spatial dimensions are fully loaded for efficient comparison
+    spatial_chunks = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
+    thresholds = thresholds.chunk(spatial_chunks).persist()
     
     # Compare anomalies to day-of-year specific thresholds
     extreme_bool = da.groupby(da[dimensions['time']].dt.dayofyear) >= thresholds
@@ -599,7 +563,7 @@ def rechunk_for_cohorts(da, chunksize=100, dim='time'):
                                           ignore_old_chunks=True)
 
 
-def _compute_detrended_anomaly(da, std_normalise=False, detrend_orders=[1], 
+def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1], 
                                dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'},
                                force_zero_mean=True):
     """
@@ -756,8 +720,7 @@ def _compute_detrended_anomaly(da, std_normalise=False, detrend_orders=[1],
         }
     )
 
-
-def compute_histogram_quantile(da, q, dim='time'):
+def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
     Uses fine-grained bins for positive anomalies and a single bin for negative values.
@@ -776,52 +739,149 @@ def compute_histogram_quantile(da, q, dim='time'):
     xarray.DataArray
         Computed quantile value for each spatial location
     """
-    # Configure histogram with asymmetric bins (higher resolution for positive values)
-    precision   = 0.025  # Bin width for positive values
-    max_anomaly = 10.0   # Maximum expected anomaly value
+    if bin_edges is None:
+        # Default asymmetric bins
+        precision = 0.01
+        max_anomaly = 5.0
+        bin_edges = np.concatenate([
+            [-np.inf, 0.],
+            np.arange(precision, max_anomaly + precision, precision)
+        ])
     
-    # Create bin edges with special treatment for negative values
-    bin_edges = np.concatenate([
-        [-np.inf, 0.],  # Single bin for all negative values
-        np.arange(precision, max_anomaly+precision, precision)  # Fine bins for positive values
-    ])
+    chunk_dict = {dimensions['time']: -1}
+    for d in ['xdim', 'ydim']:
+        if d in dimensions:
+            chunk_dict[dimensions[d]] = 10
     
-    # Compute histogram along specified dimension
-    hist = histogram(
-        da,
-        bins=[bin_edges],
-        dim=[dim]
+    da_bin = xr.DataArray(
+        np.digitize(da.data, bin_edges) - 1,  # -1 so first bin is 0
+        dims=da.dims,
+        coords=da.coords,
+        name="da_bin"
+    ).chunk(chunk_dict).persist()
+    
+    # Construct 2D histogram using flox (in doy & anomaly)
+    hist_raw = flox.xarray.xarray_reduce(
+        da_bin,
+        da_bin.dayofyear,
+        da_bin,
+        dim=[dimensions['time']],
+        func="count",
+        expected_groups=(np.arange(1, 367), np.arange(len(bin_edges)-1)),
+        isbin=(False,False),
+        dtype='int32',
+        fill_value=0
     )
     
-    # Convert to PDF and CDF with handling for empty histograms
-    hist_sum = hist.sum(dim='dat_detrend_bin') + 1e-10
-    pdf = hist / hist_sum
-    cdf = pdf.cumsum(dim='dat_detrend_bin')
+    # Pad and then window histogram
+    hist_pad = hist_raw.pad({'dayofyear':window_days_hobday//2}, mode='wrap' )
+    hist = hist_pad.rolling(dayofyear=window_days_hobday, center=True).sum().isel(dayofyear=slice(window_days_hobday//2, -window_days_hobday//2+1)).chunk({'dayofyear': -1})
+
+    #### N.B.: This *temporarily* requires up to ~20x the original dataset size as scratch space
+    hist = hist.persist()    # hist dims: (dayofyear, da_bin, lat, lon)
     
-    # Get bin centres for interpolation
+    # Calculate PDF and CDF
+    hist_sum = hist.sum(dim="da_bin") + 1e-10
+    pdf = hist / hist_sum
+    cdf = pdf.cumsum(dim="da_bin")
+
+    bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
+    bin_centers[0] = 0.
+    
+    # Determine the threshold
+    mask = cdf >= q
+    first_true = mask.argmax(dim="da_bin")
+    idx = first_true.compute()
+    idx_prev = np.clip(idx - 1, 0, len(bin_centers) - 1)
+    
+    # Interpolate to get better estimate of the thresholds
+    cdf_prev = cdf.isel({"da_bin": xr.DataArray(idx_prev, dims=first_true.dims)}).data
+    cdf_next = cdf.isel({"da_bin": xr.DataArray(idx, dims=first_true.dims)}).data
+    bin_prev = bin_centers[idx_prev]
+    bin_next = bin_centers[idx]
+    
+    denom = cdf_next - cdf_prev
+    frac = (q - cdf_prev) / denom
+    result_data = bin_prev + frac * (bin_next - bin_prev)
+
+    threshold = first_true.copy(data=result_data)  # dims: (dayofyear, lat, lon)
+    
+    return threshold
+    
+    
+
+
+def compute_histogram_quantile_1d(da, q, dim='time', bin_edges=None):
+    """
+    Efficiently compute quantiles using binned histograms optimised for extreme values.
+    Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array
+    q : float
+        Quantile to compute (0-1)
+    dim : str, optional
+        Dimension along which to compute quantile
+        
+    Returns
+    -------
+    xarray.DataArray
+        Computed quantile value for each spatial location
+    """
+    if bin_edges is None:
+        # Default asymmetric bins
+        precision = 0.01
+        max_anomaly = 5.0
+        bin_edges = np.concatenate([
+            [-np.inf, 0.],
+            np.arange(precision, max_anomaly + precision, precision)
+        ])
+    
+    # Compute histogram
+    hist = histogram(da, bins=[bin_edges], dim=[dim])
+    
+    # Convert to PDF and CDF
+    hist_sum = hist.sum(dim=f'{da.name}_bin') + 1e-10
+    pdf = hist / hist_sum
+    cdf = pdf.cumsum(dim=f'{da.name}_bin')
+    
+    # Get bin centers
     bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers[0] = 0.  # Set negative bin centre to 0
     
-    # Find bins where CDF crosses desired quantile
+    # Find first bin exceeding quantile
     mask = cdf >= q
+    first_true = mask.argmax(dim=f'{da.name}_bin')
     
-    # Get the first bin that exceeds the quantile
-    first_true = mask.argmax(dim='dat_detrend_bin')
-    
-    # Convert bin indices to actual values
-    result = first_true.copy(data=bin_centers[first_true])
+    # Linearly interpolate between the two points around the 0 crossing
+    idx = first_true.compute()
+    idx_prev = np.clip(idx - 1, 0, len(bin_centers) - 1)
+
+    cdf_prev = cdf.isel({f'{da.name}_bin': xr.DataArray(idx_prev, dims=first_true.dims)}).data
+    cdf_next = cdf.isel({f'{da.name}_bin': xr.DataArray(idx, dims=first_true.dims)}).data
+    bin_prev = bin_centers[idx_prev]
+    bin_next = bin_centers[idx]
+
+    denom = cdf_next - cdf_prev
+    frac = (q - cdf_prev) / denom
+    result_data = bin_prev + frac * (bin_next - bin_prev)
+
+    result = first_true.copy(data=result_data)
     
     return result
 
 
-# ==========================
-# Global Extreme Definition 
-# ==========================
+# ======================================
+# Constant (in time) Extreme Definition 
+# ======================================
 
-def _identify_extremes_detrended(da, threshold_percentile=95, exact_percentile=False, 
+def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=False, 
                                 dimensions={'time':'time', 'xdim':'lon'}):
     """
-    Identify extreme events exceeding a global percentile threshold.
+    Identify extreme events exceeding a constant (in time) percentile threshold.
+    i.e. There is 1 threshold for each spatial point, computed across all time.
     
     Returns both the extreme events boolean mask and the thresholds used.
     """
@@ -840,7 +900,7 @@ def _identify_extremes_detrended(da, threshold_percentile=95, exact_percentile=F
         threshold = da_rechunk.quantile(threshold_percentile/100.0, dim=dimensions['time'])
     
     else:  # Use an efficient histogram-based method with specified accuracy
-        threshold = compute_histogram_quantile(da, threshold_percentile/100.0, dim=dimensions['time'])
+        threshold = compute_histogram_quantile_1d(da, threshold_percentile/100.0, dim=dimensions['time'])
     
     # Clean up coordinates if needed
     if 'quantile' in threshold.coords:
