@@ -21,6 +21,7 @@ import pandas as pd
 import xarray as xr
 import dask
 from dask import delayed
+from dask import persist
 from dask.base import is_dask_collection
 import flox.xarray
 from xhistogram.xarray import histogram
@@ -128,7 +129,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
                            f"Either use more data or reduce window_year_baseline parameter.")
         
         start_year = min_year + window_year_baseline
-        ds = ds.where(ds[dimensions['time']].dt.year >= start_year, drop=True)
+        ds['dat_detrend'] = ds['dat_detrend'].where(ds[dimensions['time']].dt.year >= start_year, drop=True).persist()
     
     anomalies = ds.dat_detrend
     
@@ -137,6 +138,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
         anomalies, method_extreme, threshold_percentile, 
         dimensions, window_days_hobday, exact_percentile
     )
+    
     
     # Add extreme events and thresholds to dataset
     ds['extreme_events'] = extremes
@@ -193,6 +195,8 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     chunk_dict = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
     chunk_dict[dimensions['time']] = dask_chunks['time']
     ds = ds.chunk(chunk_dict)
+    if method_extreme == 'hobday_extreme':
+        ds['thresholds'] = ds.thresholds.compute()
     
     # Fix encoding issue with saving when calendar & units attribute is present
     if 'calendar' in ds[dimensions['time']].attrs:
@@ -200,7 +204,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     if 'units' in ds[dimensions['time']].attrs:
         del ds[dimensions['time']].attrs['units']
     
-    return ds
+    return ds.persist()
 
 
 def _get_preprocessing_steps(method_anomaly, method_extreme, std_normalise, detrend_orders, 
@@ -414,17 +418,12 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
     
     # Create ocean/land mask from first time step
     chunk_dict_mask = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
-    mask = np.isfinite(da.isel({dimensions['time']: 0})).chunk(chunk_dict_mask)
+    mask = np.isfinite(da.isel({dimensions['time']: 0})).drop_vars({'time'}).chunk(chunk_dict_mask)
     
     # Build output dataset
     return xr.Dataset({
         'dat_detrend': anomalies,
         'mask': mask
-    }, attrs={
-        'description': 'Shifting Baseline Anomalies',
-        'method': 'shifting_baseline',
-        'window_year_baseline': window_year_baseline,
-        'smooth_days_baseline': smooth_days_baseline
     })
 
 
@@ -477,23 +476,15 @@ def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11
     else:  # Optimised histogram approximation method
         thresholds = compute_histogram_quantile_2d(da, threshold_percentile/100.0, window_days_hobday=window_days_hobday, dimensions=dimensions)
     
-    
-    thresholds.attrs.update({
-        'long_name': f'{threshold_percentile}th percentile threshold',
-        'description': f'Climatological {threshold_percentile}th percentile computed using {window_days_hobday}-day rolling window',
-        'window_size': f'{window_days_hobday} days',
-        'percentile': threshold_percentile,
-        'method': 'day-of-year histogram approximation' if not exact_percentile else 'exact percentile'
-    })
-    
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
     thresholds = thresholds.chunk(spatial_chunks).persist()
     
     # Compare anomalies to day-of-year specific thresholds
-    extreme_bool = da.groupby(da[dimensions['time']].dt.dayofyear) >= thresholds
+    extremes = da.groupby(da[dimensions['time']].dt.dayofyear) >= thresholds
+    extremes = extremes.astype(bool).chunk(spatial_chunks).persist()
     
-    return extreme_bool, thresholds
+    return extremes, thresholds
 
 
 # ===============================================
@@ -664,19 +655,7 @@ def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1],
         data_vars['STD'] = std_rolling
     
     # Build output dataset with metadata
-    return xr.Dataset(
-        data_vars=data_vars,
-        attrs={
-            'description': 'Standardised & Detrended Data',
-            'method': 'detrended_baseline',
-            'preprocessing_steps': [
-                f'Removed {"polynomial trend orders=" + str(detrend_orders)} & seasonal cycle',
-                'Normalised by 30-day rolling STD' if std_normalise else 'No STD normalisation'
-            ],
-            'detrend_orders': detrend_orders,
-            'force_zero_mean': force_zero_mean
-        }
-    )
+    return xr.Dataset(data_vars=data_vars)
 
 def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
@@ -730,6 +709,7 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
         dtype='int32',
         fill_value=0
     )
+    hist_raw.name = None
     
     # Pad and then window histogram
     hist_pad = hist_raw.pad({'dayofyear':window_days_hobday//2}, mode='wrap' )
@@ -759,6 +739,7 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
     bin_next = bin_centers[idx]
     
     denom = cdf_next - cdf_prev
+    denom = np.where(np.abs(denom) < 1e-10, 1e-10, denom)
     frac = (q - cdf_prev) / denom
     result_data = bin_prev + frac * (bin_next - bin_prev)
 
@@ -864,13 +845,9 @@ def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=Fa
     if 'quantile' in threshold.coords:
         threshold = threshold.drop_vars('quantile')
     
-    # Add attributes for documentation
-    threshold.attrs.update({
-        'long_name': f'{threshold_percentile}th percentile threshold',
-        'description': f'Global {threshold_percentile}th percentile computed across all time',
-        'percentile': threshold_percentile,
-        'method': 'global percentile calculation'
-    })
+    # Ensure spatial dimensions are fully loaded for efficient comparison
+    spatial_chunks = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
+    threshold = threshold.chunk(spatial_chunks).persist()
     
     # Create boolean mask for values exceeding threshold
     extremes = da >= threshold
@@ -878,6 +855,8 @@ def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=Fa
     # Clean up coordinates if needed
     if 'quantile' in extremes.coords:
         extremes = extremes.drop_vars('quantile')
+    
+    extremes = extremes.astype(bool).chunk(da.chunks).persist()
     
     return extremes, threshold
 
