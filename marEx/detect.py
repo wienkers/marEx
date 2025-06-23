@@ -51,7 +51,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     - 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct", but shortens time series by window_year_baseline years
     
     Extreme Methods:
-    - 'global_extreme': Global-in-time percentile threshold
+    - 'global_extreme': Global-in-time threshold value
     - 'hobday_extreme': Local day-of-year specific thresholds with windowing
     
     Parameters
@@ -400,7 +400,6 @@ def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseli
 def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}, flox_chunksize=8):
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
-    Returned anomaly is chunked for cohorts.
     
     Returns
     -------
@@ -410,18 +409,8 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
     # Compute smoothed rolling climatology
     climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, time_dim=dimensions['time'])
     
-    # Rechunk for efficient time operations using flox
-    da_rechunked = flox.xarray.rechunk_for_cohorts(
-        da,
-        dim=dimensions['time'],
-        labels=da[dimensions['time']].dt.dayofyear,
-        chunksize=flox_chunksize,
-        ignore_old_chunks=True,
-        force_new_chunk_at=1
-    )
-    
     # Compute anomaly as difference from climatology
-    anomalies = da_rechunked - climatology_smoothed
+    anomalies = da - climatology_smoothed
     
     # Create ocean/land mask from first time step
     chunk_dict_mask = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
@@ -537,32 +526,6 @@ def add_decimal_year(da, dim='time'):
     return da.assign_coords(decimal_year=(dim, decimal_year))
 
 
-def rechunk_for_cohorts(da, chunksize=100, dim='time'):
-    """
-    Optimise chunking for climatology calculations using day-of-year cohorts.
-    
-    Parameters
-    ----------
-    da : xarray.DataArray
-        Input data array
-    chunksize : int, optional
-        Target chunk size
-    dim : str, optional
-        Homogeneous dimension along which to rechunk
-        
-    Returns
-    -------
-    xarray.DataArray
-        Optimally chunked data for climatology calculations
-    """
-    return flox.xarray.rechunk_for_cohorts(da, 
-                                          dim=dim, 
-                                          labels=da[dim].dt.dayofyear, 
-                                          force_new_chunk_at=1, 
-                                          chunksize=chunksize, 
-                                          ignore_old_chunks=True)
-
-
 def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1], 
                                dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'},
                                force_zero_mean=True):
@@ -665,11 +628,6 @@ def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1],
     
     # Standardise anomalies by temporal variability if requested
     if std_normalise: 
-        print('Note: It is highly recommended to use rechunk_for_cohorts on input data before STD normalisation')
-        print('    e.g. To compute optimal cohort chunks for your data on disk, and then load directly into the dask array:')
-        print('           da_predictor = xr.open_dataset(\'path_to_data.nc\', chunks={}).var')
-        print('           time_chunk = marex.rechunk_for_cohorts(da_predictor).chunks[0]')
-        print('           var = xr.open_dataset(\'path_to_data.nc\', chunks={\'time\': time_chunk})')
         
         # Calculate day-of-year standard deviation using cohorts
         std_day = flox.xarray.xarray_reduce(
