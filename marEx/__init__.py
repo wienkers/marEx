@@ -42,7 +42,6 @@ from .detect import (
     preprocess_data, 
     compute_normalised_anomaly,
     smoothed_rolling_climatology,
-    rechunk_for_cohorts,
     identify_extremes
 )
 
@@ -60,7 +59,6 @@ __all__ = [
     'preprocess_data',
     'compute_normalised_anomaly',
     'smoothed_rolling_climatology',
-    'rechunk_for_cohorts',
     'identify_extremes',
     
     # Tracking
