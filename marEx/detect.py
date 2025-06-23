@@ -383,7 +383,7 @@ def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
     return result.chunk(da.chunks)
 
 
-def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time', flox_chunksize=4):
+def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time', flox_chunksize=8):
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
@@ -397,7 +397,7 @@ def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseli
     return clim
 
 
-def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}, flox_chunksize=4):
+def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}, flox_chunksize=8):
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
     Returned anomaly is chunked for cohorts.
