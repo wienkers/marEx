@@ -514,6 +514,10 @@ class tracker:
         (total_area_IDed, N_objects_prefiltered, N_objects_filtered, 
          area_threshold, accepted_area_fraction, preprocessed_area_fraction) = object_stats
 
+        # Inherit metadata from input data_bin
+        if hasattr(self.data_bin, 'attrs') and self.data_bin.attrs:
+            events_ds.attrs.update(self.data_bin.attrs)
+
         # Add general attributes to dataset
         events_ds.attrs['allow_merging'] = int(self.allow_merging)
         events_ds.attrs['N_objects_prefiltered'] = int(N_objects_prefiltered)
