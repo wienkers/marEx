@@ -10,7 +10,7 @@ Efficient & scalable Marine Extremes detection, identification, & tracking for E
 ## Features
 
 ### Data Pre-processing
-**Detrending & Anomaly Detection**:
+**Anomaly Calculation & Extreme Detection**:
   - Removes trend and seasonal cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends).
   - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
   - Identifies extreme events based on a global-in-time percentile threshold.
@@ -47,7 +47,7 @@ Efficient & scalable Marine Extremes detection, identification, & tracking for E
       - etc...
   - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
     - Takes ~8 wall-minutes per decade (cf. _Old_ Method, i.e. _without_ merge-split-tracking, time-gap filling, overlap-thresholding, et al., but here updated to leverage `dask`, now takes 1 wall-minute per decade!)
-    - Requires only ~2 Gb memory per core (wwith `dask` chunks of 25 days)
+    - Requires only ~2 Gb memory per core (with `dask` chunks of 25 days)
 
 ### Visualisation
 **Plotting**:
@@ -72,7 +72,7 @@ file_name = 'path/to/sst/data'
 sst = xr.open_dataset(file_name, chunks={'time':500}).sst
 
 # Process Data
-extremes_ds = hot.preprocess_data(sst, threshold_percentile=95)
+extremes_ds = marEx.preprocess_data(sst, threshold_percentile=95)
 ```
 
 The resulting xarray dataset `extremes_ds` will have the following structure & entries:
@@ -91,11 +91,22 @@ Data variables:
 where `dat_detrend` is the detrended SST data, `mask` is the deduced land-sea mask, and `extreme_events` is the binary field locating extreme events. Additionally, the STD-renormalised anomalies, `extreme_events_stn`, will be output if `normalise=True` is set in `preprocess_data()`.
 
 Optional arguments for `marEx.preprocess_data()` include:
-- `std_normalise`: Whether to normalise the anomalies using a 30-day rolling standard deviation. Default is `False`.
+- `method_anomaly`: Method for anomaly detection. 
+  - `'detrended_baseline'`: (Default) Uses a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). This method is much faster to preprocess, but care must be taken because the harmonic detrending strongly biases certain statistics. Requires the additional arguments:
+    - `std_normalise`: Whether to normalise the anomalies using a 30-day rolling standard deviation. Default is `False`.
+    - `detrend_orders`: List of polynomial orders for detrending. Default is `[1]`, i.e. 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
+  - `'shifting_baseline'`: Uses a smoothed rolling climatology of the previous `window_year_baseline` years with `smooth_days_baseline` days of smoothing. This method is more "correct", but shortens the time series by `window_year_baseline` years. Requires the additional arguments: 
+    - `window_year_baseline`: The number of years to use for the rolling climatology baseline. Default is `15` previous years.
+    - `smooth_days_baseline`: The number of days to use for smoothing the rolling climatology baseline. Default is `21` days.
+- `method_extreme`: Method for identifying extreme events. 
+  - `'global_extreme'`: (Default) Applies a global-in-time (i.e. constant in time) threshold. This method is a hack introduced by Hillary Scannell in `ocetrac`, which when paired with `std_normalise=True` can approximate `hobday_extreme` in very specific cases and with some caveats. N.B.: Normalising by local STD is again memory-intensive, at which point there is little gained by this approximate method.
+  - `'hobday_extreme'`: Defines a local day-of-year specific threshold within a window of `window_days_hobday` (closer to the Hobday et al. (2016) definition for simple time-series). This method is more "correct", but is very computationally- & memory-demanding (requires ~5x additional scratch space). Requires the additional argument:
+    - `window_days_hobday`: The window size to include in the day-of-year threshold calculation. Default is `11` days.
 - `threshold_percentile`: The percentile threshold for extreme event detection. Default is `95`.
-- `detrend_orders`: List of polynomial orders for detrending. Default is `[1]`, i.e. 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
+- `exact_percentile`: Whether to use exact or an approximate (PDF-based) percentile calculation. Default is `True`. N.B. Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory, in consideration of the limitations inherent to distributed parallel I/O & processing.
 - `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
 - `dask_chunks`: The chunk size for the output dataset. Default is `{'time': 25}`.
+
 
 See, e.g. `./examples/unstructured data/01_preprocess_extremes.ipynb` for a detailed example of pre-processing on an _unstructured_ grid.
 
