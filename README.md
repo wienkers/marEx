@@ -5,19 +5,34 @@
 Marine Extremes Python Package
 ==============================
 
-Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data.
+**Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data.**
 
-## Features
+`MarEx` is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
 
-### Data Pre-processing
-**Anomaly Calculation & Extreme Detection**:
-  - Removes trend and seasonal cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends).
-  - (Optional) Normalises anomalies using a 30-day rolling standard deviation.
-  - Identifies extreme events based on a global-in-time percentile threshold.
-  - Utilises `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets.
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution data with 128 cores...
-    - Takes ~5 wall-minutes per _century_
-    - Requires only 1 Gb memory per core (when `dask`-backed data has chunks of 25 days) 
+## Key Capabilities
+
+- **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
+- **🔬 Advanced Analytics**: Multiple statistical methodologies for robust extreme event detection  
+- **📈 Complex Event Tracking**: Seamlessly handles coherent object splitting, merging, and evolution
+- **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
+- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to a supercomputer using to 1024+ cores
+- **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
+
+---
+
+## Features (v3.0)
+
+### Data Pre-processing Pipeline
+
+MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets. Included are two complementary methods for calculating anomalies and detecting extremes:
+
+**Anomaly Calculation**:
+  1. Shifting Baseline — Scientifically-rigorous definition of anomalies relative to a backwards-looking rolling smoothed climatology.
+  2. Detrended Baseline — Efficiently removes trend & season cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). (Highly efficient, but this approximation may lead to biases in certain statistics.)
+
+**Extreme Detection**:
+  1. Hobday Extreme — Implements a similar methodology to Hobday et al. (2016) with local day-of-year specific thresholds determined based on the quantile within a rolling window.
+  2. Global Extreme — Applies a global-in-time percentile threshold at each point across the entire dataset. Optionally renormalises anomalies using a 30-day rolling standard deviation. (Highly efficient, but may misrepresent seasonal variability and differs from common definitions in literature.)
 
 
 ### Object Detection & Tracking
@@ -59,12 +74,33 @@ https://github.com/user-attachments/assets/074cfd20-d979-49a7-bda9-0c356c786b1d
 
 
 
-## Usage
+## Technical Architecture
+
+**Distributed Computing Stack:**
+- **Framework**: `Dask` for distributed computation with asyncronous task scheduling
+- **Parallelism**: Multi-level spatio-temporal parallelisation
+- **Memory Management**: Lazy evaluation with automatic spilling and graph optimisation
+- **I/O Optimisation**: Zarr-based intermediate storage with compression
+
+**Performance Optimisations:**
+- **JIT Compilation**: Numba-accelerated critical paths for numerical kernels
+- **GPU Acceleration**: Optional JAX backend for tensor operations  
+- **Sparse Operations**: Custom sparse matrix algorithms for unstructured grids
+- **Cache-Aware**: Memory access patterns optimised for modern CPU architectures
+
+
+## Computational Workflow
+
+1. **Preprocess**: Remove trends & seasonal cycles and identify anomalous extremes
+2. **Detect**: Filter & label connected regions using morphological operations  
+3. **Track**: Follow objects through time, handling complex evolution patterns
+4. **Analyse**: Extract event statistics, duration, and spatial properties
+
+## Example Usage
 
 ### 1. Pre-process SST Data: cf. `01_preprocess_extremes.ipynb`
 ```python
 import xarray as xr
-import dask
 import marEx
 
 # Load SST data & rechunk for optimal processing
@@ -72,7 +108,15 @@ file_name = 'path/to/sst/data'
 sst = xr.open_dataset(file_name, chunks={'time':500}).sst
 
 # Process Data
-extremes_ds = marEx.preprocess_data(sst, threshold_percentile=95)
+extremes_ds = marEx.preprocess_data(
+    sst, 
+    method_anomaly='shifting_baseline',      # Anomalies from a rolling climatology using previous window_year years
+    method_extreme='hobday_extreme',         # Local day-of-year specific thresholds with windowing
+    threshold_percentile=95,                 # 95th percentile threshold for extremes
+    window_year_baseline=15,                 # Rolling climatology window
+    smooth_days_baseline=21,                 #    and smoothing window for determining the anomalies
+    window_days_hobday=11                    # Window size of compiled samples collected for the extremes detection
+)
 ```
 
 The resulting xarray dataset `extremes_ds` will have the following structure & entries:
@@ -84,11 +128,17 @@ Coordinates:
     lon         (lon)
     time        (time)
 Data variables:
-    dat_detrend     (time, lat, lon)  float64   dask.array
-    mask            (lat, lon)        bool      dask.array
-    extreme_events  (time, lat, lon)  bool      dask.array
+    dat_detrend     (time, lat, lon)        float64     dask.array
+    mask            (lat, lon)              bool        dask.array 
+    extreme_events  (time, lat, lon)        bool        dask.array
+    thresholds      (dayofyear, lat, lon)   float64     dask.array
 ```
-where `dat_detrend` is the detrended SST data, `mask` is the deduced land-sea mask, and `extreme_events` is the binary field locating extreme events. Additionally, the STD-renormalised anomalies, `extreme_events_stn`, will be output if `normalise=True` is set in `preprocess_data()`.
+where
+- `dat_detrend` is the detrended SST data
+- `mask` is the deduced land-sea mask
+- `extreme_events` is the binary field locating extreme events
+- `thresholds` is the day-of-year specific thresholds used to determine extreme events (if `method_extreme='hobday_extreme'` is set).
+- `extreme_events_stn` is the STD-renormalised anomalies (if `normalise=True`)
 
 Optional arguments for `marEx.preprocess_data()` include:
 - `method_anomaly`: Method for anomaly detection. 
@@ -114,21 +164,25 @@ See, e.g. `./examples/unstructured data/01_preprocess_extremes.ipynb` for a deta
 ### 2. Identify & Track Marine Heatwaves: cf. `02_id_track_events.ipynb`
 ```python
 import xarray as xr
-import dask
 import marEx
 
 
 # Load Pre-processed Data
 file_name = 'path/to/binary/extreme/data'
 chunk_size = {'time': 25, 'lat': -1, 'lon': -1}
-ds_hot = xr.open_dataset(file_name, chunks=chunk_size)
-
-# Extract Extreme Binary Features and Modify Mask
-extreme_bin = ds_hot.dat_stn
-mask = ds_hot.mask.where((ds_hot.lat < 85) & (ds_hot.lat > -90), other=False)
+extremes_ds = xr.open_dataset(file_name, chunks=chunk_size)
 
 # ID, Track, & Merge
-tracker = marEx.tracker(extreme_bin, mask, area_filter_quartile=0.5, R_fill=8, T_fill=2, allow_merging=True, overlap_threshold=0.5, nn_partitioning = True)
+tracker = marEx.tracker(
+    extremes_ds.extreme_events, 
+    extremes_ds.mask,
+    area_filter_quartile=0.5,      # Remove the smallest 50% of the identified coherent extreme areas
+    R_fill=8,                      # Fill small holes with radius < 8 _cells_
+    T_fill=2,                      # Allow gaps of 2 days and still continue the event tracking with the same ID
+    allow_merging=True,            # Allow extreme events to split/merge. Keeps track of merge events & unique IDs.
+    overlap_threshold=0.5,         # Overlap threshold for merging events. If overlap < threshold, events keep independent IDs.
+    nn_partitioning=True           # Use nearest-neighbor partitioning
+)
 extreme_events_ds, merges_ds = tracker.run(return_merges=True)
 ```
 
@@ -196,19 +250,36 @@ Arguments for `marEx.tracker()` include:
 
 See, e.g. `./examples/unstructured data/02_id_track_events.ipynb` for a detailed example of identification, tracking, & merging on an _unstructured_ grid.
 
-## Installation
 
-**PyPI**
+## Installation & Setup
 
-To install the full package, run: `pip install marEx[full]`  
-Note: JAX may be difficult to install on some systems. If you encounter issues, you can install without JAX support by running: `pip install marEx`
+### Standard Installation
+```bash
+# Complete installation with performance optimisations
+pip install marEx[full]
 
-**GitHub**
+# Minimal installation (fallback if JAX unavailable)  
+pip install marEx
+```
 
-1. Clone `marEx`: `git clone https://github.com/wienkers/marEx.git`
-2. Change to the parent directory of `marEx`
-3. Install `marEx` with `pip install -e ./`marEx`.  
-This will allow changes you make locally, to be reflected when you import the package in Python
+### High-Performance Computing Integration
+
+MarEx includes HPC utility functions for deployment on cloud/supercomputing environments:
+
+```python
+import marEx.helper as helper
+
+# Automated SLURM cluster management
+client = helper.start_distributed_cluster(
+    n_workers=512,           # Scale to 512 workers
+    workers_per_node=64,
+    node_memory=512,
+    runtime=120              # in minutes
+)
+
+# Automatic dashboard tunneling and monitoring
+helper.get_cluster_info(client)
+```
 
 ---
 Please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com) with any questions, comments, issues, or bugs.
