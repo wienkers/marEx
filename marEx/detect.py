@@ -21,11 +21,12 @@ import pandas as pd
 import xarray as xr
 import dask
 from dask import delayed
-from dask import persist
 from dask.base import is_dask_collection
 import flox.xarray
 from xhistogram.xarray import histogram
+from numpy.lib.stride_tricks import sliding_window_view
 import logging
+from .helper import fix_dask_tuple_array
 
 logging.getLogger('distributed.shuffle._scheduler_plugin').setLevel(logging.ERROR)
 
@@ -110,12 +111,14 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     if not is_dask_collection(da.data):
         raise ValueError('The input DataArray must be backed by a Dask array. Ensure the input data is chunked, e.g. with chunks={}')
     
+    dask.config.set({'array.slicing.split_large_chunks': True})
+    
     # Step 1: Compute anomalies
     ds = compute_normalised_anomaly(
-        da, method_anomaly, dimensions, 
+        da.astype(np.float32), method_anomaly, dimensions, 
         window_year_baseline, smooth_days_baseline,
         std_normalise, detrend_orders, force_zero_mean
-    ).persist()
+    )
     
     # For shifting baseline, remove first window_year_baseline years (insufficient climatology data)
     if method_anomaly == 'shifting_baseline':
@@ -129,7 +132,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
                            f"Either use more data or reduce window_year_baseline parameter.")
         
         start_year = min_year + window_year_baseline
-        ds['dat_detrend'] = ds['dat_detrend'].where(ds[dimensions['time']].dt.year >= start_year, drop=True).persist()
+        ds['dat_detrend'] = ds['dat_detrend'].where(ds[dimensions['time']].dt.year >= start_year, drop=True)
     
     anomalies = ds.dat_detrend
     
@@ -194,9 +197,10 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     # Final rechunking
     chunk_dict = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
     chunk_dict[dimensions['time']] = dask_chunks['time']
-    ds = ds.chunk(chunk_dict)
     if method_extreme == 'hobday_extreme':
-        ds['thresholds'] = ds.thresholds.compute()
+        chunk_dict['dayofyear'] = dask_chunks['time']
+    ds = ds.chunk(chunk_dict)
+    
     
     # Fix encoding issue with saving when calendar & units attribute is present
     if 'calendar' in ds[dimensions['time']].attrs:
@@ -204,7 +208,12 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     if 'units' in ds[dimensions['time']].attrs:
         del ds[dimensions['time']].attrs['units']
     
-    return ds.persist()
+    
+    ds = ds.persist(optimize_graph=True)
+    ds['thresholds'] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
+    ds['dat_detrend'] = fix_dask_tuple_array(ds.dat_detrend)
+    
+    return ds
 
 
 def _get_preprocessing_steps(method_anomaly, method_extreme, std_normalise, detrend_orders, 
@@ -326,82 +335,110 @@ def identify_extremes(da, method_extreme='global_extreme',
 # Shifting Baseline Anomaly Method (New Method)
 # ===============================================
 
-def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
+def rolling_climatology(da, window_year_baseline=15, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Compute rolling climatology efficiently using flox cohorts.
     Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
-    # Add year and day-of-year coordinates
-    da = da.assign_coords({
-        'year': (time_dim, da[time_dim].dt.year.data),
-        'dayofyear': (time_dim, da[time_dim].dt.dayofyear.data)
-    })
     
-    # Get unique years
-    years = da.year.values
-    unique_years = np.unique(years)
+    time_dim = dimensions['time']
+    original_chunk_dict = {dim: chunks for dim, chunks in zip(da.dims, da.chunks)}
+
+    # Add temporal coordinates
+    years = da[time_dim].dt.year
+    doys = da[time_dim].dt.dayofyear
+    da = da.assign_coords({'year': years, 'dayofyear': doys})
+
+    # Get temporal bounds
+    year_vals = years.compute().values
+    doy_vals = doys.compute().values
+    unique_years = np.unique(year_vals)
     min_year = unique_years.min()
-    
-    # Pre-compute year mappings for all valid target years
-    year_mappings = {}
-    for target_year in unique_years:
-        start_year = target_year - window_year_baseline
-        if start_year >= min_year:
-            year_mappings[target_year] = np.arange(start_year, target_year)
-    
-    # Initialise output with NaN
-    result = xr.full_like(da, np.nan)
-    
-    # Process all years in parallel using flox
-    for target_year, source_years in year_mappings.items():
-        # Create mask for source years
-        source_mask = da.year.isin(source_years)
+
+    # Create long-form grouping variables
+    # For each time point, determine which target years it contributes to
+    contributing_time_indices = []
+    contributing_target_years = []
+    contributing_dayofyears = []
+
+    for t_idx, (year_val, doy_val) in enumerate(zip(year_vals, doy_vals)):
+        # Find target years this time point contributes to
+        # A time point from year Y contributes to target years where:
+        # target_year - window_year_baseline <= Y < target_year
+        # Which means: Y < target_year <= Y + window_year_baseline
+        candidate_targets = unique_years[(unique_years > year_val) & 
+                                    (unique_years <= year_val + window_year_baseline)]
         
-        # Compute climatology for this window using flox
-        window_clim = flox.xarray.xarray_reduce(
-            da.where(source_mask),
-            da.dayofyear.where(source_mask),
-            func='nanmean',
-            dim=time_dim,
-            expected_groups=np.arange(1, 367),
-            isbin=False,
-            method='cohorts',
-            engine='flox'
-        )
+        # Only include target years that have sufficient history
+        valid_targets = candidate_targets[candidate_targets >= min_year + window_year_baseline]
         
-        # Assign to target year using groupby for efficiency
-        target_mask = da.year == target_year
-        target_doys = da.dayofyear.where(target_mask)
-        
-        # Map climatology to target year positions
-        result = xr.where(
-            target_mask,
-            window_clim.sel(dayofyear=da.dayofyear),
-            result
-        )
+        # Add entries for each valid target year
+        n_targets = len(valid_targets)
+        contributing_time_indices.extend([t_idx] * n_targets)
+        contributing_target_years.extend(valid_targets)
+        contributing_dayofyears.extend([doy_val] * n_targets)
+
+    # Convert to numpy arrays
+    time_indices = np.array(contributing_time_indices)
+    target_year_groups = np.array(contributing_target_years)
+    dayofyear_groups = np.array(contributing_dayofyears)
+
+    # Create long-form dataset by selecting the contributing time points
+    long_form_data = da.isel({time_dim: time_indices})
+
+    # Create a new time dimension for the long-form data
+    long_time_dim = f"{time_dim}_contrib"
+    long_form_data = long_form_data.rename({time_dim: long_time_dim})
+
+    # Convert grouping arrays to DataArrays with the correct dimension
+    target_year_da = xr.DataArray(target_year_groups, dims=[long_time_dim], name='target_year')
+    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_time_dim], name='dayofyear')
+
+    # Use flox with both grouping variables to compute climatologies
+    climatologies = flox.xarray.xarray_reduce(
+        long_form_data,
+        target_year_da,
+        dayofyear_da,
+        dim=long_time_dim,
+        func='nanmean',
+        expected_groups=(unique_years, np.arange(1, 367)),
+        isbin=(False, False),
+        dtype=np.float32,
+        fill_value=np.nan
+    )
+
+    # Create index arrays for final mapping
+    year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
+    year_indices = year_to_idx[year_vals].values
+
+    # Select appropriate climatology for each time point
+    result = climatologies.isel(
+        target_year=xr.DataArray(year_indices, dims=[time_dim]),
+        dayofyear=xr.DataArray(doy_vals - 1, dims=[time_dim])
+    )
+
+    # Clean up dimensions and coordinates
+    result = result.drop_vars(['target_year', 'dayofyear'])
     
-    # Clean up coordinates
-    result = result.drop_vars(['year', 'dayofyear'])
-    
-    return result.chunk(da.chunks)
+    return result.chunk(original_chunk_dict)
 
 
-def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time', flox_chunksize=8):
+def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
     
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    da_smoothed = da.rolling({time_dim: smooth_days_baseline}, center=True).mean()
+    da_smoothed = da.rolling({dimensions['time']: smooth_days_baseline}, center=True).mean().chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, time_dim)
+    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions)
     
     return clim
 
 
-def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}, flox_chunksize=8):
+def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
     
@@ -411,7 +448,7 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
         Dataset containing anomalies and mask
     """
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, time_dim=dimensions['time'])
+    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions)
     
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed
@@ -478,11 +515,11 @@ def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11
     
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
-    thresholds = thresholds.chunk(spatial_chunks).persist()
+    thresholds = thresholds.chunk(spatial_chunks)
     
     # Compare anomalies to day-of-year specific thresholds
     extremes = da.groupby(da[dimensions['time']].dt.dayofyear) >= thresholds
-    extremes = extremes.astype(bool).chunk(spatial_chunks).persist()
+    extremes = extremes.astype(bool).chunk(spatial_chunks)
     
     return extremes, thresholds
 
@@ -657,6 +694,67 @@ def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1],
     # Build output dataset with metadata
     return xr.Dataset(data_vars=data_vars)
 
+
+def _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers):
+    """
+    Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
+    
+    Parameters
+    ----------
+    hist_chunk : numpy.ndarray
+        Histogram data with shape (dayofyear, da_bin)
+    window_days_hobday : int
+        Rolling window size for day-of-year smoothing
+    q : float
+        Quantile to compute (0-1)
+    bin_centers : numpy.ndarray
+        Bin centre values for interpolation
+        
+    Returns
+    -------
+    numpy.ndarray
+        Quantile thresholds with shape (dayofyear,)
+    """
+    n_doy, n_bins = hist_chunk.shape
+    
+    # Pad histogram with wrap mode for day-of-year cycling
+    pad_size = window_days_hobday // 2
+    hist_pad = np.concatenate([
+        hist_chunk[-pad_size:],
+        hist_chunk,
+        hist_chunk[:pad_size]
+    ], axis=0)
+    
+    # Apply rolling sum using stride tricks (FTW)
+    windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
+    hist_windowed = np.sum(windowed_view, axis=-1)
+    
+    # Compute PDF and CDF in single pass
+    hist_sum = np.sum(hist_windowed, axis=1, keepdims=True) + 1e-10
+    pdf = hist_windowed / hist_sum
+    cdf = np.cumsum(pdf, axis=1)
+    
+    # Find first bin exceeding quantile threshold
+    mask = cdf >= q
+    first_true = np.argmax(mask, axis=1)
+    idx_prev = np.clip(first_true - 1, 0, n_bins - 1)
+    
+    # Extract CDF values for linear interpolation
+    doy_indices = np.arange(n_doy)
+    cdf_prev = cdf[doy_indices, idx_prev]
+    cdf_next = cdf[doy_indices, first_true]
+    
+    bin_prev = bin_centers[idx_prev]
+    bin_next = bin_centers[first_true]
+    
+    denom = cdf_next - cdf_prev
+    denom = np.where(np.abs(denom) < 1e-10, 1e-10, denom)
+    frac = (q - cdf_prev) / denom
+    threshold = bin_prev + frac * (bin_next - bin_prev)
+    
+    return threshold.astype(np.float32)
+
+
 def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -685,6 +783,16 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
             np.arange(precision, max_anomaly + precision, precision)
         ])
     
+    bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
+    bin_centers_array[0] = 0.
+    
+    bin_centers = xr.DataArray(
+        bin_centers_array,
+        dims=['da_bin'],
+        coords={'da_bin': np.arange(len(bin_centers_array))},
+        name='bin_centers'
+    )
+    
     chunk_dict = {dimensions['time']: -1}
     for d in ['xdim', 'ydim']:
         if d in dimensions:
@@ -695,7 +803,7 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
         dims=da.dims,
         coords=da.coords,
         name="da_bin"
-    ).chunk(chunk_dict).persist()
+    ).chunk(chunk_dict)
     
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
@@ -706,50 +814,31 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
         func="count",
         expected_groups=(np.arange(1, 367), np.arange(len(bin_edges)-1)),
         isbin=(False,False),
-        dtype='int32',
+        dtype=np.int32,
         fill_value=0
     )
     hist_raw.name = None
     
-    # Pad and then window histogram
-    hist_pad = hist_raw.pad({'dayofyear':window_days_hobday//2}, mode='wrap' )
-    hist = hist_pad.rolling(dayofyear=window_days_hobday, center=True).sum().isel(dayofyear=slice(window_days_hobday//2, -window_days_hobday//2+1)).chunk({'dayofyear': -1})
-
-    #### N.B.: This *temporarily* requires up to ~20x the original dataset size as scratch space
-    hist = hist.persist()    # hist dims: (dayofyear, da_bin, lat, lon)
+    def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
+        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
     
-    # Calculate PDF and CDF
-    hist_sum = hist.sum(dim="da_bin") + 1e-10
-    pdf = hist / hist_sum
-    cdf = pdf.cumsum(dim="da_bin")
-
-    bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
-    bin_centers[0] = 0.
-    
-    # Determine the threshold
-    mask = cdf >= q
-    first_true = mask.argmax(dim="da_bin")
-    idx = first_true.compute()
-    idx_prev = np.clip(idx - 1, 0, len(bin_centers) - 1)
-    
-    # Interpolate to get better estimate of the thresholds
-    cdf_prev = cdf.isel({"da_bin": xr.DataArray(idx_prev, dims=first_true.dims)}).data
-    cdf_next = cdf.isel({"da_bin": xr.DataArray(idx, dims=first_true.dims)}).data
-    bin_prev = bin_centers[idx_prev]
-    bin_next = bin_centers[idx]
-    
-    denom = cdf_next - cdf_prev
-    denom = np.where(np.abs(denom) < 1e-10, 1e-10, denom)
-    frac = (q - cdf_prev) / denom
-    result_data = bin_prev + frac * (bin_next - bin_prev)
-
-    threshold = first_true.copy(data=result_data)  # dims: (dayofyear, lat, lon)
-    
+    # Apply the optimised computation using apply_ufunc
+    threshold = xr.apply_ufunc(
+        _compute_quantile_with_params,
+        hist_raw,
+        bin_centers,
+        input_core_dims=[['dayofyear', 'da_bin'], ['da_bin']],
+        output_core_dims=[['dayofyear']],
+        dask='parallelized',
+        vectorize=True,
+        output_dtypes=[np.float32],
+        dask_gufunc_kwargs={'output_sizes': {'dayofyear': 366}},
+        keep_attrs=True
+    )
+        
     return threshold
     
     
-
-
 def compute_histogram_quantile_1d(da, q, dim='time', bin_edges=None):
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -847,7 +936,7 @@ def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=Fa
     
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ['xdim', 'ydim'] if dim in dimensions}
-    threshold = threshold.chunk(spatial_chunks).persist()
+    threshold = threshold.chunk(spatial_chunks)
     
     # Create boolean mask for values exceeding threshold
     extremes = da >= threshold
@@ -856,7 +945,7 @@ def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=Fa
     if 'quantile' in extremes.coords:
         extremes = extremes.drop_vars('quantile')
     
-    extremes = extremes.astype(bool).chunk(da.chunks).persist()
+    extremes = extremes.astype(bool).chunk(da.chunks)
     
     return extremes, threshold
 

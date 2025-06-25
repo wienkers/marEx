@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Dict, Optional, Union, Any
 
 import dask
+import dask.array as dask_array
+import xarray as xr
+import numpy as np
 from dask_jobqueue import SLURMCluster
 from dask.distributed import Client, LocalCluster
 
@@ -249,3 +252,42 @@ def start_distributed_cluster(n_workers: int, workers_per_node: int,
     get_cluster_info(client)
     
     return client
+
+
+def fix_dask_tuple_array(da):
+    """
+    Fix a dask array that has tuple (i.e. task) references in its chunks.
+    This addresses a longstanding issue/bug when dask arrays are saved to Zarr.
+    Process chunk by chunk to maintain memory efficiency.
+    """
+    
+    # N.B.: Analyse the outputs of:
+    #   first_key = result.data.__dask_keys__()[0]
+    #   first_chunk = dask.compute(first_key)[0]
+    #   print(type(first_chunk), first_chunk)
+    
+    def materialise_chunk(block):
+        """Force materialisation of a single chunk."""
+        # This ensures we return an actual numpy array, not a task reference
+        return np.asarray(block)
+    
+    chunks = da.chunks
+    
+    # Use map_blocks to process each chunk
+    clean_data = dask_array.map_blocks(
+        materialise_chunk,
+        da.data,
+        dtype=da.dtype,
+        chunks=chunks,
+        drop_axis=[],  # Keep all axes
+        meta=np.array([], dtype=da.dtype)
+    )
+    
+    # Create new DataArray with clean dask array
+    return xr.DataArray(
+        clean_data,
+        dims=da.dims,
+        coords=da.coords,
+        attrs=da.attrs,
+        name=da.name
+    )
