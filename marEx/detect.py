@@ -336,15 +336,15 @@ def identify_extremes(da, method_extreme='global_extreme',
 # Shifting Baseline Anomaly Method (New Method)
 # ===============================================
 
-def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
+def rolling_climatology(da, window_year_baseline=15, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Compute rolling climatology efficiently using flox cohorts.
     Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
     
-    original_chunks = da.chunks
-    chunk_dict = {dim: chunks for dim, chunks in zip(da.dims, original_chunks)}
+    time_dim = dimensions['time']
+    original_chunk_dict = {dim: chunks for dim, chunks in zip(da.dims, da.chunks)}
 
     # Add temporal coordinates
     years = da[time_dim].dt.year
@@ -377,7 +377,14 @@ def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
         dims=[time_dim, 'target_year'],
         coords={time_dim: da[time_dim], 'target_year': unique_years}
     )
-
+    
+    # Rechunk in space before expanding data array
+    chunk_size_1d = 100
+    chunk_dict = {dimensions[dim]: chunk_size_1d for dim in ['xdim', 'ydim'] if dim in dimensions}
+    if len(chunk_dict) == 1:
+        chunk_dict[dimensions['xdim']] = chunk_size_1d ** 2
+    da = da.chunk(chunk_dict)
+    
     # Stack data to create (time, target_year, doy) structure
     # Then compute mean for each (target_year, doy) combination
     da_expanded = da.expand_dims({'target_year': unique_years})
@@ -386,7 +393,7 @@ def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
     # Compute climatology for each target year and DOY using flox
     climatologies = flox.xarray.xarray_reduce(
         masked_data,
-        masked_data.dayofyear,
+        masked_data.dayofyear.compute(),
         dim=time_dim,
         func='nanmean',
         expected_groups=np.arange(1, 367),
@@ -409,19 +416,19 @@ def rolling_climatology(da, window_year_baseline=15, time_dim='time'):
     # Clean up dimensions and coordinates
     result = result.drop_vars(['target_year',  'dayofyear'])
     
-    return result.chunk(chunk_dict)
+    return result.chunk(original_chunk_dict)
 
 
-def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, time_dim='time'):
+def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
     """
     
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    da_smoothed = da.rolling({time_dim: smooth_days_baseline}, center=True).mean().chunk(da.chunks)
+    da_smoothed = da.rolling({dimensions['time']: smooth_days_baseline}, center=True).mean().chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, time_dim)
+    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions)
     
     return clim
 
