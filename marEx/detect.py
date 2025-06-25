@@ -210,9 +210,8 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     
     
     ds = ds.persist(optimize_graph=True)
-    if method_extreme == 'hobday_extreme':
-        ds['thresholds'] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
-        ds['dat_detrend'] = fix_dask_tuple_array(ds.dat_detrend)
+    ds['thresholds'] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
+    ds['dat_detrend'] = fix_dask_tuple_array(ds.dat_detrend)
     
     return ds
 
@@ -357,64 +356,70 @@ def rolling_climatology(da, window_year_baseline=15, dimensions={'time':'time', 
     unique_years = np.unique(year_vals)
     min_year = unique_years.min()
 
-    # Create a broadcasting-friendly mask for source years
-    # Shape: (n_time, n_unique_years)
-    time_years = year_vals[:, np.newaxis]
-    target_years = unique_years[np.newaxis, :]
+    # Create long-form grouping variables
+    # For each time point, determine which target years it contributes to
+    contributing_time_indices = []
+    contributing_target_years = []
+    contributing_dayofyears = []
 
-    # Check which time points contribute to each target year's climatology
-    is_source = ((time_years >= target_years - window_year_baseline) & 
-                    (time_years < target_years))
+    for t_idx, (year_val, doy_val) in enumerate(zip(year_vals, doy_vals)):
+        # Find target years this time point contributes to
+        # A time point from year Y contributes to target years where:
+        # target_year - window_year_baseline <= Y < target_year
+        # Which means: Y < target_year <= Y + window_year_baseline
+        candidate_targets = unique_years[(unique_years > year_val) & 
+                                    (unique_years <= year_val + window_year_baseline)]
+        
+        # Only include target years that have sufficient history
+        valid_targets = candidate_targets[candidate_targets >= min_year + window_year_baseline]
+        
+        # Add entries for each valid target year
+        n_targets = len(valid_targets)
+        contributing_time_indices.extend([t_idx] * n_targets)
+        contributing_target_years.extend(valid_targets)
+        contributing_dayofyears.extend([doy_val] * n_targets)
 
-    # Identify which target years have sufficient history
-    has_history = target_years >= min_year + window_year_baseline
-    
-    valid_contributions = is_source & has_history  # Combine conditions
+    # Convert to numpy arrays
+    time_indices = np.array(contributing_time_indices)
+    target_year_groups = np.array(contributing_target_years)
+    dayofyear_groups = np.array(contributing_dayofyears)
 
-    # Convert to xarray for use in operations
-    contribution_mask = xr.DataArray(
-        valid_contributions,
-        dims=[time_dim, 'target_year'],
-        coords={time_dim: da[time_dim], 'target_year': unique_years}
-    )
-    
-    # Rechunk in space before expanding data array
-    chunk_size_1d = 100
-    chunk_dict = {dimensions[dim]: chunk_size_1d for dim in ['xdim', 'ydim'] if dim in dimensions}
-    if len(chunk_dict) == 1:
-        chunk_dict[dimensions['xdim']] = chunk_size_1d ** 2
-    da = da.chunk(chunk_dict)
-    
-    # Stack data to create (time, target_year, doy) structure
-    # Then compute mean for each (target_year, doy) combination
-    da_expanded = da.expand_dims({'target_year': unique_years})
-    masked_data = da_expanded.where(contribution_mask.transpose('target_year', time_dim))
+    # Create long-form dataset by selecting the contributing time points
+    long_form_data = da.isel({time_dim: time_indices})
 
-    # Compute climatology for each target year and DOY using flox
+    # Create a new time dimension for the long-form data
+    long_time_dim = f"{time_dim}_contrib"
+    long_form_data = long_form_data.rename({time_dim: long_time_dim})
+
+    # Convert grouping arrays to DataArrays with the correct dimension
+    target_year_da = xr.DataArray(target_year_groups, dims=[long_time_dim], name='target_year')
+    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_time_dim], name='dayofyear')
+
+    # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
-        masked_data,
-        masked_data.dayofyear.compute(),
-        dim=time_dim,
+        long_form_data,
+        target_year_da,
+        dayofyear_da,
+        dim=long_time_dim,
         func='nanmean',
-        expected_groups=np.arange(1, 367),
-        isbin=False,
-        method='cohorts',
-        engine='flox',
-        dtype=np.float32
+        expected_groups=(unique_years, np.arange(1, 367)),
+        isbin=(False, False),
+        dtype=np.float32,
+        fill_value=np.nan
     )
-    
+
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
     year_indices = year_to_idx[year_vals].values
-    
+
     # Select appropriate climatology for each time point
     result = climatologies.isel(
         target_year=xr.DataArray(year_indices, dims=[time_dim]),
         dayofyear=xr.DataArray(doy_vals - 1, dims=[time_dim])
     )
-    
+
     # Clean up dimensions and coordinates
-    result = result.drop_vars(['target_year',  'dayofyear'])
+    result = result.drop_vars(['target_year', 'dayofyear'])
     
     return result.chunk(original_chunk_dict)
 
@@ -443,7 +448,7 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
         Dataset containing anomalies and mask
     """
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, time_dim=dimensions['time'])
+    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions)
     
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed
