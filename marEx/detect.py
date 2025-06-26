@@ -945,7 +945,7 @@ def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=Fa
     if 'quantile' in extremes.coords:
         extremes = extremes.drop_vars('quantile')
     
-    extremes = extremes.astype(bool).chunk(da.chunks)
+    extremes = extremes.astype(bool).chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
     
     return extremes, threshold
 

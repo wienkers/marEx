@@ -142,6 +142,12 @@ class tracker:
         self.debug = debug
         self.verbosity = verbosity
         
+        # Extract data_bin metadata to inherit
+        if hasattr(self.data_bin, 'attrs') and self.data_bin.attrs:
+            self.data_attrs = self.data_bin.attrs.copy()
+        else:
+            self.data_attrs = {}
+        
         # Input validation and preparation
         self._validate_inputs()
         
@@ -483,7 +489,8 @@ class tracker:
         events_ds['ID_field'] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
         
         # Delete the last ID -- it is all 0s
-        events_ds = events_ds.isel(ID=slice(None,-1)) # At least for the gridded algorithm
+        if self.allow_merging or self.unstructured_grid:
+            events_ds = events_ds.isel(ID=slice(None,-1)) # At least for the gridded algorithm
         
         if self.verbosity > 0:
             print('Finished tracking all extreme events!\n\n')
@@ -515,8 +522,7 @@ class tracker:
          area_threshold, accepted_area_fraction, preprocessed_area_fraction) = object_stats
 
         # Inherit metadata from input data_bin
-        if hasattr(self.data_bin, 'attrs') and self.data_bin.attrs:
-            events_ds.attrs.update(self.data_bin.attrs)
+        events_ds.attrs.update(self.data_attrs)
 
         # Add general attributes to dataset
         events_ds.attrs['allow_merging'] = int(self.allow_merging)
