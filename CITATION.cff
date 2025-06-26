@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "MarEx: Marine Extremes Detection and Tracking"
+abstract: "Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data. A high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets."
+authors:
+  - family-names: "Wienkers"
+    given-names: "Aaron"
+    email: "aaron@wienkers.com"
+    orcid: "https://orcid.org/0000-0002-8464-3139"
+repository-code: "https://github.com/wienkers/marEx"
+url: "https://github.com/wienkers/marEx"
+keywords:
+  - "marine heatwaves"
+  - "extreme events"
+  - "oceanography"
+  - "extremes tracking"
+  - "ocean extremes"
+  - "marine extremes"
+version: "3.0.0"
+date-released: "2025-06-26"
