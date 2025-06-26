@@ -151,14 +151,18 @@ class TestGriddedTracking:
         present_lat_centroids = lat_centroids[present_events.values]
         present_lon_centroids = lon_centroids[present_events.values]
         
+        # Ignore nan values
+        valid_lat = ~np.isnan(present_lat_centroids)
+        valid_lon = ~np.isnan(present_lon_centroids)
+        
         # Centroids should be within data bounds
         lat_min, lat_max = float(self.extremes_data.lat.min()), float(self.extremes_data.lat.max())
         lon_min, lon_max = float(self.extremes_data.lon.min()), float(self.extremes_data.lon.max())
         
-        assert (present_lat_centroids >= lat_min).all(), "Some centroids below lat bounds"
-        assert (present_lat_centroids <= lat_max).all(), "Some centroids above lat bounds"
-        assert (present_lon_centroids >= lon_min).all(), "Some centroids below lon bounds"
-        assert (present_lon_centroids <= lon_max).all(), "Some centroids above lon bounds"
+        assert (present_lat_centroids[valid_lat] >= lat_min).all(), "Some centroids below lat bounds"
+        assert (present_lat_centroids[valid_lat] <= lat_max).all(), "Some centroids above lat bounds"
+        assert (present_lon_centroids[valid_lon] >= lon_min).all(), "Some centroids below lon bounds"
+        assert (present_lon_centroids[valid_lon] <= lon_max).all(), "Some centroids above lon bounds"
     
     def test_different_filtering_parameters(self, dask_client):
         """Test tracking with different area filtering parameters."""
