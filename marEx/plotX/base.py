@@ -128,7 +128,7 @@ class PlotterBase:
         self._setup_colorbar(fig, im, config.show_colorbar, var_units, extend)
         self._add_map_features(ax, config.grid_lines, config.grid_labels)
         
-        return fig, ax
+        return fig, ax, im
 
     def multi_plot(self, config: PlotConfig, col='time', col_wrap=3):
         """Make wrapped subplots with given configuration"""

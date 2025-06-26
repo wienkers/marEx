@@ -1,0 +1,11 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "lat",
+        "lon"
+    ],
+    "dtype": "bool",
+    "long_name": "sea water potential temperature",
+    "param": "18.4.10",
+    "standard_name": "sea_water_potential_temperature",
+    "units": "C"
+}
