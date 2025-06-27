@@ -9,15 +9,14 @@ authors = [
 ]
 description = "Marine Extremes Detection and Tracking"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
 ]
 dynamic = ["version"]
 dependencies = [
@@ -64,6 +63,14 @@ local_scheme = "node-and-date"
 [tool.black]
 line-length = 88
 target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
