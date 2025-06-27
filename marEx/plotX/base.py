@@ -1,14 +1,20 @@
 from pathlib import Path
+import xarray as xr
 import numpy as np
+from numpy.typing import NDArray
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
+from matplotlib.colorbar import Colorbar
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import ListedColormap, BoundaryNorm, Normalize
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import dask
 from PIL import Image
 import subprocess
-from matplotlib.colors import ListedColormap, BoundaryNorm
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Union, Tuple
+from typing import Optional, Dict, List, Union, Tuple, Any
 import shutil
 import warnings
 import os
@@ -19,18 +25,18 @@ class PlotConfig:
     title: Optional[str] = None
     var_units: str = ''
     issym: bool = False
-    cmap: Optional[str] = None
+    cmap: Optional[Union[str, ListedColormap]] = None
     cperc: List[int] = None
     clim: Optional[Tuple[float, float]] = None
     show_colorbar: bool = True
     grid_lines: bool = True
     grid_labels: bool = False
     dimensions: Dict[str, str] = None
-    norm: Optional[object] = None
+    norm: Optional[Union[BoundaryNorm, Normalize]] = None
     plot_IDs: bool = False
     extend: str = 'both'
     
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.cperc is None:
             self.cperc = [4, 96]
         if self.dimensions is None:
@@ -39,14 +45,20 @@ class PlotConfig:
             self.show_colorbar = False
 
 class PlotterBase:
-    def __init__(self, xarray_obj):
+    def __init__(self, xarray_obj: xr.DataArray) -> None:
         self.da = xarray_obj
         
         # Cache common features
         self._land = cfeature.LAND.with_scale('50m')
         self._coastlines = cfeature.COASTLINE.with_scale('50m')
     
-    def _setup_common_params(self, config: PlotConfig) -> Tuple:
+    def _setup_common_params(self, config: PlotConfig) -> Tuple[
+        Union[str, ListedColormap], 
+        Optional[Union[BoundaryNorm, Normalize]], 
+        Optional[Tuple[float, float]], 
+        str, 
+        str
+    ]:
         """Centralise common parameter setup"""
         self.setup_plot_params()
         
@@ -70,7 +82,7 @@ class PlotterBase:
                 
         return cmap, norm, clim, var_units, extend
 
-    def _setup_axes(self, ax=None):
+    def _setup_axes(self, ax: Optional[Axes] = None) -> Tuple[Figure, Axes]:
         """Create or use existing axes with projection"""
         if ax is None:
             fig = plt.figure(figsize=(7, 5))
@@ -79,7 +91,12 @@ class PlotterBase:
             fig = ax.get_figure()
         return fig, ax
 
-    def _add_map_features(self, ax, grid_lines=True, grid_labels=True):
+    def _add_map_features(
+        self, 
+        ax: Axes, 
+        grid_lines: bool = True, 
+        grid_labels: bool = True
+    ) -> None:
         """Add common map features to the plot"""
         ax.add_feature(self._land, facecolor='darkgrey', zorder=2)
         ax.add_feature(self._coastlines, linewidth=0.5, zorder=3)
@@ -87,8 +104,15 @@ class PlotterBase:
             ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=grid_labels,
                         linewidth=1, color='gray', alpha=0.5, linestyle='--', zorder=4)
 
-    def _setup_colorbar(self, fig, im, show_colorbar, var_units, extend='both', 
-                       position=None):
+    def _setup_colorbar(
+        self, 
+        fig: Figure, 
+        im: Union[ScalarMappable, Any], 
+        show_colorbar: bool, 
+        var_units: str, 
+        extend: str = 'both', 
+        position: Optional[List[float]] = None
+    ) -> Optional[Colorbar]:
         """Set up colorbar with common parameters"""
         if not show_colorbar:
             return None
@@ -106,14 +130,23 @@ class PlotterBase:
         cb.ax.tick_params(labelsize=10)
         return cb
 
-    def _get_title(self, time_index, col_name, dimensions):
+    def _get_title(
+        self, 
+        time_index: int, 
+        col_name: str, 
+        dimensions: Dict[str, str]
+    ) -> str:
         """Generate appropriate title based on dimension"""
         if col_name == dimensions['time']:
             return f"{self.da[col_name].isel({col_name: time_index}).time.dt.strftime('%Y-%m-%d').values}"
         return f"{col_name}={self.da[col_name].isel({col_name: time_index}).values}"
 
 
-    def single_plot(self, config: PlotConfig, ax=None):
+    def single_plot(
+        self, 
+        config: PlotConfig, 
+        ax: Optional[Axes] = None
+    ) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
         
@@ -130,7 +163,12 @@ class PlotterBase:
         
         return fig, ax, im
 
-    def multi_plot(self, config: PlotConfig, col='time', col_wrap=3):
+    def multi_plot(
+        self, 
+        config: PlotConfig, 
+        col: str = 'time', 
+        col_wrap: int = 3
+    ) -> Tuple[Figure, NDArray[Any]]:
         """Make wrapped subplots with given configuration"""
         npanels = self.da[col].size
         nrows = int(np.ceil(npanels/col_wrap))
@@ -182,7 +220,12 @@ class PlotterBase:
         return fig, axes
     
 
-    def animate(self, config: PlotConfig, plot_dir='./', file_name=None):
+    def animate(
+        self, 
+        config: PlotConfig, 
+        plot_dir: Union[str, Path] = './', 
+        file_name: Optional[str] = None
+    ) -> Optional[str]:
         """Create an animation from time series data"""
         
         # Check if ffmpeg is installed
@@ -257,7 +300,12 @@ class PlotterBase:
         return str(output_file)
 
 
-    def clim_robust(self, data, issym, percentiles=[2, 98]):
+    def clim_robust(
+        self, 
+        data: NDArray[Any], 
+        issym: bool, 
+        percentiles: List[int] = [2, 98]
+    ) -> NDArray[np.float64]:
         """Base method for computing colour limits"""
         clim = np.nanpercentile(data, percentiles)
         
@@ -269,12 +317,15 @@ class PlotterBase:
 
         return clim
     
-    def setup_plot_params(self):
+    def setup_plot_params(self) -> None:
         """Set up common plotting parameters"""
         plt.rc('text', usetex=False)
         plt.rc('font', family='serif')
 
-    def setup_id_plot_params(self, cmap=None):
+    def setup_id_plot_params(
+        self, 
+        cmap: Optional[Union[str, ListedColormap]] = None
+    ) -> Tuple[ListedColormap, BoundaryNorm, str]:
         """Set up parameters for plotting IDs"""
         unique_values = np.unique(self.da.values[~np.isnan(self.da.values)])
         unique_values = unique_values[unique_values > 0]
@@ -288,10 +339,25 @@ class PlotterBase:
         norm = BoundaryNorm(bounds, cmap.N)
         return cmap, norm, 'ID'
 
+    def plot(
+        self, 
+        ax: Axes, 
+        cmap: Union[str, ListedColormap] = 'viridis', 
+        clim: Optional[Tuple[float, float]] = None, 
+        norm: Optional[Union[BoundaryNorm, Normalize]] = None
+    ) -> Tuple[Axes, Any]:
+        """Abstract method to be implemented by subclasses"""
+        raise NotImplementedError("Subclasses must implement plot method")
 
 
 @dask.delayed
-def make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info=None):
+def make_frame(
+    data_slice: xr.DataArray, 
+    time_ind: int, 
+    temp_dir: Path, 
+    plot_params: Dict[str, Any], 
+    grid_info: Optional[Dict[str, Any]] = None
+) -> str:
     """Create a single frame for movies - minimise memory usage with dask
     
     Args:

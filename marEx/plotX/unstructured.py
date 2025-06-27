@@ -1,24 +1,29 @@
 import numpy as np
+from numpy.typing import NDArray
 import xarray as xr
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.tri import Triangulation, TriContourSet
+from matplotlib.collections import TriMesh, QuadMesh
 import cartopy.crs as ccrs
-from matplotlib.tri import Triangulation
 from pathlib import Path
+from typing import Dict, Tuple, Optional, Union, Any
+from matplotlib.colors import Normalize, BoundaryNorm
 
 from .base import PlotterBase
 
 # Global cache for grid data
-_GRID_CACHE = {
+_GRID_CACHE: Dict[str, Dict[Union[str, Tuple[str, float]], Any]] = {
     'triangulation': {},  # key: grid_path, value: triangulation object
     'ckdtree': {}         # key: (ckdtree_path, res), value: ckdtree data
 }
 
-def clear_cache():
+def clear_cache() -> None:
     """Clear the global grid cache."""
     _GRID_CACHE['triangulation'].clear()
     _GRID_CACHE['ckdtree'].clear()
 
-def _load_triangulation(fpath_tgrid):
+def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
     """Load and cache triangulation data globally."""
     fpath_tgrid = str(fpath_tgrid)  # Convert Path to string for dict key
     if fpath_tgrid not in _GRID_CACHE['triangulation']:
@@ -45,7 +50,10 @@ def _load_triangulation(fpath_tgrid):
         
     return _GRID_CACHE['triangulation'][fpath_tgrid]
 
-def _load_ckdtree(fpath_ckdtree, res):
+def _load_ckdtree(
+    fpath_ckdtree: Union[str, Path], 
+    res: float
+) -> Dict[str, NDArray[Any]]:
     """Load and cache ckdtree data globally."""
     cache_key = (str(fpath_ckdtree), res)  # Convert Path to string for dict key
     
@@ -67,19 +75,29 @@ def _load_ckdtree(fpath_ckdtree, res):
     return _GRID_CACHE['ckdtree'][cache_key]
 
 class UnstructuredPlotter(PlotterBase):
-    def __init__(self, xarray_obj):
+    def __init__(self, xarray_obj: xr.DataArray) -> None:
         super().__init__(xarray_obj)
         
         from . import _fpath_tgrid, _fpath_ckdtree
-        self.fpath_tgrid = _fpath_tgrid
-        self.fpath_ckdtree = _fpath_ckdtree
+        self.fpath_tgrid: Optional[Path] = _fpath_tgrid
+        self.fpath_ckdtree: Optional[Path] = _fpath_ckdtree
         
-    def specify_grid(self, fpath_tgrid=None, fpath_ckdtree=None):
+    def specify_grid(
+        self, 
+        fpath_tgrid: Optional[Union[str, Path]] = None, 
+        fpath_ckdtree: Optional[Union[str, Path]] = None
+    ) -> None:
         """Set the path to the unstructured grid files."""
         self.fpath_tgrid = Path(fpath_tgrid) if fpath_tgrid else None
         self.fpath_ckdtree = Path(fpath_ckdtree) if fpath_ckdtree else None
 
-    def plot(self, ax, cmap='viridis', clim=None, norm=None):
+    def plot(
+        self, 
+        ax: Axes, 
+        cmap: Union[str, Any] = 'viridis', 
+        clim: Optional[Tuple[float, float]] = None, 
+        norm: Optional[Union[BoundaryNorm, Normalize]] = None
+    ) -> Tuple[Axes, Union[TriMesh, QuadMesh]]:
         """Implement plotting for unstructured data."""
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
@@ -127,7 +145,11 @@ class UnstructuredPlotter(PlotterBase):
         
         return ax, im
 
-    def _interpolate_with_ckdtree(self, data, res):
+    def _interpolate_with_ckdtree(
+        self, 
+        data: NDArray[Any], 
+        res: float
+    ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[Any]]:
         """Interpolate unstructured data using pre-computed KDTree indices."""
         if self.fpath_ckdtree is None:
             raise ValueError("ckdtree path not specified")
