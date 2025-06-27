@@ -1,6 +1,8 @@
 
 ![Logo](media/logo.png)
 
+[![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
 
 Marine Extremes Python Package
 ==============================
