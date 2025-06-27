@@ -21,6 +21,9 @@ import xarray as xr
 import numpy as np
 from dask.distributed import Client, LocalCluster
 
+from typing import Dict, List, Literal, Optional, Tuple
+from numpy.typing import NDArray
+
 try:
     from dask_jobqueue import SLURMCluster
 except ImportError:
@@ -261,7 +264,7 @@ def start_distributed_cluster(n_workers: int, workers_per_node: int,
     return client
 
 
-def fix_dask_tuple_array(da):
+def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
     """
     Fix a dask array that has tuple (i.e. task) references in its chunks.
     This addresses a longstanding issue/bug when dask arrays are saved to Zarr.
@@ -273,7 +276,7 @@ def fix_dask_tuple_array(da):
     #   first_chunk = dask.compute(first_key)[0]
     #   print(type(first_chunk), first_chunk)
     
-    def materialise_chunk(block):
+    def materialise_chunk(block: NDArray[Any]) -> NDArray[Any]:
         """Force materialisation of a single chunk."""
         # This ensures we return an actual numpy array, not a task reference
         return np.asarray(block)

@@ -1,15 +1,24 @@
 import numpy as np
+from numpy.typing import NDArray
 import xarray as xr
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.collections import QuadMesh
 import cartopy.crs as ccrs
+from typing import Dict, Tuple, Optional, Union, Any
+from matplotlib.colors import Normalize, BoundaryNorm
 
 from .base import PlotterBase
 
 class GriddedPlotter(PlotterBase):
-    def __init__(self, xarray_obj):
+    def __init__(self, xarray_obj: xr.DataArray) -> None:
         super().__init__(xarray_obj)
     
-    def wrap_lon(self, data, dimensions):
+    def wrap_lon(
+        self, 
+        data: xr.DataArray, 
+        dimensions: Dict[str, str]
+    ) -> xr.DataArray:
         """Handle periodic boundary in longitude by adding a column of data."""
         lon = data[dimensions['xdim']]
         
@@ -24,7 +33,13 @@ class GriddedPlotter(PlotterBase):
             return wrapped_data
         return data
 
-    def plot(self, ax, cmap='viridis', clim=None, norm=None):
+    def plot(
+        self, 
+        ax: Axes, 
+        cmap: Union[str, Any] = 'viridis', 
+        clim: Optional[Tuple[float, float]] = None, 
+        norm: Optional[Union[BoundaryNorm, Normalize]] = None
+    ) -> Tuple[Axes, QuadMesh]:
         """Implement plotting for gridded (i.e. regular grid) data."""
         dimensions = {'ydim': 'lat', 'xdim': 'lon'}
         data = self.wrap_lon(self.da, dimensions)

@@ -38,6 +38,8 @@ import os
 import shutil
 import gc
 import time
+from typing import Dict, List, Tuple, Optional, Union, Set, Literal, Any
+from numpy.typing import NDArray
 
 try:
     import jax.numpy as jnp
@@ -116,11 +118,28 @@ class tracker:
         Verbosity level
     """
         
-    def __init__(self, data_bin, mask, R_fill, area_filter_quartile, 
-                 temp_dir=None, T_fill=2, allow_merging=True, nn_partitioning=False, 
-                 overlap_threshold=0.5, unstructured_grid=False, timedim='time', 
-                 xdim='lon', ydim='lat', neighbours=None, cell_areas=None, 
-                 max_iteration=40, checkpoint=None, debug=0, verbosity=0):
+    def __init__(
+        self,
+        data_bin: xr.DataArray,
+        mask: xr.DataArray,
+        R_fill: Union[int, float],
+        area_filter_quartile: float,
+        temp_dir: Optional[str] = None,
+        T_fill: int = 2,
+        allow_merging: bool = True,
+        nn_partitioning: bool = False,
+        overlap_threshold: float = 0.5,
+        unstructured_grid: bool = False,
+        timedim: str = 'time',
+        xdim: str = 'lon',
+        ydim: str = 'lat',
+        neighbours: Optional[xr.DataArray] = None,
+        cell_areas: Optional[xr.DataArray] = None,
+        max_iteration: int = 40,
+        checkpoint: Optional[Literal['save', 'load', 'None']] = None,
+        debug: int = 0,
+        verbosity: int = 0
+    ) -> None:
         
         self.data_bin = data_bin
         self.mask = mask
@@ -157,7 +176,7 @@ class tracker:
         
         self._configure_warnings()
         
-    def _validate_inputs(self):
+    def _validate_inputs(self) -> None:
         """Validate input parameters and data."""
         # For unstructured grids, adjust dimensions
         if self.unstructured_grid:
@@ -204,7 +223,13 @@ class tracker:
         if ((self.lon.max().compute().item() - self.lon.min().compute().item()) < 100):
             raise ValueError('Lat/Lon coordinates must be in degrees')
     
-    def _setup_unstructured_grid(self, temp_dir, neighbours, cell_areas, max_iteration):
+    def _setup_unstructured_grid(
+        self,
+        temp_dir: str,
+        neighbours: xr.DataArray,
+        cell_areas: xr.DataArray,
+        max_iteration: int
+    ) -> None:
         """Set up special handling for unstructured grids."""
         if not temp_dir:
             raise ValueError('Unstructured grid requires a temporary directory for memory-efficient processing')
@@ -240,7 +265,7 @@ class tracker:
         # Construct sparse dilation matrix
         self._build_sparse_dilation_matrix()
     
-    def _build_sparse_dilation_matrix(self):
+    def _build_sparse_dilation_matrix(self) -> None:
         """Build sparse matrix for efficient dilation operations on unstructured grid."""
         # Create row and column indices for sparse matrix
         row_indices = jnp.repeat(jnp.arange(self.neighbours_int.shape[1]), 3)
@@ -267,7 +292,7 @@ class tracker:
         if self.verbosity > 0:
             print('Finished constructing the sparse dilation matrix')
     
-    def _configure_warnings(self):
+    def _configure_warnings(self) -> None:
         """Configure warning and logging suppression based on debug level."""
         if self.debug < 2:
             # Configure logging warning filters
@@ -306,7 +331,11 @@ class tracker:
     # Main Public Methods
     # ============================
     
-    def run(self, return_merges=False, checkpoint=None):
+    def run(
+        self,
+        return_merges: bool = False,
+        checkpoint: Optional[str] = None
+    ) -> Union[xr.Dataset, Tuple[xr.Dataset, xr.Dataset]]:
         """
         Run the complete object identification and tracking pipeline.
         
@@ -343,7 +372,10 @@ class tracker:
         else:
             return events_ds
     
-    def run_preprocess(self, checkpoint=None):
+    def run_preprocess(
+        self,
+        checkpoint: Optional[str] = None
+    ) -> Tuple[xr.DataArray, Tuple[float, int, int, float, float, float]]:
         """
         Preprocess binary data to prepare for tracking.
         
@@ -365,14 +397,14 @@ class tracker:
         if not checkpoint:
             checkpoint = self.checkpoint
         
-        def load_data_from_checkpoint():
+        def load_data_from_checkpoint() -> xr.DataArray:
             """Load preprocessed data from checkpoint files."""
             data_bin_preprocessed = xr.open_zarr(
                 f'{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr', 
                 chunks={self.timedim: self.timechunks}
             )['data_bin_preproc']
             return data_bin_preprocessed
-        def load_stats_from_checkpoint():
+        def load_stats_from_checkpoint() -> List[Union[float, int]]:
             object_stats_npz = np.load(f'{self.scratch_dir}/marEx_checkpoint_stats.npz')
             object_stats = [
                 object_stats_npz[key] for key in [
@@ -456,7 +488,10 @@ class tracker:
         
         return data_bin_filtered, object_stats
     
-    def run_tracking(self, data_bin_preprocessed):
+    def run_tracking(
+        self,
+        data_bin_preprocessed: xr.DataArray
+    ) -> Tuple[xr.Dataset, xr.Dataset, int]:
         """
         Track objects through time to identify events.
         
@@ -497,7 +532,13 @@ class tracker:
         
         return events_ds, merges_ds, N_events_final
     
-    def run_stats_attributes(self, events_ds, merges_ds, object_stats, N_events_final):
+    def run_stats_attributes(
+        self,
+        events_ds: xr.Dataset,
+        merges_ds: xr.Dataset,
+        object_stats: Tuple[float, int, int, float, float, float],
+        N_events_final: int
+    ) -> xr.Dataset:
         """
         Add statistics and attributes to the events dataset.
         
@@ -574,7 +615,10 @@ class tracker:
     # Data Processing Methods
     # ============================
     
-    def compute_area(self, data_bin):
+    def compute_area(
+        self,
+        data_bin: xr.DataArray
+    ) -> xr.DataArray:
         """
         Compute the total area of binary data at each time.
         
@@ -595,7 +639,11 @@ class tracker:
         
         return area
     
-    def fill_holes(self, data_bin, R_fill=None):
+    def fill_holes(
+        self,
+        data_bin: xr.DataArray,
+        R_fill: Optional[int] = None
+    ) -> xr.DataArray:
         """
         Fill holes and gaps using morphological operations.
         
@@ -624,7 +672,13 @@ class tracker:
             indices = xr.DataArray(self.dilate_sparse.indices, dims='indices')
             indptr = xr.DataArray(self.dilate_sparse.indptr, dims='indptr')
             
-            def binary_open_close(bitmap_binary, sp_data, indices, indptr, mask):
+            def binary_open_close(
+                bitmap_binary: NDArray[np.bool_], 
+                sp_data: NDArray[np.bool_], 
+                indices: NDArray[np.int32], 
+                indptr: NDArray[np.int32], 
+                mask: NDArray[np.bool_]
+            ) -> NDArray[np.bool_]:
                 """
                 Binary opening and closing for unstructured grid.
                 Uses sparse matrix power operations for efficiency.
@@ -691,7 +745,7 @@ class tracker:
                     self.xdim: slice(diameter, -diameter)
                 })
             else:
-                def binary_open_close(bitmap_binary):
+                def binary_open_close(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.bool_]:
                     """Apply binary opening and closing in one function."""
                     bitmap_binary_padded = np.pad(
                         bitmap_binary,
@@ -717,7 +771,10 @@ class tracker:
         
         return data_bin
     
-    def fill_time_gaps(self, data_bin):
+    def fill_time_gaps(
+        self,
+        data_bin: xr.DataArray
+    ) -> xr.DataArray:
         """
         Fill temporal gaps between objects.
         
@@ -770,7 +827,10 @@ class tracker:
         
         return data_bin_filled
     
-    def refresh_dask_graph(self, data_bin):
+    def refresh_dask_graph(
+        self,
+        data_bin: xr.DataArray
+    ) -> xr.DataArray:
         """
         Clear and reset the Dask graph via save/load cycle.
         
@@ -798,7 +858,10 @@ class tracker:
         data_new = xr.open_zarr(f'{self.scratch_dir}/marEx_temp_field.zarr', chunks={}).temp
         return data_new
     
-    def filter_small_objects(self, data_bin):
+    def filter_small_objects(
+        self,
+        data_bin: xr.DataArray
+    ) -> Tuple[xr.DataArray, float, xr.DataArray, int, int]:
         """
         Remove objects smaller than a threshold area.
         
@@ -828,7 +891,9 @@ class tracker:
             #  Note: identify_objects() starts at ID=0 for every time slice
             max_ID = object_id_field.max().compute().item()
             
-            def count_cluster_sizes(object_id_field):
+            def count_cluster_sizes(
+                object_id_field: NDArray[np.int32]
+            ) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:
                 """Count the number of cells in each cluster."""
                 unique, counts = np.unique(object_id_field[object_id_field > 0], return_counts=True)
                 padded_sizes = np.zeros(max_ID, dtype=np.int32)
@@ -862,7 +927,10 @@ class tracker:
             area_threshold = np.percentile(object_areas, self.area_filter_quartile*100)
             N_objects_filtered = np.sum(object_areas > area_threshold)
             
-            def filter_area_binary(cluster_IDs_0, keep_IDs_0):
+            def filter_area_binary(
+                cluster_IDs_0: NDArray[np.int32], 
+                keep_IDs_0: NDArray[np.int32]
+            ) -> NDArray[np.bool_]:
                 """Keep only clusters above threshold area."""
                 keep_IDs_0 = keep_IDs_0[keep_IDs_0 > 0]
                 keep_where = np.isin(cluster_IDs_0, keep_IDs_0)
@@ -909,7 +977,11 @@ class tracker:
     # Object Identification Methods
     # ============================
     
-    def identify_objects(self, data_bin, time_connectivity):
+    def identify_objects(
+        self,
+        data_bin: xr.DataArray,
+        time_connectivity: bool
+    ) -> Tuple[xr.DataArray, None, int]:
         """
         Identify connected regions in binary data.
         
@@ -937,7 +1009,10 @@ class tracker:
                 raise ValueError('Cannot automatically compute time-connectivity on unstructured grid')
             
             # Use Union-Find (Disjoint Set Union) clustering for unstructured grid
-            def cluster_true_values(arr, neighbours_int):
+            def cluster_true_values(
+                arr: NDArray[np.bool_], 
+                neighbours_int: NDArray[np.int32]
+            ) -> NDArray[np.int32]:
                 """Cluster connected True values in binary data on unstructured grid."""
                 t, n = arr.shape
                 labels = np.full((t, n), -1, dtype=np.int32)
@@ -1022,7 +1097,11 @@ class tracker:
         
         return object_id_field, None, N_objects
     
-    def calculate_centroid(self, binary_mask, original_centroid=None):
+    def calculate_centroid(
+        self,
+        binary_mask: NDArray[np.bool_],
+        original_centroid: Optional[Tuple[float, float]] = None
+    ) -> Tuple[float, float]:
         """
         Calculate object centroid, handling edge cases for periodic boundaries.
         
@@ -1072,7 +1151,11 @@ class tracker:
         
         return (y_centroid, x_centroid)
     
-    def calculate_object_properties(self, object_id_field, properties=None):
+    def calculate_object_properties(
+        self,
+        object_id_field: xr.DataArray,
+        properties: Optional[List[str]] = None
+    ) -> xr.Dataset:
         """
         Calculate properties of objects from ID field.
         
@@ -1109,7 +1192,13 @@ class tracker:
             max_ID = object_id_field.max().compute().item() + 1
             ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0]) * 4
             
-            def object_properties_chunk(ids, lat, lon, area, buffer_IDs=True):
+            def object_properties_chunk(
+                ids: NDArray[np.int32], 
+                lat: NDArray[np.float32], 
+                lon: NDArray[np.float32], 
+                area: NDArray[np.float32], 
+                buffer_IDs: bool = True
+            ) -> Tuple[NDArray[np.float32], NDArray[np.int32]]:
                 """
                 Calculate object properties for a chunk of data.
                 Uses vectorised operations for efficiency.
@@ -1259,7 +1348,9 @@ class tracker:
             # N.B.: These operations are simply done on a pixel grid — no cartesian conversion (therefore, polar regions are doubly biased)
             
             # Define function to calculate properties for each chunk
-            def object_properties_chunk(ids):
+            def object_properties_chunk(
+                ids: NDArray[np.int32]
+            ) -> Dict[str, List[Union[int, float]]]:
                 """Calculate object properties for a chunk of data."""
                 # Use regionprops_table for standard properties
                 props_slice = regionprops_table(ids, properties=properties)
@@ -1322,7 +1413,11 @@ class tracker:
     # Overlap and Tracking Methods
     # ============================
     
-    def check_overlap_slice(self, ids_t0, ids_next):
+    def check_overlap_slice(
+        self,
+        ids_t0: NDArray[np.int32],
+        ids_next: NDArray[np.int32]
+    ) -> NDArray[Union[np.float32, np.int32]]:
         """
         Find overlapping objects between two consecutive time slices.
         
@@ -1379,7 +1474,10 @@ class tracker:
         
         return result
     
-    def find_overlapping_objects(self, object_id_field):
+    def find_overlapping_objects(
+        self,
+        object_id_field: xr.DataArray
+    ) -> NDArray[Union[np.float32, np.int32]]:
         """
         Find all overlapping objects across time.
         
@@ -1430,7 +1528,11 @@ class tracker:
         
         return overlap_objects_list_unique
     
-    def enforce_overlap_threshold(self, overlap_objects_list, object_props):
+    def enforce_overlap_threshold(
+        self,
+        overlap_objects_list: NDArray[Union[np.float32, np.int32]],
+        object_props: xr.Dataset
+    ) -> NDArray[Union[np.float32, np.int32]]:
         """
         Filter object pairs based on overlap threshold.
         
@@ -1460,7 +1562,13 @@ class tracker:
         
         return overlap_objects_list_filtered
     
-    def compute_id_time_dict(self, da, child_objects, max_objects, all_objects=True):
+    def compute_id_time_dict(
+        self,
+        da: xr.DataArray,
+        child_objects: Union[List[int], NDArray[np.int32]],
+        max_objects: int,
+        all_objects: bool = True
+    ) -> Dict[int, int]:
         """
         Generate lookup table mapping object IDs to their time index.
         
@@ -1483,7 +1591,7 @@ class tracker:
         # Estimate max objects per time
         est_objects_per_time_max = int(max_objects / da[self.timedim].shape[0] * 100)
 
-        def unique_pad(x):
+        def unique_pad(x: NDArray[np.int32]) -> NDArray[np.int32]:
             """Extract unique values and pad to fixed size."""
             uniq = np.unique(x)
             result = np.zeros(est_objects_per_time_max, dtype=x.dtype) # Pad output to maximum size
@@ -1535,7 +1643,10 @@ class tracker:
     # Event Tracking Methods
     # ============================
     
-    def track_objects(self, data_bin):
+    def track_objects(
+        self,
+        data_bin: xr.DataArray
+    ) -> Tuple[xr.Dataset, xr.Dataset, int]:
         """
         Track objects through time to form events.
         
@@ -1614,7 +1725,13 @@ class tracker:
     
         return split_merged_events_ds, merge_events, N_events
     
-    def cluster_rename_objects_and_props(self, object_id_field_unique, object_props, overlap_objects_list, merge_events):
+    def cluster_rename_objects_and_props(
+        self,
+        object_id_field_unique: xr.DataArray,
+        object_props: xr.Dataset,
+        overlap_objects_list: NDArray[np.int32],
+        merge_events: xr.Dataset
+    ) -> xr.Dataset:
         """
         Cluster the object pairs and relabel to determine final event IDs.
         
@@ -1685,7 +1802,10 @@ class tracker:
             coords={'ID': np.arange(max_old_ID + 1)}
         )
         
-        def map_IDs_to_indices(block, ID_to_cluster_index_array):
+        def map_IDs_to_indices(
+            block: NDArray[np.int32], 
+            ID_to_cluster_index_array: NDArray[np.int32]
+        ) -> NDArray[np.int32]:
             """Map original IDs to cluster indices."""
             mask = block > 0
             new_block = np.zeros_like(block, dtype=np.int32)
@@ -1727,7 +1847,10 @@ class tracker:
         
         new_id_to_idx = {id_val: idx for idx, id_val in enumerate(new_ids)}
 
-        def process_timestep(orig_ids, new_ids_t):
+        def process_timestep(
+            orig_ids: NDArray[np.int32], 
+            new_ids_t: NDArray[np.int32]
+        ) -> NDArray[np.int32]:
             """Process a single timestep to create ID mapping."""
             result = np.zeros(len(new_id_to_idx), dtype=np.int32)
             
@@ -1808,7 +1931,11 @@ class tracker:
                        .copy())
         
         # Wrapper for processing/mapping mergers in parallel
-        def process_time_group(time_block, IDs_data, IDs_coords):
+        def process_time_group(
+            time_block: xr.DataArray, 
+            IDs_data: NDArray[np.int32], 
+            IDs_coords: Dict[str, Any]
+        ) -> xr.DataArray:
             """Process all mergers for a single block of timesteps."""
             result = xr.full_like(time_block, -1)
             
@@ -1901,7 +2028,11 @@ class tracker:
     # Splitting and Merging Methods
     # ============================
     
-    def split_and_merge_objects(self, object_id_field_unique, object_props):
+    def split_and_merge_objects(
+        self,
+        object_id_field_unique: xr.DataArray,
+        object_props: xr.Dataset
+    ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
         """
         Implement object splitting and merging logic.
         
@@ -2217,7 +2348,11 @@ class tracker:
                 merge_events)
 
     
-    def split_and_merge_objects_parallel(self, object_id_field_unique, object_props):
+    def split_and_merge_objects_parallel(
+        self,
+        object_id_field_unique: xr.DataArray,
+        object_props: xr.Dataset
+    ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
         """
         Optimised parallel implementation of object splitting and merging.
         
@@ -2244,7 +2379,25 @@ class tracker:
         MAX_PARENTS = 10  # Maximum number of parents per merge
         MAX_CHILDREN = MAX_PARENTS
                 
-        def process_chunk(chunk_data_m1_full, chunk_data_p1_full, merging_objects, next_id_start, lat, lon, area, neighbours_int):
+        def process_chunk(
+            chunk_data_m1_full: NDArray[np.int32], 
+            chunk_data_p1_full: NDArray[np.int32], 
+            merging_objects: NDArray[np.int64], 
+            next_id_start: NDArray[np.int64], 
+            lat: NDArray[np.float32], 
+            lon: NDArray[np.float32], 
+            area: NDArray[np.float32], 
+            neighbours_int: NDArray[np.int32]
+        ) -> Tuple[
+            NDArray[np.int32],  # merge_child_ids
+            NDArray[np.int32],  # merge_parent_ids
+            NDArray[np.float32],  # merge_areas
+            NDArray[np.int16],  # merge_counts
+            NDArray[np.bool_],  # has_merge
+            NDArray[np.uint8],  # updates_array
+            NDArray[np.int32],  # updates_ids
+            NDArray[np.int32]   # final_merging_objects
+        ]:
             """
             Process a single chunk of merging objects.
             
@@ -2507,7 +2660,12 @@ class tracker:
                     has_merge, updates_array, updates_ids, final_merging_objects)
         
 
-        def update_object_id_field_inplace(object_id_field, id_lookup, updates_array, updates_ids, has_merge):
+        def update_timeslice(
+            data: NDArray[np.int32], 
+            updates: NDArray[np.uint8], 
+            update_ids: NDArray[np.int32], 
+            lookup_values: NDArray[np.int32]
+        ) -> NDArray[np.int32]:
             """
             Update the object field with chunk results using xarray operations.
             
@@ -2615,7 +2773,10 @@ class tracker:
                 object_id_field.name = 'temp'
                 object_id_field.to_zarr(zarr_path, mode='w')
             
-            def update_time_chunk(ds_chunk, lookup_dict):
+            def update_time_chunk(
+                ds_chunk: xr.Dataset, 
+                lookup_dict: Dict[int, int]
+            ) -> xr.DataArray:
                 """Process a single chunk with optimised memory usage."""
                 
                 # Skip processing if no merges in this chunk
@@ -2702,7 +2863,16 @@ class tracker:
             return object_id_field_new
         
         
-        def merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter):
+        def merge_objects_parallel_iteration(
+            object_id_field_unique: xr.DataArray, 
+            merging_objects: Set[int], 
+            global_id_counter: int
+        ) -> Tuple[
+            xr.DataArray,  # updated_field
+            Tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int32]],  # merge_data
+            Set[int],  # new_merging_objects
+            int  # updated_counter
+        ]:
             """
             Perform a single iteration of the parallel merging process.
             
@@ -3075,7 +3245,11 @@ operations on both structured and unstructured grids.
 """
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def wrapped_euclidian_parallel(mask_values, parent_centroids_values, Nx):
+def wrapped_euclidian_parallel(
+    mask_values: NDArray[np.bool_],
+    parent_centroids_values: NDArray[np.float64],
+    Nx: int
+) -> NDArray[np.float64]:
     """
     Optimised function for computing wrapped Euclidean distances.
     
@@ -3127,7 +3301,13 @@ def wrapped_euclidian_parallel(mask_values, parent_centroids_values, Nx):
     return distances
 
 @jit(nopython=True, fastmath=True)
-def create_grid_index_arrays(points_y, points_x, grid_size, ny, nx):
+def create_grid_index_arrays(
+    points_y: NDArray[np.int32],
+    points_x: NDArray[np.int32],
+    grid_size: int,
+    ny: int,
+    nx: int
+) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:
     """
     Create a grid-based spatial index for efficient point lookup.
     
@@ -3168,7 +3348,14 @@ def create_grid_index_arrays(points_y, points_x, grid_size, ny, nx):
     return grid_points, grid_counts
 
 @jit(nopython=True, fastmath=True)
-def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
+def calculate_wrapped_distance(
+    y1: float,
+    x1: float,
+    y2: float,
+    x2: float,
+    nx: int,
+    half_nx: float
+) -> float:
     """
     Calculate distance with periodic boundary conditions in x dimension.
     
@@ -3199,7 +3386,14 @@ def calculate_wrapped_distance(y1, x1, y2, x2, nx, half_nx):
     return np.sqrt(dy * dy + dx * dx)
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def partition_nn_grid(child_mask, parent_masks, child_ids, parent_centroids, Nx, max_distance=20):
+def partition_nn_grid(
+    child_mask: NDArray[np.bool_],
+    parent_masks: NDArray[np.bool_],
+    child_ids: NDArray[np.int32],
+    parent_centroids: NDArray[np.float64],
+    Nx: int,
+    max_distance: int = 20
+) -> NDArray[np.int32]:
     """
     Partition a child object based on nearest parent object points.
     
@@ -3333,7 +3527,16 @@ def partition_nn_grid(child_mask, parent_masks, child_ids, parent_centroids, Nx,
     return new_labels
 
 @jit(nopython=True, fastmath=True)
-def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+def partition_nn_unstructured(
+    child_mask: NDArray[np.bool_],
+    parent_masks: NDArray[np.bool_],
+    child_ids: NDArray[np.int32],
+    parent_centroids: NDArray[np.float64],
+    neighbours_int: NDArray[np.int32],
+    lat: NDArray[np.float32],
+    lon: NDArray[np.float32],
+    max_distance: int = 20
+) -> NDArray[np.int32]:
     """
     Partition a child object on an unstructured grid based on nearest parent points.
     
@@ -3453,7 +3656,15 @@ def partition_nn_unstructured(child_mask, parent_masks, child_ids, parent_centro
     return child_ids[parent_assignments[child_points]]
 
 @jit(nopython=True, fastmath=True)
-def partition_nn_unstructured_optimised(child_mask, parent_frontiers, parent_centroids, neighbours_int, lat, lon, max_distance=20):
+def partition_nn_unstructured_optimised(
+    child_mask: NDArray[np.bool_],
+    parent_frontiers: NDArray[np.uint8],
+    parent_centroids: NDArray[np.float64],
+    neighbours_int: NDArray[np.int32],
+    lat: NDArray[np.float32],
+    lon: NDArray[np.float32],
+    max_distance: int = 20
+) -> NDArray[np.uint8]:
     """
     Memory-optimised nearest neighbor partitioning for unstructured grids.
     
@@ -3556,7 +3767,13 @@ def partition_nn_unstructured_optimised(child_mask, parent_frontiers, parent_cen
     return result
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon):
+def partition_centroid_unstructured(
+    child_mask: NDArray[np.bool_],
+    parent_centroids: NDArray[np.float64],
+    child_ids: NDArray[np.int32],
+    lat: NDArray[np.float32],
+    lon: NDArray[np.float32]
+) -> NDArray[np.int32]:
     """
     Partition a child object based on closest parent centroids on an unstructured grid.
     
@@ -3615,7 +3832,13 @@ def partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat
     return new_labels
 
 @njit(fastmath=True, parallel=True)
-def sparse_bool_power(vec, sp_data, indices, indptr, exponent):
+def sparse_bool_power(
+    vec: NDArray[np.bool_],
+    sp_data: NDArray[np.bool_],
+    indices: NDArray[np.int32],
+    indptr: NDArray[np.int32],
+    exponent: int
+) -> NDArray[np.bool_]:
     """
     Efficient sparse boolean matrix power operation.
     
