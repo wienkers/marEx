@@ -1,15 +1,17 @@
 from .base import PlotterBase, PlotConfig
 from .gridded import GriddedPlotter
 from .unstructured import UnstructuredPlotter, clear_cache
+from typing import Optional, Union
+from pathlib import Path
 import xarray as xr
 import warnings
 
 # Global variables to store grid information
-_fpath_tgrid = None
-_fpath_ckdtree = None
-_grid_type = None
+_fpath_tgrid: Optional[str] = None
+_fpath_ckdtree: Optional[str] = None
+_grid_type: Optional[str] = None
 
-def _detect_grid_type(xarray_obj):
+def _detect_grid_type(xarray_obj: Union[xr.Dataset, xr.DataArray]) -> str:
     """
     Deduce grid type based on coordinate structure.
     
@@ -22,7 +24,7 @@ def _detect_grid_type(xarray_obj):
     # For unstructured data, lat/lon are coordinates but not dimensions
     return 'unstructured' if (has_lat_lon_coords and not has_lat_lon_dims) else 'gridded'
 
-def register_plotter(xarray_obj):
+def register_plotter(xarray_obj: xr.DataArray) -> Union['GriddedPlotter', 'UnstructuredPlotter']:
     """
     Determine the appropriate plotter to use based on the data structure.
     This function is called automatically by xarray's accessor system.
@@ -59,7 +61,11 @@ def register_plotter(xarray_obj):
     
     return plotter
 
-def specify_grid(grid_type=None, fpath_tgrid=None, fpath_ckdtree=None):
+def specify_grid(
+    grid_type: Optional[str] = None, 
+    fpath_tgrid: Optional[Union[str, Path]] = None, 
+    fpath_ckdtree: Optional[Union[str, Path]] = None
+) -> None:
     """
     Set the global grid specification that will be used by all plotters.
     
