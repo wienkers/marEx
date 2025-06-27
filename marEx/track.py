@@ -521,8 +521,6 @@ class tracker:
         (total_area_IDed, N_objects_prefiltered, N_objects_filtered, 
          area_threshold, accepted_area_fraction, preprocessed_area_fraction) = object_stats
 
-        # Inherit metadata from input data_bin
-        events_ds.attrs.update(self.data_attrs)
 
         # Add general attributes to dataset
         events_ds.attrs['allow_merging'] = int(self.allow_merging)
@@ -556,6 +554,9 @@ class tracker:
             events_ds.attrs['multi_parent_merges'] = (merges_ds.n_parents > 2).sum().item()
             
             print(f"   Total Merging Events Recorded: {events_ds.attrs['total_merges']}")
+        
+        # Inherit metadata from input data_bin
+        events_ds.attrs.update(self.data_attrs)
         
         # For unstructured grid, restore coordinates and rechunk
         if self.unstructured_grid:
