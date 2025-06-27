@@ -1,29 +1,32 @@
+import os
+import shutil
+import subprocess
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
-import xarray as xr
-import numpy as np
-from numpy.typing import NDArray
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-from matplotlib.axes import Axes
-from matplotlib.colorbar import Colorbar
-from matplotlib.cm import ScalarMappable
-from matplotlib.colors import ListedColormap, BoundaryNorm, Normalize
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import dask
+import matplotlib.pyplot as plt
+import numpy as np
+import xarray as xr
+from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colorbar import Colorbar
+from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
+from matplotlib.figure import Figure
+from numpy.typing import NDArray
 from PIL import Image
-import subprocess
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Union, Tuple, Any
-import shutil
-import warnings
-import os
+
 
 @dataclass
 class PlotConfig:
     """Configuration class for plot parameters"""
+
     title: Optional[str] = None
-    var_units: str = ''
+    var_units: str = ""
     issym: bool = False
     cmap: Optional[Union[str, ListedColormap]] = None
     cperc: List[int] = None
@@ -34,42 +37,43 @@ class PlotConfig:
     dimensions: Dict[str, str] = None
     norm: Optional[Union[BoundaryNorm, Normalize]] = None
     plot_IDs: bool = False
-    extend: str = 'both'
-    
+    extend: str = "both"
+
     def __post_init__(self) -> None:
         if self.cperc is None:
             self.cperc = [4, 96]
         if self.dimensions is None:
-            self.dimensions = {'time': 'time', 'ydim': 'lat', 'xdim': 'lon'}
+            self.dimensions = {"time": "time", "ydim": "lat", "xdim": "lon"}
         if self.plot_IDs:
             self.show_colorbar = False
+
 
 class PlotterBase:
     def __init__(self, xarray_obj: xr.DataArray) -> None:
         self.da = xarray_obj
-        
+
         # Cache common features
-        self._land = cfeature.LAND.with_scale('50m')
-        self._coastlines = cfeature.COASTLINE.with_scale('50m')
-    
+        self._land = cfeature.LAND.with_scale("50m")
+        self._coastlines = cfeature.COASTLINE.with_scale("50m")
+
     def _setup_common_params(self, config: PlotConfig) -> Tuple[
-        Union[str, ListedColormap], 
-        Optional[Union[BoundaryNorm, Normalize]], 
-        Optional[Tuple[float, float]], 
-        str, 
-        str
+        Union[str, ListedColormap],
+        Optional[Union[BoundaryNorm, Normalize]],
+        Optional[Tuple[float, float]],
+        str,
+        str,
     ]:
         """Centralise common parameter setup"""
         self.setup_plot_params()
-        
+
         if config.plot_IDs:
             cmap, norm, var_units = self.setup_id_plot_params(config.cmap)
             clim = None
-            extend = 'neither'
+            extend = "neither"
             self.da = self.da.where(self.da > 0)  # Fill value to NaN (get rid of 0s)
         else:
             if config.cmap is None:
-                cmap = 'RdBu_r' if config.issym else 'viridis'
+                cmap = "RdBu_r" if config.issym else "viridis"
             else:
                 cmap = config.cmap
             norm = config.norm
@@ -79,7 +83,7 @@ class PlotterBase:
                 clim = config.clim
             var_units = config.var_units
             extend = config.extend
-                
+
         return cmap, norm, clim, var_units, extend
 
     def _setup_axes(self, ax: Optional[Axes] = None) -> Tuple[Figure, Axes]:
@@ -92,31 +96,35 @@ class PlotterBase:
         return fig, ax
 
     def _add_map_features(
-        self, 
-        ax: Axes, 
-        grid_lines: bool = True, 
-        grid_labels: bool = True
+        self, ax: Axes, grid_lines: bool = True, grid_labels: bool = True
     ) -> None:
         """Add common map features to the plot"""
-        ax.add_feature(self._land, facecolor='darkgrey', zorder=2)
+        ax.add_feature(self._land, facecolor="darkgrey", zorder=2)
         ax.add_feature(self._coastlines, linewidth=0.5, zorder=3)
         if grid_lines:
-            ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=grid_labels,
-                        linewidth=1, color='gray', alpha=0.5, linestyle='--', zorder=4)
+            ax.gridlines(
+                crs=ccrs.PlateCarree(),
+                draw_labels=grid_labels,
+                linewidth=1,
+                color="gray",
+                alpha=0.5,
+                linestyle="--",
+                zorder=4,
+            )
 
     def _setup_colorbar(
-        self, 
-        fig: Figure, 
-        im: Union[ScalarMappable, Any], 
-        show_colorbar: bool, 
-        var_units: str, 
-        extend: str = 'both', 
-        position: Optional[List[float]] = None
+        self,
+        fig: Figure,
+        im: Union[ScalarMappable, Any],
+        show_colorbar: bool,
+        var_units: str,
+        extend: str = "both",
+        position: Optional[List[float]] = None,
     ) -> Optional[Colorbar]:
         """Set up colorbar with common parameters"""
         if not show_colorbar:
             return None
-            
+
         if position is not None:
             # For column plots
             cbar_ax = fig.add_axes(position)
@@ -124,112 +132,110 @@ class PlotterBase:
         else:
             # For single plots
             cb = plt.colorbar(im, shrink=0.6, ax=plt.gca(), extend=extend)
-            
+
         if var_units:
             cb.ax.set_ylabel(var_units, fontsize=10)
         cb.ax.tick_params(labelsize=10)
         return cb
 
     def _get_title(
-        self, 
-        time_index: int, 
-        col_name: str, 
-        dimensions: Dict[str, str]
+        self, time_index: int, col_name: str, dimensions: Dict[str, str]
     ) -> str:
         """Generate appropriate title based on dimension"""
-        if col_name == dimensions['time']:
+        if col_name == dimensions["time"]:
             return f"{self.da[col_name].isel({col_name: time_index}).time.dt.strftime('%Y-%m-%d').values}"
         return f"{col_name}={self.da[col_name].isel({col_name: time_index}).values}"
 
-
     def single_plot(
-        self, 
-        config: PlotConfig, 
-        ax: Optional[Axes] = None
+        self, config: PlotConfig, ax: Optional[Axes] = None
     ) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
-        
+
         fig, ax = self._setup_axes(ax)
-        
+
         # Call implementation-specific plot function
         ax, im = self.plot(ax=ax, cmap=cmap, clim=clim, norm=norm)
-        
+
         if config.title:
             ax.set_title(config.title, size=12)
-        
+
         self._setup_colorbar(fig, im, config.show_colorbar, var_units, extend)
         self._add_map_features(ax, config.grid_lines, config.grid_labels)
-        
+
         return fig, ax, im
 
     def multi_plot(
-        self, 
-        config: PlotConfig, 
-        col: str = 'time', 
-        col_wrap: int = 3
+        self, config: PlotConfig, col: str = "time", col_wrap: int = 3
     ) -> Tuple[Figure, NDArray[Any]]:
         """Make wrapped subplots with given configuration"""
         npanels = self.da[col].size
-        nrows = int(np.ceil(npanels/col_wrap))
+        nrows = int(np.ceil(npanels / col_wrap))
         ncols = min(npanels, col_wrap)
-        
+
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
-        
-        fig = plt.figure(figsize=(6*ncols, 3*nrows))
-        axes = fig.subplots(nrows, ncols, 
-                          subplot_kw={'projection': ccrs.Robinson()}).flatten()
-        
+
+        fig = plt.figure(figsize=(6 * ncols, 3 * nrows))
+        axes = fig.subplots(
+            nrows, ncols, subplot_kw={"projection": ccrs.Robinson()}
+        ).flatten()
+
         # Create a single plotter instance to be reused
         base_plotter = type(self)(self.da)
-        for attr in ['fpath_tgrid', 'fpath_ckdtree']:
+        for attr in ["fpath_tgrid", "fpath_ckdtree"]:
             if hasattr(self, attr):
                 setattr(base_plotter, attr, getattr(self, attr))
-        
+
         for i, ax in enumerate(axes):
             if i < npanels:
                 title = self._get_title(i, col, config.dimensions)
-                
+
                 # Create new config for individual panel
                 panel_config = PlotConfig(
-                    title=title, cmap=cmap, clim=clim,
-                    show_colorbar=False, grid_labels=False,
-                    norm=norm, plot_IDs=False, extend=extend
+                    title=title,
+                    cmap=cmap,
+                    clim=clim,
+                    show_colorbar=False,
+                    grid_labels=False,
+                    norm=norm,
+                    plot_IDs=False,
+                    extend=extend,
                 )
-                
+
                 # Update data in base plotter instead of creating new instance
                 base_plotter.da = self.da.isel({col: i})
-                
+
                 # Plot individual panel using the same plotter instance
                 base_plotter.single_plot(panel_config, ax=ax)
             else:
                 fig.delaxes(ax)
-        
+
         # Add single colorbar for all panels
         if config.show_colorbar:
             fig.subplots_adjust(right=0.9)
             if norm is None and clim is not None:
                 # Create a proper norm from clim
                 from matplotlib.colors import Normalize
+
                 norm = Normalize(vmin=clim[0], vmax=clim[1])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
-            self._setup_colorbar(fig, sm, True, var_units, extend,
-                            position=[0.92, 0.15, 0.02, 0.7])
-        
+            self._setup_colorbar(
+                fig, sm, True, var_units, extend, position=[0.92, 0.15, 0.02, 0.7]
+            )
+
         return fig, axes
-    
 
     def animate(
-        self, 
-        config: PlotConfig, 
-        plot_dir: Union[str, Path] = './', 
-        file_name: Optional[str] = None
+        self,
+        config: PlotConfig,
+        plot_dir: Union[str, Path] = "./",
+        file_name: Optional[str] = None,
     ) -> Optional[str]:
         """Create an animation from time series data"""
-        
+
         # Check if ffmpeg is installed
-        if shutil.which('ffmpeg') is None:
+        if shutil.which("ffmpeg") is None:
             warnings.warn(
                 "ffmpeg executable not found in system PATH. Cannot create animation.\n"
                 "Please install ffmpeg using one of the following methods:\n"
@@ -238,7 +244,7 @@ class PlotterBase:
                 "Alternatively, use matplotlib for animation in Jupyter notebooks."
             )
             return None
-        
+
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(exist_ok=True)
         temp_dir = plot_dir / "blobs_seq"
@@ -247,68 +253,82 @@ class PlotterBase:
         temp_dir.mkdir(exist_ok=True)
         if not file_name:
             file_name = f"movie_{self.da.name}.mp4"
-        
-        output_file = plot_dir / f'{file_name}.mp4'
-        
+
+        output_file = plot_dir / f"{file_name}.mp4"
+
         # Set up plotting parameters
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
-        
+
         plot_params = {
-            'cmap': cmap,
-            'norm': norm,
-            'clim': clim,
-            'var_units': var_units,
-            'extend': extend,
-            'show_colorbar': config.show_colorbar
+            "cmap": cmap,
+            "norm": norm,
+            "clim": clim,
+            "var_units": var_units,
+            "extend": extend,
+            "show_colorbar": config.show_colorbar,
         }
-        
+
         # Set up grid information if needed
         grid_info = None
-        if hasattr(self, 'fpath_tgrid') or hasattr(self, 'fpath_ckdtree'):
+        if hasattr(self, "fpath_tgrid") or hasattr(self, "fpath_ckdtree"):
             grid_info = {
-                'type': 'unstructured',
-                'tgrid_path': getattr(self, 'fpath_tgrid', None),
-                'ckdtree_path': getattr(self, 'fpath_ckdtree', None),
-                'res': 0.3
+                "type": "unstructured",
+                "tgrid_path": getattr(self, "fpath_tgrid", None),
+                "ckdtree_path": getattr(self, "fpath_ckdtree", None),
+                "res": 0.3,
             }
-        
+
         # Generate frames using dask for parallel processing
         delayed_tasks = []
-        for time_ind in range(len(self.da[config.dimensions['time']])):
-            data_slice = self.da.isel({config.dimensions['time']: time_ind})
-            plot_params['time_str'] = str(
-                self.da[config.dimensions['time']]
-                .isel({config.dimensions['time']: time_ind})
-                .dt.strftime('%Y-%m-%d').values
+        for time_ind in range(len(self.da[config.dimensions["time"]])):
+            data_slice = self.da.isel({config.dimensions["time"]: time_ind})
+            plot_params["time_str"] = str(
+                self.da[config.dimensions["time"]]
+                .isel({config.dimensions["time"]: time_ind})
+                .dt.strftime("%Y-%m-%d")
+                .values
             )
             delayed_tasks.append(
                 make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info)
             )
-        
+
         filenames = dask.compute(*delayed_tasks)
-        filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-        
+        filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
+
         # Create movie using ffmpeg
-        subprocess.run([
-            'ffmpeg', '-y', '-threads', '0', '-framerate', '10',
-            '-i', str(temp_dir / 'time_%04d.jpg'),
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-            str(output_file)
-        ], check=True)
-        
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-threads",
+                "0",
+                "-framerate",
+                "10",
+                "-i",
+                str(temp_dir / "time_%04d.jpg"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "22",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(output_file),
+            ],
+            check=True,
+        )
+
         return str(output_file)
 
-
     def clim_robust(
-        self, 
-        data: NDArray[Any], 
-        issym: bool, 
-        percentiles: List[int] = [2, 98]
+        self, data: NDArray[Any], issym: bool, percentiles: List[int] = [2, 98]
     ) -> NDArray[np.float64]:
         """Base method for computing colour limits"""
         clim = np.nanpercentile(data, percentiles)
-        
+
         if issym:
             clim = np.abs(clim).max()
             clim = np.array([-clim, clim])
@@ -316,35 +336,34 @@ class PlotterBase:
             clim = np.array([0, clim[1]])
 
         return clim
-    
+
     def setup_plot_params(self) -> None:
         """Set up common plotting parameters"""
-        plt.rc('text', usetex=False)
-        plt.rc('font', family='serif')
+        plt.rc("text", usetex=False)
+        plt.rc("font", family="serif")
 
     def setup_id_plot_params(
-        self, 
-        cmap: Optional[Union[str, ListedColormap]] = None
+        self, cmap: Optional[Union[str, ListedColormap]] = None
     ) -> Tuple[ListedColormap, BoundaryNorm, str]:
         """Set up parameters for plotting IDs"""
         unique_values = np.unique(self.da.values[~np.isnan(self.da.values)])
         unique_values = unique_values[unique_values > 0]
         bounds = np.arange(unique_values.min(), unique_values.max() + 2) - 0.5
         n_bins = len(bounds) - 1
-        
+
         if cmap is None:
             np.random.seed(42)
             cmap = ListedColormap(np.random.random(size=(n_bins, 3)))
-        
+
         norm = BoundaryNorm(bounds, cmap.N)
-        return cmap, norm, 'ID'
+        return cmap, norm, "ID"
 
     def plot(
-        self, 
-        ax: Axes, 
-        cmap: Union[str, ListedColormap] = 'viridis', 
-        clim: Optional[Tuple[float, float]] = None, 
-        norm: Optional[Union[BoundaryNorm, Normalize]] = None
+        self,
+        ax: Axes,
+        cmap: Union[str, ListedColormap] = "viridis",
+        clim: Optional[Tuple[float, float]] = None,
+        norm: Optional[Union[BoundaryNorm, Normalize]] = None,
     ) -> Tuple[Axes, Any]:
         """Abstract method to be implemented by subclasses"""
         raise NotImplementedError("Subclasses must implement plot method")
@@ -352,14 +371,14 @@ class PlotterBase:
 
 @dask.delayed
 def make_frame(
-    data_slice: xr.DataArray, 
-    time_ind: int, 
-    temp_dir: Path, 
-    plot_params: Dict[str, Any], 
-    grid_info: Optional[Dict[str, Any]] = None
+    data_slice: xr.DataArray,
+    time_ind: int,
+    temp_dir: Path,
+    plot_params: Dict[str, Any],
+    grid_info: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Create a single frame for movies - minimise memory usage with dask
-    
+
     Args:
         data_slice: The data for this specific frame
         time_ind: Frame index
@@ -368,86 +387,93 @@ def make_frame(
         grid_info: Dict containing grid paths and settings for unstructured data
     """
     # Set up plotting parameters
-    plt.rc('text', usetex=False)
-    plt.rc('font', family='serif')
-    
+    plt.rc("text", usetex=False)
+    plt.rc("font", family="serif")
+
     fig = plt.figure(figsize=(7, 5))
     ax = plt.axes(projection=ccrs.Robinson())
-    
+
     data_slice_np = data_slice.values
-        
+
     # Set up plot kwargs
     plot_kwargs = {
-        'transform': ccrs.PlateCarree(),
-        'cmap': plot_params['cmap'],
-        'shading': 'auto'
+        "transform": ccrs.PlateCarree(),
+        "cmap": plot_params["cmap"],
+        "shading": "auto",
     }
-    
-    if plot_params.get('norm'):
-        plot_kwargs['norm'] = plot_params['norm']
-    elif plot_params.get('clim'):
-        plot_kwargs['vmin'] = plot_params['clim'][0]
-        plot_kwargs['vmax'] = plot_params['clim'][1]
-    
+
+    if plot_params.get("norm"):
+        plot_kwargs["norm"] = plot_params["norm"]
+    elif plot_params.get("clim"):
+        plot_kwargs["vmin"] = plot_params["clim"][0]
+        plot_kwargs["vmax"] = plot_params["clim"][1]
+
     # Handle different grid types
-    if grid_info and grid_info.get('type') == 'unstructured':
+    if grid_info and grid_info.get("type") == "unstructured":
         from .unstructured import _load_ckdtree, _load_triangulation
-        if grid_info.get('ckdtree_path'):
+
+        if grid_info.get("ckdtree_path"):
             # Use cached ckdtree data
-            ckdt_data = _load_ckdtree(grid_info['ckdtree_path'], grid_info.get('res', 0.3))
-            grid_data = data_slice_np[ckdt_data['indices']].reshape(
-                ckdt_data['lat'].size,
-                ckdt_data['lon'].size
+            ckdt_data = _load_ckdtree(
+                grid_info["ckdtree_path"], grid_info.get("res", 0.3)
+            )
+            grid_data = data_slice_np[ckdt_data["indices"]].reshape(
+                ckdt_data["lat"].size, ckdt_data["lon"].size
             )
             grid_data = np.ma.masked_invalid(grid_data)
             im = ax.pcolormesh(
-                ckdt_data['lon'], ckdt_data['lat'],
-                grid_data, **plot_kwargs
+                ckdt_data["lon"], ckdt_data["lat"], grid_data, **plot_kwargs
             )
-        elif grid_info.get('tgrid_path'):
+        elif grid_info.get("tgrid_path"):
             # Use triangulation
-            triang = _load_triangulation(grid_info['tgrid_path'])
+            triang = _load_triangulation(grid_info["tgrid_path"])
             data_masked = np.ma.masked_invalid(data_slice_np)
             im = ax.tripcolor(triang, data_masked, **plot_kwargs)
     else:
         # Regular grid plotting
         lat = data_slice.lat.values
         lon = data_slice.lon.values
-        im = ax.pcolormesh(
-                lon, lat,
-                data_slice_np, **plot_kwargs
-            )
-    
-    time_str = plot_params.get('time_str', f'Frame {time_ind}')
+        im = ax.pcolormesh(lon, lat, data_slice_np, **plot_kwargs)
+
+    time_str = plot_params.get("time_str", f"Frame {time_ind}")
     ax.set_title(time_str, size=12)
-    
-    if plot_params.get('show_colorbar'):
-        cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=plot_params.get('extend', 'both'))
-        if plot_params.get('var_units'):
-            cb.ax.set_ylabel(plot_params['var_units'], fontsize=10)
+
+    if plot_params.get("show_colorbar"):
+        cb = plt.colorbar(
+            im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both")
+        )
+        if plot_params.get("var_units"):
+            cb.ax.set_ylabel(plot_params["var_units"], fontsize=10)
         cb.ax.tick_params(labelsize=10)
-    
-    land = cfeature.LAND.with_scale('50m')
-    coastlines = cfeature.COASTLINE.with_scale('50m')
-    ax.add_feature(land, facecolor='darkgrey', zorder=2)
+
+    land = cfeature.LAND.with_scale("50m")
+    coastlines = cfeature.COASTLINE.with_scale("50m")
+    ax.add_feature(land, facecolor="darkgrey", zorder=2)
     ax.add_feature(coastlines, linewidth=0.5, zorder=3)
-    ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
-                linewidth=1, color='gray', alpha=0.5, linestyle='--', zorder=4)
-    
+    ax.gridlines(
+        crs=ccrs.PlateCarree(),
+        draw_labels=True,
+        linewidth=1,
+        color="gray",
+        alpha=0.5,
+        linestyle="--",
+        zorder=4,
+    )
+
     # Save and process frame
-    filename = f'time_{time_ind:04d}.jpg'
-    temp_file = temp_dir / f'temp_{filename}'
-    fig.savefig(str(temp_file), dpi=300, bbox_inches='tight')
+    filename = f"time_{time_ind:04d}.jpg"
+    temp_file = temp_dir / f"temp_{filename}"
+    fig.savefig(str(temp_file), dpi=300, bbox_inches="tight")
     plt.close(fig)
-    
+
     # Ensure dimensions are even for video encoding
     image = Image.open(str(temp_file))
     width, height = image.size
     new_width = width - (width % 2)
     new_height = height - (height % 2)
     image = image.resize((new_width, new_height), Image.LANCZOS)
-    
+
     image.save(str(temp_dir / filename))
     temp_file.unlink()
-    
+
     return filename
