@@ -55,7 +55,7 @@ class TestUnstructuredPreprocessing:
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
         assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_detrend' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
         assert 'thresholds' in extremes_ds.data_vars
         assert 'mask' in extremes_ds.data_vars
         
@@ -70,7 +70,7 @@ class TestUnstructuredPreprocessing:
         
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
-        assert extremes_ds.dat_detrend.dtype == np.float32
+        assert extremes_ds.dat_anomaly.dtype == np.float32
         
         # Verify dimensions for unstructured grid
         cell_dim = 'ncells' if 'ncells' in extremes_ds.dims else 'cell'
@@ -85,7 +85,8 @@ class TestUnstructuredPreprocessing:
         
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert 0.03 < extreme_frequency < 0.07, f"Extreme frequency {extreme_frequency} outside expected range"
+        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (unstructured): {extreme_frequency}")
+        assert 0.036 < extreme_frequency < 0.039, f"Extreme frequency {extreme_frequency} outside expected range"
     
     def test_detrended_baseline_global_extreme_unstructured(self):
         """Test preprocessing with detrended_baseline + global_extreme for unstructured grid."""
@@ -104,7 +105,7 @@ class TestUnstructuredPreprocessing:
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
         assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_detrend' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
         assert 'thresholds' in extremes_ds.data_vars
         assert 'mask' in extremes_ds.data_vars
         
@@ -119,7 +120,7 @@ class TestUnstructuredPreprocessing:
         
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
-        assert extremes_ds.dat_detrend.dtype == np.float32
+        assert extremes_ds.dat_anomaly.dtype == np.float32
         
         # Verify dimensions for unstructured grid
         cell_dim = 'ncells' if 'ncells' in extremes_ds.dims else 'cell'
@@ -132,7 +133,8 @@ class TestUnstructuredPreprocessing:
         
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert 0.03 < extreme_frequency < 0.07, f"Extreme frequency {extreme_frequency} outside expected range"
+        print(f"Exact extreme_frequency for detrended_baseline + global_extreme (unstructured): {extreme_frequency}")
+        assert 0.046 < extreme_frequency < 0.049, f"Extreme frequency {extreme_frequency} outside expected range"
     
     def test_unstructured_grid_detection(self):
         """Test that the function correctly detects unstructured vs gridded data."""
@@ -189,7 +191,7 @@ class TestUnstructuredPreprocessing:
         )
         
         # Both should have the same core data variables
-        core_vars = ['extreme_events', 'dat_detrend', 'mask', 'neighbours', 'cell_areas']
+        core_vars = ['extreme_events', 'dat_anomaly', 'mask', 'neighbours', 'cell_areas']
         for var in core_vars:
             assert var in shifting_ds.data_vars
             assert var in detrended_ds.data_vars

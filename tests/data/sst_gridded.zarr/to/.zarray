@@ -1,26 +1,24 @@
 {
     "chunks": [
-        32,
-        21,
-        41
+        30,
+        20,
+        40
     ],
-    "compressor": null,
+    "compressor": {
+        "blocksize": 0,
+        "clevel": 5,
+        "cname": "lz4",
+        "id": "blosc",
+        "shuffle": 1
+    },
     "dtype": "<f4",
     "fill_value": "NaN",
-    "filters": [
-        {
-            "blocksize": 4152960,
-            "clevel": 5,
-            "cname": "lz4",
-            "id": "blosc",
-            "shuffle": 1
-        }
-    ],
+    "filters": null,
     "order": "C",
     "shape": [
-        14246,
-        21,
-        41
+        14611,
+        20,
+        40
     ],
     "zarr_format": 2
 }
