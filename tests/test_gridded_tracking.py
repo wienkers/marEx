@@ -59,6 +59,12 @@ class TestGriddedTracking:
         
         # Verify that background is labeled as 0
         assert int(tracked_ds.ID_field.min()) == 0
+        
+        # Assert tracking statistics bounds
+        assert abs(tracked_ds.attrs['preprocessed_area_fraction'] - 0.9724) < 0.02
+        assert abs(tracked_ds.attrs['N_objects_prefiltered'] - 549) < 2
+        assert abs(tracked_ds.attrs['N_objects_filtered'] - 274) < 2
+        assert abs(tracked_ds.attrs['N_events_final'] - 24) < 1
     
     def test_advanced_tracking_with_merging(self, dask_client):
         """Test advanced tracking with temporal filling and merging enabled."""
@@ -116,6 +122,13 @@ class TestGriddedTracking:
             start_time = tracked_ds.time_start.sel(ID=event_id)
             end_time = tracked_ds.time_end.sel(ID=event_id)
             assert start_time <= end_time, f"Event {event_id} has start_time > end_time"
+        
+        # Assert tracking statistics bounds
+        assert abs(tracked_ds.attrs['preprocessed_area_fraction'] - 0.9143) < 0.02
+        assert abs(tracked_ds.attrs['N_objects_prefiltered'] - 516) < 2
+        assert abs(tracked_ds.attrs['N_objects_filtered'] - 258) < 2
+        assert abs(tracked_ds.attrs['N_events_final'] - 20) < 1
+        assert abs(tracked_ds.attrs['total_merges'] - 26) < 2
     
     def test_tracking_data_consistency(self, dask_client):
         """Test that tracking produces consistent data structures."""
@@ -163,6 +176,13 @@ class TestGriddedTracking:
         assert (present_lat_centroids[valid_lat] <= lat_max).all(), "Some centroids above lat bounds"
         assert (present_lon_centroids[valid_lon] >= lon_min).all(), "Some centroids below lon bounds"
         assert (present_lon_centroids[valid_lon] <= lon_max).all(), "Some centroids above lon bounds"
+        
+        # Assert tracking statistics bounds
+        assert abs(tracked_ds.attrs['preprocessed_area_fraction'] - 0.9143) < 0.02
+        assert abs(tracked_ds.attrs['N_objects_prefiltered'] - 516) < 2
+        assert abs(tracked_ds.attrs['N_objects_filtered'] - 258) < 2
+        assert abs(tracked_ds.attrs['N_events_final'] - 19) < 1
+        assert abs(tracked_ds.attrs['total_merges'] - 27) < 2
     
     def test_different_filtering_parameters(self, dask_client):
         """Test tracking with different area filtering parameters."""
@@ -200,6 +220,18 @@ class TestGriddedTracking:
         # Both should have valid ID fields
         assert int(tracked_no_filter.ID_field.max()) > 0
         assert int(tracked_high_filter.ID_field.max()) >= 0  # Could be 0 if all events filtered out
+        
+        # Assert tracking statistics bounds for no filter case
+        assert abs(tracked_no_filter.attrs['preprocessed_area_fraction'] - 1.0622) < 0.02
+        assert abs(tracked_no_filter.attrs['N_objects_prefiltered'] - 1046) < 2
+        assert abs(tracked_no_filter.attrs['N_objects_filtered'] - 1045) < 2
+        assert abs(tracked_no_filter.attrs['N_events_final'] - 152) < 1
+        
+        # Assert tracking statistics bounds for high filter case
+        assert abs(tracked_high_filter.attrs['preprocessed_area_fraction'] - 1.5423) < 0.02
+        assert abs(tracked_high_filter.attrs['N_objects_prefiltered'] - 1046) < 2
+        assert abs(tracked_high_filter.attrs['N_objects_filtered'] - 209) < 2
+        assert abs(tracked_high_filter.attrs['N_events_final'] - 21) < 1
     
     def test_temporal_gap_filling(self, dask_client):
         """Test that temporal gap filling works correctly."""
@@ -240,3 +272,15 @@ class TestGriddedTracking:
         # Verify T_fill attribute is correctly set
         assert tracked_no_gaps.attrs['T_fill'] == 0
         assert tracked_with_gaps.attrs['T_fill'] == 4
+        
+        # Assert tracking statistics bounds for no gaps case
+        assert abs(tracked_no_gaps.attrs['preprocessed_area_fraction'] - 1.1650) < 0.02
+        assert abs(tracked_no_gaps.attrs['N_objects_prefiltered'] - 1046) < 2
+        assert abs(tracked_no_gaps.attrs['N_objects_filtered'] - 522) < 2
+        assert abs(tracked_no_gaps.attrs['N_events_final'] - 54) < 1
+        
+        # Assert tracking statistics bounds for with gaps case
+        assert abs(tracked_with_gaps.attrs['preprocessed_area_fraction'] - 1.0080) < 0.02
+        assert abs(tracked_with_gaps.attrs['N_objects_prefiltered'] - 1041) < 2
+        assert abs(tracked_with_gaps.attrs['N_objects_filtered'] - 522) < 2
+        assert abs(tracked_with_gaps.attrs['N_events_final'] - 38) < 1
