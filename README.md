@@ -128,13 +128,13 @@ Coordinates:
     lon         (lon)
     time        (time)
 Data variables:
-    dat_detrend     (time, lat, lon)        float64     dask.array
+    dat_anomaly     (time, lat, lon)        float64     dask.array
     mask            (lat, lon)              bool        dask.array 
     extreme_events  (time, lat, lon)        bool        dask.array
     thresholds      (dayofyear, lat, lon)   float64     dask.array
 ```
 where
-- `dat_detrend` is the detrended SST data
+- `dat_anomaly` is the anomaly (either detrended or from a rolling climatology)
 - `mask` is the deduced land-sea mask
 - `extreme_events` is the binary field locating extreme events
 - `thresholds` is the day-of-year specific thresholds used to determine extreme events (if `method_extreme='hobday_extreme'` is set).
