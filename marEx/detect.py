@@ -237,8 +237,8 @@ def preprocess_data(
 
     if method_extreme == "hobday_extreme":
         ds.attrs.update({"window_days_hobday": window_days_hobday})
-    elif method_extreme == "global_extreme":
-        ds.attrs.update({"exact_percentile": exact_percentile})
+    
+    ds.attrs.update({"exact_percentile": exact_percentile})
 
     # Final rechunking
     chunk_dict = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
@@ -821,11 +821,11 @@ def _compute_anomaly_detrended(
         chunk_dict_std = chunk_dict_mask.copy()
         chunk_dict_std["dayofyear"] = -1
 
-        da_stn = da_stn.chunk(chunk_dict_std)
+        da_stn = da_stn.chunk(chunk_dict_mask)
         std_rolling = std_rolling.chunk(chunk_dict_std)
 
         # Add standardised data to output
-        data_vars["dat_stn"] = da_stn.drop_vars({"dayofyear", "decimal_year"})
+        data_vars["dat_stn"] = da_stn
         data_vars["STD"] = std_rolling
 
     # Build output dataset with metadata
