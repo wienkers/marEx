@@ -27,6 +27,8 @@ from xhistogram.xarray import histogram
 from numpy.lib.stride_tricks import sliding_window_view
 import logging
 from .helper import fix_dask_tuple_array
+from typing import Dict, List, Tuple, Optional, Union, Literal, Any
+from numpy.typing import NDArray
 
 logging.getLogger('distributed.shuffle._scheduler_plugin').setLevel(logging.ERROR)
 
@@ -35,14 +37,23 @@ logging.getLogger('distributed.shuffle._scheduler_plugin').setLevel(logging.ERRO
 # Methodology Selection
 # ============================
 
-def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='global_extreme', 
-                   threshold_percentile=95, 
-                   window_year_baseline=15, smooth_days_baseline=21,  # for shifting_baseline
-                   window_days_hobday=11,                  # for hobday_extreme
-                   std_normalise=False, detrend_orders=[1], force_zero_mean=True, # for detrended_baseline
-                   exact_percentile=False,         # for both extremes algorithms
-                   dask_chunks={'time': 25}, dimensions={'time':'time', 'xdim':'lon'}, 
-                   neighbours=None, cell_areas=None):
+def preprocess_data(
+    da: xr.DataArray,
+    method_anomaly: Literal['detrended_baseline', 'shifting_baseline'] = 'detrended_baseline',
+    method_extreme: Literal['global_extreme', 'hobday_extreme'] = 'global_extreme',
+    threshold_percentile: float = 95,
+    window_year_baseline: int = 15,      # for shifting_baseline
+    smooth_days_baseline: int = 21,      # "
+    window_days_hobday: int = 11,        # for hobday_extreme
+    std_normalise: bool = False,         # for detrended_baseline
+    detrend_orders: List[int] = [1],     # "
+    force_zero_mean: bool = True,        # "
+    exact_percentile: bool = False,
+    dask_chunks: Dict[str, int] = {'time': 25},
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon'},
+    neighbours: Optional[xr.DataArray] = None,
+    cell_areas: Optional[xr.DataArray] = None
+) -> xr.Dataset:
     """
     Complete preprocessing pipeline for marine extreme event identification.
     
@@ -216,8 +227,15 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     return ds
 
 
-def _get_preprocessing_steps(method_anomaly, method_extreme, std_normalise, detrend_orders, 
-                            window_year_baseline, smooth_days_baseline, window_days_hobday):
+def _get_preprocessing_steps(
+    method_anomaly: str,
+    method_extreme: str,
+    std_normalise: bool,
+    detrend_orders: List[int],
+    window_year_baseline: int,
+    smooth_days_baseline: int,
+    window_days_hobday: int
+) -> List[str]:
     """
     Generate preprocessing steps description based on selected methods.
     """
@@ -240,10 +258,16 @@ def _get_preprocessing_steps(method_anomaly, method_extreme, std_normalise, detr
     return steps
 
 
-def compute_normalised_anomaly(da, method_anomaly='detrended_baseline',
-                               dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'},
-                               window_year_baseline=15, smooth_days_baseline=21,  # for shifting_baseline
-                               std_normalise=False, detrend_orders=[1], force_zero_mean=True):  # for detrended_baseline
+def compute_normalised_anomaly(
+    da: xr.DataArray,
+    method_anomaly: Literal['detrended_baseline', 'shifting_baseline'] = 'detrended_baseline',
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'},
+    window_year_baseline: int = 15,    # for shifting_baseline
+    smooth_days_baseline: int = 21,    # "
+    std_normalise: bool = False,       # for detrended_baseline
+    detrend_orders: List[int] = [1],   # "
+    force_zero_mean: bool = True       # "
+) -> xr.Dataset:
     """
     Generate normalised anomalies using specified methodology.
     
@@ -287,10 +311,14 @@ def compute_normalised_anomaly(da, method_anomaly='detrended_baseline',
         raise ValueError(f"Unknown method_anomaly '{method_anomaly}'. Choose 'detrended_baseline' or 'shifting_baseline'")
 
 
-def identify_extremes(da, method_extreme='global_extreme', 
-                     threshold_percentile=95, dimensions={'time':'time', 'xdim':'lon'},
-                     window_days_hobday=11,  # for hobday_extreme
-                     exact_percentile=False):
+def identify_extremes(
+    da: xr.DataArray,
+    method_extreme: Literal['global_extreme', 'hobday_extreme'] = 'global_extreme',
+    threshold_percentile: float = 95,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon'},
+    window_days_hobday: int = 11,    # for hobday_extreme
+    exact_percentile: bool = False
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
     
@@ -335,7 +363,11 @@ def identify_extremes(da, method_extreme='global_extreme',
 # Shifting Baseline Anomaly Method (New Method)
 # ===============================================
 
-def rolling_climatology(da, window_year_baseline=15, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def rolling_climatology(
+    da: xr.DataArray,
+    window_year_baseline: int = 15,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'}
+) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
     Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
@@ -424,7 +456,12 @@ def rolling_climatology(da, window_year_baseline=15, dimensions={'time':'time', 
     return result.chunk(original_chunk_dict)
 
 
-def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def smoothed_rolling_climatology(
+    da: xr.DataArray,
+    window_year_baseline: int = 15,
+    smooth_days_baseline: int = 21,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'}
+) -> xr.DataArray:
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
@@ -438,7 +475,12 @@ def smoothed_rolling_climatology(da, window_year_baseline=15, smooth_days_baseli
     return clim
 
 
-def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_baseline=21, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def _compute_anomaly_shifting_baseline(
+    da: xr.DataArray,
+    window_year_baseline: int = 15,
+    smooth_days_baseline: int = 21,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'}
+) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
     
@@ -468,8 +510,13 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
 # Hobday Extreme Definition 
 # ==========================
 
-def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11, exact_percentile=False, 
-                             dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def _identify_extremes_hobday(
+    da: xr.DataArray,
+    threshold_percentile: float = 95,
+    window_days_hobday: int = 11,
+    exact_percentile: bool = False,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'}
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
     
@@ -528,7 +575,10 @@ def _identify_extremes_hobday(da, threshold_percentile=95, window_days_hobday=11
 # Detrended Baseline Anomaly Method (Old Method)
 # ===============================================
 
-def add_decimal_year(da, dim='time'):
+def add_decimal_year(
+    da: xr.DataArray,
+    dim: str = 'time'
+) -> xr.DataArray:
     """
     Add decimal year coordinate to DataArray for trend analysis.
     
@@ -554,9 +604,13 @@ def add_decimal_year(da, dim='time'):
     return da.assign_coords(decimal_year=(dim, decimal_year))
 
 
-def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1], 
-                               dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'},
-                               force_zero_mean=True):
+def _compute_anomaly_detrended(
+    da: xr.DataArray,
+    std_normalise: bool = False,
+    detrend_orders: List[int] = [1],
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'},
+    force_zero_mean: bool = True
+) -> xr.Dataset:
     """
     Generate normalised anomalies by removing trends, seasonal cycles, and optionally
     standardising by local temporal variability using the detrended baseline method.
@@ -695,7 +749,12 @@ def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1],
     return xr.Dataset(data_vars=data_vars)
 
 
-def _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers):
+def _rolling_histogram_quantile(
+    hist_chunk: NDArray[np.float64],
+    window_days_hobday: int,
+    q: float,
+    bin_centers: NDArray[np.float64]
+) -> NDArray[np.float32]:
     """
     Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
     
@@ -755,7 +814,13 @@ def _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers):
     return threshold.astype(np.float32)
 
 
-def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, dimensions={'time':'time', 'xdim':'lon', 'ydim':'lat'}):
+def compute_histogram_quantile_2d(
+    da: xr.DataArray,
+    q: float,
+    window_days_hobday: int = 11,
+    bin_edges: Optional[NDArray[np.float64]] = None,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon', 'ydim':'lat'}
+) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
     Uses fine-grained bins for positive anomalies and a single bin for negative values.
@@ -839,7 +904,12 @@ def compute_histogram_quantile_2d(da, q, window_days_hobday=11, bin_edges=None, 
     return threshold
     
     
-def compute_histogram_quantile_1d(da, q, dim='time', bin_edges=None):
+def compute_histogram_quantile_1d(
+    da: xr.DataArray,
+    q: float,
+    dim: str = 'time',
+    bin_edges: Optional[NDArray[np.float64]] = None
+) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
     Uses fine-grained bins for positive anomalies and a single bin for negative values.
@@ -905,8 +975,12 @@ def compute_histogram_quantile_1d(da, q, dim='time', bin_edges=None):
 # Constant (in time) Extreme Definition 
 # ======================================
 
-def _identify_extremes_constant(da, threshold_percentile=95, exact_percentile=False, 
-                                dimensions={'time':'time', 'xdim':'lon'}):
+def _identify_extremes_constant(
+    da: xr.DataArray,
+    threshold_percentile: float = 95,
+    exact_percentile: bool = False,
+    dimensions: Dict[str, str] = {'time':'time', 'xdim':'lon'}
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a constant (in time) percentile threshold.
     i.e. There is 1 threshold for each spatial point, computed across all time.
