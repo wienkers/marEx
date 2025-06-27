@@ -42,7 +42,7 @@ class TestGriddedPreprocessing:
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
         assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_detrend' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
         assert 'thresholds' in extremes_ds.data_vars
         assert 'mask' in extremes_ds.data_vars
         
@@ -53,7 +53,7 @@ class TestGriddedPreprocessing:
         
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
-        assert extremes_ds.dat_detrend.dtype == np.float32
+        assert extremes_ds.dat_anomaly.dtype == np.float32
         
         # Verify dimensions
         assert 'time' in extremes_ds.extreme_events.dims
@@ -63,7 +63,8 @@ class TestGriddedPreprocessing:
         
         # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert 0.03 < extreme_frequency < 0.07, f"Extreme frequency {extreme_frequency} outside expected range"
+        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency}")
+        assert 0.044 < extreme_frequency < 0.047, f"Extreme frequency {extreme_frequency} outside expected range"
     
     def test_detrended_baseline_global_extreme(self):
         """Test preprocessing with detrended_baseline + global_extreme combination."""
@@ -80,7 +81,7 @@ class TestGriddedPreprocessing:
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
         assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_detrend' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
         assert 'thresholds' in extremes_ds.data_vars
         assert 'mask' in extremes_ds.data_vars
         
@@ -91,7 +92,7 @@ class TestGriddedPreprocessing:
         
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
-        assert extremes_ds.dat_detrend.dtype == np.float32
+        assert extremes_ds.dat_anomaly.dtype == np.float32
         
         # Verify dimensions
         assert 'time' in extremes_ds.extreme_events.dims
@@ -105,7 +106,8 @@ class TestGriddedPreprocessing:
         
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert 0.03 < extreme_frequency < 0.07, f"Extreme frequency {extreme_frequency} outside expected range"
+        print(f"Exact extreme_frequency for detrended_baseline + global_extreme: {extreme_frequency}")
+        assert 0.049 < extreme_frequency < 0.052, f"Extreme frequency {extreme_frequency} outside expected range"
     
     def test_output_consistency(self):
         """Test that both preprocessing methods produce consistent output structures."""
@@ -133,7 +135,7 @@ class TestGriddedPreprocessing:
         )
         
         # Both should have the same core data variables
-        core_vars = ['extreme_events', 'dat_detrend', 'mask']
+        core_vars = ['extreme_events', 'dat_anomaly', 'mask']
         for var in core_vars:
             assert var in shifting_ds.data_vars
             assert var in detrended_ds.data_vars

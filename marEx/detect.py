@@ -132,9 +132,9 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
                            f"Either use more data or reduce window_year_baseline parameter.")
         
         start_year = min_year + window_year_baseline
-        ds['dat_detrend'] = ds['dat_detrend'].where(ds[dimensions['time']].dt.year >= start_year, drop=True)
+        ds['dat_anomaly'] = ds['dat_anomaly'].where(ds[dimensions['time']].dt.year >= start_year, drop=True)
     
-    anomalies = ds.dat_detrend
+    anomalies = ds.dat_anomaly
     
     # Step 2: Identify extreme events (both methods now return consistent tuple structures)
     extremes, thresholds = identify_extremes(
@@ -211,7 +211,7 @@ def preprocess_data(da, method_anomaly='detrended_baseline', method_extreme='glo
     
     ds = ds.persist(optimize_graph=True)
     ds['thresholds'] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
-    ds['dat_detrend'] = fix_dask_tuple_array(ds.dat_detrend)
+    ds['dat_anomaly'] = fix_dask_tuple_array(ds.dat_anomaly)
     
     return ds
 
@@ -459,7 +459,7 @@ def _compute_anomaly_shifting_baseline(da, window_year_baseline=15, smooth_days_
     
     # Build output dataset
     return xr.Dataset({
-        'dat_detrend': anomalies,
+        'dat_anomaly': anomalies,
         'mask': mask
     })
 
@@ -650,7 +650,7 @@ def _compute_anomaly_detrended(da, std_normalise=False, detrend_orders=[1],
     
     # Initialise output dataset
     data_vars = {
-        'dat_detrend': da_detrend,
+        'dat_anomaly': da_detrend,
         'mask': mask
     }    
     
