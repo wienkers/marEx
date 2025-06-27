@@ -151,3 +151,151 @@ class TestGriddedPreprocessing:
         assert 'lon' in shifting_ds.coords
         assert 'lat' in detrended_ds.coords  
         assert 'lon' in detrended_ds.coords
+    
+    def test_std_normalise_detrended_baseline(self):
+        """Test preprocessing with std_normalise=True for detrended_baseline method."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly='detrended_baseline',
+            method_extreme='global_extreme',
+            threshold_percentile=95,
+            std_normalise=True,
+            detrend_orders=[1, 2],
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks
+        )
+        
+        # Verify output structure includes standardized data
+        assert isinstance(extremes_ds, xr.Dataset)
+        assert 'extreme_events' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
+        assert 'thresholds' in extremes_ds.data_vars
+        assert 'mask' in extremes_ds.data_vars
+        
+        # Check for additional variables when std_normalise=True
+        assert 'dat_stn' in extremes_ds.data_vars, "dat_stn should be present when std_normalise=True"
+        assert 'STD' in extremes_ds.data_vars, "STD should be present when std_normalise=True"
+        assert 'extreme_events_stn' in extremes_ds.data_vars, "extreme_events_stn should be present when std_normalise=True"
+        assert 'thresholds_stn' in extremes_ds.data_vars, "thresholds_stn should be present when std_normalise=True"
+        
+        # Verify attributes
+        assert extremes_ds.attrs['method_anomaly'] == 'detrended_baseline'
+        assert extremes_ds.attrs['method_extreme'] == 'global_extreme'
+        assert extremes_ds.attrs['threshold_percentile'] == 95
+        assert extremes_ds.attrs['std_normalise'] == True
+        
+        # Verify data types
+        assert extremes_ds.extreme_events.dtype == bool
+        assert extremes_ds.extreme_events_stn.dtype == bool
+        assert extremes_ds.dat_anomaly.dtype == np.float32
+        assert extremes_ds.dat_stn.dtype == np.float32
+        assert extremes_ds.STD.dtype == np.float32
+        
+        # Verify dimensions
+        assert 'time' in extremes_ds.dat_stn.dims
+        assert 'lat' in extremes_ds.dat_stn.dims
+        assert 'lon' in extremes_ds.dat_stn.dims
+        
+        # STD should have dayofyear dimension but not time
+        assert 'dayofyear' in extremes_ds.STD.dims
+        assert 'lat' in extremes_ds.STD.dims
+        assert 'lon' in extremes_ds.STD.dims
+        assert 'time' not in extremes_ds.STD.dims
+        
+        # Verify reasonable extreme event frequency for both regular and standardized
+        extreme_frequency = float(extremes_ds.extreme_events.mean())
+        extreme_frequency_stn = float(extremes_ds.extreme_events_stn.mean())
+        print(f"Extreme frequency (regular): {extreme_frequency}")
+        print(f"Extreme frequency (standardized): {extreme_frequency_stn}")
+        
+        # Both should be close to 5% for 95th percentile
+        assert 0.049 < extreme_frequency < 0.052, f"Regular extreme frequency {extreme_frequency} outside expected range"
+        assert 0.049 < extreme_frequency_stn < 0.052, f"Standardized extreme frequency {extreme_frequency_stn} outside expected range"
+    
+    def test_shifting_baseline_hobday_extreme_exact_percentile(self):
+        """Test preprocessing with shifting_baseline + hobday_extreme combination and exact_percentile=True."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly='shifting_baseline',
+            method_extreme='hobday_extreme',
+            threshold_percentile=95,
+            exact_percentile=True,
+            window_year_baseline=5,  # Reduced for test data
+            smooth_days_baseline=11,  # Reduced for test data
+            window_days_hobday=5,  # Reduced for test data
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks
+        )
+        
+        # Verify output structure
+        assert isinstance(extremes_ds, xr.Dataset)
+        assert 'extreme_events' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
+        assert 'thresholds' in extremes_ds.data_vars
+        assert 'mask' in extremes_ds.data_vars
+        
+        # Verify attributes
+        assert extremes_ds.attrs['method_anomaly'] == 'shifting_baseline'
+        assert extremes_ds.attrs['method_extreme'] == 'hobday_extreme'
+        assert extremes_ds.attrs['threshold_percentile'] == 95
+        assert extremes_ds.attrs['exact_percentile'] == True
+        
+        # Verify data types
+        assert extremes_ds.extreme_events.dtype == bool
+        assert extremes_ds.dat_anomaly.dtype == np.float32
+        
+        # Verify dimensions
+        assert 'time' in extremes_ds.extreme_events.dims
+        assert 'lat' in extremes_ds.extreme_events.dims
+        assert 'lon' in extremes_ds.extreme_events.dims
+        assert 'dayofyear' in extremes_ds.thresholds.dims
+        
+        # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
+        extreme_frequency = float(extremes_ds.extreme_events.mean())
+        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (exact_percentile=True): {extreme_frequency}")
+        assert 0.044 < extreme_frequency < 0.047, f"Extreme frequency {extreme_frequency} outside expected range"
+    
+    def test_detrended_baseline_global_extreme_exact_percentile(self):
+        """Test preprocessing with detrended_baseline + global_extreme combination and exact_percentile=True."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly='detrended_baseline',
+            method_extreme='global_extreme',
+            threshold_percentile=95,
+            exact_percentile=True,
+            detrend_orders=[1, 2],
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks
+        )
+        
+        # Verify output structure
+        assert isinstance(extremes_ds, xr.Dataset)
+        assert 'extreme_events' in extremes_ds.data_vars
+        assert 'dat_anomaly' in extremes_ds.data_vars
+        assert 'thresholds' in extremes_ds.data_vars
+        assert 'mask' in extremes_ds.data_vars
+        
+        # Verify attributes
+        assert extremes_ds.attrs['method_anomaly'] == 'detrended_baseline'
+        assert extremes_ds.attrs['method_extreme'] == 'global_extreme'
+        assert extremes_ds.attrs['threshold_percentile'] == 95
+        assert extremes_ds.attrs['exact_percentile'] == True
+        
+        # Verify data types
+        assert extremes_ds.extreme_events.dtype == bool
+        assert extremes_ds.dat_anomaly.dtype == np.float32
+        
+        # Verify dimensions
+        assert 'time' in extremes_ds.extreme_events.dims
+        assert 'lat' in extremes_ds.extreme_events.dims
+        assert 'lon' in extremes_ds.extreme_events.dims
+        
+        # For global_extreme, thresholds should be 2D (lat, lon) not 3D with dayofyear
+        assert 'dayofyear' not in extremes_ds.thresholds.dims
+        assert 'lat' in extremes_ds.thresholds.dims
+        assert 'lon' in extremes_ds.thresholds.dims
+        
+        # Verify reasonable extreme event frequency
+        extreme_frequency = float(extremes_ds.extreme_events.mean())
+        print(f"Exact extreme_frequency for detrended_baseline + global_extreme (exact_percentile=True): {extreme_frequency}")
+        assert 0.0499 < extreme_frequency < 0.0501, f"Extreme frequency {extreme_frequency} outside expected range"
