@@ -19,58 +19,53 @@ Example
 >>> # Preprocess data to identify extreme events
 >>> extreme_events_ds = marEx.preprocess_data(sst, threshold_percentile=95)
 >>> # Track events through time
->>> tracker = marEx.tracker(extreme_events_ds.extreme_events, extreme_events_ds.mask, 
+>>> tracker = marEx.tracker(extreme_events_ds.extreme_events, extreme_events_ds.mask,
 ...                         R_fill=8, area_filter_quartile=0.5)
 >>> events_ds = tracker.run()
 """
 
 try:
-    import jax
     HAS_JAX = True
 except ImportError:
     HAS_JAX = False
     import warnings
+
     warnings.warn(
         "JAX not installed. Some operations will be slower. "
         "For best performance, install with: pip install marEx[jax]",
         ImportWarning,
-        stacklevel=2
+        stacklevel=2,
     )
 
 # Import core functionality
 from .detect import (
-    preprocess_data, 
     compute_normalised_anomaly,
+    identify_extremes,
+    preprocess_data,
     smoothed_rolling_climatology,
-    identify_extremes
 )
 
+# Import plotting utilities
+from .plotX import PlotConfig, specify_grid
 from .track import tracker
-
-# Import plotting utilities 
-from .plotX import (
-    specify_grid,
-    PlotConfig
-)
 
 # Convenience variables
 __all__ = [
     # Core data preprocessing
-    'preprocess_data',
-    'compute_normalised_anomaly',
-    'smoothed_rolling_climatology',
-    'identify_extremes',
-    
+    "preprocess_data",
+    "compute_normalised_anomaly",
+    "smoothed_rolling_climatology",
+    "identify_extremes",
     # Tracking
-    'tracker',
-    
+    "tracker",
     # Visualization
-    'specify_grid',
-    'PlotConfig',
+    "specify_grid",
+    "PlotConfig",
 ]
 
 # Version information
 from importlib.metadata import version
+
 try:
     __version__ = version("marEx")
 except ImportError:
