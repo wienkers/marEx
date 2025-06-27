@@ -70,7 +70,9 @@ MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for
 
 cf. Old (Basic) ID Method vs. New Tracking & Merging Algorithm:
 
-https://github.com/user-attachments/assets/074cfd20-d979-49a7-bda9-0c356c786b1d
+https://github.com/user-attachments/assets/5acf48eb-56bf-43e5-bfc4-4ef1a7a90eff
+
+
 
 
 
