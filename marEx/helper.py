@@ -19,8 +19,12 @@ import dask
 import dask.array as dask_array
 import xarray as xr
 import numpy as np
-from dask_jobqueue import SLURMCluster
 from dask.distributed import Client, LocalCluster
+
+try:
+    from dask_jobqueue import SLURMCluster
+except ImportError:
+    SLURMCluster = None
 
 
 # Default configuration values
@@ -204,6 +208,9 @@ def start_distributed_cluster(n_workers: int, workers_per_node: int,
     Client
         Dask client connected to the distributed cluster.
     """
+    if SLURMCluster is None:
+        raise ImportError("dask_jobqueue is required for SLURM cluster functionality. Install with: pip install dask_jobqueue")
+    
     # Configure Dask
     temp_dir = configure_dask(scratch_dir)
     
