@@ -1,0 +1,297 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0, v2.1.3, etc.
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: write
+  id-token: write  # For trusted publishing to PyPI
+
+jobs:
+  validate-tag:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Validate and parse version
+      id: version
+      run: |
+        if [[ "${GITHUB_REF}" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+          VERSION="${BASH_REMATCH[1]}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          # Check if this is a prerelease (contains alpha, beta, rc, or dev)
+          if [[ "${VERSION}" =~ (alpha|beta|rc|dev) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Valid version tag: v${VERSION}"
+        else
+          echo "Invalid version tag: ${GITHUB_REF}"
+          exit 1
+        fi
+
+  run-tests:
+    name: Run Full Test Suite
+    runs-on: ubuntu-latest
+    needs: validate-tag
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: 'pyproject.toml'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev,full]"
+
+    - name: Configure Dask for CI
+      run: |
+        mkdir -p ~/.dask
+        cat > ~/.dask/config.yaml << 'EOF'
+        distributed:
+          worker:
+            memory:
+              target: 0.8
+              spill: 0.9
+              pause: 0.95
+              terminate: 0.98
+          admin:
+            log-format: '%(name)s - %(levelname)s - %(message)s'
+        array:
+          chunk-size: 64MiB
+        EOF
+
+    - name: Run comprehensive test suite
+      run: |
+        pytest tests/ -v --tb=short -m "not slow" --durations=10
+
+    - name: Run code quality checks
+      run: |
+        black --check marEx/
+        isort --check-only marEx/
+        flake8 marEx/
+
+  build:
+    name: Build Distribution Packages
+    runs-on: ubuntu-latest
+    needs: [validate-tag, run-tests]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Needed for setuptools_scm
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: 'pyproject.toml'
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: Build source and wheel distributions
+      run: |
+        python -m build
+
+    - name: Check distribution packages
+      run: |
+        twine check dist/*
+
+    - name: List built packages
+      run: |
+        ls -la dist/
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist-packages
+        path: dist/
+        retention-days: 30
+
+  test-install:
+    name: Test Package Installation
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist-packages
+        path: dist/
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install hdf5 netcdf proj geos
+
+    - name: Test wheel installation
+      run: |
+        python -m pip install --upgrade pip
+        # Install from wheel
+        pip install dist/*.whl
+
+    - name: Test import and basic functionality
+      run: |
+        python -c "
+        import marEx
+        print(f'marEx version: {marEx.__version__}')
+
+        # Test basic imports
+        from marEx import detect, track, helper
+        from marEx.plotX import base, gridded, unstructured
+
+        print('All imports successful!')
+        "
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [validate-tag, build, test-install]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/marEx
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist-packages
+        path: dist/
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        verbose: true
+        print-hash: true
+
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate-tag, publish-pypi]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist-packages
+        path: dist/
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get the previous tag
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+        if [ -n "$PREVIOUS_TAG" ]; then
+          echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
+          CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${PREVIOUS_TAG}..HEAD --no-merges)
+        else
+          echo "No previous tag found, generating changelog from first commit"
+          CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+        fi
+
+        # Prepare changelog for GitHub release
+        cat << EOF > changelog.md
+        ## What's Changed
+
+        ${CHANGELOG}
+
+        ## Installation
+
+        \`\`\`bash
+        pip install marEx==${{ needs.validate-tag.outputs.version }}
+        \`\`\`
+
+        ## Full Changelog
+
+        **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}
+        EOF
+
+        # Set output for use in release creation
+        echo "changelog<<EOF" >> $GITHUB_OUTPUT
+        cat changelog.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Release v${{ needs.validate-tag.outputs.version }}
+        body: ${{ steps.changelog.outputs.changelog }}
+        prerelease: ${{ needs.validate-tag.outputs.is_prerelease == 'true' }}
+        files: |
+          dist/*
+        generate_release_notes: true
+        make_latest: ${{ needs.validate-tag.outputs.is_prerelease == 'false' }}
+
+  announce-release:
+    name: Post-Release Notifications
+    runs-on: ubuntu-latest
+    needs: [validate-tag, create-github-release]
+    if: needs.validate-tag.outputs.is_prerelease == 'false'  # Only for stable releases
+
+    steps:
+    - name: Notify release completion
+      run: |
+        echo "🎉 marEx v${{ needs.validate-tag.outputs.version }} has been successfully released!"
+        echo "📦 PyPI: https://pypi.org/project/marEx/${{ needs.validate-tag.outputs.version }}/"
+        echo "📋 GitHub: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+
+        # You can add additional notification steps here, such as:
+        # - Slack notifications
+        # - Discord webhooks
+        # - Email notifications
+        # - Update documentation sites
