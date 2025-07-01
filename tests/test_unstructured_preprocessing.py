@@ -25,18 +25,16 @@ class TestUnstructuredPreprocessing:
             "xdim": "ncells",  # Note: no 'ydim' indicates unstructured grid
         }
 
+        cls.coordinates = {"time": "time", "xdim": "lon", "ydim": "lat"}
+
         # Standard dask chunks for output
         cls.dask_chunks = {"time": 25}
 
         # Mock neighbors and cell areas for unstructured grid
         # In real usage these would come from grid files
         ncells = cls.sst_data.sizes.get("ncells", cls.sst_data.sizes.get("cell", 1000))
-        cls.mock_neighbours = xr.DataArray(
-            np.random.randint(0, ncells, (3, ncells)), dims=["nv", "ncells"]
-        )
-        cls.mock_cell_areas = xr.DataArray(
-            np.ones(ncells) * 1000.0, dims=["ncells"]  # Mock cell areas in m²
-        )
+        cls.mock_neighbours = xr.DataArray(np.random.randint(0, ncells, (3, ncells)), dims=["nv", "ncells"])
+        cls.mock_cell_areas = xr.DataArray(np.ones(ncells) * 1000.0, dims=["ncells"])  # Mock cell areas in m²
 
     def test_shifting_baseline_hobday_extreme_unstructured(self):
         """Test preprocessing with shifting_baseline + hobday_extreme for unstructured grid."""
@@ -49,6 +47,7 @@ class TestUnstructuredPreprocessing:
             smooth_days_baseline=11,  # Reduced for test data
             window_days_hobday=5,  # Reduced for test data
             dimensions=self.dimensions,
+            coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
             neighbours=self.mock_neighbours,
             cell_areas=self.mock_cell_areas,
@@ -87,9 +86,7 @@ class TestUnstructuredPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(
-            f"Exact extreme_frequency for shifting_baseline + hobday_extreme (unstructured): {extreme_frequency}"
-        )
+        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (unstructured): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
@@ -105,6 +102,7 @@ class TestUnstructuredPreprocessing:
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
+            coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
             neighbours=self.mock_neighbours,
             cell_areas=self.mock_cell_areas,
@@ -141,9 +139,7 @@ class TestUnstructuredPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(
-            f"Exact extreme_frequency for detrended_baseline + global_extreme (unstructured): {extreme_frequency}"
-        )
+        print(f"Exact extreme_frequency for detrended_baseline + global_extreme (unstructured): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
@@ -161,6 +157,7 @@ class TestUnstructuredPreprocessing:
             method_extreme="global_extreme",
             threshold_percentile=95,
             dimensions=unstructured_dims,
+            coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
             neighbours=self.mock_neighbours,
             cell_areas=self.mock_cell_areas,
@@ -187,6 +184,7 @@ class TestUnstructuredPreprocessing:
             smooth_days_baseline=11,  # Reduced for test data
             window_days_hobday=5,  # Reduced for test data
             dimensions=self.dimensions,
+            coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
             neighbours=self.mock_neighbours,
             cell_areas=self.mock_cell_areas,
@@ -199,6 +197,7 @@ class TestUnstructuredPreprocessing:
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
+            coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
             neighbours=self.mock_neighbours,
             cell_areas=self.mock_cell_areas,
