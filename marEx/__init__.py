@@ -7,8 +7,8 @@ such as Marine Heatwaves (MHWs).
 
 Core Functionality
 -----------------
-- preprocess_data: Convert raw time series into standardised anomalies
-- tracker: Identify and track extreme events through time
+- detect: Convert raw time series into standardised anomalies
+- track: Identify and track extreme events through time
 
 Example
 -------
@@ -24,18 +24,12 @@ Example
 >>> events_ds = tracker.run()
 """
 
-try:
-    HAS_JAX = True
-except ImportError:
-    HAS_JAX = False
-    import warnings
-
-    warnings.warn(
-        "JAX not installed. Some operations will be slower. "
-        "For best performance, install with: pip install marEx[jax]",
-        ImportWarning,
-        stacklevel=2,
-    )
+# Import dependency management
+from ._dependencies import (
+    get_installation_profile,
+    has_dependency,
+    print_dependency_status,
+)
 
 # Import core functionality
 from .detect import (
@@ -45,9 +39,41 @@ from .detect import (
     smoothed_rolling_climatology,
 )
 
+# Import exception hierarchy
+from .exceptions import (  # Main exception hierarchy; Convenience constructors
+    ConfigurationError,
+    CoordinateError,
+    DataValidationError,
+    DependencyError,
+    MarExError,
+    ProcessingError,
+    TrackingError,
+    VisualisationError,
+    create_coordinate_error,
+    create_data_validation_error,
+    create_processing_error,
+    wrap_exception,
+)
+
+# Import logging configuration functions
+from .logging_config import (
+    configure_logging,
+    get_logger,
+    get_verbosity_level,
+    is_quiet_mode,
+    is_verbose_mode,
+    set_normal_logging,
+    set_quiet_mode,
+    set_verbose_mode,
+)
+
 # Import plotting utilities
 from .plotX import PlotConfig, specify_grid
-from .track import tracker
+from .track import regional_tracker, tracker
+
+# Coordinate validation utilities are now integrated into the main modules
+
+
 
 # Convenience variables
 __all__ = [
@@ -58,9 +84,36 @@ __all__ = [
     "identify_extremes",
     # Tracking
     "tracker",
-    # Visualization
+    "regional_tracker",
+    # Visualisation
     "specify_grid",
     "PlotConfig",
+    # Exception hierarchy
+    "MarExError",
+    "DataValidationError",
+    "CoordinateError",
+    "ProcessingError",
+    "ConfigurationError",
+    "DependencyError",
+    "TrackingError",
+    "VisualisationError",
+    "create_data_validation_error",
+    "create_coordinate_error",
+    "create_processing_error",
+    "wrap_exception",
+    # Dependency management
+    "has_dependency",
+    "print_dependency_status",
+    "get_installation_profile",
+    # Logging configuration
+    "configure_logging",
+    "set_verbose_mode",
+    "set_quiet_mode",
+    "set_normal_logging",
+    "get_verbosity_level",
+    "is_verbose_mode",
+    "is_quiet_mode",
+    "get_logger",
 ]
 
 # Version information
