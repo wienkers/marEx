@@ -51,6 +51,89 @@ logging.getLogger("distributed.shuffle._scheduler_plugin").setLevel(logging.ERRO
 
 
 # ============================
+# Validation Functions
+# ============================
+
+
+def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
+    """
+    Validate that all specified dimensions exist in the dataset.
+    
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array to validate
+    dimensions : dict
+        Mapping of conceptual dimensions to actual dimension names
+    
+    Raises
+    ------
+    DataValidationError
+        If any specified dimension does not exist in the dataset
+    """
+    missing_dims = []
+    for concept_dim, actual_dim in dimensions.items():
+        if actual_dim not in da.dims:
+            missing_dims.append(f"'{actual_dim}' (for {concept_dim})")
+    
+    if missing_dims:
+        available_dims = list(da.dims)
+        raise create_data_validation_error(
+            f"Missing required dimensions: {', '.join(missing_dims)}",
+            details=f"Dataset has dimensions: {available_dims}",
+            suggestions=[
+                "Check dimension names in your data",
+                "Update the 'dimensions' parameter to match your data structure",
+                f"Available dimensions: {available_dims}",
+            ],
+            data_info={
+                "missing_dimensions": missing_dims,
+                "available_dimensions": available_dims,
+                "provided_dimensions": dimensions,
+            },
+        )
+
+
+def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -> None:
+    """
+    Validate that all specified coordinates exist in the dataset.
+    
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array to validate
+    coordinates : dict
+        Mapping of conceptual coordinates to actual coordinate names
+    
+    Raises
+    ------
+    DataValidationError
+        If any specified coordinate does not exist in the dataset
+    """
+    missing_coords = []
+    for concept_coord, actual_coord in coordinates.items():
+        if actual_coord not in da.coords:
+            missing_coords.append(f"'{actual_coord}' (for {concept_coord})")
+    
+    if missing_coords:
+        available_coords = list(da.coords.keys())
+        raise create_data_validation_error(
+            f"Missing required coordinates: {', '.join(missing_coords)}",
+            details=f"Dataset has coordinates: {available_coords}",
+            suggestions=[
+                "Check coordinate names in your data",
+                "Update the 'coordinates' parameter to match your data structure",
+                f"Available coordinates: {available_coords}",
+            ],
+            data_info={
+                "missing_coordinates": missing_coords,
+                "available_coordinates": available_coords,
+                "provided_coordinates": coordinates,
+            },
+        )
+
+
+# ============================
 # Methodology Selection
 # ============================
 
@@ -69,7 +152,7 @@ def preprocess_data(
     exact_percentile: bool = False,
     dask_chunks: Dict[str, int] = {"time": 25},
     dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
     verbose: Optional[bool] = None,
@@ -219,7 +302,7 @@ def preprocess_data(
     >>> result_unstructured = marEx.preprocess_data(
     ...     icon_sst,
     ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"xdim": "lon", "ydim": "lat"}
+    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"}
     ...     dask_chunks={"time": 50}
     ... )
 
@@ -276,7 +359,34 @@ def preprocess_data(
     log_dask_info(logger, da, "Input data")
     log_memory_usage(logger, "Initial memory state")
 
-    # Coordinate validation removed
+    # Handle coordinates parameter based on data structure
+    if coordinates is None:
+        if "ydim" not in dimensions:
+            # Unstructured (2D) data - requires explicit coordinate specification
+            logger.error("Coordinates parameter required for unstructured data")
+            raise create_data_validation_error(
+                "Coordinates parameter must be explicitly specified for unstructured data",
+                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                suggestions=[
+                    "Specify coordinates parameter with spatial coordinate names",
+                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
+                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                ],
+                data_info={
+                    "data_structure": "unstructured (2D)",
+                    "dimensions": dimensions,
+                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                },
+            )
+        else:
+            # Gridded (3D) data - copy dimensions to coordinates
+            coordinates = dimensions.copy()
+            logger.debug("Gridded data detected - copying dimensions to coordinates")
+
+    # Validate dimensions and coordinates exist in dataset
+    logger.debug("Validating dimensions and coordinates")
+    _validate_dimensions_exist(da, dimensions)
+    _validate_coordinates_exist(da, coordinates)
 
     # Check if input data is dask-backed
     if not is_dask_collection(da.data):
@@ -533,7 +643,7 @@ def compute_normalised_anomaly(
     da: xr.DataArray,
     method_anomaly: Literal["detrended_baseline", "shifting_baseline"] = "detrended_baseline",
     dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    coordinates: Optional[Dict[str, str]] = None,
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
     std_normalise: bool = False,  # for detrended_baseline
@@ -637,7 +747,7 @@ def compute_normalised_anomaly(
     >>> result_unstructured = marEx.compute_normalised_anomaly(
     ...     icon_data,
     ...     dimensions={"time": "time", "xdim": "ncells"}
-    ...     coordinates={"xdim": "lon", "ydim": "lat"},
+    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
     ... )
     >>> print(result_unstructured.dims)
     Frozen({'time': 1461, 'ncells': 83886})
@@ -665,7 +775,34 @@ def compute_normalised_anomaly(
 
     logger.debug(f"Computing normalised anomaly using {method_anomaly} method")
 
-    # Coordinate validation removed
+    # Handle coordinates parameter based on data structure
+    if coordinates is None:
+        if "ydim" not in dimensions:
+            # Unstructured (2D) data - requires explicit coordinate specification
+            logger.error("Coordinates parameter required for unstructured data")
+            raise create_data_validation_error(
+                "Coordinates parameter must be explicitly specified for unstructured data",
+                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                suggestions=[
+                    "Specify coordinates parameter with spatial coordinate names",
+                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
+                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                ],
+                data_info={
+                    "data_structure": "unstructured (2D)",
+                    "dimensions": dimensions,
+                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                },
+            )
+        else:
+            # Gridded (3D) data - copy dimensions to coordinates
+            coordinates = dimensions.copy()
+            logger.debug("Gridded data detected - copying dimensions to coordinates")
+
+    # Validate dimensions and coordinates exist in dataset
+    logger.debug("Validating dimensions and coordinates")
+    _validate_dimensions_exist(da, dimensions)
+    _validate_coordinates_exist(da, coordinates)
 
     if method_anomaly == "detrended_baseline":
         logger.debug(
@@ -696,7 +833,7 @@ def identify_extremes(
     method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
     threshold_percentile: float = 95,
     dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    coordinates: Optional[Dict[str, str]] = None,
     window_days_hobday: int = 11,  # for hobday_extreme
     exact_percentile: bool = False,
     verbose: Optional[bool] = None,
@@ -817,7 +954,7 @@ def identify_extremes(
     >>> extremes_unstructured, thresholds_unstructured = marEx.identify_extremes(
     ...     icon_anomalies,
     ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"xdim": "lon", "ydim": "lat"},
+    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
     ...     threshold_percentile=95
     ... )
     >>> print(f"Unstructured extremes shape: {extremes_unstructured.shape}")
@@ -842,6 +979,35 @@ def identify_extremes(
         configure_logging(verbose=verbose, quiet=quiet)
 
     logger.debug(f"Identifying extremes using {method_extreme} method - {threshold_percentile}th percentile")
+
+    # Handle coordinates parameter based on data structure
+    if coordinates is None:
+        if "ydim" not in dimensions:
+            # Unstructured (2D) data - requires explicit coordinate specification
+            logger.error("Coordinates parameter required for unstructured data")
+            raise create_data_validation_error(
+                "Coordinates parameter must be explicitly specified for unstructured data",
+                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                suggestions=[
+                    "Specify coordinates parameter with spatial coordinate names",
+                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
+                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                ],
+                data_info={
+                    "data_structure": "unstructured (2D)",
+                    "dimensions": dimensions,
+                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                },
+            )
+        else:
+            # Gridded (3D) data - copy dimensions to coordinates
+            coordinates = dimensions.copy()
+            logger.debug("Gridded data detected - copying dimensions to coordinates")
+
+    # Validate dimensions and coordinates exist in dataset
+    logger.debug("Validating dimensions and coordinates")
+    _validate_dimensions_exist(da, dimensions)
+    _validate_coordinates_exist(da, coordinates)
 
     # Validate percentile parameter when using approximate method
     if threshold_percentile < 60 and not exact_percentile:
@@ -956,7 +1122,7 @@ def rolling_climatology(
     >>> icon_climatology = marEx.rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "xdim": "ncells"}
-    ...     coordinates={"xdim": "lon", "ydim": "lat"}
+    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"}
     ... )
     >>> print(icon_climatology.dims)
     Frozen({'time': 7305, 'ncells': 83886})
@@ -1150,7 +1316,7 @@ def smoothed_rolling_climatology(
     >>> icon_smooth_clim = marEx.smoothed_rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"xdim": "lon", "ydim": "lat"},
+    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
     ...     window_year_baseline=10,
     ...     smooth_days_baseline=31
     ... )
