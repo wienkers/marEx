@@ -1,301 +1,388 @@
+from pathlib import Path
+
+import numpy as np
 import pytest
 import xarray as xr
-import numpy as np
-from pathlib import Path
+
 import marEx
+
+from .conftest import assert_percentile_frequency
 
 
 class TestGriddedPreprocessing:
     """Test preprocessing functionality for gridded data using test datasets."""
-    
+
     @classmethod
     def setup_class(cls):
         """Load test data for all tests."""
         test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
         ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
         cls.sst_data = ds.to
-        
+
         # Define standard dimensions for gridded data
-        cls.dimensions = {
-            'time': 'time',
-            'xdim': 'lon', 
-            'ydim': 'lat'
-        }
-        
+        cls.dimensions = {"time": "time", "xdim": "lon", "ydim": "lat"}
+
         # Standard dask chunks for output
-        cls.dask_chunks = {'time': 25}
-    
+        cls.dask_chunks = {"time": 25}
+
     def test_shifting_baseline_hobday_extreme(self):
         """Test preprocessing with shifting_baseline + hobday_extreme combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='shifting_baseline',
-            method_extreme='hobday_extreme',
+            method_anomaly="shifting_baseline",
+            method_extreme="hobday_extreme",
             threshold_percentile=95,
             window_year_baseline=5,  # Reduced for test data
             smooth_days_baseline=11,  # Reduced for test data
             window_days_hobday=5,  # Reduced for test data
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
-        assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_anomaly' in extremes_ds.data_vars
-        assert 'thresholds' in extremes_ds.data_vars
-        assert 'mask' in extremes_ds.data_vars
-        
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "dat_anomaly" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert "mask" in extremes_ds.data_vars
+
         # Verify attributes
-        assert extremes_ds.attrs['method_anomaly'] == 'shifting_baseline'
-        assert extremes_ds.attrs['method_extreme'] == 'hobday_extreme'
-        assert extremes_ds.attrs['threshold_percentile'] == 95
-        
+        assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
+        assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds.attrs["threshold_percentile"] == 95
+
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
         assert extremes_ds.dat_anomaly.dtype == np.float32
-        
+
         # Verify dimensions
-        assert 'time' in extremes_ds.extreme_events.dims
-        assert 'lat' in extremes_ds.extreme_events.dims
-        assert 'lon' in extremes_ds.extreme_events.dims
-        assert 'dayofyear' in extremes_ds.thresholds.dims
-        
+        assert "time" in extremes_ds.extreme_events.dims
+        assert "lat" in extremes_ds.extreme_events.dims
+        assert "lon" in extremes_ds.extreme_events.dims
+        assert "dayofyear" in extremes_ds.thresholds.dims
+
+        # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"]
+        window_year_baseline = 5  # From test parameters
+        expected_time_reduction = (
+            window_year_baseline * 365
+        )  # Approximate daily reduction
+        assert (
+            output_time_size < input_time_size
+        ), f"Output time size ({output_time_size}) should be less than input ({input_time_size}) for shifting_baseline"
+        # Allow some flexibility due to leap years and exact windowing
+        time_reduction = input_time_size - output_time_size
+        assert (
+            abs(time_reduction - expected_time_reduction) <= 10
+        ), f"Time reduction ({time_reduction}) should be approximately {expected_time_reduction} days"
+
         # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency}")
-        assert 0.044 < extreme_frequency < 0.047, f"Extreme frequency {extreme_frequency} outside expected range"
-    
+        print(
+            f"Exact extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency}"
+        )
+        assert_percentile_frequency(
+            extreme_frequency, 95, description="shifting_baseline + hobday_extreme"
+        )
+
     def test_detrended_baseline_global_extreme(self):
         """Test preprocessing with detrended_baseline + global_extreme combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='detrended_baseline',
-            method_extreme='global_extreme',
+            method_anomaly="detrended_baseline",
+            method_extreme="global_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
-        assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_anomaly' in extremes_ds.data_vars
-        assert 'thresholds' in extremes_ds.data_vars
-        assert 'mask' in extremes_ds.data_vars
-        
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "dat_anomaly" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert "mask" in extremes_ds.data_vars
+
         # Verify attributes
-        assert extremes_ds.attrs['method_anomaly'] == 'detrended_baseline'
-        assert extremes_ds.attrs['method_extreme'] == 'global_extreme'
-        assert extremes_ds.attrs['threshold_percentile'] == 95
-        
+        assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
+        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["threshold_percentile"] == 95
+
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
         assert extremes_ds.dat_anomaly.dtype == np.float32
-        
+
         # Verify dimensions
-        assert 'time' in extremes_ds.extreme_events.dims
-        assert 'lat' in extremes_ds.extreme_events.dims
-        assert 'lon' in extremes_ds.extreme_events.dims
-        
+        assert "time" in extremes_ds.extreme_events.dims
+        assert "lat" in extremes_ds.extreme_events.dims
+        assert "lon" in extremes_ds.extreme_events.dims
+
         # For global_extreme, thresholds should be 2D (lat, lon) not 3D with dayofyear
-        assert 'dayofyear' not in extremes_ds.thresholds.dims
-        assert 'lat' in extremes_ds.thresholds.dims
-        assert 'lon' in extremes_ds.thresholds.dims
-        
+        assert "dayofyear" not in extremes_ds.thresholds.dims
+        assert "lat" in extremes_ds.thresholds.dims
+        assert "lon" in extremes_ds.thresholds.dims
+
+        # Verify time dimension: detrended_baseline should preserve all time steps
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"]
+        assert (
+            output_time_size == input_time_size
+        ), f"Output time size ({output_time_size}) should equal input ({input_time_size}) for detrended_baseline"
+
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrended_baseline + global_extreme: {extreme_frequency}")
-        assert 0.049 < extreme_frequency < 0.052, f"Extreme frequency {extreme_frequency} outside expected range"
-    
+        print(
+            f"Exact extreme_frequency for detrended_baseline + global_extreme: {extreme_frequency}"
+        )
+        assert_percentile_frequency(
+            extreme_frequency, 95, description="detrended_baseline + global_extreme"
+        )
+
     def test_output_consistency(self):
         """Test that both preprocessing methods produce consistent output structures."""
         # Run both methods
         shifting_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='shifting_baseline',
-            method_extreme='hobday_extreme',
+            method_anomaly="shifting_baseline",
+            method_extreme="hobday_extreme",
             threshold_percentile=95,
             window_year_baseline=5,
             smooth_days_baseline=21,
             window_days_hobday=11,
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         detrended_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='detrended_baseline', 
-            method_extreme='global_extreme',
+            method_anomaly="detrended_baseline",
+            method_extreme="global_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         # Both should have the same core data variables
-        core_vars = ['extreme_events', 'dat_anomaly', 'mask']
+        core_vars = ["extreme_events", "dat_anomaly", "mask"]
         for var in core_vars:
             assert var in shifting_ds.data_vars
             assert var in detrended_ds.data_vars
-        
+
         # Both should have mask with same spatial shape
         assert shifting_ds.mask.shape == detrended_ds.mask.shape
-        
+
         # Extreme events should have consistent spatial dimensions
-        assert shifting_ds.extreme_events.dims[-2:] == detrended_ds.extreme_events.dims[-2:]
-        
+        assert (
+            shifting_ds.extreme_events.dims[-2:]
+            == detrended_ds.extreme_events.dims[-2:]
+        )
+
         # Both should have consistent coordinate structure (lat, lon)
-        assert 'lat' in shifting_ds.coords
-        assert 'lon' in shifting_ds.coords
-        assert 'lat' in detrended_ds.coords  
-        assert 'lon' in detrended_ds.coords
-    
+        assert "lat" in shifting_ds.coords
+        assert "lon" in shifting_ds.coords
+        assert "lat" in detrended_ds.coords
+        assert "lon" in detrended_ds.coords
+
     def test_std_normalise_detrended_baseline(self):
         """Test preprocessing with std_normalise=True for detrended_baseline method."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='detrended_baseline',
-            method_extreme='global_extreme',
+            method_anomaly="detrended_baseline",
+            method_extreme="global_extreme",
             threshold_percentile=95,
             std_normalise=True,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
-        # Verify output structure includes standardized data
+
+        # Verify output structure includes standardised data
         assert isinstance(extremes_ds, xr.Dataset)
-        assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_anomaly' in extremes_ds.data_vars
-        assert 'thresholds' in extremes_ds.data_vars
-        assert 'mask' in extremes_ds.data_vars
-        
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "dat_anomaly" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert "mask" in extremes_ds.data_vars
+
         # Check for additional variables when std_normalise=True
-        assert 'dat_stn' in extremes_ds.data_vars, "dat_stn should be present when std_normalise=True"
-        assert 'STD' in extremes_ds.data_vars, "STD should be present when std_normalise=True"
-        assert 'extreme_events_stn' in extremes_ds.data_vars, "extreme_events_stn should be present when std_normalise=True"
-        assert 'thresholds_stn' in extremes_ds.data_vars, "thresholds_stn should be present when std_normalise=True"
-        
+        assert (
+            "dat_stn" in extremes_ds.data_vars
+        ), "dat_stn should be present when std_normalise=True"
+        assert (
+            "STD" in extremes_ds.data_vars
+        ), "STD should be present when std_normalise=True"
+        assert (
+            "extreme_events_stn" in extremes_ds.data_vars
+        ), "extreme_events_stn should be present when std_normalise=True"
+        assert (
+            "thresholds_stn" in extremes_ds.data_vars
+        ), "thresholds_stn should be present when std_normalise=True"
+
         # Verify attributes
-        assert extremes_ds.attrs['method_anomaly'] == 'detrended_baseline'
-        assert extremes_ds.attrs['method_extreme'] == 'global_extreme'
-        assert extremes_ds.attrs['threshold_percentile'] == 95
-        assert extremes_ds.attrs['std_normalise'] == True
-        
+        assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
+        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["threshold_percentile"] == 95
+        assert extremes_ds.attrs["std_normalise"] == True
+
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
         assert extremes_ds.extreme_events_stn.dtype == bool
         assert extremes_ds.dat_anomaly.dtype == np.float32
         assert extremes_ds.dat_stn.dtype == np.float32
         assert extremes_ds.STD.dtype == np.float32
-        
+
         # Verify dimensions
-        assert 'time' in extremes_ds.dat_stn.dims
-        assert 'lat' in extremes_ds.dat_stn.dims
-        assert 'lon' in extremes_ds.dat_stn.dims
-        
+        assert "time" in extremes_ds.dat_stn.dims
+        assert "lat" in extremes_ds.dat_stn.dims
+        assert "lon" in extremes_ds.dat_stn.dims
+
         # STD should have dayofyear dimension but not time
-        assert 'dayofyear' in extremes_ds.STD.dims
-        assert 'lat' in extremes_ds.STD.dims
-        assert 'lon' in extremes_ds.STD.dims
-        assert 'time' not in extremes_ds.STD.dims
-        
-        # Verify reasonable extreme event frequency for both regular and standardized
+        assert "dayofyear" in extremes_ds.STD.dims
+        assert "lat" in extremes_ds.STD.dims
+        assert "lon" in extremes_ds.STD.dims
+        assert "time" not in extremes_ds.STD.dims
+
+        # Verify reasonable extreme event frequency for both regular and standardised
         extreme_frequency = float(extremes_ds.extreme_events.mean())
         extreme_frequency_stn = float(extremes_ds.extreme_events_stn.mean())
         print(f"Extreme frequency (regular): {extreme_frequency}")
-        print(f"Extreme frequency (standardized): {extreme_frequency_stn}")
-        
+        print(f"Extreme frequency (standardised): {extreme_frequency_stn}")
+
         # Both should be close to 5% for 95th percentile
-        assert 0.049 < extreme_frequency < 0.052, f"Regular extreme frequency {extreme_frequency} outside expected range"
-        assert 0.049 < extreme_frequency_stn < 0.052, f"Standardized extreme frequency {extreme_frequency_stn} outside expected range"
-    
+        assert_percentile_frequency(
+            extreme_frequency,
+            95,
+            description="Regular extreme events (std_normalise=True)",
+        )
+        assert_percentile_frequency(
+            extreme_frequency_stn,
+            95,
+            description="Standardised extreme events (std_normalise=True)",
+        )
+
     def test_shifting_baseline_hobday_extreme_exact_percentile(self):
         """Test preprocessing with shifting_baseline + hobday_extreme combination and exact_percentile=True."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='shifting_baseline',
-            method_extreme='hobday_extreme',
+            method_anomaly="shifting_baseline",
+            method_extreme="hobday_extreme",
             threshold_percentile=95,
             exact_percentile=True,
             window_year_baseline=5,  # Reduced for test data
             smooth_days_baseline=11,  # Reduced for test data
             window_days_hobday=5,  # Reduced for test data
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
-        assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_anomaly' in extremes_ds.data_vars
-        assert 'thresholds' in extremes_ds.data_vars
-        assert 'mask' in extremes_ds.data_vars
-        
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "dat_anomaly" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert "mask" in extremes_ds.data_vars
+
         # Verify attributes
-        assert extremes_ds.attrs['method_anomaly'] == 'shifting_baseline'
-        assert extremes_ds.attrs['method_extreme'] == 'hobday_extreme'
-        assert extremes_ds.attrs['threshold_percentile'] == 95
-        assert extremes_ds.attrs['exact_percentile'] == True
-        
+        assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
+        assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds.attrs["threshold_percentile"] == 95
+        assert extremes_ds.attrs["exact_percentile"] == True
+
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
         assert extremes_ds.dat_anomaly.dtype == np.float32
-        
+
         # Verify dimensions
-        assert 'time' in extremes_ds.extreme_events.dims
-        assert 'lat' in extremes_ds.extreme_events.dims
-        assert 'lon' in extremes_ds.extreme_events.dims
-        assert 'dayofyear' in extremes_ds.thresholds.dims
-        
+        assert "time" in extremes_ds.extreme_events.dims
+        assert "lat" in extremes_ds.extreme_events.dims
+        assert "lon" in extremes_ds.extreme_events.dims
+        assert "dayofyear" in extremes_ds.thresholds.dims
+
+        # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"]
+        window_year_baseline = 5  # From test parameters
+        expected_time_reduction = (
+            window_year_baseline * 365
+        )  # Approximate daily reduction
+        assert (
+            output_time_size < input_time_size
+        ), f"Output time size ({output_time_size}) should be less than input ({input_time_size}) for shifting_baseline"
+        # Allow some flexibility due to leap years and exact windowing
+        time_reduction = input_time_size - output_time_size
+        assert (
+            abs(time_reduction - expected_time_reduction) <= 10
+        ), f"Time reduction ({time_reduction}) should be approximately {expected_time_reduction} days"
+
         # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (exact_percentile=True): {extreme_frequency}")
-        assert 0.044 < extreme_frequency < 0.047, f"Extreme frequency {extreme_frequency} outside expected range"
-    
+        print(
+            f"Exact extreme_frequency for shifting_baseline + hobday_extreme (exact_percentile=True): {extreme_frequency}"
+        )
+        assert_percentile_frequency(
+            extreme_frequency,
+            95,
+            description="shifting_baseline + hobday_extreme (exact_percentile=True)",
+        )
+
     def test_detrended_baseline_global_extreme_exact_percentile(self):
         """Test preprocessing with detrended_baseline + global_extreme combination and exact_percentile=True."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly='detrended_baseline',
-            method_extreme='global_extreme',
+            method_anomaly="detrended_baseline",
+            method_extreme="global_extreme",
             threshold_percentile=95,
             exact_percentile=True,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
-            dask_chunks=self.dask_chunks
+            dask_chunks=self.dask_chunks,
         )
-        
+
         # Verify output structure
         assert isinstance(extremes_ds, xr.Dataset)
-        assert 'extreme_events' in extremes_ds.data_vars
-        assert 'dat_anomaly' in extremes_ds.data_vars
-        assert 'thresholds' in extremes_ds.data_vars
-        assert 'mask' in extremes_ds.data_vars
-        
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "dat_anomaly" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert "mask" in extremes_ds.data_vars
+
         # Verify attributes
-        assert extremes_ds.attrs['method_anomaly'] == 'detrended_baseline'
-        assert extremes_ds.attrs['method_extreme'] == 'global_extreme'
-        assert extremes_ds.attrs['threshold_percentile'] == 95
-        assert extremes_ds.attrs['exact_percentile'] == True
-        
+        assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
+        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["threshold_percentile"] == 95
+        assert extremes_ds.attrs["exact_percentile"] == True
+
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
         assert extremes_ds.dat_anomaly.dtype == np.float32
-        
+
         # Verify dimensions
-        assert 'time' in extremes_ds.extreme_events.dims
-        assert 'lat' in extremes_ds.extreme_events.dims
-        assert 'lon' in extremes_ds.extreme_events.dims
-        
+        assert "time" in extremes_ds.extreme_events.dims
+        assert "lat" in extremes_ds.extreme_events.dims
+        assert "lon" in extremes_ds.extreme_events.dims
+
         # For global_extreme, thresholds should be 2D (lat, lon) not 3D with dayofyear
-        assert 'dayofyear' not in extremes_ds.thresholds.dims
-        assert 'lat' in extremes_ds.thresholds.dims
-        assert 'lon' in extremes_ds.thresholds.dims
-        
+        assert "dayofyear" not in extremes_ds.thresholds.dims
+        assert "lat" in extremes_ds.thresholds.dims
+        assert "lon" in extremes_ds.thresholds.dims
+
+        # Verify time dimension: detrended_baseline should preserve all time steps
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"]
+        assert (
+            output_time_size == input_time_size
+        ), f"Output time size ({output_time_size}) should equal input ({input_time_size}) for detrended_baseline"
+
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrended_baseline + global_extreme (exact_percentile=True): {extreme_frequency}")
-        assert 0.0499 < extreme_frequency < 0.0501, f"Extreme frequency {extreme_frequency} outside expected range"
+        print(
+            f"Exact extreme_frequency for detrended_baseline + global_extreme (exact_percentile=True): {extreme_frequency}"
+        )
+        # For exact_percentile=True, we expect very precise adherence to the percentile
+        assert_percentile_frequency(
+            extreme_frequency,
+            95,
+            tolerance_std=1.0,
+            description="detrended_baseline + global_extreme (exact_percentile=True)",
+        )

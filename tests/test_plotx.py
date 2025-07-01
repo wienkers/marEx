@@ -1,16 +1,12 @@
-import pytest
-import numpy as np
-import xarray as xr
-from unittest.mock import patch, MagicMock
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
+import xarray as xr
 
 import marEx
-from marEx.plotX import (
-    PlotConfig,
-    _detect_grid_type,
-    register_plotter,
-    specify_grid,
-)
+from marEx.plotX import PlotConfig, _detect_grid_type, register_plotter, specify_grid
 from marEx.plotX.base import PlotterBase
 from marEx.plotX.gridded import GriddedPlotter
 from marEx.plotX.unstructured import UnstructuredPlotter
@@ -203,7 +199,9 @@ class TestSpecifyGrid:
 
     def test_specify_grid_invalid_type(self):
         """Test specify_grid with invalid grid type."""
-        with pytest.raises(ValueError, match="grid_type must be either"):
+        from marEx.exceptions import ConfigurationError
+
+        with pytest.raises(ConfigurationError, match="Invalid grid type specification"):
             specify_grid(grid_type="invalid")
 
     def test_specify_grid_with_paths(self):
@@ -250,8 +248,8 @@ class TestPlotterBase:
             },
         )
 
-    def test_plotter_base_initialization(self):
-        """Test PlotterBase initialization."""
+    def test_plotter_base_initialisation(self):
+        """Test PlotterBase initialisation."""
 
         # Create a concrete subclass for testing
         class TestPlotter(PlotterBase):
