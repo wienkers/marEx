@@ -4,9 +4,14 @@ from typing import Optional, Union
 
 import xarray as xr
 
+from ..exceptions import ConfigurationError, VisualisationError
+from ..logging_config import get_logger
 from .base import PlotConfig
 from .gridded import GriddedPlotter
 from .unstructured import UnstructuredPlotter
+
+# Get module logger
+logger = get_logger(__name__)
 
 # Global variables to store grid information
 _fpath_tgrid: Optional[str] = None
@@ -25,9 +30,13 @@ def _detect_grid_type(xarray_obj: Union[xr.Dataset, xr.DataArray]) -> str:
     has_lat_lon_dims = "lat" in xarray_obj.dims and "lon" in xarray_obj.dims
 
     # For unstructured data, lat/lon are coordinates but not dimensions
-    return (
+    grid_type = (
         "unstructured" if (has_lat_lon_coords and not has_lat_lon_dims) else "gridded"
     )
+    logger.debug(
+        f"Detected grid type: {grid_type} (coords: {has_lat_lon_coords}, dims: {has_lat_lon_dims})"
+    )
+    return grid_type
 
 
 def register_plotter(
@@ -51,6 +60,10 @@ def register_plotter(
     # If grid type was explicitly specified, check for consistency
     if _grid_type is not None:
         if _grid_type != detected_type:
+            logger.warning(
+                f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
+                f"based on coordinate structure. Using specified type '{_grid_type}'"
+            )
             warnings.warn(
                 f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
                 f"based on coordinate structure. Using specified type '{_grid_type}'."
@@ -58,6 +71,8 @@ def register_plotter(
         final_type = _grid_type
     else:
         final_type = detected_type
+
+    logger.debug(f"Creating {final_type} plotter")
 
     # Create appropriate plotter
     plotter_class = (
@@ -71,6 +86,7 @@ def register_plotter(
         and _fpath_tgrid is not None
         and _fpath_ckdtree is not None
     ):
+        logger.debug("Setting grid paths for unstructured plotter")
         plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
 
     return plotter
@@ -90,11 +106,28 @@ def specify_grid(
                   to determine grid type.
         fpath_tgrid: Path to the triangulation grid file
         fpath_ckdtree: Path to the pre-computed KDTree indices directory
+
     """
     global _fpath_tgrid, _fpath_ckdtree, _grid_type
 
     if grid_type is not None and grid_type.lower() not in ["gridded", "unstructured"]:
-        raise ValueError("grid_type must be either 'gridded' or 'unstructured'")
+        logger.error(f"Invalid grid_type: {grid_type}")
+        raise ConfigurationError(
+            "Invalid grid type specification",
+            details=f"Provided grid_type '{grid_type}' is not supported",
+            suggestions=[
+                "Use 'gridded' for regular lat/lon grids",
+                "Use 'unstructured' for triangular/irregular meshes",
+            ],
+            context={
+                "provided_type": grid_type,
+                "valid_types": ["gridded", "unstructured"],
+            },
+        )
+
+    logger.info(
+        f"Setting global grid specification: type={grid_type}, tgrid={fpath_tgrid}, ckdtree={fpath_ckdtree}"
+    )
 
     _fpath_tgrid = str(fpath_tgrid) if fpath_tgrid else None
     _fpath_ckdtree = str(fpath_ckdtree) if fpath_ckdtree else None

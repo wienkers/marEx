@@ -1,0 +1,62 @@
+# Read the Docs configuration file for marEx
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+
+# Required
+version: 2
+
+# Set the OS, Python version and tools
+build:
+  os: ubuntu-22.04
+  tools:
+    python: "3.11"
+  jobs:
+    # Install system dependencies
+    pre_create_environment:
+      - apt-get update
+      - apt-get install -y libproj-dev proj-data proj-bin libgeos-dev
+    # Pre-install requirements to handle problematic packages
+    pre_install:
+      - pip install --upgrade pip setuptools wheel
+      - pip install numpy scipy  # Install these first to avoid build issues
+
+# Build documentation in the docs/ directory with Sphinx
+sphinx:
+  configuration: docs/conf.py
+  builder: html
+  fail_on_warning: false
+
+# Explicitly set the version control system
+vcs:
+  submodules:
+    include: all
+
+# Set the Python environment and dependencies
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - full  # Install with full optional dependencies
+    - requirements: docs/requirements-docs.txt
+
+# Configure search functionality
+search:
+  ranking:
+    api/: -1
+    generated/: -2
+  ignore:
+    - "*.pdf"
+    - "_build/*"
+    - "_static/*"
+    - "_templates/*"
+
+# Formats to build (HTML is default, can add PDF/EPUB)
+formats:
+  - pdf
+  - epub
+
+# Environment variables for build
+environment:
+  READTHEDOCS: "True"
+  MPLBACKEND: "Agg"  # Use non-interactive matplotlib backend
+  DASK_DISTRIBUTED__LOGGING__DISTRIBUTED: "error"  # Reduce dask logging

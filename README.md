@@ -3,6 +3,8 @@
 
 [![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
+[![PyPI version](https://badge.fury.io/py/marEx.svg)](https://badge.fury.io/py/marEx)
+[![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 
 Marine Extremes Python Package
 ==============================
@@ -14,7 +16,7 @@ Marine Extremes Python Package
 ## Key Capabilities
 
 - **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
-- **🔬 Advanced Analytics**: Multiple statistical methodologies for robust extreme event detection  
+- **🔬 Advanced Analytics**: Multiple statistical methodologies for robust extreme event detection
 - **📈 Complex Event Tracking**: Seamlessly handles coherent object splitting, merging, and evolution
 - **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
 - **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to a supercomputer using to 1024+ cores
@@ -58,7 +60,7 @@ MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for
   - Provides much more accessible and usable tracking outputs:
     - Tracked object properties (such as area, centroid, and any other user-defined properties) are mapped into `ID`-`time` space
     - Details & Properties of all Merging/Splitting events are recorded.
-    - Provides other useful information that may be difficult to extract from the large `object ID field`, such as: 
+    - Provides other useful information that may be difficult to extract from the large `object ID field`, such as:
       - Event presence in time
       - Event start/end times and duration
       - etc...
@@ -88,7 +90,7 @@ https://github.com/user-attachments/assets/5acf48eb-56bf-43e5-bfc4-4ef1a7a90eff
 
 **Performance Optimisations:**
 - **JIT Compilation**: Numba-accelerated critical paths for numerical kernels
-- **GPU Acceleration**: Optional JAX backend for tensor operations  
+- **GPU Acceleration**: Optional JAX backend for tensor operations
 - **Sparse Operations**: Custom sparse matrix algorithms for unstructured grids
 - **Cache-Aware**: Memory access patterns optimised for modern CPU architectures
 
@@ -96,7 +98,7 @@ https://github.com/user-attachments/assets/5acf48eb-56bf-43e5-bfc4-4ef1a7a90eff
 ## Computational Workflow
 
 1. **Preprocess**: Remove trends & seasonal cycles and identify anomalous extremes
-2. **Detect**: Filter & label connected regions using morphological operations  
+2. **Detect**: Filter & label connected regions using morphological operations
 3. **Track**: Follow objects through time, handling complex evolution patterns
 4. **Analyse**: Extract event statistics, duration, and spatial properties
 
@@ -111,9 +113,9 @@ import marEx
 file_name = 'path/to/sst/data'
 sst = xr.open_dataset(file_name, chunks={'time':500}).sst
 
-# Process Data
+# Process Data - settings automatically optimised based on available dependencies
 extremes_ds = marEx.preprocess_data(
-    sst, 
+    sst,
     method_anomaly='shifting_baseline',      # Anomalies from a rolling climatology using previous window_year years
     method_extreme='hobday_extreme',         # Local day-of-year specific thresholds with windowing
     threshold_percentile=95,                 # 95th percentile threshold for extremes
@@ -121,6 +123,10 @@ extremes_ds = marEx.preprocess_data(
     smooth_days_baseline=21,                 #    and smoothing window for determining the anomalies
     window_days_hobday=11                    # Window size of compiled samples collected for the extremes detection
 )
+
+# Performance note: JAX acceleration automatically used if available
+if marEx.has_dependency('jax'):
+    print("🚀 Using JAX-accelerated computations")
 ```
 
 The resulting xarray dataset `extremes_ds` will have the following structure & entries:
@@ -133,7 +139,7 @@ Coordinates:
     time        (time)
 Data variables:
     dat_anomaly     (time, lat, lon)        float64     dask.array
-    mask            (lat, lon)              bool        dask.array 
+    mask            (lat, lon)              bool        dask.array
     extreme_events  (time, lat, lon)        bool        dask.array
     thresholds      (dayofyear, lat, lon)   float64     dask.array
 ```
@@ -145,14 +151,14 @@ where
 - `extreme_events_stn` is the STD-renormalised anomalies (if `normalise=True`)
 
 Optional arguments for `marEx.preprocess_data()` include:
-- `method_anomaly`: Method for anomaly detection. 
+- `method_anomaly`: Method for anomaly detection.
   - `'detrended_baseline'`: (Default) Uses a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). This method is much faster to preprocess, but care must be taken because the harmonic detrending strongly biases certain statistics. Requires the additional arguments:
     - `std_normalise`: Whether to normalise the anomalies using a 30-day rolling standard deviation. Default is `False`.
     - `detrend_orders`: List of polynomial orders for detrending. Default is `[1]`, i.e. 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
-  - `'shifting_baseline'`: Uses a smoothed rolling climatology of the previous `window_year_baseline` years with `smooth_days_baseline` days of smoothing. This method is more "correct", but shortens the time series by `window_year_baseline` years. Requires the additional arguments: 
+  - `'shifting_baseline'`: Uses a smoothed rolling climatology of the previous `window_year_baseline` years with `smooth_days_baseline` days of smoothing. This method is more "correct", but shortens the time series by `window_year_baseline` years. Requires the additional arguments:
     - `window_year_baseline`: The number of years to use for the rolling climatology baseline. Default is `15` previous years.
     - `smooth_days_baseline`: The number of days to use for smoothing the rolling climatology baseline. Default is `21` days.
-- `method_extreme`: Method for identifying extreme events. 
+- `method_extreme`: Method for identifying extreme events.
   - `'global_extreme'`: (Default) Applies a global-in-time (i.e. constant in time) threshold. This method is a hack introduced by Hillary Scannell in `ocetrac`, which when paired with `std_normalise=True` can approximate `hobday_extreme` in very specific cases and with some caveats. N.B.: Normalising by local STD is again memory-intensive, at which point there is little gained by this approximate method.
   - `'hobday_extreme'`: Defines a local day-of-year specific threshold within a window of `window_days_hobday` (closer to the Hobday et al. (2016) definition for simple time-series). This method is more "correct", but is very computationally- & memory-demanding (requires ~5x additional scratch space). Requires the additional argument:
     - `window_days_hobday`: The window size to include in the day-of-year threshold calculation. Default is `11` days.
@@ -170,7 +176,6 @@ See, e.g. `./examples/unstructured data/01_preprocess_extremes.ipynb` for a deta
 import xarray as xr
 import marEx
 
-
 # Load Pre-processed Data
 file_name = 'path/to/binary/extreme/data'
 chunk_size = {'time': 25, 'lat': -1, 'lon': -1}
@@ -178,7 +183,7 @@ extremes_ds = xr.open_dataset(file_name, chunks=chunk_size)
 
 # ID, Track, & Merge
 tracker = marEx.tracker(
-    extremes_ds.extreme_events, 
+    extremes_ds.extreme_events,
     extremes_ds.mask,
     area_filter_quartile=0.5,      # Remove the smallest 50% of the identified coherent extreme areas
     R_fill=8,                      # Fill small holes with radius < 8 _cells_
@@ -192,8 +197,8 @@ extreme_events_ds, merges_ds = tracker.run(return_merges=True)
 
 The resulting xarray dataset `extreme_events_ds` will have the following structure & entries:
 ```
-xarray.Dataset 
-Dimensions: (lat, lon, time, ID, component, sibling_ID) 
+xarray.Dataset
+Dimensions: (lat, lon, time, ID, component, sibling_ID)
 Coordinates:
     lat         (lat)
     lon         (lon)
@@ -210,7 +215,7 @@ Data variables:
     merge_ledger          (time, ID, sibling_ID)  int32       ndarray
 
 ```
-where 
+where
 - `ID_field` is the binary field of tracked events,
 - `global_ID` is the unique ID of each object. `global_ID.sel(ID=10)` tells you the corresponding mapped `original_id` of event ID 10 at every time,
 - `area` is the area of each event as a function of time,
@@ -221,8 +226,8 @@ where
 
 Additionally, if running with `return_merges=True`, the resulting xarray dataset `merges_ds` will have the following structure & entries:
 ```
-xarray.Dataset 
-Dimensions: (merge_ID, parent_idx, child_idx) 
+xarray.Dataset
+Dimensions: (merge_ID, parent_idx, child_idx)
 Data variables:
     parent_IDs      (merge_ID, parent_idx)  int32       ndarray
     child_IDs       (merge_ID, child_idx)   int32       ndarray
@@ -237,7 +242,7 @@ where
 - `merge_time` is the time of each merging event,
 - `n_parents` and `n_children` are the number of parent and child objects participating in each merging event.
 
-Arguments for `marEx.tracker()` include: 
+Arguments for `marEx.tracker()` include:
 - `data_bin`: The binary field of events to group & label. _Must represent an underlying `dask` array_.
 - `mask`: The land-sea mask to apply to the binary field, indicating points to keep.
 - `area_filter_quartile`: The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
@@ -245,8 +250,8 @@ Arguments for `marEx.tracker()` include:
 - `T_fill`: The permissible temporal gap between objects for tracking continuity to be maintained. Default is `2` days.
 - `allow_merging`:
   - `True`: (Default) Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
-  - `False`: Classical `ndmeasure.label` with simple time connectivity, i.e. Scannell et al. 
-- `nn_partitioning`: 
+  - `False`: Classical `ndmeasure.label` with simple time connectivity, i.e. Scannell et al.
+- `nn_partitioning`:
   - `True`: (Default) Implement a better partitioning of merged child objects _based on closest parent cell_.
   - `False`: Use the _parent centroids_ to determine partitioning between new child objects, i.e. Di Sun & Bohai Zhang 2023. N.B.: This has major problems with small merging objects suddenly obtaining unrealistically-large (and often disjoint) fractions of the larger object.
 - `overlap_threshold`: The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event and continue tracking with the same ID. Default is `0.5`.
@@ -257,33 +262,54 @@ See, e.g. `./examples/unstructured data/02_id_track_events.ipynb` for a detailed
 
 ## Installation & Setup
 
-### Standard Installation
+### Installation Profiles
+
+#### 1. Full Installation (Complete Feature Set)
 ```bash
-# Complete installation with performance optimisations
+# Complete installation with all optional dependencies
 pip install marEx[full]
-
-# Minimal installation (fallback if JAX unavailable)  
-pip install marEx
 ```
+**Use case**: Research environments, comprehensive analysis workflows, and maximum functionality.
 
-### High-Performance Computing Integration
+**Features**: All available features including JAX acceleration, enhanced plotting, and all optimisations.
 
-MarEx includes HPC utility functions for deployment on cloud/supercomputing environments:
+**Performance**: Maximum performance with all acceleration options enabled.
 
-```python
-import marEx.helper as helper
-
-# Automated SLURM cluster management
-client = helper.start_distributed_cluster(
-    n_workers=512,           # Scale to 512 workers
-    workers_per_node=64,
-    node_memory=512,
-    runtime=120              # in minutes
-)
-
-# Automatic dashboard tunneling and monitoring
-helper.get_cluster_info(client)
+#### 2. HPC Installation (Supercomputing Environments)
+```bash
+# Complete HPC setup with all features
+pip install marEx[full,hpc]
 ```
+**Use case**: Deployment on SLURM clusters, cloud computing, or multi-node processing.
+
+**Features**: All features + cluster management, automated resource monitoring, and distributed computing tools.
+
+**Performance**: Scales to 1000+ cores with optimised memory management.
+
+#### 3. Development Installation (Contributing to MarEx)
+```bash
+# Clone and install for development
+git clone https://github.com/wienkers/marEx.git
+cd marEx
+pip install -e .[dev]
+
+# Install pre-commit hooks
+pre-commit install
+```
+**Use case**: Contributing to MarEx, customizing algorithms, or debugging.
+
+**Features**: All features + development tools, testing framework, documentation building, and code quality tools.
+
+
+### Getting Help
+
+If you encounter installation issues:
+
+1. **Check Dependencies**: Run `marEx.print_dependency_status()` to identify missing components
+2. **Search Issues**: Check the [GitHub Issues](https://github.com/wienkers/marEx/issues) for similar problems
+3. **System Information**: Include your OS, Python version, and error messages when reporting issues
+4. **Support**: Reach out to [Aaron Wienkers](mailto:aaron.wienkers@gmail.com)
+
 
 ---
 Please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com) with any questions, comments, issues, or bugs.

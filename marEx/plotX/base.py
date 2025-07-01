@@ -6,19 +6,62 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
 import dask
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-from matplotlib.axes import Axes
-from matplotlib.cm import ScalarMappable
-from matplotlib.colorbar import Colorbar
-from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
-from matplotlib.figure import Figure
 from numpy.typing import NDArray
-from PIL import Image
+
+from ..exceptions import CoordinateError, DependencyError, VisualisationError
+from ..logging_config import configure_logging, get_logger, log_timing
+
+# Get module logger
+logger = get_logger(__name__)
+
+# Handle optional dependencies for plotting
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
+    ccrs = None
+    cfeature = None
+
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.axes import Axes
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colorbar import Colorbar
+    from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
+    from matplotlib.figure import Figure
+
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    plt = None
+    Axes = None
+    ScalarMappable = None
+    Colorbar = None
+    BoundaryNorm = None
+    ListedColormap = None
+    Normalize = None
+    Figure = None
+
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    Image = None
+
+
+def _check_plotting_dependencies() -> None:
+    """Check if plotting dependencies are available and raise informative error if not."""
+    from .._dependencies import require_dependencies
+
+    require_dependencies(["matplotlib", "cartopy"], "Plotting functionality")
 
 
 @dataclass
@@ -38,6 +81,8 @@ class PlotConfig:
     norm: Optional[Union[BoundaryNorm, Normalize]] = None
     plot_IDs: bool = False
     extend: str = "both"
+    verbose: Optional[bool] = None
+    quiet: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.cperc is None:
@@ -47,9 +92,14 @@ class PlotConfig:
         if self.plot_IDs:
             self.show_colorbar = False
 
+        # Configure logging if verbose/quiet parameters are provided
+        if self.verbose is not None or self.quiet is not None:
+            configure_logging(verbose=self.verbose, quiet=self.quiet)
+
 
 class PlotterBase:
     def __init__(self, xarray_obj: xr.DataArray) -> None:
+        _check_plotting_dependencies()
         self.da = xarray_obj
 
         # Cache common features
@@ -150,6 +200,7 @@ class PlotterBase:
         self, config: PlotConfig, ax: Optional[Axes] = None
     ) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
+
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
         fig, ax = self._setup_axes(ax)
@@ -233,6 +284,11 @@ class PlotterBase:
         file_name: Optional[str] = None,
     ) -> Optional[str]:
         """Create an animation from time series data"""
+
+        # Check if PIL is available for image processing
+        from .._dependencies import require_dependencies
+
+        require_dependencies(["pillow"], "Animation functionality")
 
         # Check if ffmpeg is installed
         if shutil.which("ffmpeg") is None:
@@ -410,7 +466,19 @@ def make_frame(
 
     # Handle different grid types
     if grid_info and grid_info.get("type") == "unstructured":
-        from .unstructured import _load_ckdtree, _load_triangulation
+        try:
+            from .unstructured import _load_ckdtree, _load_triangulation
+        except ImportError as e:
+            raise DependencyError(
+                "Unstructured plotting dependencies missing",
+                details=str(e),
+                suggestions=[
+                    "Install plotting dependencies: pip install marEx[plot]",
+                    "Check that scipy and matplotlib are available",
+                    "Verify unstructured grid support is properly installed",
+                ],
+                context={"missing_dependency": str(e), "plot_type": "unstructured"},
+            )
 
         if grid_info.get("ckdtree_path"):
             # Use cached ckdtree data

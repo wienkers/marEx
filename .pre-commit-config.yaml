@@ -1,0 +1,91 @@
+# Pre-commit hooks for marEx package
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  # General code quality hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        description: Remove trailing whitespace
+        exclude: '^tests/data/.*(\.zarr/.*|\.nc)$'
+      - id: end-of-file-fixer
+        description: Ensure files end in a newline
+        exclude: '^tests/data/.*(\.zarr/.*|\.nc)$'
+      - id: check-yaml
+        description: Check YAML files are valid
+      - id: check-toml
+        description: Check TOML files are valid
+      - id: check-added-large-files
+        description: Prevent adding large files to git
+        exclude: '^tests/data/.*(\.zarr/.*|\.nc)$'
+      - id: check-case-conflict
+        description: Check for files that would conflict on case-insensitive filesystems
+      - id: check-merge-conflict
+        description: Check for merge conflict markers
+      - id: debug-statements
+        description: Check for debugger imports and py37+ `breakpoint()` calls in python
+
+  # Python code formatting
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        description: Format Python code with Black
+        language_version: python3
+        args: [--line-length=88, --target-version=py310]
+
+  # Import sorting
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        description: Sort Python imports
+        args: [--profile=black, --line-length=88]
+
+  # Python linting
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.0
+    hooks:
+      - id: flake8
+        description: Lint Python code with flake8
+        additional_dependencies:
+          - flake8-docstrings
+          - flake8-bugbear
+          - flake8-comprehensions
+          - flake8-pyproject
+
+  # Type checking with mypy (optional - disabled by default due to extensive issues)
+  # Uncomment the following section when ready to address type annotations
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.10.1
+  #   hooks:
+  #     - id: mypy
+  #       description: Static type checking with mypy
+  #       args: [--ignore-missing-imports, --no-strict-optional, --check-untyped-defs]
+  #       additional_dependencies:
+  #         - types-requests
+  #         - types-PyYAML
+  #       # Only run on marEx package, exclude tests for now
+  #       files: ^marEx/.*\.py$
+
+  # Jupyter notebook cleaning
+  - repo: https://github.com/nbQA-dev/nbQA
+    rev: 1.8.5
+    hooks:
+      - id: nbqa-black
+        description: Format Jupyter notebooks with black
+        args: [--line-length=88, --target-version=py310]
+      - id: nbqa-isort
+        description: Sort imports in Jupyter notebooks
+        args: [--profile=black, --line-length=88]
+
+  # Security checks (disabled due to false positives in scientific computing context)
+  # - repo: https://github.com/PyCQA/bandit
+  #   rev: 1.7.9
+  #   hooks:
+  #     - id: bandit
+  #       description: Security linting with bandit
+  #       args: [--skip, B404,B603,B607]  # Skip subprocess warnings for scientific computing
+  #       exclude: ^tests/
+  #       files: ^marEx/.*\.py$
