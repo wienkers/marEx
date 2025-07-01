@@ -1,4 +1,5 @@
 """Test configuration and fixtures for marEx package."""
+
 import dask
 import numpy as np
 import pytest
@@ -87,9 +88,7 @@ def assert_percentile_frequency(
     if sample_size is not None:
         # Use exact binomial test with known sample size
         # Calculate confidence interval for binomial distribution
-        std_error = np.sqrt(
-            expected_frequency * (1 - expected_frequency) / sample_size
-        )
+        std_error = np.sqrt(expected_frequency * (1 - expected_frequency) / sample_size)
         lower_bound = expected_frequency - tolerance_std * std_error
         upper_bound = expected_frequency + tolerance_std * std_error
 
@@ -105,9 +104,7 @@ def assert_percentile_frequency(
         # Use approximate test with reasonable tolerance for unknown sample size
         # For typical dataset sizes, allow broader tolerance
         relative_tolerance = 0.20  # 20% relative tolerance
-        absolute_tolerance = max(
-            0.005, expected_frequency * relative_tolerance
-        )
+        absolute_tolerance = max(0.005, expected_frequency * relative_tolerance)
 
         lower_bound = expected_frequency - absolute_tolerance
         upper_bound = expected_frequency + absolute_tolerance

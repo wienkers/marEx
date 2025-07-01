@@ -42,22 +42,37 @@ from scipy.sparse import coo_matrix, csr_matrix, eye
 from scipy.sparse.csgraph import connected_components
 from skimage.measure import regionprops_table
 
+from ._dependencies import warn_missing_dependency
+from .exceptions import (
+    ConfigurationError,
+    CoordinateError,
+    DataValidationError,
+    ProcessingError,
+    TrackingError,
+    create_coordinate_error,
+    create_data_validation_error,
+    create_processing_error,
+)
+from .logging_config import (
+    configure_logging,
+    get_logger,
+    log_dask_info,
+    log_memory_usage,
+    log_progress,
+    log_timing,
+    progress_bar,
+)
+
+# Get module logger
+logger = get_logger(__name__)
+
 try:
     import jax.numpy as jnp
-
-    HAS_JAX = True
 except ImportError:
     import numpy as np
 
     jnp = np  # Alias for jnp
-    HAS_JAX = False
-
-    warnings.warn(
-        "JAX not installed. Some functionality will be slower. "
-        "For best performance, install with: pip install marEx[jax]",
-        ImportWarning,
-        stacklevel=2,
-    )
+    warn_missing_dependency("jax", "Some functionality")
 
 
 # ============================
@@ -118,8 +133,146 @@ class tracker:
         Checkpoint strategy ('save', 'load', or None)
     debug : int, default=0
         Debug level (0-2)
-    verbosity : int, default=0
-        Verbosity level
+    verbose : bool, optional
+        Enable verbose logging with detailed progress information.
+        If None, uses current global logging configuration.
+    quiet : bool, optional
+        Enable quiet logging with minimal output (warnings and errors only).
+        If None, uses current global logging configuration.
+        Note: quiet takes precedence over verbose if both are True.
+    regional_mode : bool, default=False
+        Enable regional mode for non-global coordinate ranges.
+        When True, coordinate_units must be specified.
+    coordinate_units : str, optional
+        Coordinate units when regional_mode=True.
+        Must be either 'degrees' or 'radians'.
+    coordinates : dict, optional
+        Coordinate names for unstructured grids.
+        Should contain 'xdim' and 'ydim' keys for x and y coordinates.
+
+    Examples
+    --------
+    Basic tracking of marine heatwave events from preprocessed data:
+
+    >>> import xarray as xr
+    >>> import marEx
+    >>>
+    >>> # Load preprocessed extreme events data
+    >>> processed = xr.open_dataset('extreme_events.nc', chunks={})
+    >>> extreme_events = processed.extreme_events  # Boolean array
+    >>> mask = processed.mask  # Ocean/land mask
+    >>>
+    >>> # Initialise tracker with basic parameters
+    >>> tracker = marEx.tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     R_fill=8,                    # Fill holes up to 8 grid cells
+    ...     area_filter_quartile=0.5     # Remove smallest 50% of objects
+    ...     allow_merging=False          # Basic tracking without splitting/merging
+    ... )
+    >>>
+    >>> # Run tracking algorithm
+    >>> events = tracker.run()
+    >>> print(f"Identified {events.ID.max().compute()} distinct events")
+    Identified 1247 distinct events
+
+    Advanced tracking with merging and splitting enabled:
+
+    >>> # More sophisticated tracking with temporal gap filling
+    >>> advanced_tracker = marEx.tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     R_fill=12,               # Larger spatial gap filling
+    ...     T_fill=4,                # Fill up to 4-day temporal gaps
+    ...     area_filter_quartile=0.25,  # More aggressive size filtering
+    ...     allow_merging=True,      # Enable split/merge detection
+    ...     overlap_threshold=0.3    # Lower threshold for object linking
+    ... )
+    >>>
+    >>> events_advanced, merges_log = advanced_tracker.run(return_merges=True)
+    >>> print(events_advanced.data_vars)
+    Data variables:
+        event           (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
+        event_centroid  (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
+        ID_field        (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
+        global_ID       (time, ID)              int32           dask.array<chunksize=(25, 1247)>
+        area            (time, ID)              float32         dask.array<chunksize=(25, 1247)>
+        centroid        (component, time, ID)   float64         dask.array<chunksize=(2, 25, 1247)>
+        presence        (time, ID)              bool            dask.array<chunksize=(25, 1247)>
+        time_start      (ID)                    datetime64[ns]  dask.array<chunksize=(1247,)>
+        time_end        (ID)                    datetime64[ns]  dask.array<chunksize=(1247,)>
+        merge_ledger    (time, ID, sibling_ID)  int32           dask.array<chunksize=(25, 1247, 10)>
+
+    Processing unstructured ocean model data (ICON):
+
+    >>> # Load ICON ocean model data with connectivity
+    >>> icon_data = xr.open_dataset('icon_extremes.nc', chunks={})
+    >>> icon_extremes = icon_data.extreme_events  # (time, ncells)
+    >>> icon_mask = icon_data.mask
+    >>> neighbours = icon_data.neighbours  # Cell connectivity
+    >>> cell_areas = icon_data.cell_areas  # Physical areas
+    >>>
+    >>> # Track events on unstructured grid
+    >>> unstructured_tracker = marEx.tracker(
+    ...     icon_extremes,
+    ...     icon_mask,
+    ...     R_fill=5,                                   # 5-neighbor radius for gap filling
+    ...     area_filter_quartile=0.6,                   # Remove 60% of smallest events
+    ...     unstructured_grid=True,                     # Enable unstructured mode
+    ...     xdim='ncells',                              # Cell dimension name
+    ...     coordinates={"xdim": "lon", "ydim": "lat"}, # Coordinate names
+    ...     neighbours=neighbours,                      # Required for unstructured
+    ...     cell_areas=cell_areas                       # Required for area calculations
+    ... )
+    >>> unstructured_events = unstructured_tracker.run()
+
+    Memory management and checkpointing for large datasets:
+
+    >>> # Use checkpointing for very large datasets
+    >>> large_tracker = marEx.tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     R_fill=8,
+    ...     area_filter_quartile=0.5,
+    ...     temp_dir='/scratch/user/tracking_temp',  # Temporary storage
+    ...     checkpoint='save'             # Save intermediate results
+    ... )
+    >>> # Processing can be resumed if interrupted
+    >>> large_events = large_tracker.run()
+
+    Comparing different filtering strategies:
+
+    >>> # Conservative filtering - keep more events
+    >>> conservative = marEx.tracker(
+    ...     extreme_events, mask, R_fill=5, area_filter_quartile=0.1
+    ... )
+    >>> conservative_events = conservative.run()
+    >>>
+    >>> # Aggressive filtering - focus on largest events
+    >>> aggressive = marEx.tracker(
+    ...     extreme_events, mask, R_fill=15, area_filter_quartile=0.8
+    ... )
+    >>> aggressive_events = aggressive.run()
+    >>>
+    >>> print(f"Conservative: {conservative_events.ID.max().compute()} events")
+    >>> print(f"Aggressive: {aggressive_events.ID.max().compute()} events")
+
+    Integration with full marEx workflow:
+
+    >>> # Complete workflow from raw data to tracked events
+    >>> raw_sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
+    >>>
+    >>> # Step 1: Preprocess to identify extremes
+    >>> processed = marEx.preprocess_data(raw_sst, threshold_percentile=95)
+    >>>
+    >>> # Step 2: Track extreme events
+    >>> tracker = marEx.tracker(
+    ...     processed.extreme_events,
+    ...     processed.mask,
+    ...     R_fill=8,
+    ...     area_filter_quartile=0.5
+    ... )
+    >>> tracked_events = tracker.run()
     """
 
     def __init__(
@@ -142,10 +295,54 @@ class tracker:
         max_iteration: int = 40,
         checkpoint: Optional[Literal["save", "load", "None"]] = None,
         debug: int = 0,
-        verbosity: int = 0,
+        verbose: Optional[bool] = None,
+        quiet: Optional[bool] = None,
+        regional_mode: bool = False,
+        coordinate_units: Optional[Literal["degrees", "radians"]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
     ) -> None:
+        # Configure logging if verbose/quiet parameters are provided
+        if verbose is not None or quiet is not None:
+            configure_logging(verbose=verbose, quiet=quiet)
+
+        # Store logging preferences
+        self.verbose = verbose
+        self.quiet = quiet
+
+        # Log tracker initialisation
+        logger.info("Initialising MarEx tracker")
+        logger.info(
+            f"Grid type: {'unstructured' if unstructured_grid else 'structured'}"
+        )
+        logger.info(
+            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}"
+        )
+        logger.debug(
+            f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, overlap_threshold={overlap_threshold}"
+        )
+        logger.debug(f"Dimensions: time={timedim}, x={xdim}, y={ydim}")
+
+        # Log input data info
+        log_dask_info(logger, data_bin, "Binary input data")
+        log_memory_usage(logger, "Tracker initialisation")
 
         self.data_bin = data_bin
+
+        # Store coordinate parameters
+        self.regional_mode = regional_mode
+        self.coordinate_units = coordinate_units
+
+        # Unify coordinate system: degrees
+        if not unstructured_grid:
+            self.xcoord = xdim
+            self.ycoord = ydim
+        else:
+            self.xcoord = coordinates["xdim"]
+            self.ycoord = coordinates["ydim"]
+        self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
+        self.lon_init = data_bin[self.xcoord].persist()
+        self._unify_coordinates()
+
         self.mask = mask
         self.R_fill = int(R_fill)
         self.T_fill = T_fill
@@ -156,14 +353,13 @@ class tracker:
         self.timedim = timedim
         self.xdim = xdim
         self.ydim = ydim
-        self.lat = data_bin.lat.persist()
-        self.lon = data_bin.lon.persist()
+        self.lat = data_bin[self.ycoord].persist()
+        self.lon = data_bin[self.xcoord].persist()
         self.timechunks = data_bin.chunks[data_bin.dims.index(timedim)][0]
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # For structured grids, units are pixels
         self.checkpoint = checkpoint
         self.debug = debug
-        self.verbosity = verbosity
 
         # Extract data_bin metadata to inherit
         if hasattr(self.data_bin, "attrs") and self.data_bin.attrs:
@@ -191,9 +387,17 @@ class tracker:
                 try:
                     self.data_bin = self.data_bin.transpose(self.timedim, self.xdim)
                 except:
-                    raise ValueError(
-                        f"Unstructured MarEx only supports 2D DataArrays with dimensions "
-                        f"({self.timedim} and {self.xdim}). Found {list(self.data_bin.dims)}"
+                    raise create_data_validation_error(
+                        "Invalid dimensions for unstructured data",
+                        details=f"Expected 2D array with dimensions ({self.timedim}, {self.xdim}), got {list(self.data_bin.dims)}",
+                        suggestions=[
+                            "Ensure data has time and cell dimensions only",
+                            "Check dimension mapping in function call",
+                        ],
+                        data_info={
+                            "actual_dims": list(self.data_bin.dims),
+                            "expected_dims": [self.timedim, self.xdim],
+                        },
                     )
         else:
             # For structured grids, ensure 3D data
@@ -203,35 +407,192 @@ class tracker:
                         self.timedim, self.ydim, self.xdim
                     )
                 except:
-                    raise ValueError(
-                        f"Gridded (structured) MarEx only supports 3D DataArrays with dimensions "
-                        f"({self.timedim}, {self.ydim}, and {self.xdim}). Found {list(self.data_bin.dims)}"
+                    raise create_data_validation_error(
+                        "Invalid dimensions for gridded data",
+                        details=f"Expected 3D array with dimensions ({self.timedim}, {self.ydim}, {self.xdim}), got {list(self.data_bin.dims)}",
+                        suggestions=[
+                            "Ensure data has time, latitude, and longitude dimensions",
+                            "Check dimension mapping and coordinate names",
+                        ],
+                        data_info={
+                            "actual_dims": list(self.data_bin.dims),
+                            "expected_dims": [self.timedim, self.ydim, self.xdim],
+                        },
                     )
 
         # Check data type and structure
         if self.data_bin.data.dtype != bool:
-            raise ValueError("The input DataArray must be binary (boolean type)")
+            raise create_data_validation_error(
+                "Input DataArray must be binary (boolean type)",
+                details=f"Found dtype {self.data_bin.data.dtype}, expected bool",
+                suggestions=[
+                    "Convert data using da > threshold for binary events",
+                    "Use xr.where(condition, True, False) for boolean conversion",
+                ],
+                data_info={
+                    "actual_dtype": str(self.data_bin.data.dtype),
+                    "expected_dtype": "bool",
+                },
+            )
 
         if not is_dask_collection(self.data_bin.data):
-            raise ValueError("The input DataArray must be backed by a Dask array")
+            raise create_data_validation_error(
+                "Input DataArray must be Dask-backed",
+                details="Tracking requires chunked data for efficient processing",
+                suggestions=[
+                    "Convert to Dask: data_bin = data_bin.chunk({'time': 10})",
+                    "Load with chunking: xr.open_dataset('file.nc', chunks={})",
+                ],
+                data_info={"data_type": type(self.data_bin.data).__name__},
+            )
 
         if self.mask.data.dtype != bool:
-            raise ValueError("The mask must be binary (boolean type)")
+            raise create_data_validation_error(
+                "Mask must be binary (boolean type)",
+                details=f"Found mask dtype {self.mask.data.dtype}, expected bool",
+                suggestions=["Convert mask using mask > 0 or mask.astype(bool)"],
+                data_info={"mask_dtype": str(self.mask.data.dtype)},
+            )
 
         if (self.mask == False).all():
-            raise ValueError(
-                "Mask contains only False values. It should indicate valid regions with True"
+            raise create_data_validation_error(
+                "Mask contains only False values",
+                details="Mask should indicate valid regions with True values",
+                suggestions=[
+                    "Check mask orientation - it should mark valid (ocean) regions as True",
+                    "Invert mask if needed: mask = ~mask",
+                    "Create ocean mask from land mask",
+                ],
             )
 
         if (self.area_filter_quartile < 0) or (self.area_filter_quartile > 1):
-            raise ValueError("area_filter_quartile must be between 0 and 1")
+            raise ConfigurationError(
+                "Invalid area_filter_quartile value",
+                details=f"Value {self.area_filter_quartile} is outside valid range [0, 1]",
+                suggestions=[
+                    "Use 0.0 to keep all events",
+                    "Use 0.25 to filter smallest 25% of events",
+                    "Use 0.5 to keep only larger events",
+                ],
+                context={
+                    "provided_value": self.area_filter_quartile,
+                    "valid_range": [0, 1],
+                },
+            )
 
         if self.T_fill % 2 != 0:
-            raise ValueError("T_fill must be even for symmetry")
+            raise ConfigurationError(
+                "T_fill must be even for temporal symmetry",
+                details=f"Provided T_fill={self.T_fill} is odd",
+                suggestions=["Use even values: 2, 4, 6, 8, etc."],
+                context={"provided_value": self.T_fill, "requirement": "even number"},
+            )
 
-        # Check geographic coordinates
-        if (self.lon.max().compute().item() - self.lon.min().compute().item()) < 100:
-            raise ValueError("Lat/Lon coordinates must be in degrees")
+    def _unify_coordinates(self) -> None:
+
+        if self.regional_mode:
+            if self.coordinate_units is None:
+                raise create_coordinate_error(
+                    "coordinate_units must be specified when regional_mode=True",
+                    suggestions=[
+                        "Set coordinate_units='degrees' for degree-based coordinates",
+                        "Set coordinate_units='radians' for radian-based coordinates",
+                    ],
+                )
+            if self.coordinate_units not in ["degrees", "radians"]:
+                raise create_coordinate_error(
+                    f"Invalid coordinate_units '{self.coordinate_units}'",
+                    details="coordinate_units must be either 'degrees' or 'radians'",
+                    suggestions=[
+                        "Use coordinate_units='degrees' or coordinate_units='radians'"
+                    ],
+                )
+        else:
+
+            # Auto-detect coordinate units for global data
+            lon = self.data_bin[self.xcoord]
+            lon_range = float(lon.max()) - float(lon.min())
+
+            # Check for degrees (range close to 360)
+            if abs(lon_range - 360.0) <= 1.0:
+                self.coordinate_units = "degrees"
+
+            # Check for radians (range close to 2π)
+            elif abs(lon_range - 2 * np.pi) <= 0.02:
+                self.coordinate_units = "radians"
+
+            # If neither, throw error unless in regional mode
+            else:
+                raise create_coordinate_error(
+                    f"Cannot auto-detect coordinate units from range {lon_range:.3f}",
+                    details=(
+                        f"Expected ranges: ~360 degrees or ~{2*np.pi:.3f} radians. "
+                        f"Found range: {lon_range:.3f}"
+                    ),
+                    suggestions=[
+                        "Use regional_mode=True with coordinate_units specified for regional data",
+                        "Check that your coordinate values are correct",
+                        "Verify x-dimension coordinate ranges",
+                    ],
+                    context={"detected_range": lon_range, "xdim": self.xcoord},
+                )
+
+        # Convert lat & lon to degrees
+        if self.coordinate_units == "radians":
+            self.data_bin[self.xcoord] = self.data_bin[self.xcoord] * 180.0 / np.pi
+            self.data_bin[self.ycoord] = self.data_bin[self.ycoord] * 180.0 / np.pi
+
+    def _remap_coordinates(self, events_ds) -> None:
+        """Remap coordinates to original lat/lon values after processing.
+        Map centroids from lat=[-180,180] back into original lat/lon units & range.
+        """
+
+        # Re-assign original coordinates from original marEx input
+        events_ds = events_ds.assign_coords(
+            lat=self.lat_init.compute(), lon=self.lon_init.compute()
+        )
+
+        # Map centroids
+        centroids = events_ds[
+            "centroid"
+        ].persist()  # (lat, lon), in degrees [-90,90], [-180,180]
+
+        # Split into components
+        centroids_lat = centroids.isel(component=0)  # [-90, 90] degrees
+        centroids_lon = centroids.isel(component=1)  # [-180, 180] degrees
+
+        # Get original coordinate bounds
+        lon_min = self.lon_init.min().compute().item()
+        lon_max = self.lon_init.max().compute().item()
+
+        # Convert units and adjust ranges
+        if self.coordinate_units == "radians":
+            # Convert from degrees to radians
+            centroids_lat = centroids_lat * np.pi / 180.0  # Now in [-π/2, π/2]
+            centroids_lon = centroids_lon * np.pi / 180.0  # Now in [-π, π]
+
+            # Check if original longitude was in [0, 2π] range
+            if lon_min >= 0 and lon_max > np.pi:
+                # Shift from [-π, π] to [0, 2π]
+                centroids_lon = xr.where(
+                    centroids_lon < 0, centroids_lon + 2 * np.pi, centroids_lon
+                )
+        else:
+            # Coordinates remain in degrees
+            # Check if original longitude was in [0, 360] range
+            if lon_min >= 0 and lon_max > 180:
+                # Shift from [-180, 180] to [0, 360]
+                centroids_lon = xr.where(
+                    centroids_lon < 0, centroids_lon + 360, centroids_lon
+                )
+
+        # Reassemble centroids with remapped coordinates
+        centroids_remapped = xr.concat([centroids_lat, centroids_lon], dim="component")
+
+        # Update the dataset
+        events_ds["centroid"] = centroids_remapped
+
+        return events_ds
 
     def _setup_unstructured_grid(
         self,
@@ -242,8 +603,13 @@ class tracker:
     ) -> None:
         """Set up special handling for unstructured grids."""
         if not temp_dir:
-            raise ValueError(
-                "Unstructured grid requires a temporary directory for memory-efficient processing"
+            raise ConfigurationError(
+                "Missing temporary directory for unstructured processing",
+                details="Unstructured grids require temporary storage for memory efficiency",
+                suggestions=[
+                    "Provide temp_dir parameter: tracker(..., temp_dir='/tmp/marex')",
+                    "Ensure directory has sufficient space and write permissions",
+                ],
             )
 
         self.scratch_dir = temp_dir
@@ -274,11 +640,32 @@ class tracker:
 
         # Validate neighbour array structure
         if self.neighbours_int.shape[0] != 3:
-            raise ValueError(
-                "Unstructured MarEx only supports triangular grids. Neighbours array must have shape (3, ncells)"
+            raise create_data_validation_error(
+                "Invalid neighbour array for triangular grid",
+                details=f"Expected shape (3, ncells), got {self.neighbours_int.shape}",
+                suggestions=[
+                    "Ensure triangular grid connectivity",
+                    "Check neighbour array from grid file",
+                    "Verify unstructured grid format",
+                ],
+                data_info={
+                    "actual_shape": self.neighbours_int.shape,
+                    "expected_shape": "(3, ncells)",
+                },
             )
         if self.neighbours_int.dims != ("nv", self.xdim):
-            raise ValueError("Neighbours array must have dimensions (nv, xdim)")
+            raise create_data_validation_error(
+                "Invalid neighbour array dimensions",
+                details=f"Expected dimensions ('nv', '{self.xdim}'), got {self.neighbours_int.dims}",
+                suggestions=[
+                    "Check dimension names in grid file",
+                    "Verify coordinate mapping",
+                ],
+                data_info={
+                    "actual_dims": self.neighbours_int.dims,
+                    "expected_dims": ("nv", self.xdim),
+                },
+            )
 
         # Construct sparse dilation matrix
         self._build_sparse_dilation_matrix()
@@ -294,12 +681,11 @@ class tracker:
         row_indices = row_indices[valid_mask]
         col_indices = col_indices[valid_mask]
 
-        max_neighbour = self.neighbours_int.max().compute().item() + 1
-
         # Create the sparse matrix for dilation
+        ncells = self.neighbours_int.shape[1]
         dilate_coo = coo_matrix(
             (jnp.ones_like(row_indices, dtype=bool), (row_indices, col_indices)),
-            shape=(self.neighbours_int.shape[1], max_neighbour),
+            shape=(ncells, ncells),
         )
         self.dilate_sparse = csr_matrix(dilate_coo)
 
@@ -307,11 +693,11 @@ class tracker:
         identity = eye(self.neighbours_int.shape[1], dtype=bool, format="csr")
         self.dilate_sparse = self.dilate_sparse + identity
 
-        if self.verbosity > 0:
-            print("Finished constructing the sparse dilation matrix")
+        logger.info("Finished constructing the sparse dilation matrix")
 
     def _configure_warnings(self) -> None:
         """Configure warning and logging suppression based on debug level."""
+        logger.debug(f"Configuring warnings and logging for debug level: {self.debug}")
         if self.debug < 2:
             # Configure logging warning filters
             logging.getLogger("distributed.scheduler").setLevel(logging.ERROR)
@@ -379,20 +765,64 @@ class tracker:
         merges_ds : xarray.Dataset, optional
             Dataset with merge event information (only if return_merges=True)
         """
+        logger.info("Starting complete tracking pipeline")
+        log_memory_usage(logger, "Pipeline start")
+
+        # Progress tracking
+        total_steps = 3
+        current_step = 0
+
         # Preprocess the binary data
-        data_bin_preprocessed, object_stats = self.run_preprocess(checkpoint=checkpoint)
+        current_step += 1
+        logger.info(f"Step {current_step}/{total_steps}: Data preprocessing")
+        with log_timing(
+            logger, "Data preprocessing", log_memory=True, show_progress=True
+        ):
+            data_bin_preprocessed, object_stats = self.run_preprocess(
+                checkpoint=checkpoint
+            )
 
         # Run identification and tracking
-        events_ds, merges_ds, N_events_final = self.run_tracking(data_bin_preprocessed)
+        current_step += 1
+        logger.info(
+            f"Step {current_step}/{total_steps}: Object identification and tracking"
+        )
+        with log_timing(
+            logger,
+            "Object identification and tracking",
+            log_memory=True,
+            show_progress=True,
+        ):
+            events_ds, merges_ds, N_events_final = self.run_tracking(
+                data_bin_preprocessed
+            )
 
         # Compute statistics and finalise output
-        events_ds = self.run_stats_attributes(
-            events_ds, merges_ds, object_stats, N_events_final
+        current_step += 1
+        logger.info(
+            f"Step {current_step}/{total_steps}: Computing event statistics and attributes"
         )
+        with log_timing(
+            logger,
+            "Computing event statistics and attributes",
+            log_memory=True,
+            show_progress=True,
+        ):
+            events_ds = self.run_stats_attributes(
+                events_ds, merges_ds, object_stats, N_events_final
+            )
+
+        logger.info(
+            f"Tracking pipeline completed successfully - {N_events_final} events identified"
+        )
+        logger.debug(f"Final dataset dimensions: {events_ds.dims}")
+        log_memory_usage(logger, "Pipeline completion")
 
         if self.allow_merging and return_merges:
+            logger.debug("Returning both events and merge datasets")
             return events_ds, merges_ds
         else:
+            logger.debug("Returning events dataset only")
             return events_ds
 
     def run_preprocess(
@@ -443,45 +873,57 @@ class tracker:
             return object_stats
 
         if checkpoint == "load":
-            print("Loading preprocessed data & stats...")
+            logger.info("Loading preprocessed data from checkpoint")
             return load_data_from_checkpoint(), load_stats_from_checkpoint()
 
         # Compute area of initial binary data
+        logger.debug("Computing area of initial binary data")
         raw_area = self.compute_area(self.data_bin)
+        logger.debug(f"Initial raw area: {raw_area}")
 
         # Fill small holes & gaps between objects
-        data_bin_filled = self.fill_holes(self.data_bin)
-        del self.data_bin  # Free memory
-        if self.verbosity > 0:
-            print("Finished filling spatial holes")
+        logger.info(f"Filling spatial holes with radius R_fill={self.R_fill}")
+        with log_timing(logger, "Spatial hole filling"):
+            data_bin_filled = self.fill_holes(self.data_bin)
+            del self.data_bin  # Free memory
+            log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
 
         # Fill small time-gaps between objects
-        data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
-        if self.verbosity > 0:
-            print("Finished filling spatio-temporal holes")
+        logger.info(f"Filling temporal gaps with T_fill={self.T_fill}")
+        with log_timing(logger, "Temporal gap filling"):
+            data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
+            log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
         # Remove small objects
-        (
-            data_bin_filtered,
-            area_threshold,
-            object_areas,
-            N_objects_prefiltered,
-            N_objects_filtered,
-        ) = self.filter_small_objects(data_bin_filled)
-        del data_bin_filled  # Free memory
-        if self.verbosity > 0:
-            print("Finished filtering small objects")
+        logger.info(
+            f"Filtering small objects using {self.area_filter_quartile} quartile threshold"
+        )
+        with log_timing(logger, "Small object filtering"):
+            (
+                data_bin_filtered,
+                area_threshold,
+                object_areas,
+                N_objects_prefiltered,
+                N_objects_filtered,
+            ) = self.filter_small_objects(data_bin_filled)
+            del data_bin_filled  # Free memory
+            logger.info(
+                f"Filtered {N_objects_prefiltered} -> {N_objects_filtered} objects (threshold: {area_threshold})"
+            )
+            log_memory_usage(logger, "After object filtering", logging.DEBUG)
 
         # Persist preprocessed data &/or Save checkpoint
         if checkpoint and "save" in checkpoint:
-            print("Saving preprocessed data & stats...")
-            time.sleep(5)
-            data_bin_filtered.name = "data_bin_preproc"
-            data_bin_filtered.to_zarr(
-                f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w"
-            )  # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
-            data_bin_filtered = load_data_from_checkpoint()
+            logger.info("Saving preprocessed data to checkpoint")
+            with log_timing(logger, "Checkpoint saving"):
+                time.sleep(5)
+                data_bin_filtered.name = "data_bin_preproc"
+                data_bin_filtered.to_zarr(
+                    f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w"
+                )  # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
+                data_bin_filtered = load_data_from_checkpoint()
         else:
+            logger.debug("Persisting preprocessed data in memory")
             data_bin_filtered = data_bin_filtered.persist()
             wait(data_bin_filtered)
 
@@ -571,8 +1013,7 @@ class tracker:
                 ID=slice(None, -1)
             )  # At least for the gridded algorithm
 
-        if self.verbosity > 0:
-            print("Finished tracking all extreme events!\n\n")
+        logger.info("Finished tracking all extreme events!")
 
         return events_ds, merges_ds, N_events_final
 
@@ -654,14 +1095,12 @@ class tracker:
         # Inherit metadata from input data_bin
         events_ds.attrs.update(self.data_attrs)
 
-        # For unstructured grid, restore coordinates and rechunk
-        if self.unstructured_grid:
-            # Add lat & lon back as coordinates
-            events_ds = events_ds.assign_coords(
-                lat=self.lat.compute(), lon=self.lon.compute()
-            )
-            # Rechunk to size 1 for better post-processing
-            events_ds = events_ds.chunk({self.timedim: 1})
+        # Restore coordinates & remap centroids
+        # Add lat & lon back as coordinates
+        events_ds = self._remap_coordinates(events_ds)
+
+        # Rechunk to size 1 for better post-processing
+        events_ds = events_ds.chunk({self.timedim: 1})
 
         return events_ds
 
@@ -929,8 +1368,7 @@ class tracker:
         data_new : xarray.DataArray
             Data with fresh Dask graph
         """
-        if self.verbosity > 1:
-            print("  Refreshing Dask task graph...")
+        logger.debug("Refreshing Dask task graph...")
 
         data_bin.name = "temp"
         data_bin.to_zarr(f"{self.scratch_dir}/marEx_temp_field.zarr", mode="w")
@@ -1103,8 +1541,13 @@ class tracker:
             # which differs from structured grid where IDs are unique across time.
 
             if time_connectivity:
-                raise ValueError(
-                    "Cannot automatically compute time-connectivity on unstructured grid"
+                raise ConfigurationError(
+                    "Time connectivity not supported for unstructured grids",
+                    details="Automatic time connectivity computation requires regular grids",
+                    suggestions=[
+                        "Set time_connectivity=False for unstructured data",
+                        "Manually specify connectivity if needed",
+                    ],
                 )
 
             # Use Union-Find (Disjoint Set Union) clustering for unstructured grid
@@ -1825,8 +2268,7 @@ class tracker:
         object_id_field, _, _ = self.identify_objects(data_bin, time_connectivity=False)
         object_id_field = object_id_field.persist()
         del data_bin
-        if self.verbosity > 0:
-            print("Finished object identification")
+        logger.info("Finished object identification")
 
         # For unstructured grid, make objects unique across time
         if self.unstructured_grid:
@@ -1839,10 +2281,9 @@ class tracker:
                 object_id_field > 0, object_id_field + cumsum_ids, 0
             )
             object_id_field = self.refresh_dask_graph(object_id_field)
-            if self.verbosity > 0:
-                print(
-                    f"Finished assigning c. {cumsum_ids.max().compute().values} globally unique object IDs"
-                )
+            logger.info(
+                f"Finished assigning c. {cumsum_ids.max().compute().values} globally unique object IDs"
+            )
 
         # Calculate object properties
         object_props = self.calculate_object_properties(
@@ -1850,8 +2291,7 @@ class tracker:
         )
         object_props = object_props.persist()
         wait(object_props)
-        if self.verbosity > 0:
-            print("Finished calculating object properties")
+        logger.info("Finished calculating object properties")
 
         # Apply splitting & merging logic
         #  This is the most intricate step due to non-trivial loop-wise dependencies
@@ -1864,8 +2304,7 @@ class tracker:
         object_id_field, object_props, overlap_objects_list, merge_events = (
             split_and_merge(object_id_field, object_props)
         )
-        if self.verbosity > 0:
-            print("Finished splitting and merging objects")
+        logger.info("Finished splitting and merging objects")
 
         # Persist results (This helps avoid block-wise task fusion run_spec issues with dask)
         results = persist(
@@ -1890,10 +2329,9 @@ class tracker:
             chunk_dict[self.ydim] = -1
 
         split_merged_events_ds = split_merged_events_ds.chunk(chunk_dict)  # .persist()
-        if self.verbosity > 0:
-            print(
-                "Finished clustering and renaming objects into coherent consistent events"
-            )
+        logger.info(
+            "Finished clustering and renaming objects into coherent consistent events"
+        )
 
         # Count final number of events
         N_events = split_merged_events_ds.ID_field.max().compute().data
@@ -2279,8 +2717,7 @@ class tracker:
         overlap_objects_list = self.enforce_overlap_threshold(
             overlap_objects_list, object_props
         )
-        if self.verbosity > 0:
-            print("Finished finding overlapping objects")
+        logger.info("Finished finding overlapping objects")
 
         # Initialise merge tracking lists
         merge_times = []  # When the merge occurred
@@ -2521,10 +2958,9 @@ class tracker:
                     object_props = object_props.drop_sel(
                         ID=child_id
                     )  # N.B.: This means that the IDs are no longer continuous...
-                    if self.verbosity > 0:
-                        print(
-                            f"Deleted child_id {child_id} because parents have split/morphed"
-                        )
+                    logger.info(
+                        f"Deleted child_id {child_id} because parents have split/morphed"
+                    )
 
                 # Add the properties for the N-1 other new child ID
                 new_object_ids_still = new_child_props.ID.where(
@@ -2536,8 +2972,8 @@ class tracker:
                 )
 
                 missing_ids = set(new_object_id) - set(new_object_ids_still.values)
-                if len(missing_ids) > 0 and self.verbosity > 0:
-                    print(
+                if len(missing_ids) > 0:
+                    logger.warning(
                         f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
                     )
 
@@ -2590,8 +3026,8 @@ class tracker:
                 )
             )
 
-            if chunk_idx % 10 == 0 and self.verbosity > 0:
-                print(
+            if chunk_idx % 10 == 0:
+                logger.info(
                     f"Processing splitting and merging in chunk {chunk_idx} of {len(objects_by_chunk)}"
                 )
 
@@ -2839,8 +3275,19 @@ class tracker:
                     # Find all unique parent IDs with significant overlap
                     for parent_id in potential_parents[potential_parents > 0]:
                         if n_parents >= MAX_PARENTS:
-                            raise RuntimeError(
-                                f"Reached maximum number of parents ({MAX_PARENTS}) for child {child_id} at timestep {t}"
+                            raise TrackingError(
+                                f"Too many parent objects for tracking",
+                                details=f"Child {child_id} at timestep {t} has {n_parents} parents (limit: {MAX_PARENTS})",
+                                suggestions=[
+                                    "Increase overlap_threshold to reduce fragmentation",
+                                    "Apply stronger area filtering",
+                                ],
+                                context={
+                                    "child_id": child_id,
+                                    "timestep": t,
+                                    "n_parents": n_parents,
+                                    "limit": MAX_PARENTS,
+                                },
                             )
 
                         parent_mask = data_m1 == parent_id
@@ -2904,8 +3351,18 @@ class tracker:
                     # Record merge event
                     curr_merge_idx = merge_counts[t]
                     if curr_merge_idx > MAX_MERGES:
-                        raise RuntimeError(
-                            f"Reached maximum number of merges ({MAX_MERGES}) at timestep {t}"
+                        raise TrackingError(
+                            "Too many merge operations",
+                            details=f"Timestep {t} requires {curr_merge_idx} merges (limit: {MAX_MERGES})",
+                            suggestions=[
+                                "Increase area_filter_quartile to reduce small objects",
+                                "Consider adjusting tracking parameters",
+                            ],
+                            context={
+                                "timestep": t,
+                                "merge_count": curr_merge_idx,
+                                "limit": MAX_MERGES,
+                            },
                         )
 
                     merge_child_ids[t, curr_merge_idx, :n_parents] = child_ids[
@@ -2999,8 +3456,18 @@ class tracker:
                         # Record for next chunk
                         for new_object_id in new_merging_list:
                             if final_merge_count > MAX_MERGES:
-                                raise RuntimeError(
-                                    f"Reached maximum number of merges ({MAX_MERGES}) at timestep {t}"
+                                raise TrackingError(
+                                    "Excessive merge operations detected",
+                                    details=f"Final merge count {final_merge_count} exceeds limit {MAX_MERGES} at timestep {t}",
+                                    suggestions=[
+                                        "Increase area_filter_quartile to reduce small objects",
+                                        "Consider adjusting tracking parameters",
+                                    ],
+                                    context={
+                                        "timestep": t,
+                                        "final_merge_count": final_merge_count,
+                                        "limit": MAX_MERGES,
+                                    },
                                 )
 
                             if not np.any(
@@ -3296,17 +3763,15 @@ class tracker:
             # Prepare neighbour information
             neighbours_int = self.neighbours_int.chunk({self.xdim: -1, "nv": -1})
 
-            if self.verbosity > 0:
-                print(
-                    f"Processing Parallel Iteration {iteration + 1} with {len(merging_objects)} Merging Objects..."
-                )
+            logger.info(
+                f"Processing Parallel Iteration {iteration + 1} with {len(merging_objects)} Merging Objects..."
+            )
 
             # Pre-compute the child_time_idx for merging_objects
             time_index_map = self.compute_id_time_dict(
                 object_id_field_unique, list(merging_objects), global_id_counter
             )
-            if self.verbosity > 1:
-                print("  Finished Mapping Children to Time Indices")
+            logger.debug("Finished Mapping Children to Time Indices")
 
             # Create uniform array of merging objects for each timestep
             max_merges = max(
@@ -3464,8 +3929,7 @@ class tracker:
             )
             gc.collect()
 
-            if self.verbosity > 1:
-                print("  Finished Batch Processing Step")
+            logger.debug("Finished Batch Processing Step")
 
             # ====== Global Consolidation of Data ======
 
@@ -3490,8 +3954,7 @@ class tracker:
                 }
                 global_id_counter += len(all_temp_ids)
 
-            if self.verbosity > 1:
-                print("  Finished Consolidation Step 1: Temporary ID Mapping")
+            logger.debug("Finished Consolidation Step 1: Temporary ID Mapping")
 
             # 2. Update object ID field with new IDs
             update_on_disk = True  # This is more memory efficient because it refreshes the dask graph every iteration
@@ -3520,8 +3983,7 @@ class tracker:
             del updates_array, updates_ids
             gc.collect()
 
-            if self.verbosity > 1:
-                print("  Finished Consolidation Step 2: Data Field Update")
+            logger.debug("Finished Consolidation Step 2: Data Field Update")
 
             # 3. Update merge events
             new_merging_objects = set()
@@ -3582,10 +4044,9 @@ class tracker:
             ]
             new_merging_objects.update(mapped_final_objects)
 
-            if self.verbosity > 1:
-                print(
-                    "  Finished Consolidation Step 3: Merge List Dictionary Consolidation"
-                )
+            logger.debug(
+                "Finished Consolidation Step 3: Merge List Dictionary Consolidation"
+            )
 
             # Clean up memory
             del merge_child_ids, merge_parent_ids, merge_areas, merge_counts, has_merge
@@ -3609,8 +4070,7 @@ class tracker:
         overlap_objects_list = self.enforce_overlap_threshold(
             overlap_objects_list, object_props
         )
-        if self.verbosity > 0:
-            print("Finished finding overlapping objects")
+        logger.info("Finished finding overlapping objects")
 
         # Find initial merging objects
         unique_children, children_counts = np.unique(
@@ -3625,7 +4085,7 @@ class tracker:
         processed_chunks = set()
         global_id_counter = object_props.ID.max().item() + 1
 
-        # Initialize global merge event tracking
+        # Initialise global merge event tracking
         global_child_ids = []
         global_parent_ids = []
         global_merge_areas = []
@@ -3678,9 +4138,18 @@ class tracker:
 
         # Check if we reached maximum iterations
         if iteration == self.max_iteration:
-            raise RuntimeError(
-                f"Reached maximum iterations ({self.max_iteration}) in split_and_merge_objects_parallel. "
-                f"Set optional argument 'max_iteration' to a higher value."
+            raise TrackingError(
+                "Maximum iterations reached in tracking algorithm",
+                details=f"Algorithm failed to converge after {self.max_iteration} iterations",
+                suggestions=[
+                    "Increase max_iteration parameter",
+                    "Increase area_filter_quartile to reduce small objects",
+                    "Consider adjusting tracking parameters",
+                ],
+                context={
+                    "max_iteration": self.max_iteration,
+                    "reached_iteration": iteration,
+                },
             )
 
         ## Process the collected merge events
@@ -4416,3 +4885,76 @@ def sparse_bool_power(
         result = temp_result
 
     return result.T
+
+
+def regional_tracker(
+    data_bin: xr.DataArray,
+    mask: xr.DataArray,
+    coordinate_units: Literal["degrees", "radians"],
+    R_fill: Union[int, float],
+    area_filter_quartile: float,
+    **kwargs,
+) -> "tracker":
+    """
+    Create a tracker instance configured for regional (non-global) data.
+
+    This is a convenience function that automatically sets regional_mode=True
+    and requires explicit specification of coordinate units, since auto-detection
+    may fail for regional coordinate ranges.
+
+    Parameters
+    ----------
+    data_bin : xr.DataArray
+        Binary data to identify and track objects in (True = object, False = background)
+    mask : xr.DataArray
+        Binary mask indicating valid regions (True = valid, False = invalid)
+    coordinate_units : {'degrees', 'radians'}
+        Units of the coordinate system. Must be specified for regional data.
+    R_fill : int or float
+        Radius for filling holes/gaps in spatial domain (in grid cells)
+    area_filter_quartile : float
+        Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%)
+    **kwargs
+        Additional parameters passed to the tracker class
+
+    Returns
+    -------
+    tracker
+        Configured tracker instance with regional_mode=True
+
+    Examples
+    --------
+    Track events in regional Mediterranean Sea data:
+
+    >>> import marEx
+    >>> # For regional data with degree coordinates
+    >>> regional_tracker = marEx.regional_tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     coordinate_units='degrees',
+    ...     R_fill=5,
+    ...     area_filter_quartile=0.3
+    ... )
+    >>> events = regional_tracker.run()
+
+    Track events in regional data with radian coordinates:
+
+    >>> # For model output with radian coordinates
+    >>> regional_tracker = marEx.regional_tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     coordinate_units='radians',
+    ...     R_fill=8,
+    ...     area_filter_quartile=0.5
+    ... )
+    >>> events = regional_tracker.run()
+    """
+    return tracker(
+        data_bin=data_bin,
+        mask=mask,
+        R_fill=R_fill,
+        area_filter_quartile=area_filter_quartile,
+        regional_mode=True,
+        coordinate_units=coordinate_units,
+        **kwargs,
+    )

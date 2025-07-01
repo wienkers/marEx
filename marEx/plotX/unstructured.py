@@ -1,15 +1,30 @@
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-import cartopy.crs as ccrs
 import numpy as np
 import xarray as xr
-from matplotlib.axes import Axes
-from matplotlib.collections import QuadMesh, TriMesh
-from matplotlib.colors import BoundaryNorm, Normalize
-from matplotlib.tri import Triangulation
 from numpy.typing import NDArray
 
+try:
+    import cartopy.crs as ccrs
+    from matplotlib.axes import Axes
+    from matplotlib.collections import QuadMesh, TriMesh
+    from matplotlib.colors import BoundaryNorm, Normalize
+    from matplotlib.tri import Triangulation
+
+    HAS_PLOTTING_DEPS = True
+except ImportError:
+    # These will be checked in the base class
+    ccrs = None
+    Axes = None
+    QuadMesh = None
+    TriMesh = None
+    BoundaryNorm = None
+    Normalize = None
+    Triangulation = None
+    HAS_PLOTTING_DEPS = False
+
+from ..exceptions import DataValidationError, VisualisationError
 from .base import PlotterBase
 
 # Global cache for grid data
@@ -45,8 +60,18 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
             or "clon" not in grid_data.variables
             or "clat" not in grid_data.variables
         ):
-            raise ValueError(
-                "Triangulation Grid File must contain 'vertex_of_cell', 'clon', and 'clat' variables"
+            raise DataValidationError(
+                "Invalid triangulation grid file format",
+                details="Missing required variables for triangulation",
+                suggestions=[
+                    "Ensure grid file contains 'vertex_of_cell', 'clon', and 'clat' variables",
+                    "Check grid file format and variable names",
+                    "Verify unstructured grid file is properly formatted",
+                ],
+                context={
+                    "required_vars": ["vertex_of_cell", "clon", "clat"],
+                    "available_vars": list(grid_data.variables.keys()),
+                },
             )
 
         # Extract triangulation vertices - convert to 0-based indexing
@@ -71,7 +96,16 @@ def _load_ckdtree(
         ckdtree_file = Path(fpath_ckdtree) / f"res{res:3.2f}.nc"
 
         if not ckdtree_file.exists():
-            raise ValueError(f"No ckdtree file found for resolution {res}")
+            raise DataValidationError(
+                "KDTree file not found",
+                details=f"Expected file at {ckdtree_file} for resolution {res}",
+                suggestions=[
+                    "Check that the ckdtree path is correct",
+                    "Verify the resolution value matches available files",
+                    "Ensure ckdtree data files are available",
+                ],
+                context={"expected_file": str(ckdtree_file), "resolution": res},
+            )
 
         ds_ckdt = xr.open_dataset(ckdtree_file)
         _GRID_CACHE["ckdtree"][cache_key] = {
@@ -135,7 +169,15 @@ class UnstructuredPlotter(PlotterBase):
         else:
             # Use triangulation from file if available
             if self.fpath_tgrid is None:
-                raise ValueError("Either fpath_tgrid or fpath_ckdtree must be provided")
+                raise VisualisationError(
+                    "Missing grid specification for unstructured plot",
+                    details="Unstructured plotting requires either triangulation or ckdtree data",
+                    suggestions=[
+                        "Provide fpath_tgrid for triangulation-based plotting",
+                        "Provide fpath_ckdtree for interpolated regular grid plotting",
+                        "Use specify_grid() to set global grid paths",
+                    ],
+                )
 
             triang = _load_triangulation(self.fpath_tgrid)
 
@@ -160,7 +202,15 @@ class UnstructuredPlotter(PlotterBase):
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[Any]]:
         """Interpolate unstructured data using pre-computed KDTree indices."""
         if self.fpath_ckdtree is None:
-            raise ValueError("ckdtree path not specified")
+            raise VisualisationError(
+                "KDTree path not specified",
+                details="KDTree plotting method requires ckdtree_path parameter",
+                suggestions=[
+                    "Provide fpath_ckdtree parameter",
+                    "Use specify_grid() to set global ckdtree path",
+                    "Consider using triangulation method instead",
+                ],
+            )
 
         # Load or get cached ckdtree data
         ckdt_data = _load_ckdtree(self.fpath_ckdtree, res)

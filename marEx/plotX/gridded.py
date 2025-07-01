@@ -1,13 +1,29 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
-import cartopy.crs as ccrs
 import numpy as np
 import xarray as xr
-from matplotlib.axes import Axes
-from matplotlib.collections import QuadMesh
-from matplotlib.colors import BoundaryNorm, Normalize
 
+try:
+    import cartopy.crs as ccrs
+    from matplotlib.axes import Axes
+    from matplotlib.collections import QuadMesh
+    from matplotlib.colors import BoundaryNorm, Normalize
+
+    HAS_PLOTTING_DEPS = True
+except ImportError:
+    # These will be checked in the base class
+    ccrs = None
+    Axes = None
+    QuadMesh = None
+    BoundaryNorm = None
+    Normalize = None
+    HAS_PLOTTING_DEPS = False
+
+from ..logging_config import get_logger, log_timing
 from .base import PlotterBase
+
+# Get module logger
+logger = get_logger(__name__)
 
 
 class GriddedPlotter(PlotterBase):
@@ -38,26 +54,36 @@ class GriddedPlotter(PlotterBase):
         norm: Optional[Union[BoundaryNorm, Normalize]] = None,
     ) -> Tuple[Axes, QuadMesh]:
         """Implement plotting for gridded (i.e. regular grid) data."""
-        dimensions = {"ydim": "lat", "xdim": "lon"}
-        data = self.wrap_lon(self.da, dimensions)
+        logger.debug(f"Plotting gridded data with shape {self.da.shape}")
 
-        # Ensure data has only required dimensions for imshow
-        if "time" in data.dims and len(data.time) == 1:
-            data = data.squeeze(dim="time")  # Remove time dimension if it's singular
+        with log_timing(logger, "Gridded plot rendering", show_progress=True):
+            dimensions = {"ydim": "lat", "xdim": "lon"}
+            data = self.wrap_lon(self.da, dimensions)
 
-        plot_kwargs = {"transform": ccrs.PlateCarree(), "cmap": cmap, "shading": "auto"}
+            # Ensure data has only required dimensions for imshow
+            if "time" in data.dims and len(data.time) == 1:
+                data = data.squeeze(
+                    dim="time"
+                )  # Remove time dimension if it's singular
 
-        if norm is not None:
-            plot_kwargs["norm"] = norm
-        elif clim is not None:
-            plot_kwargs["vmin"] = clim[0]
-            plot_kwargs["vmax"] = clim[1]
+            plot_kwargs = {
+                "transform": ccrs.PlateCarree(),
+                "cmap": cmap,
+                "shading": "auto",
+            }
 
-        lons = data[dimensions["xdim"]].values
-        lats = data[dimensions["ydim"]].values
-        values = data.values
+            if norm is not None:
+                plot_kwargs["norm"] = norm
+            elif clim is not None:
+                plot_kwargs["vmin"] = clim[0]
+                plot_kwargs["vmax"] = clim[1]
 
-        # imshow has some dimension issues with cartopy...
-        im = ax.pcolormesh(lons, lats, values, **plot_kwargs)
+            lons = data[dimensions["xdim"]].values
+            lats = data[dimensions["ydim"]].values
+            values = data.values
+
+            logger.debug(f"Rendering plot with {len(lons)} x {len(lats)} grid points")
+            # imshow has some dimension issues with cartopy...
+            im = ax.pcolormesh(lons, lats, values, **plot_kwargs)
 
         return ax, im
