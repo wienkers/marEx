@@ -41,15 +41,7 @@ from .exceptions import (
     create_processing_error,
 )
 from .helper import fix_dask_tuple_array
-from .logging_config import (
-    configure_logging,
-    get_logger,
-    log_dask_info,
-    log_memory_usage,
-    log_progress,
-    log_timing,
-    progress_bar,
-)
+from .logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_progress, log_timing, progress_bar
 
 # Get module logger
 logger = get_logger(__name__)
@@ -65,9 +57,7 @@ logging.getLogger("distributed.shuffle._scheduler_plugin").setLevel(logging.ERRO
 
 def preprocess_data(
     da: xr.DataArray,
-    method_anomaly: Literal[
-        "detrended_baseline", "shifting_baseline"
-    ] = "detrended_baseline",
+    method_anomaly: Literal["detrended_baseline", "shifting_baseline"] = "detrended_baseline",
     method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
     threshold_percentile: float = 95,
     window_year_baseline: int = 15,  # for shifting_baseline
@@ -274,12 +264,8 @@ def preprocess_data(
         configure_logging(verbose=verbose, quiet=quiet)
 
     # Log preprocessing start with parameters
-    logger.info(
-        f"Starting data preprocessing - Method: {method_anomaly} -> {method_extreme}"
-    )
-    logger.info(
-        f"Parameters: percentile={threshold_percentile}%, exact={exact_percentile}"
-    )
+    logger.info(f"Starting data preprocessing - Method: {method_anomaly} -> {method_extreme}")
+    logger.info(f"Parameters: percentile={threshold_percentile}%, exact={exact_percentile}")
     logger.debug(
         f"Anomaly method parameters: window_year={window_year_baseline}, smooth_days={smooth_days_baseline}, "
         + f"std_normalise={std_normalise}, detrend_orders={detrend_orders}, force_zero_mean={force_zero_mean}"
@@ -294,9 +280,7 @@ def preprocess_data(
 
     # Check if input data is dask-backed
     if not is_dask_collection(da.data):
-        logger.error(
-            "Input DataArray is not Dask-backed - preprocessing requires chunked data"
-        )
+        logger.error("Input DataArray is not Dask-backed - preprocessing requires chunked data")
         raise create_data_validation_error(
             "Input DataArray must be Dask-backed",
             details="Preprocessing requires chunked data for efficient computation",
@@ -336,18 +320,14 @@ def preprocess_data(
 
     # For shifting baseline, remove first window_year_baseline years (insufficient climatology data)
     if method_anomaly == "shifting_baseline":
-        min_year = ds[coordinates["time"]].dt.year.min().values
-        max_year = ds[coordinates["time"]].dt.year.max().values
+        min_year = int(ds[coordinates["time"]].dt.year.min().values.item())
+        max_year = int(ds[coordinates["time"]].dt.year.max().values.item())
         total_years = max_year - min_year + 1
 
-        logger.info(
-            f"Shifting baseline data validation: {total_years} years available ({min_year}-{max_year})"
-        )
+        logger.info(f"Shifting baseline data validation: {total_years} years available ({min_year}-{max_year})")
 
         if total_years < window_year_baseline:
-            logger.error(
-                f"Insufficient data: {total_years} years < {window_year_baseline} required"
-            )
+            logger.error(f"Insufficient data: {total_years} years < {window_year_baseline} required")
             raise create_data_validation_error(
                 "Insufficient data for shifting_baseline method",
                 details=f"Dataset spans {total_years} years but requires at least {window_year_baseline} years",
@@ -357,15 +337,13 @@ def preprocess_data(
                     "Consider using detrended_baseline method instead",
                 ],
                 data_info={
-                    "available_years": total_years,
-                    "required_years": window_year_baseline,
+                    "available_years": int(total_years),
+                    "required_years": int(window_year_baseline),
                 },
             )
 
-        start_year = min_year + window_year_baseline
-        logger.info(
-            f"Trimming data to start from {start_year} (removing first {window_year_baseline} years)"
-        )
+        start_year = int(min_year + window_year_baseline)
+        logger.info(f"Trimming data to start from {start_year} (removing first {window_year_baseline} years)")
         time_sel = ds[coordinates["time"]].dt.year >= start_year
         ds = ds.sel({coordinates["time"]: time_sel})
 
@@ -495,9 +473,7 @@ def preprocess_data(
         show_progress=True,
     ):
         ds = ds.persist(optimize_graph=True)
-        ds["thresholds"] = (
-            ds.thresholds.compute()
-        )  # Patch for a dask-Zarr bug that has problems saving this data array...
+        ds["thresholds"] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
         # Patch for same dask-Zarr bug:
@@ -515,9 +491,7 @@ def preprocess_data(
     if hasattr(extreme_count, "compute"):
         extreme_count = extreme_count.compute()
 
-    logger.info(
-        f"Preprocessing completed successfully - {extreme_count} extreme events identified"
-    )
+    logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
     logger.debug(f"Final dataset shape: {ds.dims}")
     log_dask_info(logger, ds, "Final preprocessed dataset")
 
@@ -539,9 +513,7 @@ def _get_preprocessing_steps(
     steps = []
 
     if method_anomaly == "detrended_baseline":
-        steps.append(
-            f"Removed polynomial trend orders={detrend_orders} & seasonal cycle"
-        )
+        steps.append(f"Removed polynomial trend orders={detrend_orders} & seasonal cycle")
         if std_normalise:
             steps.append("Normalised by 30-day rolling STD")
     elif method_anomaly == "shifting_baseline":
@@ -559,9 +531,7 @@ def _get_preprocessing_steps(
 
 def compute_normalised_anomaly(
     da: xr.DataArray,
-    method_anomaly: Literal[
-        "detrended_baseline", "shifting_baseline"
-    ] = "detrended_baseline",
+    method_anomaly: Literal["detrended_baseline", "shifting_baseline"] = "detrended_baseline",
     dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
     coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
     window_year_baseline: int = 15,  # for shifting_baseline
@@ -701,16 +671,10 @@ def compute_normalised_anomaly(
         logger.debug(
             f"Detrended baseline parameters: std_normalise={std_normalise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
         )
-        return _compute_anomaly_detrended(
-            da, std_normalise, detrend_orders, dimensions, coordinates, force_zero_mean
-        )
+        return _compute_anomaly_detrended(da, std_normalise, detrend_orders, dimensions, coordinates, force_zero_mean)
     elif method_anomaly == "shifting_baseline":
-        logger.debug(
-            f"Shifting baseline parameters: window_years={window_year_baseline}, smooth_days={smooth_days_baseline}"
-        )
-        return _compute_anomaly_shifting_baseline(
-            da, window_year_baseline, smooth_days_baseline, dimensions, coordinates
-        )
+        logger.debug(f"Shifting baseline parameters: window_years={window_year_baseline}, smooth_days={smooth_days_baseline}")
+        return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")
         raise ConfigurationError(
@@ -877,19 +841,31 @@ def identify_extremes(
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
 
-    logger.debug(
-        f"Identifying extremes using {method_extreme} method - {threshold_percentile}th percentile"
-    )
+    logger.debug(f"Identifying extremes using {method_extreme} method - {threshold_percentile}th percentile")
+
+    # Validate percentile parameter when using approximate method
+    if threshold_percentile < 60 and not exact_percentile:
+        logger.error(f"Invalid percentile threshold: {threshold_percentile}% with exact_percentile=False")
+        raise ConfigurationError(
+            f"Percentile threshold {threshold_percentile}% is not supported with exact_percentile=False",
+            details="Low percentile thresholds (<60%) produce undefined and unsupported behaviour when using approximate histogram methods",
+            suggestions=[
+                "Use exact_percentile=True for percentiles below 60%",
+                "Use a higher percentile threshold (≥60%) with exact_percentile=False",
+                "Consider if such low percentiles are appropriate for extreme event identification",
+            ],
+            context={
+                "threshold_percentile": threshold_percentile,
+                "exact_percentile": exact_percentile,
+                "min_supported_percentile": 60,
+            },
+        )
 
     if method_extreme == "global_extreme":
         logger.debug(f"Global extreme method - exact_percentile={exact_percentile}")
-        return _identify_extremes_constant(
-            da, threshold_percentile, exact_percentile, dimensions, coordinates
-        )
+        return _identify_extremes_constant(da, threshold_percentile, exact_percentile, dimensions, coordinates)
     elif method_extreme == "hobday_extreme":
-        logger.debug(
-            f"Hobday extreme method - window_days={window_days_hobday}, exact_percentile={exact_percentile}"
-        )
+        logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, exact_percentile={exact_percentile}")
         return _identify_extremes_hobday(
             da,
             threshold_percentile,
@@ -1019,7 +995,7 @@ def rolling_climatology(
     year_vals = years.compute().values
     doy_vals = doys.compute().values
     unique_years = np.unique(year_vals)
-    min_year = unique_years.min()
+    min_year = int(unique_years.min().item())
 
     # Create long-form grouping variables
     # For each time point, determine which target years it contributes to
@@ -1028,30 +1004,29 @@ def rolling_climatology(
     contributing_dayofyears = []
 
     for t_idx, (year_val, doy_val) in enumerate(zip(year_vals, doy_vals)):
+        # Convert numpy scalars to Python ints to avoid dtype issues
+        year_val = int(year_val)
+        doy_val = int(doy_val)
+
         # Find target years this time point contributes to
         # A time point from year Y contributes to target years where:
         # target_year - window_year_baseline <= Y < target_year
         # Which means: Y < target_year <= Y + window_year_baseline
-        candidate_targets = unique_years[
-            (unique_years > year_val)
-            & (unique_years <= year_val + window_year_baseline)
-        ]
+        candidate_targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_year_baseline)]
 
         # Only include target years that have sufficient history
-        valid_targets = candidate_targets[
-            candidate_targets >= min_year + window_year_baseline
-        ]
+        valid_targets = candidate_targets[candidate_targets >= min_year + window_year_baseline]
 
         # Add entries for each valid target year
         n_targets = len(valid_targets)
         contributing_time_indices.extend([t_idx] * n_targets)
-        contributing_target_years.extend(valid_targets)
+        contributing_target_years.extend(valid_targets.tolist())
         contributing_dayofyears.extend([doy_val] * n_targets)
 
-    # Convert to numpy arrays
-    time_indices = np.array(contributing_time_indices)
-    target_year_groups = np.array(contributing_target_years)
-    dayofyear_groups = np.array(contributing_dayofyears)
+    # Convert to numpy arrays with explicit dtypes
+    time_indices = np.array(contributing_time_indices, dtype=np.int64)
+    target_year_groups = np.array(contributing_target_years, dtype=np.int64)
+    dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int64)
 
     # Create long-form dataset by selecting the contributing time points
     long_form_data = da.isel({time_dim: time_indices})
@@ -1061,12 +1036,8 @@ def rolling_climatology(
     long_form_data = long_form_data.rename({time_dim: long_time_dim})
 
     # Convert grouping arrays to DataArrays with the correct dimension
-    target_year_da = xr.DataArray(
-        target_year_groups, dims=[long_time_dim], name="target_year"
-    )
-    dayofyear_da = xr.DataArray(
-        dayofyear_groups, dims=[long_time_dim], name="dayofyear"
-    )
+    target_year_da = xr.DataArray(target_year_groups, dims=[long_time_dim], name="target_year")
+    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_time_dim], name="dayofyear")
 
     # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
@@ -1217,9 +1188,7 @@ def smoothed_rolling_climatology(
         .chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
     )
 
-    clim = rolling_climatology(
-        da_smoothed, window_year_baseline, dimensions, coordinates
-    )
+    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
 
     return clim
 
@@ -1240,22 +1209,14 @@ def _compute_anomaly_shifting_baseline(
         Dataset containing anomalies and mask
     """
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(
-        da, window_year_baseline, smooth_days_baseline, dimensions, coordinates
-    )
+    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
 
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {
-        dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions
-    }
-    mask = (
-        np.isfinite(da.isel({dimensions["time"]: 0}))
-        .drop_vars({coordinates["time"]})
-        .chunk(chunk_dict_mask)
-    )
+    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
+    mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
 
     # Build output dataset
     return xr.Dataset({"dat_anomaly": anomalies, "mask": mask})
@@ -1307,9 +1268,7 @@ def _identify_extremes_hobday(
     # Group by day-of-year and compute percentile
     if exact_percentile:
         # Construct rolling window dimension
-        da_windowed = da.rolling(
-            {dimensions["time"]: window_days_hobday}, center=True
-        ).construct("window")
+        da_windowed = da.rolling({dimensions["time"]: window_days_hobday}, center=True).construct("window")
 
         thresholds = da_windowed.groupby("dayofyear").reduce(
             np.nanpercentile, q=threshold_percentile, dim=("window", dimensions["time"])
@@ -1324,9 +1283,7 @@ def _identify_extremes_hobday(
         )
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
-    spatial_chunks = {
-        dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions
-    }
+    spatial_chunks = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
     thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
@@ -1458,23 +1415,15 @@ def _compute_anomaly_detrended(
     model_fit_da = xr.DataArray(pmodel_da.dot(da), dims=dims, coords=coords)
 
     # Remove trend and seasonal cycle
-    da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(
-        np.float32
-    )
+    da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)
 
     # Force zero mean if requested
     if force_zero_mean:
         da_detrend = da_detrend - da_detrend.mean(dim=dimensions["time"])
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {
-        dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions
-    }
-    mask = (
-        np.isfinite(da.isel({dimensions["time"]: 0}))
-        .chunk(chunk_dict_mask)
-        .drop_vars({"decimal_year", "time"})
-    )
+    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
+    mask = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask).drop_vars({"decimal_year", "time"})
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
@@ -1494,17 +1443,12 @@ def _compute_anomaly_detrended(
 
         # Calculate 30-day rolling standard deviation with annual wrapped padding
         std_day_wrap = std_day.pad(dayofyear=16, mode="wrap")
-        std_rolling = np.sqrt(
-            (std_day_wrap**2).rolling(dayofyear=30, center=True).mean()
-        ).isel(dayofyear=slice(16, 366 + 16))
+        std_rolling = np.sqrt((std_day_wrap**2).rolling(dayofyear=30, center=True).mean()).isel(dayofyear=slice(16, 366 + 16))
 
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings
         std_rolling_safe = std_rolling.where(std_rolling > 1e-10, np.nan)
-        da_stn = (
-            da_detrend.groupby(da_detrend[coordinates["time"]].dt.dayofyear)
-            / std_rolling_safe
-        )
+        da_stn = da_detrend.groupby(da_detrend[coordinates["time"]].dt.dayofyear) / std_rolling_safe
 
         # Rechunk data for efficient processing
         chunk_dict_std = chunk_dict_mask.copy()
@@ -1550,9 +1494,7 @@ def _rolling_histogram_quantile(
 
     # Pad histogram with wrap mode for day-of-year cycling
     pad_size = window_days_hobday // 2
-    hist_pad = np.concatenate(
-        [hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0
-    )
+    hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
 
     # Apply rolling sum using stride tricks (FTW)
     windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
@@ -1612,9 +1554,7 @@ def compute_histogram_quantile_2d(
         # Default asymmetric bins
         precision = 0.01
         max_anomaly = 5.0
-        bin_edges = np.concatenate(
-            [[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)]
-        )
+        bin_edges = np.concatenate([[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)])
 
     bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers_array[0] = 0.0
@@ -1653,9 +1593,7 @@ def compute_histogram_quantile_2d(
     hist_raw.name = None
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(
-            hist_chunk, window_days_hobday, q, bin_centers_chunk
-        )
+        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
 
     # Apply the optimised computation using apply_ufunc
     threshold = xr.apply_ufunc(
@@ -1702,9 +1640,7 @@ def compute_histogram_quantile_1d(
         # Default asymmetric bins
         precision = 0.01
         max_anomaly = 5.0
-        bin_edges = np.concatenate(
-            [[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)]
-        )
+        bin_edges = np.concatenate([[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)])
 
     # Compute histogram
     hist = histogram(da, bins=[bin_edges], dim=[dim])
@@ -1726,12 +1662,8 @@ def compute_histogram_quantile_1d(
     idx = first_true.compute()
     idx_prev = np.clip(idx - 1, 0, len(bin_centers) - 1)
 
-    cdf_prev = cdf.isel(
-        {f"{da.name}_bin": xr.DataArray(idx_prev, dims=first_true.dims)}
-    ).data
-    cdf_next = cdf.isel(
-        {f"{da.name}_bin": xr.DataArray(idx, dims=first_true.dims)}
-    ).data
+    cdf_prev = cdf.isel({f"{da.name}_bin": xr.DataArray(idx_prev, dims=first_true.dims)}).data
+    cdf_next = cdf.isel({f"{da.name}_bin": xr.DataArray(idx, dims=first_true.dims)}).data
     bin_prev = bin_centers[idx_prev]
     bin_next = bin_centers[idx]
 
@@ -1769,32 +1701,22 @@ def _identify_extremes_constant(
         else:
             rechunk_size = 100 * int(np.sqrt(da[dimensions["xdim"]].size) * 1.5 / 100)
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
-        chunk_dict = {
-            dimensions[dim]: rechunk_size
-            for dim in ["xdim", "ydim"]
-            if dim in dimensions
-        }
+        chunk_dict = {dimensions[dim]: rechunk_size for dim in ["xdim", "ydim"] if dim in dimensions}
         chunk_dict[dimensions["time"]] = -1
         da_rechunk = da.chunk(chunk_dict)
 
         # Calculate threshold
-        threshold = da_rechunk.quantile(
-            threshold_percentile / 100.0, dim=dimensions["time"]
-        )
+        threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
 
     else:  # Use an efficient histogram-based method with specified accuracy
-        threshold = compute_histogram_quantile_1d(
-            da, threshold_percentile / 100.0, dim=dimensions["time"]
-        )
+        threshold = compute_histogram_quantile_1d(da, threshold_percentile / 100.0, dim=dimensions["time"])
 
     # Clean up coordinates if needed
     if "quantile" in threshold.coords:
         threshold = threshold.drop_vars("quantile")
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
-    spatial_chunks = {
-        dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions
-    }
+    spatial_chunks = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
     threshold = threshold.chunk(spatial_chunks)
 
     # Create boolean mask for values exceeding threshold
@@ -1804,8 +1726,6 @@ def _identify_extremes_constant(
     if "quantile" in extremes.coords:
         extremes = extremes.drop_vars("quantile")
 
-    extremes = extremes.astype(bool).chunk(
-        {dim: chunks for dim, chunks in zip(da.dims, da.chunks)}
-    )
+    extremes = extremes.astype(bool).chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
 
     return extremes, threshold
