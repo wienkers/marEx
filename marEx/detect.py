@@ -58,14 +58,14 @@ logging.getLogger("distributed.shuffle._scheduler_plugin").setLevel(logging.ERRO
 def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     """
     Validate that all specified dimensions exist in the dataset.
-    
+
     Parameters
     ----------
     da : xarray.DataArray
         Input data array to validate
     dimensions : dict
         Mapping of conceptual dimensions to actual dimension names
-    
+
     Raises
     ------
     DataValidationError
@@ -75,7 +75,7 @@ def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> 
     for concept_dim, actual_dim in dimensions.items():
         if actual_dim not in da.dims:
             missing_dims.append(f"'{actual_dim}' (for {concept_dim})")
-    
+
     if missing_dims:
         available_dims = list(da.dims)
         raise create_data_validation_error(
@@ -97,14 +97,14 @@ def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> 
 def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -> None:
     """
     Validate that all specified coordinates exist in the dataset.
-    
+
     Parameters
     ----------
     da : xarray.DataArray
         Input data array to validate
     coordinates : dict
         Mapping of conceptual coordinates to actual coordinate names
-    
+
     Raises
     ------
     DataValidationError
@@ -114,7 +114,7 @@ def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -
     for concept_coord, actual_coord in coordinates.items():
         if actual_coord not in da.coords:
             missing_coords.append(f"'{actual_coord}' (for {concept_coord})")
-    
+
     if missing_coords:
         available_coords = list(da.coords.keys())
         raise create_data_validation_error(

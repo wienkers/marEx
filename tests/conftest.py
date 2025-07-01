@@ -18,14 +18,22 @@ def dask_client():
             "distributed.worker.memory.spill": 0.9,
             "distributed.worker.memory.pause": 0.95,
             "distributed.worker.memory.terminate": 0.98,
+            # Add more aggressive memory management
+            "distributed.worker.memory.recent-to-old-time": "3s",
+            "distributed.worker.memory.rebalance.measure": "managed_in_memory",
+            # Optimize task scheduling for memory-intensive workflows
+            "distributed.scheduler.allowed-failures": 10,
+            "distributed.comm.timeouts.connect": "60s",
+            "distributed.comm.timeouts.tcp": "60s",
         }
     )
 
-    # Create a LocalCluster with limited resources for CI
+    # Create a LocalCluster with optimized resources for CI
+    # Use more workers with smaller memory per worker for better parallelisation
     cluster = LocalCluster(
-        n_workers=2,
+        n_workers=4,
         threads_per_worker=1,
-        memory_limit="1GB",
+        memory_limit="3GB",  # Github Linux Runners have 14GB RAM & 4 CPUs
         dashboard_address=None,  # Disable dashboard in CI
         silence_logs=True,
     )
@@ -48,8 +56,54 @@ def configure_dask():
             "array.chunk-size": "32MB",
             "array.slicing.split_large_chunks": True,
             "distributed.worker.memory.recent-to-old-time": "10s",
+            # Add optimisation settings for complex computations
+            "optimization.fuse.ave-width": 2,
+            "optimization.fuse.max-width": 4,
+            "optimization.fuse.max-depth": 4,
+            # Optimize for memory-intensive reductions
+            "array.chunk-options.split-every": {"reduction-dimension": 4},
         }
     )
+
+
+@pytest.fixture(scope="function")
+def dask_client_largemem():
+    """Create a Dask client optimised for memory-intensive computations."""
+    # Configure Dask for memory-intensive tests
+    dask.config.set(
+        {
+            "distributed.worker.daemon": False,
+            "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
+            "distributed.worker.memory.target": 0.8,
+            "distributed.worker.memory.spill": 0.9,
+            "distributed.worker.memory.pause": 0.95,
+            "distributed.worker.memory.terminate": 0.98,
+            # Add more aggressive memory management
+            "distributed.worker.memory.recent-to-old-time": "3s",
+            "distributed.worker.memory.rebalance.measure": "managed_in_memory",
+            # Optimize task scheduling for memory-intensive workflows
+            "distributed.scheduler.allowed-failures": 10,
+            "distributed.comm.timeouts.connect": "60s",
+            "distributed.comm.timeouts.tcp": "60s",
+        }
+    )
+
+    # Create a LocalCluster with larger memory for intensive computations
+    cluster = LocalCluster(
+        n_workers=2,
+        threads_per_worker=1,
+        memory_limit="7GB",  # Larger memory per worker for complex computations
+        dashboard_address=None,  # Disable dashboard in CI
+        silence_logs=True,
+    )
+
+    client = Client(cluster)
+
+    yield client
+
+    # Cleanup
+    client.close()
+    cluster.close()
 
 
 # Statistical Test Helper Functions
@@ -181,8 +235,7 @@ def assert_count_in_reasonable_range(count, expected_count, tolerance=2):
     upper_bound = expected_count + tolerance
 
     assert lower_bound <= count <= upper_bound, (
-        f"Count {count} is outside reasonable range [{lower_bound}, {upper_bound}] "
-        f"(expected: {expected_count} ± {tolerance})"
+        f"Count {count} is outside reasonable range [{lower_bound}, {upper_bound}] " f"(expected: {expected_count} ± {tolerance})"
     )
 
 

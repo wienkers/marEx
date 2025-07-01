@@ -74,9 +74,7 @@ class TestFullPipelineGridded:
 
         # Verify extreme event frequency is reasonable for 90th percentile
         # Calculate frequency as fraction of total space-time points
-        total_spacetime_points = extremes_ds.mask.sum().compute().item() * len(
-            extremes_ds.time
-        )
+        total_spacetime_points = extremes_ds.mask.sum().compute().item() * len(extremes_ds.time)
         extreme_frequency = n_extreme_points / total_spacetime_points
 
         # For 90th percentile, expect approximately 10% of points to be extreme
@@ -86,9 +84,7 @@ class TestFullPipelineGridded:
         ), f"Extreme frequency {extreme_frequency:.4f} outside reasonable range [0.05, 0.20] for 90th percentile"
 
         # Verify data structure and attributes
-        assert (
-            extremes_ds.extreme_events.dtype == bool
-        ), "Extreme events should be boolean"
+        assert extremes_ds.extreme_events.dtype == bool, "Extreme events should be boolean"
         assert extremes_ds.mask.dtype == bool, "Mask should be boolean"
 
         # Verify dimensions are preserved
@@ -126,9 +122,7 @@ class TestFullPipelineGridded:
     def test_full_pipeline_with_tracking(self, dask_client):
         """Test complete pipeline including tracking (simplified for speed)."""
         # Use very small subset for tracking test
-        sst_subset = self.sst_data.isel(
-            time=slice(0, 50), lat=slice(0, 10), lon=slice(0, 20)
-        )
+        sst_subset = self.sst_data.isel(time=slice(0, 50), lat=slice(0, 10), lon=slice(0, 20))
 
         # Step 1: Preprocessing
         extremes_ds = marEx.preprocess_data(
@@ -144,9 +138,7 @@ class TestFullPipelineGridded:
         # Check if we have enough events to track
         n_extreme_points = extremes_ds.extreme_events.sum().compute().item()
         if n_extreme_points < 10:
-            pytest.skip(
-                "Not enough extreme events in subset for meaningful tracking test"
-            )
+            pytest.skip("Not enough extreme events in subset for meaningful tracking test")
 
         # Step 2: Tracking with very conservative parameters
         # Extend coordinates for tracker validation
@@ -190,30 +182,29 @@ class TestFullPipelineGridded:
 
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_full_pipeline_shifting_hobday(self, dask_client):
+    def test_full_pipeline_shifting_hobday(self, dask_client_largemem):
         """Test complete pipeline with shifting_baseline + hobday_extreme methods."""
+        sst_subset = self.sst_data.isel(time=slice(0, 1500))  # ~4 years
         # Step 1: Preprocessing with more sophisticated methods
         extremes_ds = marEx.preprocess_data(
-            self.sst_data,
+            sst_subset,
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
             threshold_percentile=85,  # Lower threshold for test data
             window_year_baseline=3,  # Reduced for test data duration
-            smooth_days_baseline=11,  # Reduced smoothing window
-            window_days_hobday=5,  # Reduced hobday window
+            smooth_days_baseline=3,  # Minimal smoothing window
+            window_days_hobday=3,  # Reduced hobday window
             dimensions=self.dimensions,
-            dask_chunks={"time": 15},
+            dask_chunks={"time": 25},
         )
 
         # Verify shifting baseline reduces time series length
-        original_time_length = len(self.sst_data.time)
+        original_time_length = len(sst_subset.time)
         new_time_length = len(extremes_ds.time)
         expected_reduction = 3  # window_year_baseline
 
         # Allow some flexibility in time reduction due to implementation details
-        assert (
-            new_time_length < original_time_length
-        ), "Shifting baseline should reduce time series length"
+        assert new_time_length < original_time_length, "Shifting baseline should reduce time series length"
         assert_reasonable_bounds(
             new_time_length,
             original_time_length - expected_reduction * 365,
@@ -222,7 +213,7 @@ class TestFullPipelineGridded:
         )
 
         # Verify thresholds vary over time (hobday method)
-        threshold_variance = extremes_ds.thresholds.var("time").mean().compute().item()
+        threshold_variance = extremes_ds.thresholds.var("dayofyear").mean().compute().item()
         assert threshold_variance > 0, "Hobday thresholds should vary over time"
 
         # Step 2: Track events with conservative settings
@@ -235,8 +226,8 @@ class TestFullPipelineGridded:
             extremes_mod.extreme_events,
             extremes_mod.mask,
             area_filter_quartile=0.5,  # Filter more aggressively
-            R_fill=2,  # Smaller spatial filling
-            T_fill=1,  # Minimal temporal filling
+            R_fill=4,
+            T_fill=2,
             allow_merging=False,  # Disable merging for simpler tracking
             quiet=True,
         )
@@ -285,9 +276,7 @@ class TestFullPipelineGridded:
 
             # Verify chunking was applied
             expected_time_chunks = chunks["time"]
-            actual_chunks = extremes_ds.extreme_events.chunks[
-                0
-            ]  # time dimension chunks
+            actual_chunks = extremes_ds.extreme_events.chunks[0]  # time dimension chunks
 
             # Most chunks should match expected size (last chunk may be smaller)
             assert all(
@@ -311,9 +300,7 @@ class TestFullPipelineGridded:
         extreme_counts = [r["n_extremes"] for r in results]
 
         # All counts should be identical (same algorithm, same data)
-        assert (
-            len(set(extreme_counts)) == 1
-        ), f"Different chunking strategies produced different results: {extreme_counts}"
+        assert len(set(extreme_counts)) == 1, f"Different chunking strategies produced different results: {extreme_counts}"
 
         # Verify reasonable extreme count
         assert extreme_counts[0] > 0, "No extremes found with any chunking strategy"
@@ -333,15 +320,11 @@ class TestFullPipelineGridded:
         )
 
         n_extremes_high = extremes_high.extreme_events.sum().compute().item()
-        total_spacetime_points = (
-            (extremes_high.mask * extremes_high.time.notnull()).sum().compute().item()
-        )
+        total_spacetime_points = (extremes_high.mask * extremes_high.time.notnull()).sum().compute().item()
         extreme_freq_high = n_extremes_high / total_spacetime_points
 
         # Should have very few extremes with 99.5th percentile
-        assert (
-            extreme_freq_high < 0.02
-        ), f"Too many extremes ({extreme_freq_high:.4f}) for 99.5th percentile threshold"
+        assert extreme_freq_high < 0.02, f"Too many extremes ({extreme_freq_high:.4f}) for 99.5th percentile threshold"
 
         # Test 2: Lower percentile threshold (should produce more events)
         extremes_low = marEx.preprocess_data(
@@ -354,15 +337,11 @@ class TestFullPipelineGridded:
         )
 
         n_extremes_low = extremes_low.extreme_events.sum().compute().item()
-        total_spacetime_points_low = (
-            (extremes_low.mask * extremes_low.time.notnull()).sum().compute().item()
-        )
+        total_spacetime_points_low = (extremes_low.mask * extremes_low.time.notnull()).sum().compute().item()
         extreme_freq_low = n_extremes_low / total_spacetime_points_low
 
         # Should have more extremes with lower threshold
-        assert (
-            extreme_freq_low > extreme_freq_high
-        ), "Lower threshold should produce more extremes than higher threshold"
+        assert extreme_freq_low > extreme_freq_high, "Lower threshold should produce more extremes than higher threshold"
 
         # Test 3: Track events with very restrictive filtering
         if n_extremes_low > 0:  # Only if we have events to track
@@ -431,15 +410,9 @@ class TestFullPipelineUnstructured:
         # Verify dimensions are correct for unstructured data
         expected_dims = set(extremes_ds.extreme_events.dims)
         assert "time" in expected_dims, "Should have time dimension"
-        assert (
-            "cell" in expected_dims
-        ), "Should have cell dimension for unstructured data"
-        assert (
-            "lat" not in expected_dims
-        ), "Should not have lat dimension for unstructured data"
-        assert (
-            "lon" not in expected_dims
-        ), "Should not have lon dimension for unstructured data"
+        assert "cell" in expected_dims, "Should have cell dimension for unstructured data"
+        assert "lat" not in expected_dims, "Should not have lat dimension for unstructured data"
+        assert "lon" not in expected_dims, "Should not have lon dimension for unstructured data"
 
         # Check for extreme events
         n_extremes = extremes_ds.extreme_events.sum().compute().item()
@@ -456,7 +429,7 @@ class TestFullPipelineUnstructured:
                 extremes_ds.mask,
                 area_filter_quartile=0.2,  # Keep more events
                 R_fill=2,  # Conservative spatial filling
-                T_fill=1,  # Minimal temporal filling
+                T_fill=2,  # Minimal temporal filling
                 allow_merging=False,  # Disable complex merging
                 unstructured_grid=True,  # Enable unstructured mode
                 temp_dir=temp_dir,  # Required for unstructured
@@ -492,9 +465,7 @@ class TestPipelineIntegration:
         cls.gridded_data = xr.open_zarr(str(gridded_path), chunks={}).persist().to
 
         unstructured_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        cls.unstructured_data = (
-            xr.open_zarr(str(unstructured_path), chunks={}).persist().to
-        )
+        cls.unstructured_data = xr.open_zarr(str(unstructured_path), chunks={}).persist().to
 
     @pytest.mark.integration
     def test_method_combinations_consistency(self, dask_client):
@@ -529,9 +500,7 @@ class TestPipelineIntegration:
 
             # Calculate key metrics
             n_extremes = extremes_ds.extreme_events.sum().compute().item()
-            total_spacetime_points = extremes_ds.mask.sum().compute().item() * len(
-                extremes_ds.time
-            )
+            total_spacetime_points = extremes_ds.mask.sum().compute().item() * len(extremes_ds.time)
             extreme_frequency = n_extremes / total_spacetime_points
 
             results[f"{anomaly_method}_{extreme_method}"] = {
@@ -541,9 +510,7 @@ class TestPipelineIntegration:
             }
 
             # Basic validation
-            assert (
-                n_extremes > 0
-            ), f"No extremes found for {anomaly_method} + {extreme_method}"
+            assert n_extremes > 0, f"No extremes found for {anomaly_method} + {extreme_method}"
             assert (
                 0 < extreme_frequency < 0.5
             ), f"Unreasonable extreme frequency ({extreme_frequency:.4f}) for {anomaly_method} + {extreme_method}"
@@ -603,9 +570,7 @@ class TestPipelineIntegration:
         # Memory usage should not grow unboundedly
         # (This is a basic check; more sophisticated monitoring could be added)
         final_memory = dask_client.cluster.scheduler_info["workers"]
-        assert len(final_memory) == len(
-            initial_memory
-        ), "Number of workers should remain constant"
+        assert len(final_memory) == len(initial_memory), "Number of workers should remain constant"
 
     @pytest.mark.integration
     def test_data_validation_integration(self, dask_client):
@@ -679,9 +644,7 @@ class TestPipelineReproducibility:
         extremes_2 = marEx.preprocess_data(self.sst_data, **params)
 
         # Results should be identical
-        assert extremes_1.extreme_events.equals(
-            extremes_2.extreme_events
-        ), "Preprocessing should produce identical extreme events"
+        assert extremes_1.extreme_events.equals(extremes_2.extreme_events), "Preprocessing should produce identical extreme events"
 
         assert np.allclose(
             extremes_1.dat_anomaly.values, extremes_2.dat_anomaly.values, equal_nan=True
@@ -718,19 +681,15 @@ class TestPipelineReproducibility:
         tracker_params = {
             "area_filter_quartile": 0.3,
             "R_fill": 2,
-            "T_fill": 1,
+            "T_fill": 2,
             "allow_merging": False,  # Disable merging for reproducibility
             "quiet": True,
         }
 
-        tracker_1 = marEx.tracker(
-            extremes_mod.extreme_events, extremes_mod.mask, **tracker_params
-        )
+        tracker_1 = marEx.tracker(extremes_mod.extreme_events, extremes_mod.mask, **tracker_params)
         tracked_1 = tracker_1.run()
 
-        tracker_2 = marEx.tracker(
-            extremes_mod.extreme_events, extremes_mod.mask, **tracker_params
-        )
+        tracker_2 = marEx.tracker(extremes_mod.extreme_events, extremes_mod.mask, **tracker_params)
         tracked_2 = tracker_2.run()
 
         # Results should be identical
@@ -738,9 +697,7 @@ class TestPipelineReproducibility:
             tracked_1.attrs["N_events_final"] == tracked_2.attrs["N_events_final"]
         ), "Tracking should produce identical event counts"
 
-        assert tracked_1.ID_field.equals(
-            tracked_2.ID_field
-        ), "Tracking should produce identical ID fields"
+        assert tracked_1.ID_field.equals(tracked_2.ID_field), "Tracking should produce identical ID fields"
 
         # Memory cleanup
         del extremes_ds, tracked_1, tracked_2
