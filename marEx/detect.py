@@ -322,10 +322,10 @@ def preprocess_data(
     Performance considerations with chunking:
 
     >>> # For large datasets, adjust chunking for memory management
-    >>> large_sst = sst.chunk({'time': 25, 'lat': 90, 'lon': 180})
+    >>> large_sst = sst.chunk({"time": 25, "lat": 90, "lon": 180})
     >>> result = marEx.preprocess_data(
     ...     large_sst,
-    ...     dask_chunks={'time': 25},
+    ...     dask_chunks={"time": 25},
     ...     exact_percentile=False  # Use approximate method for long time-series calculations
     ... )
 
@@ -560,11 +560,12 @@ def preprocess_data(
     ds.attrs.update({"exact_percentile": exact_percentile})
 
     # Final rechunking
-    logger.debug(f"Final rechunking with time chunks: {dask_chunks['time']}")
+    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 10))
+    logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     chunk_dict = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
-    chunk_dict[dimensions["time"]] = dask_chunks["time"]
+    chunk_dict[dimensions["time"]] = time_chunks
     if method_extreme == "hobday_extreme":
-        chunk_dict["dayofyear"] = dask_chunks["time"]
+        chunk_dict["dayofyear"] = time_chunks
     ds = ds.chunk(chunk_dict)
 
     # Fix encoding issue with saving when calendar & units attribute is present
@@ -1513,7 +1514,7 @@ def _compute_anomaly_detrended(
         print("Warning: Higher-order detrending without linear term may be unstable")
 
     # Add decimal year for trend modelling
-    da = add_decimal_year(da)
+    da = add_decimal_year(da, dim=dimensions["time"])
     dy = da.decimal_year.compute()
 
     # Build model matrix with constant term, trends, and seasonal harmonics
@@ -1589,7 +1590,16 @@ def _compute_anomaly_detrended(
 
     # Create ocean/land mask from first time step
     chunk_dict_mask = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
-    mask = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask).drop_vars({"decimal_year", "time"})
+    mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
+    # Drop time-related coordinates to create spatial mask
+    vars_to_drop = []
+    if "decimal_year" in mask_temp.coords:
+        vars_to_drop.append("decimal_year")
+    if dimensions["time"] in mask_temp.coords:
+        vars_to_drop.append(dimensions["time"])
+    if coordinates["time"] in mask_temp.coords:
+        vars_to_drop.append(coordinates["time"])
+    mask = mask_temp.drop_vars(vars_to_drop) if vars_to_drop else mask_temp
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
