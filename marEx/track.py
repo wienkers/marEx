@@ -527,7 +527,7 @@ class tracker:
         """
 
         # Re-assign original coordinates from original marEx input
-        events_ds = events_ds.assign_coords(lat=self.lat_init.compute(), lon=self.lon_init.compute())
+        events_ds = events_ds.assign_coords({self.ycoord: self.lat_init.compute(), self.xcoord: self.lon_init.compute()})
 
         if "centroid" in events_ds.data_vars:
             # Remap centroids to original coordinate system
@@ -592,16 +592,16 @@ class tracker:
             shutil.rmtree(f"{self.scratch_dir}/marEx_temp_field.zarr/")
 
         # Remove coordinate variables to avoid memory issues
-        self.data_bin = self.data_bin.drop_vars({"lat", "lon"})
-        self.mask = self.mask.drop_vars({"lat", "lon"})
+        self.data_bin = self.data_bin.drop_vars({self.ycoord, self.xcoord})
+        self.mask = self.mask.drop_vars({self.ycoord, self.xcoord})
         self.lat = self.lat.drop_vars(self.lat.coords)
         self.lon = self.lon.drop_vars(self.lon.coords)
-        neighbours = neighbours.drop_vars({"lat", "lon", "nv"})
+        neighbours = neighbours.drop_vars({self.ycoord, self.xcoord, "nv"})
 
         self.max_iteration = max_iteration
 
         # Store cell areas (in square metres)
-        self.cell_area = cell_areas.astype(np.float32).drop_vars({"lat", "lon"}).persist()
+        self.cell_area = cell_areas.astype(np.float32).drop_vars({self.ycoord, self.xcoord}).persist()
         self.mean_cell_area = float(cell_areas.mean().compute().item())
 
         # Initialise dilation array for unstructured grid
@@ -1155,25 +1155,29 @@ class tracker:
             se_kernel = r < (R_fill**2) + 1
 
             if use_dask_morph:
-                # Pad data to avoid edge effects
-                data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode="wrap")
-                data_coords = data_bin.coords
-                data_dims = data_bin.dims
+                # Skip all operations if R_fill is 0
+                if R_fill == 0:
+                    pass  # No morphological operations needed
+                else:
+                    # Pad data to avoid edge effects
+                    data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode="wrap")
+                    data_coords = data_bin.coords
+                    data_dims = data_bin.dims
 
-                # Apply morphological operations
-                data_bin = binary_closing_dask(
-                    data_bin.data, structure=se_kernel[np.newaxis, :, :]
-                )  # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
-                data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
+                    # Apply morphological operations
+                    data_bin = binary_closing_dask(
+                        data_bin.data, structure=se_kernel[np.newaxis, :, :]
+                    )  # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+                    data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
 
-                # Convert back to xarray.DataArray and trim padding
-                data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
-                data_bin = data_bin.isel(
-                    {
-                        self.ydim: slice(diameter, -diameter),
-                        self.xdim: slice(diameter, -diameter),
-                    }
-                )
+                    # Convert back to xarray.DataArray and trim padding
+                    data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
+                    data_bin = data_bin.isel(
+                        {
+                            self.ydim: slice(diameter, -diameter),
+                            self.xdim: slice(diameter, -diameter),
+                        }
+                    )
             else:
 
                 def binary_open_close(
@@ -1623,7 +1627,7 @@ class tracker:
 
             # Calculate buffer size for IDs in chunks
             max_ID = int(object_id_field.max().compute().item()) + 1
-            ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0]) * 4
+            ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0]) * 4 + 2
 
             def object_properties_chunk(
                 ids: NDArray[np.int32],
@@ -1697,6 +1701,10 @@ class tracker:
                     centroid_lon - 360.0,
                     np.where(centroid_lon < -180.0, centroid_lon + 360.0, centroid_lon),
                 )
+
+                assert areas.shape == (n_ids,)
+                assert centroid_lat.shape == (n_ids,)
+                assert centroid_lon.shape == (n_ids,)
 
                 if buffer_IDs:
                     # Create padded output arrays
@@ -2426,8 +2434,8 @@ class tracker:
         valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
         object_props_extended["presence"] = valid_presence
-        object_props_extended["time_start"] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
-        object_props_extended["time_end"] = valid_presence.time[
+        object_props_extended["time_start"] = valid_presence[self.timedim][valid_presence.argmax(dim=self.timedim)]
+        object_props_extended["time_end"] = valid_presence[self.timedim][
             (valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)
         ]
 
@@ -2574,7 +2582,7 @@ class tracker:
                 child_ids = np.concatenate((np.array([child_id]), new_object_id))
 
                 # Record merge event
-                merge_times.append(chunk_data.isel({self.timedim: relative_time_idx}).time.values)
+                merge_times.append(chunk_data.isel({self.timedim: relative_time_idx})[self.timedim].values)
                 merge_child_ids.append(child_ids)
                 merge_parent_ids.append(parent_ids)
                 merge_areas.append(overlap_objects_list[child_mask, 2])
@@ -2738,8 +2746,13 @@ class tracker:
         object_id_field_unique = object_id_field_unique.persist()
 
         # Process merge events into a dataset
-        max_parents = max(len(ids) for ids in merge_parent_ids)
-        max_children = max(len(ids) for ids in merge_child_ids)
+        # Handle case where there are no merge events
+        if merge_parent_ids and merge_child_ids:
+            max_parents = max(len(ids) for ids in merge_parent_ids)
+            max_children = max(len(ids) for ids in merge_child_ids)
+        else:
+            max_parents = 1  # Default minimum size
+            max_children = 1
 
         # Convert lists to padded numpy arrays
         parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
@@ -3728,8 +3741,13 @@ class tracker:
         times = object_id_field_unique[self.timedim].values
 
         # Find maximum dimensions for arrays
-        max_parents = max(len(ids) for ids in global_parent_ids)
-        max_children = max(len(ids) for ids in global_child_ids)
+        # Handle case where there are no merge events
+        if global_parent_ids and global_child_ids:
+            max_parents = max(len(ids) for ids in global_parent_ids)
+            max_children = max(len(ids) for ids in global_child_ids)
+        else:
+            max_parents = 1  # Default minimum size
+            max_children = 1
 
         # Create padded arrays for merge events
         parent_ids_array = np.full((len(global_parent_ids), max_parents), -1, dtype=np.int32)
