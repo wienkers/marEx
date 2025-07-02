@@ -255,7 +255,8 @@ Arguments for `marEx.tracker()` include:
   - `True`: (Default) Implement a better partitioning of merged child objects _based on closest parent cell_.
   - `False`: Use the _parent centroids_ to determine partitioning between new child objects, i.e. Di Sun & Bohai Zhang 2023. N.B.: This has major problems with small merging objects suddenly obtaining unrealistically-large (and often disjoint) fractions of the larger object.
 - `overlap_threshold`: The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event and continue tracking with the same ID. Default is `0.5`.
-- `timedim`, `xdim`, `ydim`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
+- `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `{'time': 'time', 'x': 'lon', 'y': 'lat')`.
+- `coordinates`: The names of the time, latitude, and longitude coordinates in the data array. Default is `{'time': 'time', 'x': 'lon', 'y': 'lat')`.
 
 See, e.g. `./examples/unstructured data/02_id_track_events.ipynb` for a detailed example of identification, tracking, & merging on an _unstructured_ grid.
 
