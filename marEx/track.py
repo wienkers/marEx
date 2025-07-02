@@ -109,12 +109,12 @@ class tracker:
         Minimum fraction of overlap between objects to consider them the same
     unstructured_grid : bool, default=False
         Whether data is on an unstructured grid
-    timedim : str, default='time'
-        Name of time dimension
-    xdim : str, default='lon'
-        Name of x/longitude dimension
-    ydim : str, default='lat'
-        Name of y/latitude dimension
+    dimensions : dict, optional
+        Mapping of dimensions to names in the data
+    coordinates : dict, optional
+        Coordinate names for unstructured grids.
+        Should contain 'x' and 'y' keys for x and y coordinates.
+        May also contain 'time' if the time coordinate name is different from the dimension name.
     neighbours : xarray.DataArray, optional
         For unstructured grid, indicates connectivity between cells
     cell_areas : xarray.DataArray, optional
@@ -138,9 +138,7 @@ class tracker:
     coordinate_units : str, optional
         Coordinate units when regional_mode=True.
         Must be either 'degrees' or 'radians'.
-    coordinates : dict, optional
-        Coordinate names for unstructured grids.
-        Should contain 'xdim' and 'ydim' keys for x and y coordinates.
+    
 
     Examples
     --------
@@ -212,7 +210,7 @@ class tracker:
     ...     area_filter_quartile=0.6,                   # Remove 60% of smallest events
     ...     unstructured_grid=True,                     # Enable unstructured mode
     ...     xdim='ncells',                              # Cell dimension name
-    ...     coordinates={"xdim": "lon", "ydim": "lat"}, # Coordinate names
+    ...     coordinates={"x": "lon", "y": "lat"}, # Coordinate names
     ...     neighbours=neighbours,                      # Required for unstructured
     ...     cell_areas=cell_areas                       # Required for area calculations
     ... )
@@ -279,9 +277,8 @@ class tracker:
         nn_partitioning: bool = False,
         overlap_threshold: float = 0.5,
         unstructured_grid: bool = False,
-        timedim: str = "time",
-        xdim: str = "lon",
-        ydim: str = "lat",
+        dimensions: Dict[str, str] = None,
+        coordinates: Optional[Dict[str, str]] = None,
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
         max_iteration: int = 40,
@@ -291,7 +288,6 @@ class tracker:
         quiet: Optional[bool] = None,
         regional_mode: bool = False,
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
-        coordinates: Optional[Dict[str, str]] = None,
     ) -> None:
         # Configure logging if verbose/quiet parameters are provided
         if verbose is not None or quiet is not None:
@@ -308,7 +304,6 @@ class tracker:
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, overlap_threshold={overlap_threshold}"
         )
-        logger.debug(f"Dimensions: time={timedim}, x={xdim}, y={ydim}")
 
         # Log input data info
         log_dask_info(logger, data_bin, "Binary input data")
@@ -321,12 +316,19 @@ class tracker:
         self.coordinate_units = coordinate_units
 
         # Unify coordinate system: degrees
-        if not unstructured_grid:
-            self.xcoord = xdim
-            self.ycoord = ydim
+        self.timedim = dimensions.get("time", "time")
+        self.xdim = dimensions.get("x", "lon")
+        self.ydim = dimensions.get("y", "lat")
+        if unstructured_grid:
+            self.timecoord = coordinates["time"] if coordinates and "time" in coordinates else self.timedim
+            self.xcoord = coordinates["x"] if coordinates and "x" in coordinates else 'lon'
+            self.ycoord = coordinates["y"] if coordinates and "y" in coordinates else 'lat'
+                    
         else:
-            self.xcoord = coordinates["xdim"]
-            self.ycoord = coordinates["ydim"]
+            self.timecoord = coordinates.get("time", self.timedim)
+            self.xcoord = coordinates.get("x", self.xdim)
+            self.ycoord = coordinates.get("y", self.ydim)
+        
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
         self.lon_init = data_bin[self.xcoord].persist()
         self._unify_coordinates()
@@ -338,16 +340,16 @@ class tracker:
         self.allow_merging = allow_merging
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
-        self.timedim = timedim
-        self.xdim = xdim
-        self.ydim = ydim
         self.lat = data_bin[self.ycoord].persist()
         self.lon = data_bin[self.xcoord].persist()
-        self.timechunks = data_bin.chunks[data_bin.dims.index(timedim)][0]
+        self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # For structured grids, units are pixels
         self.checkpoint = checkpoint
         self.debug = debug
+        
+        logger.debug(f"Dimensions: time={self.timedim}, x={self.xdim}, y={self.ydim}")
+        logger.debug(f"Coordinates: time={self.timecoord}, x={self.xcoord}, y={self.ycoord}")
 
         # Extract data_bin metadata to inherit
         if hasattr(self.data_bin, "attrs") and self.data_bin.attrs:
@@ -385,6 +387,21 @@ class tracker:
                             "expected_dims": [self.timedim, self.xdim],
                         },
                     )
+            # Check if self.timecoord, self.xcoord, and self.ycoord are in data_bin coords:
+            if self.timecoord not in self.data_bin.coords or self.xcoord not in self.data_bin.coords or self.ycoord not in self.data_bin.coords:
+                raise create_data_validation_error(
+                    "Missing required coordinates in unstructured data",
+                    details=f"Expected coordinates ({self.timecoord}, {self.xcoord}, {self.ycoord}), but found {list(self.data_bin.coords)}",
+                    suggestions=[
+                        "Ensure data_bin contains time, x, and y coordinates",
+                        "Check coordinate names in the dataset",
+                        "Specify coordinates in the tracker initialisation with `coordinates` parameter.",
+                    ],
+                    data_info={
+                        "actual_coords": list(self.data_bin.coords),
+                        "expected_coords": [self.timecoord, self.xcoord, self.ycoord],
+                    },
+                )
         else:
             # For structured grids, ensure 3D data
             if (self.timedim, self.ydim, self.xdim) != self.data_bin.dims:
@@ -527,7 +544,7 @@ class tracker:
         """
 
         # Re-assign original coordinates from original marEx input
-        events_ds = events_ds.assign_coords(lat=self.lat_init.compute(), lon=self.lon_init.compute())
+        events_ds = events_ds.assign_coords({self.ycoord: self.lat_init.compute(), self.xcoord: self.lon_init.compute()})
 
         if "centroid" in events_ds.data_vars:
             # Remap centroids to original coordinate system
@@ -592,16 +609,16 @@ class tracker:
             shutil.rmtree(f"{self.scratch_dir}/marEx_temp_field.zarr/")
 
         # Remove coordinate variables to avoid memory issues
-        self.data_bin = self.data_bin.drop_vars({"lat", "lon"})
-        self.mask = self.mask.drop_vars({"lat", "lon"})
+        self.data_bin = self.data_bin.drop_vars({self.ycoord, self.xcoord})
+        self.mask = self.mask.drop_vars({self.ycoord, self.xcoord})
         self.lat = self.lat.drop_vars(self.lat.coords)
         self.lon = self.lon.drop_vars(self.lon.coords)
-        neighbours = neighbours.drop_vars({"lat", "lon", "nv"})
+        neighbours = neighbours.drop_vars({self.ycoord, self.xcoord, "nv"})
 
         self.max_iteration = max_iteration
 
         # Store cell areas (in square metres)
-        self.cell_area = cell_areas.astype(np.float32).drop_vars({"lat", "lon"}).persist()
+        self.cell_area = cell_areas.astype(np.float32).drop_vars({self.ycoord, self.xcoord}).persist()
         self.mean_cell_area = float(cell_areas.mean().compute().item())
 
         # Initialise dilation array for unstructured grid
@@ -1155,25 +1172,29 @@ class tracker:
             se_kernel = r < (R_fill**2) + 1
 
             if use_dask_morph:
-                # Pad data to avoid edge effects
-                data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode="wrap")
-                data_coords = data_bin.coords
-                data_dims = data_bin.dims
+                # Skip all operations if R_fill is 0
+                if R_fill == 0:
+                    pass  # No morphological operations needed
+                else:
+                    # Pad data to avoid edge effects
+                    data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode="wrap")
+                    data_coords = data_bin.coords
+                    data_dims = data_bin.dims
 
-                # Apply morphological operations
-                data_bin = binary_closing_dask(
-                    data_bin.data, structure=se_kernel[np.newaxis, :, :]
-                )  # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
-                data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
+                    # Apply morphological operations
+                    data_bin = binary_closing_dask(
+                        data_bin.data, structure=se_kernel[np.newaxis, :, :]
+                    )  # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+                    data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
 
-                # Convert back to xarray.DataArray and trim padding
-                data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
-                data_bin = data_bin.isel(
-                    {
-                        self.ydim: slice(diameter, -diameter),
-                        self.xdim: slice(diameter, -diameter),
-                    }
-                )
+                    # Convert back to xarray.DataArray and trim padding
+                    data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
+                    data_bin = data_bin.isel(
+                        {
+                            self.ydim: slice(diameter, -diameter),
+                            self.xdim: slice(diameter, -diameter),
+                        }
+                    )
             else:
 
                 def binary_open_close(
@@ -1623,7 +1644,7 @@ class tracker:
 
             # Calculate buffer size for IDs in chunks
             max_ID = int(object_id_field.max().compute().item()) + 1
-            ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0]) * 4
+            ID_buffer_size = int(max_ID / object_id_field[self.timedim].shape[0]) * 4 + 2
 
             def object_properties_chunk(
                 ids: NDArray[np.int32],
@@ -1697,6 +1718,10 @@ class tracker:
                     centroid_lon - 360.0,
                     np.where(centroid_lon < -180.0, centroid_lon + 360.0, centroid_lon),
                 )
+
+                assert areas.shape == (n_ids,)
+                assert centroid_lat.shape == (n_ids,)
+                assert centroid_lon.shape == (n_ids,)
 
                 if buffer_IDs:
                     # Create padded output arrays
@@ -2247,7 +2272,7 @@ class tracker:
         new_ids = np.arange(1, max_new_ID + 1, dtype=np.int32)
 
         # Create new object_props dataset
-        object_props_extended = xr.Dataset(coords={"ID": new_ids, self.timedim: object_id_field_unique[self.timedim]})
+        object_props_extended = xr.Dataset(coords={"ID": new_ids, self.timecoord: object_id_field_unique[self.timecoord]})
 
         # Create mapping from new IDs to the original IDs _at the corresponding time_
         valid_new_ids = split_merged_relabeled_object_id_field > 0
@@ -2357,7 +2382,7 @@ class tracker:
             result = xr.full_like(time_block, -1)
 
             # Get unique times in this block
-            unique_times = np.unique(time_block[self.timedim])
+            unique_times = np.unique(time_block[self.timecoord])
 
             for time_val in unique_times:
                 # Get IDs for this time
@@ -2373,7 +2398,7 @@ class tracker:
                     if np.any(valid_mask):
                         # Create expanded array for sibling_ID dimension
                         expanded_IDs = np.broadcast_to(IDs_at_time, (len(time_block.sibling_ID), len(IDs_at_time)))
-                        result.loc[{self.timedim: time_val, "ID": IDs_at_time[valid_mask]}] = expanded_IDs[:, valid_mask]
+                        result.loc[{self.timecoord: time_val, "ID": IDs_at_time[valid_mask]}] = expanded_IDs[:, valid_mask]
 
                 # Handle multiple mergers case
                 else:
@@ -2384,7 +2409,7 @@ class tracker:
                                 merger_IDs,
                                 (len(time_block.sibling_ID), len(merger_IDs)),
                             )
-                            result.loc[{self.timedim: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
+                            result.loc[{self.timecoord: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
 
             return result
 
@@ -2426,8 +2451,8 @@ class tracker:
         valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
         object_props_extended["presence"] = valid_presence
-        object_props_extended["time_start"] = valid_presence.time[valid_presence.argmax(dim=self.timedim)]
-        object_props_extended["time_end"] = valid_presence.time[
+        object_props_extended["time_start"] = valid_presence[self.timecoord][valid_presence.argmax(dim=self.timedim)]
+        object_props_extended["time_end"] = valid_presence[self.timecoord][
             (valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)
         ]
 
@@ -2574,7 +2599,7 @@ class tracker:
                 child_ids = np.concatenate((np.array([child_id]), new_object_id))
 
                 # Record merge event
-                merge_times.append(chunk_data.isel({self.timedim: relative_time_idx}).time.values)
+                merge_times.append(chunk_data.isel({self.timedim: relative_time_idx})[self.timecoord].values)
                 merge_child_ids.append(child_ids)
                 merge_parent_ids.append(parent_ids)
                 merge_areas.append(overlap_objects_list[child_mask, 2])
@@ -2738,8 +2763,13 @@ class tracker:
         object_id_field_unique = object_id_field_unique.persist()
 
         # Process merge events into a dataset
-        max_parents = max(len(ids) for ids in merge_parent_ids)
-        max_children = max(len(ids) for ids in merge_child_ids)
+        # Handle case where there are no merge events
+        if merge_parent_ids and merge_child_ids:
+            max_parents = max(len(ids) for ids in merge_parent_ids)
+            max_children = max(len(ids) for ids in merge_child_ids)
+        else:
+            max_parents = 1  # Default minimum size
+            max_children = 1
 
         # Convert lists to padded numpy arrays
         parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
@@ -3310,9 +3340,9 @@ class tracker:
                 return chunk_data  # Return original data for dask graph consistency
 
             # Create time indices for slicing
-            time_coords = object_id_field[self.timedim].values
+            time_coords = object_id_field[self.timecoord].values
             time_indices = np.arange(len(time_coords))
-            time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timedim: time_coords})
+            time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timecoord: time_coords})
 
             # Create dataset with all necessary components
             ds = xr.Dataset(
@@ -3382,7 +3412,7 @@ class tracker:
                 (updated_field, merge_data, new_merging_objects, updated_counter)
             """
 
-            n_time = len(object_id_field_unique[self.timedim])
+            n_time = len(object_id_field_unique[self.timecoord])
 
             # Pre-allocate arrays for this iteration
             child_ids_iter = np.full(
@@ -3415,7 +3445,7 @@ class tracker:
             merging_objects_da = xr.DataArray(
                 uniform_merging_objects_array,
                 dims=[self.timedim, "merges"],
-                coords={self.timedim: object_id_field_unique[self.timedim]},
+                coords={self.timecoord: object_id_field_unique[self.timecoord]},
             )
 
             # Calculate ID offsets for each timestep to ensure unique IDs
@@ -3425,7 +3455,7 @@ class tracker:
             next_id_offsets_da = xr.DataArray(
                 next_id_offsets,
                 dims=[self.timedim],
-                coords={self.timedim: object_id_field_unique[self.timedim]},
+                coords={self.timecoord: object_id_field_unique[self.timecoord]},
             )
 
             # Create shifted arrays for time connectivity
@@ -3725,11 +3755,16 @@ class tracker:
 
         ## Process the collected merge events
 
-        times = object_id_field_unique[self.timedim].values
+        times = object_id_field_unique[self.timecoord].values
 
         # Find maximum dimensions for arrays
-        max_parents = max(len(ids) for ids in global_parent_ids)
-        max_children = max(len(ids) for ids in global_child_ids)
+        # Handle case where there are no merge events
+        if global_parent_ids and global_child_ids:
+            max_parents = max(len(ids) for ids in global_parent_ids)
+            max_children = max(len(ids) for ids in global_child_ids)
+        else:
+            max_parents = 1  # Default minimum size
+            max_children = 1
 
         # Create padded arrays for merge events
         parent_ids_array = np.full((len(global_parent_ids), max_parents), -1, dtype=np.int32)

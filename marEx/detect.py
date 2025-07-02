@@ -151,7 +151,7 @@ def preprocess_data(
     force_zero_mean: bool = True,  # "
     exact_percentile: bool = False,
     dask_chunks: Dict[str, int] = {"time": 25},
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
@@ -301,8 +301,8 @@ def preprocess_data(
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 50})
     >>> result_unstructured = marEx.preprocess_data(
     ...     icon_sst,
-    ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"}
+    ...     dimensions={"time": "time", "x": "ncells"},
+    ...     coordinates={"time": "time", "x": "lon", "y": "lat"}
     ...     dask_chunks={"time": 50}
     ... )
 
@@ -322,10 +322,10 @@ def preprocess_data(
     Performance considerations with chunking:
 
     >>> # For large datasets, adjust chunking for memory management
-    >>> large_sst = sst.chunk({'time': 25, 'lat': 90, 'lon': 180})
+    >>> large_sst = sst.chunk({"time": 25, "lat": 90, "lon": 180})
     >>> result = marEx.preprocess_data(
     ...     large_sst,
-    ...     dask_chunks={'time': 25},
+    ...     dask_chunks={"time": 25},
     ...     exact_percentile=False  # Use approximate method for long time-series calculations
     ... )
 
@@ -361,21 +361,21 @@ def preprocess_data(
 
     # Handle coordinates parameter based on data structure
     if coordinates is None:
-        if "ydim" not in dimensions:
+        if "y" not in dimensions:
             # Unstructured (2D) data - requires explicit coordinate specification
             logger.error("Coordinates parameter required for unstructured data")
             raise create_data_validation_error(
                 "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                details="Unstructured data requires coordinate names for x and y spatial coordinates",
                 suggestions=[
                     "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
-                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
                 ],
                 data_info={
                     "data_structure": "unstructured (2D)",
                     "dimensions": dimensions,
-                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                    "missing_coordinates": "x and y spatial coordinates",
                 },
             )
         else:
@@ -455,7 +455,7 @@ def preprocess_data(
         start_year = int(min_year + window_year_baseline)
         logger.info(f"Trimming data to start from {start_year} (removing first {window_year_baseline} years)")
         time_sel = ds[coordinates["time"]].dt.year >= start_year
-        ds = ds.sel({coordinates["time"]: time_sel})
+        ds = ds.isel({coordinates["time"]: time_sel})
 
     anomalies = ds.dat_anomaly
 
@@ -560,11 +560,12 @@ def preprocess_data(
     ds.attrs.update({"exact_percentile": exact_percentile})
 
     # Final rechunking
-    logger.debug(f"Final rechunking with time chunks: {dask_chunks['time']}")
-    chunk_dict = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
-    chunk_dict[dimensions["time"]] = dask_chunks["time"]
+    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 10))
+    logger.debug(f"Final rechunking with time chunks: {time_chunks}")
+    chunk_dict = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
+    chunk_dict[dimensions["time"]] = time_chunks
     if method_extreme == "hobday_extreme":
-        chunk_dict["dayofyear"] = dask_chunks["time"]
+        chunk_dict["dayofyear"] = time_chunks
     ds = ds.chunk(chunk_dict)
 
     # Fix encoding issue with saving when calendar & units attribute is present
@@ -587,8 +588,8 @@ def preprocess_data(
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
         # Patch for same dask-Zarr bug:
-        ds[coordinates["xdim"]] = ds[coordinates["xdim"]].compute()
-        ds[coordinates["ydim"]] = ds[coordinates["ydim"]].compute()
+        ds[coordinates["x"]] = ds[coordinates["x"]].compute()
+        ds[coordinates["y"]] = ds[coordinates["y"]].compute()
         if "neighbours" in ds.data_vars:
             ds["neighbours"] = ds.neighbours.compute()
         if "cell_areas" in ds.data_vars:
@@ -642,7 +643,7 @@ def _get_preprocessing_steps(
 def compute_normalised_anomaly(
     da: xr.DataArray,
     method_anomaly: Literal["detrended_baseline", "shifting_baseline"] = "detrended_baseline",
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
     coordinates: Optional[Dict[str, str]] = None,
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
@@ -746,8 +747,8 @@ def compute_normalised_anomaly(
     >>> icon_data = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
     >>> result_unstructured = marEx.compute_normalised_anomaly(
     ...     icon_data,
-    ...     dimensions={"time": "time", "xdim": "ncells"}
-    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
+    ...     dimensions={"time": "time", "x": "ncells"}
+    ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
     ... )
     >>> print(result_unstructured.dims)
     Frozen({'time': 1461, 'ncells': 83886})
@@ -777,21 +778,21 @@ def compute_normalised_anomaly(
 
     # Handle coordinates parameter based on data structure
     if coordinates is None:
-        if "ydim" not in dimensions:
+        if "y" not in dimensions:
             # Unstructured (2D) data - requires explicit coordinate specification
             logger.error("Coordinates parameter required for unstructured data")
             raise create_data_validation_error(
                 "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                details="Unstructured data requires coordinate names for x and y spatial coordinates",
                 suggestions=[
                     "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
-                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
                 ],
                 data_info={
                     "data_structure": "unstructured (2D)",
                     "dimensions": dimensions,
-                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                    "missing_coordinates": "x and y spatial coordinates",
                 },
             )
         else:
@@ -832,7 +833,7 @@ def identify_extremes(
     da: xr.DataArray,
     method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
     threshold_percentile: float = 95,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
     coordinates: Optional[Dict[str, str]] = None,
     window_days_hobday: int = 11,  # for hobday_extreme
     exact_percentile: bool = False,
@@ -953,8 +954,8 @@ def identify_extremes(
     >>> icon_anomalies = xr.open_dataset('icon_anomalies.nc', chunks={}).dat_anomaly
     >>> extremes_unstructured, thresholds_unstructured = marEx.identify_extremes(
     ...     icon_anomalies,
-    ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
+    ...     dimensions={"time": "time", "x": "ncells"},
+    ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
     ...     threshold_percentile=95
     ... )
     >>> print(f"Unstructured extremes shape: {extremes_unstructured.shape}")
@@ -982,21 +983,21 @@ def identify_extremes(
 
     # Handle coordinates parameter based on data structure
     if coordinates is None:
-        if "ydim" not in dimensions:
+        if "y" not in dimensions:
             # Unstructured (2D) data - requires explicit coordinate specification
             logger.error("Coordinates parameter required for unstructured data")
             raise create_data_validation_error(
                 "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for xdim and ydim spatial coordinates",
+                details="Unstructured data requires coordinate names for x and y spatial coordinates",
                 suggestions=[
                     "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'xdim': 'lon', 'ydim': 'lat'}",
-                    f"Your xdim dimension '{dimensions['xdim']}' needs associated coordinate names",
+                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
                 ],
                 data_info={
                     "data_structure": "unstructured (2D)",
                     "dimensions": dimensions,
-                    "missing_coordinates": "xdim and ydim spatial coordinates",
+                    "missing_coordinates": "x and y spatial coordinates",
                 },
             )
         else:
@@ -1064,8 +1065,8 @@ def identify_extremes(
 def rolling_climatology(
     da: xr.DataArray,
     window_year_baseline: int = 15,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
@@ -1121,8 +1122,8 @@ def rolling_climatology(
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
     >>> icon_climatology = marEx.rolling_climatology(
     ...     icon_sst,
-    ...     dimensions={"time": "time", "xdim": "ncells"}
-    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"}
+    ...     dimensions={"time": "time", "x": "ncells"}
+    ...     coordinates={"time": "time", "x": "lon", "y": "lat"}
     ... )
     >>> print(icon_climatology.dims)
     Frozen({'time': 7305, 'ncells': 83886})
@@ -1238,8 +1239,8 @@ def smoothed_rolling_climatology(
     da: xr.DataArray,
     window_year_baseline: int = 15,
     smooth_days_baseline: int = 21,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> xr.DataArray:
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
@@ -1315,8 +1316,8 @@ def smoothed_rolling_climatology(
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
     >>> icon_smooth_clim = marEx.smoothed_rolling_climatology(
     ...     icon_sst,
-    ...     dimensions={"time": "time", "xdim": "ncells"},
-    ...     coordinates={"time": "time", "xdim": "lon", "ydim": "lat"},
+    ...     dimensions={"time": "time", "x": "ncells"},
+    ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
     ...     window_year_baseline=10,
     ...     smooth_days_baseline=31
     ... )
@@ -1363,8 +1364,8 @@ def _compute_anomaly_shifting_baseline(
     da: xr.DataArray,
     window_year_baseline: int = 15,
     smooth_days_baseline: int = 21,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -1381,7 +1382,7 @@ def _compute_anomaly_shifting_baseline(
     anomalies = da - climatology_smoothed
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
+    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
     mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
 
     # Build output dataset
@@ -1398,8 +1399,8 @@ def _identify_extremes_hobday(
     threshold_percentile: float = 95,
     window_days_hobday: int = 11,
     exact_percentile: bool = False,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -1449,7 +1450,7 @@ def _identify_extremes_hobday(
         )
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
-    spatial_chunks = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
+    spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
     thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
@@ -1494,8 +1495,8 @@ def _compute_anomaly_detrended(
     da: xr.DataArray,
     std_normalise: bool = False,
     detrend_orders: List[int] = [1],
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
     force_zero_mean: bool = True,
 ) -> xr.Dataset:
     """
@@ -1513,7 +1514,7 @@ def _compute_anomaly_detrended(
         print("Warning: Higher-order detrending without linear term may be unstable")
 
     # Add decimal year for trend modelling
-    da = add_decimal_year(da)
+    da = add_decimal_year(da, dim=dimensions["time"])
     dy = da.decimal_year.compute()
 
     # Build model matrix with constant term, trends, and seasonal harmonics
@@ -1550,7 +1551,7 @@ def _compute_anomaly_detrended(
         model.T,
         dims=[dimensions["time"], "coeff"],
         coords={
-            coordinates["time"]: da[coordinates["time"]].values,
+            dimensions["time"]: da[coordinates["time"]].values,
             "coeff": np.arange(1, n_coeffs + 1),
         },
     ).chunk({dimensions["time"]: da.chunks[0]})
@@ -1560,7 +1561,7 @@ def _compute_anomaly_detrended(
         dims=["coeff", dimensions["time"]],
         coords={
             "coeff": np.arange(1, n_coeffs + 1),
-            coordinates["time"]: da[coordinates["time"]].values,
+            dimensions["time"]: da[coordinates["time"]].values,
         },
     ).chunk({dimensions["time"]: da.chunks[0]})
 
@@ -1569,13 +1570,13 @@ def _compute_anomaly_detrended(
     coords = {"coeff": np.arange(1, n_coeffs + 1)}
 
     # Handle both 2D (unstructured) and 3D (gridded) data
-    if "ydim" in dimensions:  # 3D gridded case
-        dims.extend([dimensions["ydim"], dimensions["xdim"]])
-        coords[coordinates["ydim"]] = da[coordinates["ydim"]].values
-        coords[coordinates["xdim"]] = da[coordinates["xdim"]].values
+    if "y" in dimensions:  # 3D gridded case
+        dims.extend([dimensions["y"], dimensions["x"]])
+        coords[dimensions["y"]] = da[coordinates["y"]].values
+        coords[dimensions["x"]] = da[coordinates["x"]].values
     else:  # 2D unstructured case
-        dims.append(dimensions["xdim"])
-        coords.update(da[coordinates["xdim"]].coords)
+        dims.append(dimensions["x"])
+        coords.update(da[coordinates["x"]].coords)
 
     # Fit model to data
     model_fit_da = xr.DataArray(pmodel_da.dot(da), dims=dims, coords=coords)
@@ -1588,11 +1589,26 @@ def _compute_anomaly_detrended(
         da_detrend = da_detrend - da_detrend.mean(dim=dimensions["time"])
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
-    mask = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask).drop_vars({"decimal_year", "time"})
+    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
+    mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
+    # Drop time-related coordinates to create spatial mask
+    vars_to_drop = []
+    if "decimal_year" in mask_temp.coords:
+        vars_to_drop.append("decimal_year")
+    if dimensions["time"] in mask_temp.coords:
+        vars_to_drop.append(dimensions["time"])
+    if coordinates["time"] in mask_temp.coords:
+        vars_to_drop.append(coordinates["time"])
+    mask = mask_temp.drop_vars(vars_to_drop) if vars_to_drop else mask_temp
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
+    
+    # Ensure all original coordinates are preserved in the dataset
+    coords_to_preserve = {}
+    for coord_name in da.coords:
+        if coord_name not in data_vars:  # Don't override data variables
+            coords_to_preserve[coord_name] = da.coords[coord_name]
 
     # Standardise anomalies by temporal variability if requested
     if std_normalise:
@@ -1628,7 +1644,7 @@ def _compute_anomaly_detrended(
         data_vars["STD"] = std_rolling
 
     # Build output dataset with metadata
-    return xr.Dataset(data_vars=data_vars)
+    return xr.Dataset(data_vars=data_vars, coords=coords_to_preserve)
 
 
 def _rolling_histogram_quantile(
@@ -1697,8 +1713,8 @@ def compute_histogram_quantile_2d(
     q: float,
     window_days_hobday: int = 11,
     bin_edges: Optional[NDArray[np.float64]] = None,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -1733,7 +1749,7 @@ def compute_histogram_quantile_2d(
     )
 
     chunk_dict = {dimensions["time"]: -1}
-    for d in ["xdim", "ydim"]:
+    for d in ["x", "y"]:
         if d in dimensions:
             chunk_dict[dimensions[d]] = 10
 
@@ -1851,8 +1867,8 @@ def _identify_extremes_constant(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     exact_percentile: bool = False,
-    dimensions: Dict[str, str] = {"time": "time", "xdim": "lon"},
-    coordinates: Dict[str, str] = {"time": "time", "xdim": "lon", "ydim": "lat"},
+    dimensions: Dict[str, str] = {"time": "time", "x": "lon"},
+    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a constant (in time) percentile threshold.
@@ -1862,12 +1878,12 @@ def _identify_extremes_constant(
     """
     if exact_percentile:  # Compute exact percentile (memory-intensive)
         # Determine appropriate chunk size based on data dimensions
-        if "ydim" in dimensions:
+        if "y" in dimensions:
             rechunk_size = "auto"
         else:
-            rechunk_size = 100 * int(np.sqrt(da[dimensions["xdim"]].size) * 1.5 / 100)
+            rechunk_size = 100 * int(np.sqrt(da[dimensions["x"]].size) * 1.5 / 100)
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
-        chunk_dict = {dimensions[dim]: rechunk_size for dim in ["xdim", "ydim"] if dim in dimensions}
+        chunk_dict = {dimensions[dim]: rechunk_size for dim in ["x", "y"] if dim in dimensions}
         chunk_dict[dimensions["time"]] = -1
         da_rechunk = da.chunk(chunk_dict)
 
@@ -1882,7 +1898,7 @@ def _identify_extremes_constant(
         threshold = threshold.drop_vars("quantile")
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
-    spatial_chunks = {dimensions[dim]: -1 for dim in ["xdim", "ydim"] if dim in dimensions}
+    spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
     threshold = threshold.chunk(spatial_chunks)
 
     # Create boolean mask for values exceeding threshold
