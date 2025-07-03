@@ -21,14 +21,14 @@ def dask_client():
             # Add more aggressive memory management
             "distributed.worker.memory.recent-to-old-time": "3s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
-            # Optimize task scheduling for memory-intensive workflows
+            # Optimise task scheduling for memory-intensive workflows
             "distributed.scheduler.allowed-failures": 10,
             "distributed.comm.timeouts.connect": "60s",
             "distributed.comm.timeouts.tcp": "60s",
         }
     )
 
-    # Create a LocalCluster with optimized resources for CI
+    # Create a LocalCluster with optimised resources for CI
     # Use more workers with smaller memory per worker for better parallelisation
     cluster = LocalCluster(
         n_workers=4,
@@ -60,7 +60,7 @@ def configure_dask():
             "optimization.fuse.ave-width": 2,
             "optimization.fuse.max-width": 4,
             "optimization.fuse.max-depth": 4,
-            # Optimize for memory-intensive reductions
+            # Optimise for memory-intensive reductions
             "array.chunk-options.split-every": {"reduction-dimension": 4},
         }
     )
@@ -81,7 +81,7 @@ def dask_client_largemem():
             # Add more aggressive memory management
             "distributed.worker.memory.recent-to-old-time": "3s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
-            # Optimize task scheduling for memory-intensive workflows
+            # Optimise task scheduling for memory-intensive workflows
             "distributed.scheduler.allowed-failures": 10,
             "distributed.comm.timeouts.connect": "60s",
             "distributed.comm.timeouts.tcp": "60s",

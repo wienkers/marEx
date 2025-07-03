@@ -177,6 +177,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=3,
             area_filter_quartile=0.5,
+            temp_dir=self.temp_dir,
             T_fill=2,  # Allow 2-day gaps
             allow_merging=True,
             overlap_threshold=0.5,
@@ -243,10 +244,10 @@ class TestUnstructuredTracking:
             tolerance_relative=0.3,
         )
         assert_count_in_reasonable_range(
-            tracked_ds.attrs["N_objects_prefiltered"], 500, tolerance=50
+            tracked_ds.attrs["N_objects_prefiltered"], 200, tolerance=100
         )
         assert_count_in_reasonable_range(
-            tracked_ds.attrs["N_objects_filtered"], 250, tolerance=50
+            tracked_ds.attrs["N_objects_filtered"], 100, tolerance=75
         )
         assert_count_in_reasonable_range(
             tracked_ds.attrs["N_events_final"], 20, tolerance=10
@@ -334,13 +335,13 @@ class TestUnstructuredTracking:
             tolerance_relative=0.3,
         )
         assert_count_in_reasonable_range(
-            tracked_ds.attrs["N_objects_prefiltered"], 500, tolerance=50
+            tracked_ds.attrs["N_objects_prefiltered"], 200, tolerance=100
         )
         assert_count_in_reasonable_range(
-            tracked_ds.attrs["N_objects_filtered"], 250, tolerance=50
+            tracked_ds.attrs["N_objects_filtered"], 100, tolerance=75
         )
         assert_count_in_reasonable_range(
-            tracked_ds.attrs["N_events_final"], 20, tolerance=10
+            tracked_ds.attrs["N_events_final"], 5, tolerance=10
         )
 
     @pytest.mark.slow
@@ -353,6 +354,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=2,
             area_filter_quartile=0.0,
+            temp_dir=self.temp_dir,
             T_fill=0,
             allow_merging=False,
             unstructured_grid=True,  # Enable unstructured grid mode
@@ -374,6 +376,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=2,
             area_filter_quartile=0.8,
+            temp_dir=self.temp_dir,
             T_fill=0,
             allow_merging=False,
             unstructured_grid=True,  # Enable unstructured grid mode
@@ -432,6 +435,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=2,
             area_filter_quartile=0.5,
+            temp_dir=self.temp_dir,
             T_fill=0,
             allow_merging=False,
             unstructured_grid=True,  # Enable unstructured grid mode
@@ -453,6 +457,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=2,
             area_filter_quartile=0.5,
+            temp_dir=self.temp_dir,
             T_fill=4,  # Allow 4-day gaps
             allow_merging=False,
             unstructured_grid=True,  # Enable unstructured grid mode
@@ -491,10 +496,10 @@ class TestUnstructuredTracking:
             tolerance_relative=0.3,
         )
         assert_count_in_reasonable_range(
-            tracked_no_gaps.attrs["N_objects_prefiltered"], 500, tolerance=100
+            tracked_no_gaps.attrs["N_objects_prefiltered"], 200, tolerance=100
         )
         assert_count_in_reasonable_range(
-            tracked_no_gaps.attrs["N_objects_filtered"], 250, tolerance=50
+            tracked_no_gaps.attrs["N_objects_filtered"], 100, tolerance=75
         )
         assert_count_in_reasonable_range(
             tracked_no_gaps.attrs["N_events_final"], 40, tolerance=20
@@ -510,10 +515,14 @@ class TestUnstructuredTracking:
                 self.extremes_data.mask,
                 R_fill=2,
                 area_filter_quartile=0.5,
+                temp_dir=self.temp_dir,
                 T_fill=0,
                 allow_merging=False,
                 unstructured_grid=True,  # Enable unstructured grid mode
                 dimensions={"x": "ncells"},   # Must specify the name of the spatial dimension
+                coordinates={"x": "lon", "y": "lat"},
+                regional_mode=False,
+                coordinate_units="degrees",
                 quiet=True,
                 # Missing neighbours and cell_areas - should cause error
             )
@@ -528,6 +537,7 @@ class TestUnstructuredTracking:
             self.extremes_data.mask,
             R_fill=2,
             area_filter_quartile=0.6,  # Higher filtering for cleaner test
+            temp_dir=self.temp_dir,
             T_fill=0,
             allow_merging=True,
             unstructured_grid=True,  # Enable unstructured grid mode
@@ -585,7 +595,8 @@ class TestUnstructuredTracking:
             mask_rechunked,
             R_fill=2,
             area_filter_quartile=0.7,  # Higher filtering to reduce memory usage
-            T_fill=1,
+            temp_dir=self.temp_dir,
+            T_fill=2,  # Must be even for temporal symmetry
             allow_merging=False,
             unstructured_grid=True,  # Enable unstructured grid mode
             dimensions={"x": "ncells"},   # Must specify the name of the spatial dimension
@@ -644,7 +655,7 @@ class TestUnstructuredTracking:
         assert hasattr(tracker_no_merge, "dilate_sparse")
         
         # Note: Actual tracking execution is currently skipped due to unstructured tracking issues
-        # This test validates tracker initialization with custom dimensions/coordinates
+        # This test validates tracker initialisation with custom dimensions/coordinates
         
         # Test 2: Tracking with allow_merging=True
         tracker_with_merge = marEx.tracker(

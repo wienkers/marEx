@@ -181,7 +181,7 @@ class TestTrackerVerbosity:
         binary_data = (sample_data > sample_data.mean()).astype(bool)
         mask = xr.ones_like(sample_data.isel(time=0), dtype=bool)
 
-        # Test that verbose mode is properly set and tracker initializes
+        # Test that verbose mode is properly set and tracker initialises
         tracker = marEx.tracker(
             binary_data,
             mask,
@@ -201,7 +201,7 @@ class TestTrackerVerbosity:
         assert tracker.area_filter_quartile == 0.5
 
     def test_tracker_run_verbose(self, sample_data, dask_client):
-        """Test verbose tracker can be initialized and has verbose mode set."""
+        """Test verbose tracker can be initialised and has verbose mode set."""
         # Create binary data
         binary_data = (sample_data > sample_data.mean()).astype(bool)
         mask = xr.ones_like(sample_data.isel(time=0), dtype=bool)

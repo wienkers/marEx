@@ -46,7 +46,7 @@ dependencies = [
 # Minimal installation (basic oceanographic analysis)
 minimal = []
 
-# Performance optimization dependencies
+# Performance optimisation dependencies
 performance = [
     "jax",
     "jaxlib",
