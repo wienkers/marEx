@@ -52,8 +52,6 @@ logger = get_logger(__name__)
 try:
     import jax.numpy as jnp
 except ImportError:
-    import numpy as np
-
     jnp = np  # Alias for jnp
     warn_missing_dependency("jax", "Some functionality")
 
@@ -105,7 +103,8 @@ class tracker:
     coordinates : dict, optional
         Coordinate names for unstructured grids.
         Should contain 'x' and 'y' keys for x and y coordinates.
-        May also contain 'time' if the time coordinate name is different from the dimension name.
+        May also contain 'time' if the time coordinate name is different from
+        the dimension name.
     neighbours : xarray.DataArray, optional
         For unstructured grid, indicates connectivity between cells
     cell_areas : xarray.DataArray, optional
@@ -280,6 +279,7 @@ class tracker:
         regional_mode: bool = False,
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
     ) -> None:
+        """Initialise the tracker with parameters and data."""
         # Configure logging if verbose/quiet parameters are provided
         if verbose is not None or quiet is not None:
             configure_logging(verbose=verbose, quiet=quiet)
@@ -293,7 +293,8 @@ class tracker:
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
         logger.info(f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}")
         logger.debug(
-            f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, overlap_threshold={overlap_threshold}"
+            f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
+            f"overlap_threshold={overlap_threshold}"
         )
 
         # Log input data info
@@ -374,7 +375,7 @@ class tracker:
             if (self.timedim, self.xdim) != self.data_bin.dims:
                 try:
                     self.data_bin = self.data_bin.transpose(self.timedim, self.xdim)
-                except:
+                except Exception:
                     raise create_data_validation_error(
                         "Invalid dimensions for unstructured data",
                         details=f"Expected 2D array with dimensions ({self.timedim}, {self.xdim}), got {list(self.data_bin.dims)}",
@@ -392,10 +393,13 @@ class tracker:
             if (self.timedim, self.ydim, self.xdim) != self.data_bin.dims:
                 try:
                     self.data_bin = self.data_bin.transpose(self.timedim, self.ydim, self.xdim)
-                except:
+                except Exception:
                     raise create_data_validation_error(
                         "Invalid dimensions for gridded data",
-                        details=f"Expected 3D array with dimensions ({self.timedim}, {self.ydim}, {self.xdim}), got {list(self.data_bin.dims)}",
+                        details=(
+                            f"Expected 3D array with dimensions ({self.timedim}, {self.ydim}, {self.xdim}), "
+                            f"got {list(self.data_bin.dims)}"
+                        ),
                         suggestions=[
                             "Ensure data has time, latitude, and longitude dimensions",
                             "Check dimension mapping and coordinate names",
@@ -414,7 +418,10 @@ class tracker:
         ):
             raise create_data_validation_error(
                 "Missing required coordinates in unstructured data",
-                details=f"Expected coordinates ({self.timecoord}, {self.xcoord}, {self.ycoord}), but found {list(self.data_bin.coords)}",
+                details=(
+                    f"Expected coordinates ({self.timecoord}, {self.xcoord}, {self.ycoord}), "
+                    f"but found {list(self.data_bin.coords)}"
+                ),
                 suggestions=[
                     "Ensure data_bin contains time, x, and y coordinates",
                     "Check coordinate names in the dataset",
@@ -470,7 +477,7 @@ class tracker:
                 data_info={"mask_dtype": str(self.mask.data.dtype)},
             )
 
-        if (self.mask == False).all():
+        if (not self.mask).all():
             raise create_data_validation_error(
                 "Mask contains only False values",
                 details="Mask should indicate valid regions with True values",
@@ -703,7 +710,6 @@ class tracker:
         """Remap coordinates to original lat/lon values after processing.
         Map centroids from lat=[-180,180] back into original lat/lon units & range.
         """
-
         # Re-assign original coordinates from original marEx input
         events_ds = events_ds.assign_coords({self.ycoord: self.lat_init.compute(), self.xcoord: self.lon_init.compute()})
 
@@ -1289,7 +1295,7 @@ class tracker:
                 Binary opening and closing for unstructured grid.
                 Uses sparse matrix power operations for efficiency.
                 """
-                ## Closing: Dilation then Erosion (fills small gaps)
+                # Closing: Dilation then Erosion (fills small gaps)
 
                 # Dilation
                 bitmap_binary = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, R_fill)
@@ -1300,7 +1306,7 @@ class tracker:
                 # Erosion (negated dilation of negated image)
                 bitmap_binary = ~sparse_bool_power(~bitmap_binary, sp_data, indices, indptr, R_fill)
 
-                ## Opening: Erosion then Dilation (removes small objects)
+                # Opening: Erosion then Dilation (removes small objects)
 
                 # Set land values to True (to avoid artificially eroding the shore)
                 bitmap_binary[:, ~mask] = True
@@ -1360,7 +1366,8 @@ class tracker:
                     # Apply morphological operations
                     data_bin = binary_closing_dask(
                         data_bin.data, structure=se_kernel[np.newaxis, :, :]
-                    )  # N.B.: There may be a rearing bug in constructing the dask task graph when we extract and then re-imbed the dask array into an xarray DataArray
+                    )  # N.B.: There may be a rearing bug in constructing the dask task graph when we
+                    # extract and then re-imbed the dask array into an xarray DataArray
                     data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
 
                     # Convert back to xarray.DataArray and trim padding
@@ -1701,9 +1708,7 @@ class tracker:
 
             if time_connectivity:
                 # ID objects in 3D (i.e. space & time) -- N.B. IDs are unique across time
-                neighbours[:, :, :] = (
-                    1  #                       including +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
-                )
+                neighbours[:, :, :] = 1  # +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
             else:
                 # ID objects only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)
                 neighbours[1, :, :] = 1  # All 8 neighbours, but ignore time
@@ -1765,7 +1770,8 @@ class tracker:
             y_centroid = original_centroid[0]
 
         # If object is near both edges, recalculate x-centroid to handle wrapping
-        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the object may be split and straddling the boundary !
+        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the
+        # object may be split and straddling the boundary !
         if near_left_BC and near_right_BC:
             # Adjust x coordinates that are near right edge
             x_indices = np.nonzero(binary_mask)[1]
@@ -1997,7 +2003,9 @@ class tracker:
 
         else:
             # Structured grid approach
-            # N.B.: These operations are simply done on a pixel grid — no cartesian conversion (therefore, polar regions are doubly biased)
+            # N.B.: These operations are simply done on a pixel grid
+            #       i.e. with no cartesian conversion
+            #       (therefore, polar regions are doubly biased)
 
             # Define function to calculate properties for each chunk
             def object_properties_chunk(
@@ -2139,7 +2147,7 @@ class tracker:
                 - For structured grid: number of overlapping pixels (int32)
                 - For unstructured grid: total overlapping area in m^2 (float32)
         """
-        ## Check just for overlap with next time slice.
+        # Check just for overlap with next time slice.
         #  Keep a running list of all object IDs that overlap
         object_id_field_next = object_id_field.shift({self.timedim: -1}, fill_value=0)
 
@@ -2289,7 +2297,8 @@ class tracker:
         Parameters
         ----------
         data_bin : xarray.DataArray
-            Preprocessed binary data:  Field of globally unique integer IDs of each element in connected regions. ID = 0 indicates no object.
+            Preprocessed binary data:  Field of globally unique integer IDs of each element in connected regions.
+            ID = 0 indicates no object.
 
         Returns
         -------
@@ -2371,7 +2380,8 @@ class tracker:
         object_props : xarray.Dataset
             Properties of each object that also need to be relabeled.
         overlap_objects_list : (N x 2) numpy.ndarray
-            Array of object ID pairs that indicate which objects are in the same event. The object in the first column precedes the second column in time.
+            Array of object ID pairs that indicate which objects are in the same event.
+            The object in the first column precedes the second column in time.
         merge_events : xarray.Dataset
             Information about merge events
 
@@ -2380,7 +2390,7 @@ class tracker:
         split_merged_events_ds : xarray.Dataset
             Dataset with relabeled events and their properties. ID = 0 indicates no object.
         """
-        ## Cluster the overlap_pairs into groups of IDs that are actually the same object
+        # Cluster the overlap_pairs into groups of IDs that are actually the same object
         # Get IDs from overlap pairs
         max_ID = int(object_id_field_unique.max().compute().values.item()) + 1
         IDs = np.arange(max_ID)
@@ -2409,8 +2419,9 @@ class tracker:
         for ID, component_ID in zip(IDs, component_IDs):
             ID_clusters[component_ID].append(ID)
 
-        ## ID_clusters now is a list of lists of equivalent object IDs that have been tracked across time
-        #  We now need to replace all IDs in object_id_field_unique that match the equivalent_IDs with the list index:  This is the new/final ID field.
+        # ID_clusters now is a list of lists of equivalent object IDs that have been tracked across time
+        # We now need to replace all IDs in object_id_field_unique that match the equivalent_IDs with the list index:
+        #   This is the new/final ID field.
 
         # Create mapping from original IDs to cluster indices
         min_int32 = np.iinfo(np.int32).min
@@ -2424,7 +2435,8 @@ class tracker:
                 #  ID = 0 is still invalid/no object
 
         # Convert to DataArray for apply_ufunc
-        #  N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly with large shared-mem numpy arrays**
+        #  N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly
+        #          with large shared-mem numpy arrays**
         ID_to_cluster_index_da = xr.DataArray(
             ID_to_cluster_index_array,
             dims="ID",
@@ -2451,7 +2463,7 @@ class tracker:
             output_dtypes=[np.int32],
         ).persist()
 
-        ## Relabel the object_props to match the new IDs (and add time dimension)
+        # Relabel the object_props to match the new IDs (and add time dimension)
 
         max_new_ID = num_components + 1  # New IDs range from 0 to max_new_ID
         new_ids = np.arange(1, max_new_ID + 1, dtype=np.int32)
@@ -2516,7 +2528,8 @@ class tracker:
 
         # Store original ID mapping
         object_props_extended["global_ID"] = global_id_mapping
-        # Post-condition: Now, e.g. global_id_mapping.sel(ID=10) --> Given the new ID (10), returns corresponding original_id at every time
+        # Post-condition: Now, e.g. global_id_mapping.sel(ID=10)
+        #    --> Given the new ID (10), returns corresponding original_id at every time
 
         # Transfer all properties from original object_props
         dummy = object_props.isel(ID=0) * np.nan  # Add vale of ID = 0 to this coordinate ID
@@ -2534,7 +2547,7 @@ class tracker:
 
             object_props_extended[var_name] = temp
 
-        ## Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
+        # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
         # i.e. for each merge_ID --> merge_parent_IDs   gives the old IDs  --> map to new ID using ID_to_cluster_index_da
         #                   --> merge_time
@@ -2542,7 +2555,8 @@ class tracker:
         old_parent_IDs = xr.where(merge_events.parent_IDs > 0, merge_events.parent_IDs, 0)
         new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
 
-        # Replace the coordinate merge_ID in new_IDs_parents with merge_time.  merge_events.merge_time gives merge_time for each merge_ID
+        # Replace the coordinate merge_ID in new_IDs_parents with merge_time.
+        #    merge_events.merge_time gives merge_time for each merge_ID
         new_IDs_parents_t = (
             new_IDs_parents.assign_coords({"merge_time": merge_events.merge_time})
             .drop_vars("ID")
@@ -2721,13 +2735,14 @@ class tracker:
 
         # Process each time chunk
         for chunk_idx, chunk_objects in objects_by_chunk.items():
-            # We do this to avoid repetetively re-computing and injecting tiny changes into the full dask-backed DataArray object_id_field_unique
+            # We do this to avoid repetetively re-computing and injecting tiny changes
+            # into the full dask-backed DataArray object_id_field_unique
 
             # Extract and load an entire chunk into memory
             chunk_start = sum(object_id_field_unique.chunks[0][:chunk_idx])
             chunk_end = (
                 chunk_start + object_id_field_unique.chunks[0][chunk_idx] + 1
-            )  #  We also want access to the object_id_time_p1...  But need to remember to remove the last time later
+            )  # We also want access to the object_id_time_p1...  But need to remember to remove the last time later
 
             chunk_data = object_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
 
@@ -2750,7 +2765,7 @@ class tracker:
                 object_id_time = chunk_data.isel({self.timedim: relative_time_idx})
                 try:
                     object_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx + 1})
-                except:
+                except Exception:
                     # Last chunk
                     object_id_time_p1 = xr.full_like(object_id_time, 0)
 
@@ -2791,7 +2806,7 @@ class tracker:
                 merge_parent_ids.append(parent_ids)
                 merge_areas.append(overlap_objects_list[child_mask, 2])
 
-                ## Relabel the Original Child Object ID Field to account for the New ID:
+                # Relabel the Original Child Object ID Field to account for the New ID:
                 # Get parent centroids for partitioning
                 parent_centroids = object_props.sel(ID=parent_ids).centroid.values.T
 
@@ -2865,7 +2880,7 @@ class tracker:
                         # Assign based on closest parent
                         new_labels = child_ids[np.argmin(distances, axis=1)]
 
-                ## Update values in child_time_idx and assign the updated slice back to the original DataArray
+                # Update values in child_time_idx and assign the updated slice back to the original DataArray
                 temp = np.zeros_like(object_id_time)
                 temp[child_mask_2d] = new_labels
                 object_id_time = object_id_time.where(~child_mask_2d, temp)
@@ -2880,7 +2895,7 @@ class tracker:
                 # Update the object_props DataArray:  (but first, check if the original children still exists)
                 if child_id in new_child_props.ID:
                     # Update existing entry
-                    object_props.loc[dict(ID=child_id)] = new_child_props.sel(ID=child_id)
+                    object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
                 else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
                     object_props = object_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
                     logger.info(f"Deleted child_id {child_id} because parents have split/morphed")
@@ -2898,20 +2913,23 @@ class tracker:
                         f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
                     )
 
-                ## Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
+                # Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
 
-                # Look at the overlap IDs between the original child_id and the next time-step, and also the new_object_id and the next time-step
+                # Look at the overlap IDs between the original child_id and the next time-step,
+                #   and also the new_object_id and the next time-step
                 new_overlaps = self.check_overlap_slice(object_id_time.values, object_id_time_p1.values)
                 new_child_overlaps_list = new_overlaps[
                     (new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_object_id)
                 ]
                 new_child_overlaps_list = self.enforce_overlap_threshold(new_child_overlaps_list, object_props)
 
-                # Replace the lines in the overlap_objects_list where (original) child_id is on the LHS, with these new pairs in new_child_overlaps_list
+                # Replace the lines in the overlap_objects_list where (original) child_id is on the LHS
+                #   putting in these new pairs in new_child_overlaps_list
                 child_mask_LHS = overlap_objects_list[:, 0] == child_id
                 overlap_objects_list = np.concatenate([overlap_objects_list[~child_mask_LHS], new_child_overlaps_list])
 
-                ## Finally, _FINALLY_, we need to ensure that of the new children objects we made, they only overlap with their respective parent...
+                # Finally, _FINALLY_, we need to ensure that of the new children objects we made,
+                #  they only overlap with their respective parent...
                 new_unique_children, new_children_counts = np.unique(new_child_overlaps_list[:, 1], return_counts=True)
                 new_merging_objects = new_unique_children[new_children_counts > 1]
 
@@ -3023,7 +3041,6 @@ class tracker:
         tuple
             (object_id_field, object_props, overlap_objects_list, merge_events)
         """
-
         # Constants for memory allocation
         MAX_MERGES = 20  # Maximum number of merges per timestep
         MAX_PARENTS = 10  # Maximum number of parents per merge
@@ -3077,10 +3094,10 @@ class tracker:
             tuple
                 Contains merge events, object updates, and newly created objects
             """
-
-            ## Fix Broadcasted dimensions of inputs:
+            # Fix Broadcasted dimensions of inputs:
             #    Remove extra dimension if present while preserving time chunks
-            #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting... (i.e. 'nv' dimension gets injected into all the other arrays!)
+            #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting...
+            #           (i.e. 'nv' dimension gets injected into all the other arrays!)
 
             chunk_data_m1 = chunk_data_m1_full.squeeze()[0].astype(np.int32).copy()
             chunk_data = chunk_data_m1_full.squeeze()[1].astype(np.int32).copy()
@@ -3132,6 +3149,7 @@ class tracker:
                 next_new_id = next_id_start[t]  # Use the offset for this timestep
 
                 # Get current time slice data
+                data_p1 = []
                 if t == 0:
                     data_m1 = chunk_data_m1
                     data_t = chunk_data
@@ -3162,7 +3180,7 @@ class tracker:
                     for parent_id in potential_parents[potential_parents > 0]:
                         if n_parents >= MAX_PARENTS:
                             raise TrackingError(
-                                f"Too many parent objects for tracking",
+                                "Too many parent objects for tracking",
                                 details=f"Child {child_id} at timestep {t} has {n_parents} parents (limit: {MAX_PARENTS})",
                                 suggestions=[
                                     "Increase overlap_threshold to reduce fragmentation",
@@ -3379,7 +3397,6 @@ class tracker:
             xarray.DataArray
                 Updated object field
             """
-
             # Quick return if no merges to update
             if not has_merge.any():
                 return object_id_field
@@ -3461,7 +3478,6 @@ class tracker:
             xarray.DataArray
                 Updated object field from zarr store
             """
-
             # Early return if no merges to save memory
             if not bool(has_merge.any().compute().item()):
                 return object_id_field
@@ -3475,7 +3491,6 @@ class tracker:
 
             def update_time_chunk(ds_chunk: xr.Dataset, lookup_dict: Dict[int, int]) -> xr.DataArray:
                 """Process a single chunk with optimised memory usage."""
-
                 # Skip processing if no merges in this chunk
                 needs_update = bool(ds_chunk["has_merge"].any().compute().item())
                 if not needs_update:
@@ -3598,7 +3613,6 @@ class tracker:
             tuple
                 (updated_field, merge_data, new_merging_objects, updated_counter)
             """
-
             n_time = len(object_id_field_unique[self.timecoord])
 
             # Pre-allocate arrays for this iteration
@@ -3637,8 +3651,9 @@ class tracker:
 
             # Calculate ID offsets for each timestep to ensure unique IDs
             next_id_offsets = np.arange(n_time) * max_merges * self.timechunks + global_id_counter
-            # N.B.: We also need to account for possibility of newly-split objects then creating more than max_merges by the end of the iteration through the chunk
-            #         !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
+            # N.B.: We also need to account for possibility of newly-split objects subsequently creating
+            #          more than max_merges by the end of the iteration through the chunk
+            # !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
             next_id_offsets_da = xr.DataArray(
                 next_id_offsets,
                 dims=[self.timedim],
@@ -3871,7 +3886,7 @@ class tracker:
         merging_objects = set(unique_children[children_counts > 1].astype(np.int32))
         del overlap_objects_list
 
-        ## Process chunks iteratively until no new merging objects remain
+        # Process chunks iteratively until no new merging objects remain
 
         iteration = 0
         processed_chunks = set()
@@ -3940,7 +3955,7 @@ class tracker:
                 },
             )
 
-        ## Process the collected merge events
+        # Process the collected merge events
 
         times = object_id_field_unique[self.timecoord].values
 
@@ -4336,7 +4351,6 @@ def partition_nn_unstructured(
     new_labels : np.ndarray
         1D array containing the assigned child_ids for each True point in child_mask
     """
-
     # Force contiguous arrays in memory for optimal vectorised performance
     child_mask = np.ascontiguousarray(child_mask)
     parent_masks = np.ascontiguousarray(parent_masks)
@@ -4463,7 +4477,6 @@ def partition_nn_unstructured_optimised(
     result : np.ndarray
         1D array containing the assigned parent indices for points in child_mask
     """
-
     # Create working copies to ensure memory cleanup
     parent_frontiers_working = parent_frontiers.copy()
     child_mask_working = child_mask.copy()

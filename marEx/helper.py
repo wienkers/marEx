@@ -536,7 +536,7 @@ def start_distributed_cluster(
     if node_memory not in MEMORY_CONFIGS:
         logger.error(f"Unsupported node_memory value: {node_memory}")
         raise ConfigurationError(
-            f"Unsupported node_memory configuration",
+            "Unsupported node_memory configuration",
             details=f"Value '{node_memory}' is not supported",
             suggestions=[
                 f"Use one of the supported configurations: {list(MEMORY_CONFIGS.keys())}",
@@ -611,7 +611,6 @@ def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
         DataArray with materialised chunks that can be safely saved to Zarr
 
     """
-
     # N.B.: Analyse the outputs of:
     #   first_key = result.data.__dask_keys__()[0]
     #   first_chunk = dask.compute(first_key)[0]

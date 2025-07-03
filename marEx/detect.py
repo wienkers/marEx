@@ -129,6 +129,7 @@ def _infer_dims_coords(
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Determine full set of dimensions and coordinates for the DataArray.
+    Sets default (standard) dimension and coordinate names if unspecified.
 
     This function ensures the dimensions dictionary includes required keys and coordinates
     are properly set based on data structure. It validates that all specified dimensions
@@ -153,6 +154,10 @@ def _infer_dims_coords(
     DataValidationError
         If any specified dimension or coordinate does not exist in the dataset
     """
+    if dimensions is None:
+        dimensions = {"time": "time", "x": "lon", "y": "lat"}
+    if coordinates is None:
+        coordinates = dimensions.copy()
 
     if "time" not in dimensions:
         dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
@@ -209,11 +214,11 @@ def preprocess_data(
     smooth_days_baseline: int = 21,  # "
     window_days_hobday: int = 11,  # for hobday_extreme
     std_normalise: bool = False,  # for detrended_baseline
-    detrend_orders: List[int] = [1],  # "
+    detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     exact_percentile: bool = False,
-    dask_chunks: Dict[str, int] = {"time": 25},
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dask_chunks: Optional[Dict[str, int]] = None,
+    dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
@@ -227,7 +232,8 @@ def preprocess_data(
 
     Anomaly Methods:
     - 'detrended_baseline': Detrending with harmonics and polynomials -- more efficient, but biases statistics
-    - 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct", but shortens time series by window_year_baseline years
+    - 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct",
+                           but shortens time series by window_year_baseline years
 
     Extreme Methods:
     - 'global_extreme': Global-in-time threshold value
@@ -251,8 +257,10 @@ def preprocess_data(
         Chunking specification for distributed computation
     dimensions : dict, optional
         Mapping of dimensions to names in the data
+        Defaults to {"time": "time", "x": "lon", "y": "lat"}
     coordinates : dict, optional
         Mapping of coordinates to names in the data
+        Defaults to dimensions mapping
     neighbours : xarray.DataArray, optional
         Neighbour connectivity for spatial clustering (optional)
     cell_areas : xarray.DataArray, optional
@@ -378,7 +386,8 @@ def preprocess_data(
     ...     )
     ... except ValueError as e:
     ...     print(f"Error: {e}")
-    Error: Insufficient data for shifting_baseline method. Dataset spans 3 years but window_year_baseline requires at least 15 years.
+    Error: Insufficient data for shifting_baseline method. Dataset spans 3 years but window_year_baseline
+    requires at least 15 years.
 
     Performance considerations with chunking:
 
@@ -403,6 +412,12 @@ def preprocess_data(
     >>> events = tracker.run()
     >>> print(f"Identified {events.event.max().compute()} distinct events")
     """
+    # Set default values for mutable parameters
+    if detrend_orders is None:
+        detrend_orders = [1]
+    if dask_chunks is None:
+        dask_chunks = {"time": 25}
+
     # Configure logging if verbose/quiet parameters are provided
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
@@ -653,9 +668,7 @@ def _get_preprocessing_steps(
     smooth_days_baseline: int,
     window_days_hobday: int,
 ) -> List[str]:
-    """
-    Generate preprocessing steps description based on selected methods.
-    """
+    """Generate preprocessing steps description based on selected methods."""
     steps = []
 
     if method_anomaly == "detrended_baseline":
@@ -678,12 +691,12 @@ def _get_preprocessing_steps(
 def compute_normalised_anomaly(
     da: xr.DataArray,
     method_anomaly: Literal["detrended_baseline", "shifting_baseline"] = "detrended_baseline",
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
     std_normalise: bool = False,  # for detrended_baseline
-    detrend_orders: List[int] = [1],  # "
+    detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
@@ -805,6 +818,10 @@ def compute_normalised_anomaly(
     >>> print(f"Detrended RMS: {detrended.dat_anomaly.std().compute():.3f}")
     >>> print(f"Shifting RMS: {shifting.dat_anomaly.std().compute():.3f}")
     """
+    # Set default values for mutable parameters
+    if detrend_orders is None:
+        detrend_orders = [1]
+
     # Configure logging if verbose/quiet parameters are provided
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
@@ -842,7 +859,7 @@ def identify_extremes(
     da: xr.DataArray,
     method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
     threshold_percentile: float = 95,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     window_days_hobday: int = 11,  # for hobday_extreme
     exact_percentile: bool = False,
@@ -998,7 +1015,10 @@ def identify_extremes(
         logger.error(f"Invalid percentile threshold: {threshold_percentile}% with exact_percentile=False")
         raise ConfigurationError(
             f"Percentile threshold {threshold_percentile}% is not supported with exact_percentile=False",
-            details="Low percentile thresholds (<60%) produce undefined and unsupported behaviour when using approximate histogram methods",
+            details=(
+                "Low percentile thresholds (<60%) produce undefined and unsupported behaviour "
+                "when using approximate histogram methods"
+            ),
             suggestions=[
                 "Use exact_percentile=True for percentiles below 60%",
                 "Use a higher percentile threshold (≥60%) with exact_percentile=False",
@@ -1013,7 +1033,7 @@ def identify_extremes(
 
     if method_extreme == "global_extreme":
         logger.debug(f"Global extreme method - exact_percentile={exact_percentile}")
-        return _identify_extremes_constant(da, threshold_percentile, exact_percentile, dimensions, coordinates)
+        return _identify_extremes_constant(da, threshold_percentile, exact_percentile, dimensions)
     elif method_extreme == "hobday_extreme":
         logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, exact_percentile={exact_percentile}")
         return _identify_extremes_hobday(
@@ -1048,8 +1068,8 @@ def identify_extremes(
 def rolling_climatology(
     da: xr.DataArray,
     window_year_baseline: int = 15,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
@@ -1131,12 +1151,11 @@ def rolling_climatology(
     >>> large_climatology = marEx.rolling_climatology(large_sst)
     >>> # Output maintains input chunking structure
     """
-
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
     time_coord = coordinates["time"]
-    original_chunk_dict = {dim: chunks for dim, chunks in zip(da.dims, da.chunks)}
+    original_chunk_dict = dict(zip(da.dims, da.chunks))
 
     # Add temporal coordinates
     years = da[time_coord].dt.year
@@ -1224,11 +1243,12 @@ def smoothed_rolling_climatology(
     da: xr.DataArray,
     window_year_baseline: int = 15,
     smooth_days_baseline: int = 21,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """
-    Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
+    Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data
+    and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
 
     Parameters
@@ -1332,17 +1352,12 @@ def smoothed_rolling_climatology(
     >>> large_sst = sst.chunk({'time': 25, 'lat': 45, 'lon': 90})
     >>> efficient_clim = marEx.smoothed_rolling_climatology(large_sst)
     """
-
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
 
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    da_smoothed = (
-        da.rolling({timedim: smooth_days_baseline}, center=True)
-        .mean()
-        .chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
-    )
+    da_smoothed = da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks)))
 
     clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
 
@@ -1353,8 +1368,8 @@ def _compute_anomaly_shifting_baseline(
     da: xr.DataArray,
     window_year_baseline: int = 15,
     smooth_days_baseline: int = 21,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -1391,13 +1406,14 @@ def _identify_extremes_hobday(
     threshold_percentile: float = 95,
     window_days_hobday: int = 11,
     exact_percentile: bool = False,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
 
-    For each spatial point and day-of-year, computes the p-th percentile of values within a window_days_hobday day window across all years.
+    For each spatial point and day-of-year, computes the p-th percentile of values within a
+    window_days_hobday day window across all years.
     This implements the standard methodology for marine heatwave detection threshold calculation.
 
     Parameters:
@@ -1438,7 +1454,6 @@ def _identify_extremes_hobday(
             threshold_percentile / 100.0,
             window_days_hobday=window_days_hobday,
             dimensions=dimensions,
-            coordinates=coordinates,
         )
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
@@ -1487,9 +1502,9 @@ def add_decimal_year(da: xr.DataArray, dim: str = "time") -> xr.DataArray:
 def _compute_anomaly_detrended(
     da: xr.DataArray,
     std_normalise: bool = False,
-    detrend_orders: List[int] = [1],
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    detrend_orders: Optional[List[int]] = None,
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
     force_zero_mean: bool = True,
 ) -> xr.Dataset:
     """
@@ -1498,6 +1513,10 @@ def _compute_anomaly_detrended(
     """
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
+    # Default detrend_orders to linear if not specified
+    if detrend_orders is None:
+        detrend_orders = [1]
 
     da = da.astype(np.float32)
 
@@ -1709,8 +1728,7 @@ def _compute_histogram_quantile_2d(
     q: float,
     window_days_hobday: int = 11,
     bin_edges: Optional[NDArray[np.float64]] = None,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Dict[str, str] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -1863,8 +1881,7 @@ def _identify_extremes_constant(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     exact_percentile: bool = False,
-    dimensions: Dict[str, str] = {"time": "time", "x": "lon"},
-    coordinates: Dict[str, str] = {"time": "time", "x": "lon", "y": "lat"},
+    dimensions: Dict[str, str] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a constant (in time) percentile threshold.
@@ -1872,7 +1889,6 @@ def _identify_extremes_constant(
 
     Returns both the extreme events boolean mask and the thresholds used.
     """
-
     if exact_percentile:  # Compute exact percentile (memory-intensive)
         # Determine appropriate chunk size based on data dimensions
         if "y" in dimensions:
@@ -1905,6 +1921,6 @@ def _identify_extremes_constant(
     if "quantile" in extremes.coords:
         extremes = extremes.drop_vars("quantile")
 
-    extremes = extremes.astype(bool).chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
+    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks)))
 
     return extremes, threshold
