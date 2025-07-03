@@ -520,13 +520,13 @@ class tracker:
         rechunk_dims = {}
 
         # Check xdim chunking in data_bin
-        if self.xdim in self.data_bin.chunks:
-            xdim_chunks = self.data_bin.chunks[self.xdim]
+        if self.xdim in self.data_bin.chunksizes:
+            xdim_chunks = self.data_bin.chunksizes[self.xdim]
             if len(xdim_chunks) > 1:
                 warnings.warn(
                     f"Spatial dimension '{self.xdim}' has multiple chunks ({len(xdim_chunks)} chunks). "
                     f"This will cause issues with apply_ufunc operations. Rechunking to single chunk."
-                    f"Consider direcly loading dataset with proper chunking to optimise performance.",
+                    f"Consider directly loading dataset with proper chunking to optimise performance.",
                     UserWarning,
                     stacklevel=3,
                 )
@@ -534,8 +534,8 @@ class tracker:
                 rechunk_dims[self.xdim] = -1
 
         # Check ydim chunking for structured grids
-        if self.ydim is not None and self.ydim in self.data_bin.chunks:
-            ydim_chunks = self.data_bin.chunks[self.ydim]
+        if self.ydim is not None and self.ydim in self.data_bin.chunksizes:
+            ydim_chunks = self.data_bin.chunksizes[self.ydim]
             if len(ydim_chunks) > 1:
                 warnings.warn(
                     f"Spatial dimension '{self.ydim}' has multiple chunks ({len(ydim_chunks)} chunks). "
@@ -557,8 +557,8 @@ class tracker:
         mask_rechunk_dims = {}
 
         # Check xdim chunking in mask
-        if self.xdim in self.mask.chunks:
-            xdim_chunks = self.mask.chunks[self.xdim]
+        if self.mask.chunks is not None and self.xdim in self.mask.chunksizes:
+            xdim_chunks = self.mask.chunksizes[self.xdim]
             if len(xdim_chunks) > 1:
                 warnings.warn(
                     f"Mask spatial dimension '{self.xdim}' has multiple chunks ({len(xdim_chunks)} chunks). "
@@ -570,8 +570,8 @@ class tracker:
                 mask_rechunk_dims[self.xdim] = -1
 
         # Check ydim chunking in mask for structured grids
-        if self.ydim is not None and self.ydim in self.mask.chunks:
-            ydim_chunks = self.mask.chunks[self.ydim]
+        if self.ydim is not None and self.mask.chunks is not None and self.ydim in self.mask.chunksizes:
+            ydim_chunks = self.mask.chunksizes[self.ydim]
             if len(ydim_chunks) > 1:
                 warnings.warn(
                     f"Mask spatial dimension '{self.ydim}' has multiple chunks ({len(ydim_chunks)} chunks). "
@@ -594,8 +594,8 @@ class tracker:
         neighbours_rechunk_dims = {}
 
         # Check xdim chunking in neighbours
-        if self.xdim in neighbours.chunks:
-            xdim_chunks = neighbours.chunks[self.xdim]
+        if self.xdim in neighbours.chunksizes:
+            xdim_chunks = neighbours.chunksizes[self.xdim]
             if len(xdim_chunks) > 1:
                 warnings.warn(
                     f"Neighbours spatial dimension '{self.xdim}' has multiple chunks ({len(xdim_chunks)} chunks). "
@@ -607,8 +607,8 @@ class tracker:
                 neighbours_rechunk_dims[self.xdim] = -1
 
         # Check nv dimension chunking in neighbours
-        if "nv" in neighbours.chunks:
-            nv_chunks = neighbours.chunks["nv"]
+        if "nv" in neighbours.chunksizes:
+            nv_chunks = neighbours.chunksizes["nv"]
             if len(nv_chunks) > 1:
                 warnings.warn(
                     f"Neighbours dimension 'nv' has multiple chunks ({len(nv_chunks)} chunks). "
@@ -624,8 +624,8 @@ class tracker:
         cell_areas_rechunk_dims = {}
 
         # Check xdim chunking in cell_areas
-        if self.xdim in cell_areas.chunks:
-            xdim_chunks = cell_areas.chunks[self.xdim]
+        if self.xdim in cell_areas.chunksizes:
+            xdim_chunks = cell_areas.chunksizes[self.xdim]
             if len(xdim_chunks) > 1:
                 warnings.warn(
                     f"Cell areas spatial dimension '{self.xdim}' has multiple chunks ({len(xdim_chunks)} chunks). "

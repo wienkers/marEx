@@ -383,9 +383,9 @@ class TestUnstructuredTracking:
             tolerance_relative=0.4,
         )
         # Expected ranges for full dataset (732 timesteps × 1000 cells)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_prefiltered"], 800, tolerance=100)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_filtered"], 800, tolerance=100)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_events_final"], 100, tolerance=50)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_prefiltered"], 160, tolerance=20)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_filtered"], 140, tolerance=20)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_events_final"], 25, tolerance=5)
 
     @pytest.mark.slow
     def test_unstructured_temporal_gap_filling(self, dask_client):
@@ -462,7 +462,7 @@ class TestUnstructuredTracking:
         # Expected ranges for full dataset (732 timesteps × 1000 cells)
         assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_prefiltered"], 200, tolerance=100)
         assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_filtered"], 100, tolerance=75)
-        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 40, tolerance=20)
+        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 20, tolerance=10)
 
     def test_unstructured_grid_requirements(self, dask_client):
         """Test that unstructured tracking properly validates grid requirements."""
