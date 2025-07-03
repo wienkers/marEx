@@ -119,7 +119,7 @@ class TestComputeHistogramQuantile1D:
 
         # Compare with numpy percentile
         expected = np.percentile(data, 95)
-        assert np.isclose(result.values[0, 0], expected, atol=0.1)
+        assert np.isclose(result.values[0, 0], expected, atol=0.02)
 
     def test_histogram_quantile_multiple_quantiles(self):
         """Test multiple quantile values."""
@@ -133,12 +133,12 @@ class TestComputeHistogramQuantile1D:
             name="test_data",
         )
 
-        quantiles = [0.5, 0.9, 0.95, 0.99]
+        quantiles = [0.6, 0.9, 0.95, 0.99]
 
         for q in quantiles:
             result = detect._compute_histogram_quantile_1d(da, q, dim="x")
             expected = np.percentile(data, q * 100)
-            assert np.isclose(result.values[0, 0], expected, atol=0.2)
+            assert np.isclose(result.values[0, 0], expected, atol=0.02)
 
     def test_histogram_quantile_extreme_values(self):
         """Test quantile calculation with extreme values."""
@@ -384,24 +384,27 @@ class TestRollingHistogramQuantile:
     def test_rolling_histogram_edge_wrapping(self):
         """Test that rolling window properly wraps around year boundaries."""
         # Create histogram with distinct pattern at year boundaries
-        hist_chunk = np.ones((365, 10), dtype=np.float64)
+        hist_chunk_jan1 = np.ones((365, 10), dtype=np.float64)
+        hist_chunk_dec31 = np.ones((365, 10), dtype=np.float64)
 
         # Make January 1st (day 0) and December 31st (day 364) have high values in last bin
-        hist_chunk[0, -1] = 1000  # Jan 1st
-        hist_chunk[364, -1] = 1000  # Dec 31st
+        hist_chunk_jan1[0:2, -1] = 1000  # Jan 1st
+        hist_chunk_dec31[362:364, -1] = 1000  # Dec 31st
 
         bin_centers = np.linspace(0, 10, 10)
 
-        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
+        result_jan1 = detect._rolling_histogram_quantile(hist_chunk_jan1, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
+        result_dec31 = detect._rolling_histogram_quantile(hist_chunk_dec31, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
 
         # Due to wrapping, both Jan 1st and Dec 31st should see influence from each other
         # The 95th percentile near these dates should be higher than in the middle of year
-        jan_1_quantile = result[0]
-        mid_year_quantile = result[182]  # Around July
-        dec_31_quantile = result[364]
+        jan_1_quantile_on_dec31 = result_dec31[0]
+        mid_year_quantile = result_dec31[182]  # Around July
+        dec_31_quantile_on_jan1 = result_jan1[364]
 
-        assert jan_1_quantile > mid_year_quantile
-        assert dec_31_quantile > mid_year_quantile
+        assert jan_1_quantile_on_dec31 > mid_year_quantile
+        assert dec_31_quantile_on_jan1 > mid_year_quantile
+        assert jan_1_quantile_on_dec31 == dec_31_quantile_on_jan1, "Jan 1st and Dec 31st should have same quantile due to wrapping"
 
     def test_rolling_histogram_realistic_input(self):
         """Test rolling histogram with realistic input dimensions."""
