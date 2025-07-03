@@ -3,7 +3,7 @@ Dependency management for marEx.
 """
 
 import warnings
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class DependencyTracker:
@@ -19,14 +19,14 @@ class DependencyTracker:
         """Check availability of all optional dependencies."""
         # Performance dependencies
         try:
-            import jax
+            pass
 
             self._dependencies["jax"] = True
         except ImportError:
             self._dependencies["jax"] = False
 
         try:
-            import jax.lib
+            pass
 
             self._dependencies["jaxlib"] = True
         except ImportError:
@@ -34,7 +34,7 @@ class DependencyTracker:
 
         # HPC dependencies
         try:
-            import dask_jobqueue
+            pass
 
             self._dependencies["dask_jobqueue"] = True
         except (ImportError, ValueError):
@@ -43,7 +43,7 @@ class DependencyTracker:
             self._dependencies["dask_jobqueue"] = False
 
         try:
-            import psutil
+            pass
 
             self._dependencies["psutil"] = True
         except ImportError:
@@ -51,28 +51,28 @@ class DependencyTracker:
 
         # Visualisation dependencies
         try:
-            import matplotlib
+            pass
 
             self._dependencies["matplotlib"] = True
         except ImportError:
             self._dependencies["matplotlib"] = False
 
         try:
-            import cartopy
+            pass
 
             self._dependencies["cartopy"] = True
         except ImportError:
             self._dependencies["cartopy"] = False
 
         try:
-            import seaborn
+            pass
 
             self._dependencies["seaborn"] = True
         except ImportError:
             self._dependencies["seaborn"] = False
 
         try:
-            import cmocean
+            pass
 
             self._dependencies["cmocean"] = True
         except ImportError:
@@ -80,7 +80,7 @@ class DependencyTracker:
 
         # PIL for image processing
         try:
-            import PIL
+            pass
 
             self._dependencies["pillow"] = True
         except ImportError:

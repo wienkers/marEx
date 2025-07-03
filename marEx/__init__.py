@@ -25,19 +25,15 @@ Example
 """
 
 # Import dependency management
-from ._dependencies import (
-    get_installation_profile,
-    has_dependency,
-    print_dependency_status,
-)
+from ._dependencies import get_installation_profile, has_dependency, print_dependency_status
 
 # Import core functionality
 from .detect import (
     compute_normalised_anomaly,
     identify_extremes,
     preprocess_data,
-    smoothed_rolling_climatology,
     rolling_climatology,
+    smoothed_rolling_climatology,
 )
 
 # Import exception hierarchy

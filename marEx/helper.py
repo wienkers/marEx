@@ -21,14 +21,8 @@ import xarray as xr
 from dask.distributed import Client, LocalCluster
 from numpy.typing import NDArray
 
-from .exceptions import ConfigurationError, DependencyError, ProcessingError
-from .logging_config import (
-    configure_logging,
-    get_logger,
-    is_verbose_mode,
-    log_memory_usage,
-    log_timing,
-)
+from .exceptions import ConfigurationError
+from .logging_config import configure_logging, get_logger, is_verbose_mode, log_memory_usage, log_timing
 
 # Get module logger
 logger = get_logger(__name__)
@@ -369,7 +363,7 @@ def start_local_cluster(
     client._temp_dir = temp_dir
 
     # Get and display connection information
-    cluster_info = get_cluster_info(client)
+    get_cluster_info(client)
 
     # Enhanced verbose mode reporting
     if is_verbose_mode():

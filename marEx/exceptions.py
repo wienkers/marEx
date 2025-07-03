@@ -5,7 +5,7 @@ MarEx Exception Hierarchy: Error Handling
 This module provides a structured exception hierarchy for the marEx package.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 class MarExError(Exception):
