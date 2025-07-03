@@ -17,10 +17,9 @@ Compatible data formats:
 """
 
 import logging
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple
 
 import dask
-import dask.array as da
 import flox.xarray
 import numpy as np
 import pandas as pd
@@ -31,17 +30,9 @@ from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 # Coordinate validation imports removed
-from .exceptions import (
-    ConfigurationError,
-    CoordinateError,
-    DataValidationError,
-    ProcessingError,
-    create_coordinate_error,
-    create_data_validation_error,
-    create_processing_error,
-)
+from .exceptions import ConfigurationError, create_data_validation_error
 from .helper import fix_dask_tuple_array
-from .logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_progress, log_timing, progress_bar
+from .logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 
 # Get module logger
 logger = get_logger(__name__)

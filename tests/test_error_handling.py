@@ -7,13 +7,12 @@ This includes testing for common user mistakes and ensuring helpful error messag
 
 from pathlib import Path
 
-import dask.array as da
 import numpy as np
 import pytest
 import xarray as xr
 
 import marEx
-from marEx.exceptions import ConfigurationError, CoordinateError, DataValidationError, ProcessingError, TrackingError
+from marEx.exceptions import ConfigurationError, CoordinateError, DataValidationError
 
 
 @pytest.fixture(scope="module")
@@ -198,12 +197,8 @@ class TestCoordinateDimensionValidation:
 
     def test_invalid_dimension_names_detect(self, test_data_dask, dask_chunks):
         """Test DataValidationError when dimensions don't exist in dataset."""
-        invalid_dimensions = {
-            "time": "nonexistent_time",
-            "x": "nonexistent_x", 
-            "y": "nonexistent_y"
-        }
-        
+        invalid_dimensions = {"time": "nonexistent_time", "x": "nonexistent_x", "y": "nonexistent_y"}
+
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.preprocess_data(
                 test_data_dask,
@@ -215,12 +210,8 @@ class TestCoordinateDimensionValidation:
         """Test DataValidationError when coordinates don't exist in dataset."""
         # Valid dimensions but invalid coordinates
         valid_dimensions = {"time": "time", "x": "lon", "y": "lat"}
-        invalid_coordinates = {
-            "time": "nonexistent_time_coord",
-            "x": "nonexistent_x_coord",
-            "y": "nonexistent_y_coord"
-        }
-        
+        invalid_coordinates = {"time": "nonexistent_time_coord", "x": "nonexistent_x_coord", "y": "nonexistent_y_coord"}
+
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
             marEx.preprocess_data(
                 test_data_dask,
@@ -233,7 +224,7 @@ class TestCoordinateDimensionValidation:
         """Test error when coordinates=None for unstructured data."""
         # Create 2D unstructured-like data by removing y dimension
         unstructured_dims = {"time": "time", "x": "lon"}  # No 'y' key = unstructured
-        
+
         with pytest.raises(DataValidationError, match=r"Coordinates parameter must be explicitly specified for unstructured data"):
             marEx.preprocess_data(
                 test_data_dask,
@@ -248,7 +239,7 @@ class TestCoordinateDimensionValidation:
         unstructured_data = test_data_dask.stack(ncells=("lat", "lon"))
         unstructured_dims = {"time": "time", "x": "ncells"}
         unstructured_coords = {"time": "time", "x": "ncells", "y": "ncells"}  # Both x,y use same coord for 2D
-        
+
         # This should work without error
         result = marEx.preprocess_data(
             unstructured_data,
@@ -263,18 +254,17 @@ class TestCoordinateDimensionValidation:
         # Create global coordinate data to avoid regional coordinate issues
         global_data = test_data_dask.copy()
         global_data = global_data.assign_coords(
-            lon=np.linspace(-180, 180, len(global_data.lon)),
-            lat=np.linspace(-90, 90, len(global_data.lat))
+            lon=np.linspace(-180, 180, len(global_data.lon)), lat=np.linspace(-90, 90, len(global_data.lat))
         )
-        
+
         # Use new dimension format for preprocessing
         valid_dimensions = {"time": "time", "x": "lon", "y": "lat"}
         extremes_ds = marEx.preprocess_data(global_data, dimensions=valid_dimensions, dask_chunks=dask_chunks)
-        
+
         # Now test tracker with dimensions that don't exist - this will cause transpose to fail
         wrong_dimensions = {"time": "time", "x": "nonexistent_x", "y": "nonexistent_y"}
         wrong_coordinates = {"time": "time", "x": "lon", "y": "lat"}  # Valid coordinates
-        
+
         with pytest.raises(DataValidationError, match=r"Invalid dimensions for gridded data"):
             marEx.tracker(
                 extremes_ds.extreme_events,
@@ -291,7 +281,7 @@ class TestCoordinateDimensionValidation:
         unstructured_data = test_data_dask.stack(ncells=("lat", "lon"))
         unstructured_dims = {"time": "time", "x": "ncells"}
         unstructured_coords = {"time": "time", "x": "ncells", "y": "ncells"}
-        
+
         # Create binary data
         extremes_ds = marEx.preprocess_data(
             unstructured_data,
@@ -299,11 +289,11 @@ class TestCoordinateDimensionValidation:
             coordinates=unstructured_coords,
             dask_chunks={"time": 25},
         )
-        
+
         # Test tracker with coordinates that exist but don't have required spatial info
         # Use existing coordinates to avoid KeyError before validation
         wrong_coords = {"time": "time", "x": "time", "y": "time"}  # Wrong mapping, using existing coord
-        
+
         with pytest.raises((DataValidationError, CoordinateError)):
             marEx.tracker(
                 extremes_ds.extreme_events,
@@ -318,7 +308,7 @@ class TestCoordinateDimensionValidation:
     def test_compute_normalised_anomaly_dimension_validation(self, test_data_dask):
         """Test dimension validation in compute_normalised_anomaly."""
         invalid_dimensions = {"time": "time", "x": "missing_x", "y": "missing_y"}
-        
+
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.compute_normalised_anomaly(
                 test_data_dask,
@@ -330,7 +320,7 @@ class TestCoordinateDimensionValidation:
         """Test coordinate validation in compute_normalised_anomaly."""
         valid_dimensions = {"time": "time", "x": "lon", "y": "lat"}
         invalid_coordinates = {"time": "time", "x": "missing_x", "y": "missing_y"}
-        
+
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
             marEx.compute_normalised_anomaly(
                 test_data_dask,
@@ -342,7 +332,7 @@ class TestCoordinateDimensionValidation:
     def test_identify_extremes_dimension_validation(self, test_data_dask):
         """Test dimension validation in identify_extremes."""
         invalid_dimensions = {"time": "time", "x": "missing_x", "y": "missing_y"}
-        
+
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.identify_extremes(
                 test_data_dask,
@@ -354,7 +344,7 @@ class TestCoordinateDimensionValidation:
         """Test coordinate validation in identify_extremes."""
         valid_dimensions = {"time": "time", "x": "lon", "y": "lat"}
         invalid_coordinates = {"time": "time", "x": "missing_x", "y": "missing_y"}
-        
+
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
             marEx.identify_extremes(
                 test_data_dask,
@@ -372,10 +362,9 @@ class TestTrackerValidation:
         # Create global coordinate data to avoid regional coordinate issues
         global_data = test_data_dask.copy()
         global_data = global_data.assign_coords(
-            lon=np.linspace(-180, 180, len(global_data.lon)),
-            lat=np.linspace(-90, 90, len(global_data.lat))
+            lon=np.linspace(-180, 180, len(global_data.lon)), lat=np.linspace(-90, 90, len(global_data.lat))
         )
-        
+
         # First create valid binary data with global coordinates
         extremes_ds = marEx.preprocess_data(global_data, dimensions=dimensions_gridded, dask_chunks=dask_chunks)
 
@@ -408,13 +397,12 @@ class TestTrackerValidation:
 
     def test_t_fill_even_validation(self, test_data_dask, dimensions_gridded, dask_chunks):
         """Test that T_fill must be even."""
-        # Create global coordinate data to avoid regional coordinate issues  
+        # Create global coordinate data to avoid regional coordinate issues
         global_data = test_data_dask.copy()
         global_data = global_data.assign_coords(
-            lon=np.linspace(-180, 180, len(global_data.lon)),
-            lat=np.linspace(-90, 90, len(global_data.lat))
+            lon=np.linspace(-180, 180, len(global_data.lon)), lat=np.linspace(-90, 90, len(global_data.lat))
         )
-        
+
         # First create valid binary data
         extremes_ds = marEx.preprocess_data(global_data, dimensions=dimensions_gridded, dask_chunks=dask_chunks)
 
@@ -452,10 +440,9 @@ class TestTrackerValidation:
         # Create global coordinate data to avoid regional coordinate issues
         global_data = test_data_dask.copy()
         global_data = global_data.assign_coords(
-            lon=np.linspace(-180, 180, len(global_data.lon)),
-            lat=np.linspace(-90, 90, len(global_data.lat))
+            lon=np.linspace(-180, 180, len(global_data.lon)), lat=np.linspace(-90, 90, len(global_data.lat))
         )
-        
+
         # First create valid binary data
         extremes_ds = marEx.preprocess_data(global_data, dimensions=dimensions_gridded, dask_chunks=dask_chunks)
 

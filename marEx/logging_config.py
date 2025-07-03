@@ -14,7 +14,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import psutil
 
@@ -516,7 +516,6 @@ def log_dask_info(
         message: Additional context message
     """
     try:
-        import dask
         from dask.base import is_dask_collection
 
         if hasattr(da_or_ds, "chunks"):

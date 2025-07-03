@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 import xarray as xr
 
 import marEx
@@ -37,7 +36,7 @@ class TestUnstructuredPreprocessing:
         ncells = cls.sst_data.sizes.get("ncells", cls.sst_data.sizes.get("cell", 1000))
         cls.mock_neighbours = xr.DataArray(np.random.randint(0, ncells, (3, ncells)), dims=["nv", "ncells"])
         cls.mock_cell_areas = xr.DataArray(np.ones(ncells) * 1000.0, dims=["ncells"])  # Mock cell areas in m²
-        
+
         # Add mock lat/lon coordinates to the data for unstructured processing
         # These are required by the preprocessing pipeline
         lat_coords = xr.DataArray(np.linspace(-90, 90, ncells), dims=["ncells"], name="lat")
@@ -238,22 +237,17 @@ class TestUnstructuredPreprocessing:
     def test_custom_dimension_names_unstructured(self):
         """Test preprocessing with custom dimension and coordinate names for unstructured grid with both detect methods."""
         # Rename dimensions to: "t" and "cell"
-        # Rename coordinates to: "T", "longitude", and "latitude"  
-        renamed_data = self.sst_data.rename({
-            "time": "t",
-            "ncells": "cell",
-            "lon": "longitude",
-            "lat": "latitude"
-        })
-        
+        # Rename coordinates to: "T", "longitude", and "latitude"
+        renamed_data = self.sst_data.rename({"time": "t", "ncells": "cell", "lon": "longitude", "lat": "latitude"})
+
         # Update mock data to match renamed dimensions
         mock_neighbours_renamed = self.mock_neighbours.rename({"ncells": "cell"})
         mock_cell_areas_renamed = self.mock_cell_areas.rename({"ncells": "cell"})
-        
+
         # Define custom dimensions and coordinates
         custom_dimensions = {"time": "t", "x": "cell"}
         custom_coordinates = {"time": "t", "x": "longitude", "y": "latitude"}
-        
+
         # Test 1: detrended_baseline + global_extreme
         extremes_ds_detrended = marEx.preprocess_data(
             renamed_data,
@@ -267,7 +261,7 @@ class TestUnstructuredPreprocessing:
             neighbours=mock_neighbours_renamed,
             cell_areas=mock_cell_areas_renamed,
         )
-        
+
         # Verify output structure for detrended_baseline method
         assert isinstance(extremes_ds_detrended, xr.Dataset)
         assert "extreme_events" in extremes_ds_detrended.data_vars
@@ -276,29 +270,29 @@ class TestUnstructuredPreprocessing:
         assert "mask" in extremes_ds_detrended.data_vars
         assert "neighbours" in extremes_ds_detrended.data_vars
         assert "cell_areas" in extremes_ds_detrended.data_vars
-        
+
         # Verify dimensions are correctly renamed
         assert "t" in extremes_ds_detrended.extreme_events.dims
         assert "cell" in extremes_ds_detrended.extreme_events.dims
-        
+
         # Verify no regular grid dimensions present
         assert "latitude" not in extremes_ds_detrended.extreme_events.dims
         assert "longitude" not in extremes_ds_detrended.extreme_events.dims
-        
+
         # Verify coordinates are present
         assert "latitude" in extremes_ds_detrended.coords
         assert "longitude" in extremes_ds_detrended.coords
         assert extremes_ds_detrended.latitude.dims == ("cell",)
         assert extremes_ds_detrended.longitude.dims == ("cell",)
-        
+
         # Verify attributes for detrended_baseline
         assert extremes_ds_detrended.attrs["method_anomaly"] == "detrended_baseline"
         assert extremes_ds_detrended.attrs["method_extreme"] == "global_extreme"
-        
+
         # For global_extreme, thresholds should be 1D (cells) not 2D with dayofyear
         assert "dayofyear" not in extremes_ds_detrended.thresholds.dims
         assert "cell" in extremes_ds_detrended.thresholds.dims
-        
+
         # Verify reasonable extreme event frequency
         extreme_frequency_detrended = float(extremes_ds_detrended.extreme_events.mean())
         assert_percentile_frequency(
@@ -306,7 +300,7 @@ class TestUnstructuredPreprocessing:
             95,
             description="Custom dimensions (unstructured): detrended_baseline + global_extreme",
         )
-        
+
         # Test 2: shifting_baseline + hobday_extreme
         extremes_ds_shifting = marEx.preprocess_data(
             renamed_data,
@@ -322,7 +316,7 @@ class TestUnstructuredPreprocessing:
             neighbours=mock_neighbours_renamed,
             cell_areas=mock_cell_areas_renamed,
         )
-        
+
         # Verify output structure for shifting_baseline method
         assert isinstance(extremes_ds_shifting, xr.Dataset)
         assert "extreme_events" in extremes_ds_shifting.data_vars
@@ -331,34 +325,34 @@ class TestUnstructuredPreprocessing:
         assert "mask" in extremes_ds_shifting.data_vars
         assert "neighbours" in extremes_ds_shifting.data_vars
         assert "cell_areas" in extremes_ds_shifting.data_vars
-        
+
         # Verify dimensions are correctly renamed
         assert "t" in extremes_ds_shifting.extreme_events.dims
         assert "cell" in extremes_ds_shifting.extreme_events.dims
-        
+
         # Verify no regular grid dimensions present
         assert "latitude" not in extremes_ds_shifting.extreme_events.dims
         assert "longitude" not in extremes_ds_shifting.extreme_events.dims
-        
+
         # Verify coordinates are present
         assert "latitude" in extremes_ds_shifting.coords
         assert "longitude" in extremes_ds_shifting.coords
         assert extremes_ds_shifting.latitude.dims == ("cell",)
         assert extremes_ds_shifting.longitude.dims == ("cell",)
-        
+
         # Verify attributes for shifting_baseline
         assert extremes_ds_shifting.attrs["method_anomaly"] == "shifting_baseline"
         assert extremes_ds_shifting.attrs["method_extreme"] == "hobday_extreme"
-        
+
         # For hobday_extreme, thresholds should have dayofyear dimension
         assert "dayofyear" in extremes_ds_shifting.thresholds.dims
         assert "cell" in extremes_ds_shifting.thresholds.dims
-        
+
         # Verify time dimension: shifting_baseline should reduce time
         input_time_size = renamed_data.sizes["t"]
         output_time_size = extremes_ds_shifting.sizes["t"]
         assert output_time_size < input_time_size, "shifting_baseline should reduce time dimension"
-        
+
         # Verify reasonable extreme event frequency
         extreme_frequency_shifting = float(extremes_ds_shifting.extreme_events.mean())
         assert_percentile_frequency(
@@ -366,24 +360,23 @@ class TestUnstructuredPreprocessing:
             95,
             description="Custom dimensions (unstructured): shifting_baseline + hobday_extreme",
         )
-        
+
         # Test 3: Verify both methods produce consistent core structure
         core_vars = ["extreme_events", "dat_anomaly", "mask", "neighbours", "cell_areas"]
         for var in core_vars:
             assert var in extremes_ds_detrended.data_vars
             assert var in extremes_ds_shifting.data_vars
-        
+
         # Both should have same cell dimension structure
         assert "cell" in extremes_ds_detrended.extreme_events.dims
         assert "cell" in extremes_ds_shifting.extreme_events.dims
-        
+
         # Both should have consistent neighbours and cell_areas
         assert extremes_ds_detrended.neighbours.shape == extremes_ds_shifting.neighbours.shape
         assert extremes_ds_detrended.cell_areas.shape == extremes_ds_shifting.cell_areas.shape
-        
+
         # Both should have same coordinate structure
         assert "latitude" in extremes_ds_detrended.coords
         assert "longitude" in extremes_ds_detrended.coords
         assert "latitude" in extremes_ds_shifting.coords
         assert "longitude" in extremes_ds_shifting.coords
-

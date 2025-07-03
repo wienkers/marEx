@@ -5,8 +5,6 @@ Tests core utility functions for marine extreme detection preprocessing.
 Focuses on testing individual function behaviour rather than full pipeline integration.
 """
 
-from datetime import datetime, timedelta
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,9 +21,7 @@ class TestAddDecimalYear:
         """Test basic decimal year calculation for known dates."""
         # Create test data with known dates
         dates = pd.date_range("2020-01-01", "2020-12-31", freq="D")
-        da = xr.DataArray(
-            np.random.randn(len(dates)), coords={"time": dates}, dims=["time"]
-        )
+        da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
         result = detect.add_decimal_year(da, "time")
 
@@ -51,9 +47,7 @@ class TestAddDecimalYear:
         """Test decimal year calculation for leap year."""
         # Test leap year (2020)
         dates = pd.date_range("2020-01-01", "2020-12-31", freq="D")
-        da = xr.DataArray(
-            np.random.randn(len(dates)), coords={"time": dates}, dims=["time"]
-        )
+        da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
         result = detect.add_decimal_year(da, "time")
         decimal_years = result.decimal_year.values
@@ -69,9 +63,7 @@ class TestAddDecimalYear:
         """Test decimal year calculation for non-leap year."""
         # Test non-leap year (2021)
         dates = pd.date_range("2021-01-01", "2021-12-31", freq="D")
-        da = xr.DataArray(
-            np.random.randn(len(dates)), coords={"time": dates}, dims=["time"]
-        )
+        da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
         result = detect.add_decimal_year(da, "time")
         decimal_years = result.decimal_year.values
@@ -97,9 +89,7 @@ class TestAddDecimalYear:
 
     def test_add_decimal_year_single_date(self):
         """Test decimal year calculation for single date."""
-        da = xr.DataArray(
-            [1.0], coords={"time": [pd.Timestamp("2020-07-01")]}, dims=["time"]
-        )
+        da = xr.DataArray([1.0], coords={"time": [pd.Timestamp("2020-07-01")]}, dims=["time"])
 
         result = detect.add_decimal_year(da, "time")
 
@@ -189,9 +179,7 @@ class TestComputeHistogramQuantile1D:
         # Custom bin edges
         bin_edges = np.linspace(-3, 4, 100)
 
-        result = detect._compute_histogram_quantile_1d(
-            da, 0.5, dim="x", bin_edges=bin_edges
-        )
+        result = detect._compute_histogram_quantile_1d(da, 0.5, dim="x", bin_edges=bin_edges)
 
         # Median of uniform distribution should be near 0.5
         expected = np.percentile(data, 50)
@@ -336,9 +324,7 @@ class TestValidationFunctions:
             },
         ).chunk({"time": 5})
 
-        with pytest.raises(
-            marEx.exceptions.ConfigurationError, match="Unknown anomaly method"
-        ):
+        with pytest.raises(marEx.exceptions.ConfigurationError, match="Unknown anomaly method"):
             detect.compute_normalised_anomaly(da, method_anomaly="invalid_method")
 
     def test_invalid_method_extreme(self):
@@ -353,9 +339,7 @@ class TestValidationFunctions:
             },
         ).chunk({"time": 5})
 
-        with pytest.raises(
-            marEx.exceptions.ConfigurationError, match="Unknown extreme method"
-        ):
+        with pytest.raises(marEx.exceptions.ConfigurationError, match="Unknown extreme method"):
             detect.identify_extremes(da, method_extreme="invalid_method")
 
     def test_non_dask_array_error(self):
@@ -387,9 +371,7 @@ class TestRollingHistogramQuantile:
         hist_chunk = np.random.randint(0, 100, size=(365, 10))
         bin_centers = np.linspace(-2, 3, 10)
 
-        result = detect._rolling_histogram_quantile(
-            hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers
-        )
+        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
 
         # Check output shape
         assert result.shape == (365,)
@@ -410,9 +392,7 @@ class TestRollingHistogramQuantile:
 
         bin_centers = np.linspace(0, 10, 10)
 
-        result = detect._rolling_histogram_quantile(
-            hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers
-        )
+        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
 
         # Due to wrapping, both Jan 1st and Dec 31st should see influence from each other
         # The 95th percentile near these dates should be higher than in the middle of year
@@ -431,9 +411,7 @@ class TestRollingHistogramQuantile:
         bin_centers = np.linspace(-2, 3, 20)
 
         # Test 95th percentile calculation
-        result = detect._rolling_histogram_quantile(
-            hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers
-        )
+        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
 
         # Basic validation of output shape and reasonable values
         assert len(result) == 365
