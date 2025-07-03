@@ -48,18 +48,10 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
         grid_data = xr.open_dataset(
             fpath_tgrid,
             chunks={},
-            drop_variables=[
-                v
-                for v in xr.open_dataset(fpath_tgrid).variables
-                if v not in ["vertex_of_cell", "clon", "clat"]
-            ],
+            drop_variables=[v for v in xr.open_dataset(fpath_tgrid).variables if v not in ["vertex_of_cell", "clon", "clat"]],
         )
 
-        if (
-            "vertex_of_cell" not in grid_data.variables
-            or "clon" not in grid_data.variables
-            or "clat" not in grid_data.variables
-        ):
+        if "vertex_of_cell" not in grid_data.variables or "clon" not in grid_data.variables or "clat" not in grid_data.variables:
             raise DataValidationError(
                 "Invalid triangulation grid file format",
                 details="Missing required variables for triangulation",
@@ -77,17 +69,13 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
         # Extract triangulation vertices - convert to 0-based indexing
         triangles = grid_data.vertex_of_cell.values.T - 1
         # Create matplotlib triangulation object
-        _GRID_CACHE["triangulation"][fpath_tgrid] = Triangulation(
-            grid_data.clon.values, grid_data.clat.values, triangles
-        )
+        _GRID_CACHE["triangulation"][fpath_tgrid] = Triangulation(grid_data.clon.values, grid_data.clat.values, triangles)
         grid_data.close()
 
     return _GRID_CACHE["triangulation"][fpath_tgrid]
 
 
-def _load_ckdtree(
-    fpath_ckdtree: Union[str, Path], res: float
-) -> Dict[str, NDArray[Any]]:
+def _load_ckdtree(fpath_ckdtree: Union[str, Path], res: float) -> Dict[str, NDArray[Any]]:
     """Load and cache ckdtree data globally."""
     cache_key = (str(fpath_ckdtree), res)  # Convert Path to string for dict key
 
@@ -119,8 +107,19 @@ def _load_ckdtree(
 
 
 class UnstructuredPlotter(PlotterBase):
-    def __init__(self, xarray_obj: xr.DataArray) -> None:
-        super().__init__(xarray_obj)
+    def __init__(
+        self,
+        xarray_obj: xr.DataArray,
+        dimensions: Optional[Dict[str, str]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
+    ) -> None:
+        # Set default dimensions and coordinates for unstructured data if not provided
+        if dimensions is None:
+            dimensions = {"time": "time", "x": "ncells"}
+        if coordinates is None:
+            coordinates = {"time": "time", "x": "lon", "y": "lat"}
+
+        super().__init__(xarray_obj, dimensions, coordinates)
 
         from . import _fpath_ckdtree, _fpath_tgrid
 
@@ -144,11 +143,15 @@ class UnstructuredPlotter(PlotterBase):
         norm: Optional[Union[BoundaryNorm, Normalize]] = None,
     ) -> Tuple[Axes, Union[TriMesh, QuadMesh]]:
         """Implement plotting for unstructured data."""
+        # Handle case where data might have time dimension
+        data = self.da
+        time_dim = self.dimensions.get("time", "time")
+        if time_dim in data.dims and len(data[time_dim]) == 1:
+            data = data.squeeze(dim=time_dim)
+
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
-            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(
-                self.da.values, res=0.3
-            )
+            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(data.values, res=0.3)
 
             plot_kwargs = {
                 "transform": ccrs.PlateCarree(),
@@ -190,7 +193,7 @@ class UnstructuredPlotter(PlotterBase):
                 plot_kwargs["vmax"] = clim[1]
 
             # Mask NaNs
-            native_data = self.da.copy()
+            native_data = data.copy()
             native_data = np.ma.masked_invalid(native_data)
 
             im = ax.tripcolor(triang, native_data, **plot_kwargs)
@@ -219,8 +222,6 @@ class UnstructuredPlotter(PlotterBase):
         grid_lon_2d, grid_lat_2d = np.meshgrid(ckdt_data["lon"], ckdt_data["lat"])
 
         # Use indices to create interpolated data
-        grid_data = data[ckdt_data["indices"]].reshape(
-            ckdt_data["lat"].size, ckdt_data["lon"].size
-        )
+        grid_data = data[ckdt_data["indices"]].reshape(ckdt_data["lat"].size, ckdt_data["lon"].size)
 
         return grid_lon_2d, grid_lat_2d, grid_data

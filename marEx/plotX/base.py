@@ -11,8 +11,8 @@ import numpy as np
 import xarray as xr
 from numpy.typing import NDArray
 
-from ..exceptions import CoordinateError, DependencyError, VisualisationError
-from ..logging_config import configure_logging, get_logger, log_timing
+from ..exceptions import DependencyError, VisualisationError
+from ..logging_config import configure_logging, get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -78,6 +78,7 @@ class PlotConfig:
     grid_lines: bool = True
     grid_labels: bool = False
     dimensions: Dict[str, str] = None
+    coordinates: Dict[str, str] = None
     norm: Optional[Union[BoundaryNorm, Normalize]] = None
     plot_IDs: bool = False
     extend: str = "both"
@@ -88,7 +89,9 @@ class PlotConfig:
         if self.cperc is None:
             self.cperc = [4, 96]
         if self.dimensions is None:
-            self.dimensions = {"time": "time", "ydim": "lat", "xdim": "lon"}
+            self.dimensions = {"time": "time", "y": "lat", "x": "lon"}
+        if self.coordinates is None:
+            self.coordinates = {"time": "time", "y": "lat", "x": "lon"}
         if self.plot_IDs:
             self.show_colorbar = False
 
@@ -97,10 +100,78 @@ class PlotConfig:
             configure_logging(verbose=self.verbose, quiet=self.quiet)
 
 
+def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
+    """Validate that all specified dimensions exist in the dataset."""
+    missing_dims = []
+    for concept_dim, actual_dim in dimensions.items():
+        if actual_dim not in da.dims:
+            missing_dims.append(f"'{actual_dim}' (for {concept_dim})")
+
+    if missing_dims:
+        available_dims = list(da.dims)
+        raise VisualisationError(
+            f"Missing required dimensions: {', '.join(missing_dims)}",
+            details=f"Dataset has dimensions: {available_dims}",
+            suggestions=[
+                "Check dimension names in your data",
+                "Update the 'dimensions' parameter to match your data structure",
+                f"Available dimensions: {available_dims}",
+            ],
+            context={
+                "missing_dimensions": missing_dims,
+                "available_dimensions": available_dims,
+                "provided_dimensions": dimensions,
+            },
+        )
+
+
+def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -> None:
+    """Validate that all specified coordinates exist in the dataset."""
+    missing_coords = []
+    for concept_coord, actual_coord in coordinates.items():
+        if actual_coord not in da.coords:
+            missing_coords.append(f"'{actual_coord}' (for {concept_coord})")
+
+    if missing_coords:
+        available_coords = list(da.coords)
+        raise VisualisationError(
+            f"Missing required coordinates: {', '.join(missing_coords)}",
+            details=f"Dataset has coordinates: {available_coords}",
+            suggestions=[
+                "Check coordinate names in your data",
+                "Update the 'coordinates' parameter to match your data structure",
+                f"Available coordinates: {available_coords}",
+            ],
+            context={
+                "missing_coordinates": missing_coords,
+                "available_coordinates": available_coords,
+                "provided_coordinates": coordinates,
+            },
+        )
+
+
 class PlotterBase:
-    def __init__(self, xarray_obj: xr.DataArray) -> None:
+    def __init__(
+        self,
+        xarray_obj: xr.DataArray,
+        dimensions: Optional[Dict[str, str]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
+    ) -> None:
         _check_plotting_dependencies()
         self.da = xarray_obj
+
+        # Set default dimensions and coordinates if not provided
+        if dimensions is None:
+            dimensions = {"time": "time", "y": "lat", "x": "lon"}
+        if coordinates is None:
+            coordinates = {"time": "time", "y": "lat", "x": "lon"}
+
+        self.dimensions = dimensions
+        self.coordinates = coordinates
+
+        # Validate dimensions and coordinates exist in the data
+        _validate_dimensions_exist(self.da, self.dimensions)
+        _validate_coordinates_exist(self.da, self.coordinates)
 
         # Cache common features
         self._land = cfeature.LAND.with_scale("50m")
@@ -145,9 +216,7 @@ class PlotterBase:
             fig = ax.get_figure()
         return fig, ax
 
-    def _add_map_features(
-        self, ax: Axes, grid_lines: bool = True, grid_labels: bool = True
-    ) -> None:
+    def _add_map_features(self, ax: Axes, grid_lines: bool = True, grid_labels: bool = True) -> None:
         """Add common map features to the plot"""
         ax.add_feature(self._land, facecolor="darkgrey", zorder=2)
         ax.add_feature(self._coastlines, linewidth=0.5, zorder=3)
@@ -188,17 +257,17 @@ class PlotterBase:
         cb.ax.tick_params(labelsize=10)
         return cb
 
-    def _get_title(
-        self, time_index: int, col_name: str, dimensions: Dict[str, str]
-    ) -> str:
+    def _get_title(self, time_index: int, col_name: str, dimensions: Optional[Dict[str, str]] = None) -> str:
         """Generate appropriate title based on dimension"""
+        if dimensions is None:
+            dimensions = self.dimensions
+
         if col_name == dimensions["time"]:
-            return f"{self.da[col_name].isel({col_name: time_index}).time.dt.strftime('%Y-%m-%d').values}"
+            time_coord = self.coordinates.get("time", "time")
+            return f"{self.da[time_coord].isel({col_name: time_index}).dt.strftime('%Y-%m-%d').values}"
         return f"{col_name}={self.da[col_name].isel({col_name: time_index}).values}"
 
-    def single_plot(
-        self, config: PlotConfig, ax: Optional[Axes] = None
-    ) -> Tuple[Figure, Axes, Any]:
+    def single_plot(self, config: PlotConfig, ax: Optional[Axes] = None) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
 
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
@@ -216,9 +285,7 @@ class PlotterBase:
 
         return fig, ax, im
 
-    def multi_plot(
-        self, config: PlotConfig, col: str = "time", col_wrap: int = 3
-    ) -> Tuple[Figure, NDArray[Any]]:
+    def multi_plot(self, config: PlotConfig, col: str = "time", col_wrap: int = 3) -> Tuple[Figure, NDArray[Any]]:
         """Make wrapped subplots with given configuration"""
         npanels = self.da[col].size
         nrows = int(np.ceil(npanels / col_wrap))
@@ -227,9 +294,7 @@ class PlotterBase:
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
         fig = plt.figure(figsize=(6 * ncols, 3 * nrows))
-        axes = fig.subplots(
-            nrows, ncols, subplot_kw={"projection": ccrs.Robinson()}
-        ).flatten()
+        axes = fig.subplots(nrows, ncols, subplot_kw={"projection": ccrs.Robinson()}).flatten()
 
         # Create a single plotter instance to be reused
         base_plotter = type(self)(self.da)
@@ -251,6 +316,8 @@ class PlotterBase:
                     norm=norm,
                     plot_IDs=False,
                     extend=extend,
+                    dimensions=config.dimensions,
+                    coordinates=config.coordinates,
                 )
 
                 # Update data in base plotter instead of creating new instance
@@ -271,9 +338,7 @@ class PlotterBase:
                 norm = Normalize(vmin=clim[0], vmax=clim[1])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
-            self._setup_colorbar(
-                fig, sm, True, var_units, extend, position=[0.92, 0.15, 0.02, 0.7]
-            )
+            self._setup_colorbar(fig, sm, True, var_units, extend, position=[0.92, 0.15, 0.02, 0.7])
 
         return fig, axes
 
@@ -336,17 +401,13 @@ class PlotterBase:
 
         # Generate frames using dask for parallel processing
         delayed_tasks = []
-        for time_ind in range(len(self.da[config.dimensions["time"]])):
-            data_slice = self.da.isel({config.dimensions["time"]: time_ind})
-            plot_params["time_str"] = str(
-                self.da[config.dimensions["time"]]
-                .isel({config.dimensions["time"]: time_ind})
-                .dt.strftime("%Y-%m-%d")
-                .values
-            )
-            delayed_tasks.append(
-                make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info)
-            )
+        time_dim = config.dimensions["time"]
+        time_coord = config.coordinates.get("time", time_dim)
+
+        for time_ind in range(len(self.da[time_dim])):
+            data_slice = self.da.isel({time_dim: time_ind})
+            plot_params["time_str"] = str(self.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
+            delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info))
 
         filenames = dask.compute(*delayed_tasks)
         filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
@@ -379,9 +440,7 @@ class PlotterBase:
 
         return str(output_file)
 
-    def clim_robust(
-        self, data: NDArray[Any], issym: bool, percentiles: List[int] = [2, 98]
-    ) -> NDArray[np.float64]:
+    def clim_robust(self, data: NDArray[Any], issym: bool, percentiles: List[int] = [2, 98]) -> NDArray[np.float64]:
         """Base method for computing colour limits"""
         clim = np.nanpercentile(data, percentiles)
 
@@ -398,9 +457,7 @@ class PlotterBase:
         plt.rc("text", usetex=False)
         plt.rc("font", family="serif")
 
-    def setup_id_plot_params(
-        self, cmap: Optional[Union[str, ListedColormap]] = None
-    ) -> Tuple[ListedColormap, BoundaryNorm, str]:
+    def setup_id_plot_params(self, cmap: Optional[Union[str, ListedColormap]] = None) -> Tuple[ListedColormap, BoundaryNorm, str]:
         """Set up parameters for plotting IDs"""
         unique_values = np.unique(self.da.values[~np.isnan(self.da.values)])
         unique_values = unique_values[unique_values > 0]
@@ -482,16 +539,10 @@ def make_frame(
 
         if grid_info.get("ckdtree_path"):
             # Use cached ckdtree data
-            ckdt_data = _load_ckdtree(
-                grid_info["ckdtree_path"], grid_info.get("res", 0.3)
-            )
-            grid_data = data_slice_np[ckdt_data["indices"]].reshape(
-                ckdt_data["lat"].size, ckdt_data["lon"].size
-            )
+            ckdt_data = _load_ckdtree(grid_info["ckdtree_path"], grid_info.get("res", 0.3))
+            grid_data = data_slice_np[ckdt_data["indices"]].reshape(ckdt_data["lat"].size, ckdt_data["lon"].size)
             grid_data = np.ma.masked_invalid(grid_data)
-            im = ax.pcolormesh(
-                ckdt_data["lon"], ckdt_data["lat"], grid_data, **plot_kwargs
-            )
+            im = ax.pcolormesh(ckdt_data["lon"], ckdt_data["lat"], grid_data, **plot_kwargs)
         elif grid_info.get("tgrid_path"):
             # Use triangulation
             triang = _load_triangulation(grid_info["tgrid_path"])
@@ -507,9 +558,7 @@ def make_frame(
     ax.set_title(time_str, size=12)
 
     if plot_params.get("show_colorbar"):
-        cb = plt.colorbar(
-            im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both")
-        )
+        cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both"))
         if plot_params.get("var_units"):
             cb.ax.set_ylabel(plot_params["var_units"], fontsize=10)
         cb.ax.tick_params(labelsize=10)

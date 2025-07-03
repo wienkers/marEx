@@ -27,22 +27,30 @@ logger = get_logger(__name__)
 
 
 class GriddedPlotter(PlotterBase):
-    def __init__(self, xarray_obj: xr.DataArray) -> None:
-        super().__init__(xarray_obj)
+    def __init__(
+        self,
+        xarray_obj: xr.DataArray,
+        dimensions: Optional[Dict[str, str]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
+    ) -> None:
+        super().__init__(xarray_obj, dimensions, coordinates)
 
-    def wrap_lon(self, data: xr.DataArray, dimensions: Dict[str, str]) -> xr.DataArray:
+    def wrap_lon(self, data: xr.DataArray, dimensions: Optional[Dict[str, str]] = None) -> xr.DataArray:
         """Handle periodic boundary in longitude by adding a column of data."""
-        lon = data[dimensions["xdim"]]
+        if dimensions is None:
+            dimensions = self.dimensions
+
+        x_dim = dimensions["x"]
+        x_coord = self.coordinates["x"]
+        lon = data[x_coord]
 
         # Check if we're dealing with global data that needs wrapping
         lon_spacing = np.diff(lon)[0]
         if abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing:
             # Add a column at lon=360 that equals the data at lon=0
             new_lon = np.append(lon, lon[0] + 360)
-            wrapped_data = xr.concat(
-                [data, data.isel({dimensions["xdim"]: 0})], dim=dimensions["xdim"]
-            )
-            wrapped_data[dimensions["xdim"]] = new_lon
+            wrapped_data = xr.concat([data, data.isel({x_dim: 0})], dim=x_dim)
+            wrapped_data[x_coord] = new_lon
             return wrapped_data
         return data
 
@@ -57,14 +65,12 @@ class GriddedPlotter(PlotterBase):
         logger.debug(f"Plotting gridded data with shape {self.da.shape}")
 
         with log_timing(logger, "Gridded plot rendering", show_progress=True):
-            dimensions = {"ydim": "lat", "xdim": "lon"}
-            data = self.wrap_lon(self.da, dimensions)
+            data = self.wrap_lon(self.da)
 
-            # Ensure data has only required dimensions for imshow
-            if "time" in data.dims and len(data.time) == 1:
-                data = data.squeeze(
-                    dim="time"
-                )  # Remove time dimension if it's singular
+            # Ensure data has only required dimensions for plotting
+            time_dim = self.dimensions.get("time", "time")
+            if time_dim in data.dims and len(data[time_dim]) == 1:
+                data = data.squeeze(dim=time_dim)  # Remove time dimension if it's singular
 
             plot_kwargs = {
                 "transform": ccrs.PlateCarree(),
@@ -78,8 +84,10 @@ class GriddedPlotter(PlotterBase):
                 plot_kwargs["vmin"] = clim[0]
                 plot_kwargs["vmax"] = clim[1]
 
-            lons = data[dimensions["xdim"]].values
-            lats = data[dimensions["ydim"]].values
+            x_coord = self.coordinates["x"]
+            y_coord = self.coordinates["y"]
+            lons = data[x_coord].values
+            lats = data[y_coord].values
             values = data.values
 
             logger.debug(f"Rendering plot with {len(lons)} x {len(lats)} grid points")
