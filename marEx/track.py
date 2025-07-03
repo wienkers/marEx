@@ -209,8 +209,8 @@ class tracker:
     ...     R_fill=5,                                   # 5-neighbor radius for gap filling
     ...     area_filter_quartile=0.6,                   # Remove 60% of smallest events
     ...     unstructured_grid=True,                     # Enable unstructured mode
-    ...     xdim='ncells',                              # Cell dimension name
-    ...     coordinates={"x": "lon", "y": "lat"}, # Coordinate names
+    ...     dimensions={"x": "ncells"},                 # Must specify the name of the spatial dimension
+    ...     coordinates={"x": "lon", "y": "lat"},       # Spatial coordinate names
     ...     neighbours=neighbours,                      # Required for unstructured
     ...     cell_areas=cell_areas                       # Required for area calculations
     ... )
