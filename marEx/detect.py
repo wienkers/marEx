@@ -133,6 +133,77 @@ def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -
         )
 
 
+def _infer_dims_coords(
+    da: xr.DataArray, dimensions: Dict[str, str], coordinates: Optional[Dict[str, str]]
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Determine full set of dimensions and coordinates for the DataArray.
+
+    This function ensures the dimensions dictionary includes required keys and coordinates
+    are properly set based on data structure. It validates that all specified dimensions
+    and coordinates exist in the dataset.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array to infer dimensions and coordinates for
+    dimensions : dict
+        Mapping of conceptual dimensions to actual dimension names
+    coordinates : dict, optional
+        Mapping of conceptual coordinates to actual coordinate names
+
+    Returns
+    -------
+    tuple
+        Tuple of (dimensions, coordinates) dictionaries with defaults applied
+
+    Raises
+    ------
+    DataValidationError
+        If any specified dimension or coordinate does not exist in the dataset
+    """
+
+    if "time" not in dimensions:
+        dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
+
+    # Handle coordinates parameter based on data structure
+    if coordinates is None:
+        if "y" not in dimensions:
+            # Unstructured (2D) data - requires explicit coordinate specification
+            logger.error("Coordinates parameter required for unstructured data")
+            raise create_data_validation_error(
+                "Coordinates parameter must be explicitly specified for unstructured data",
+                details="Unstructured data requires coordinate names for x and y spatial coordinates",
+                suggestions=[
+                    "Specify coordinates parameter with spatial coordinate names",
+                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
+                    "If data is gridded, ensure 'y' dimension is also specified",
+                ],
+                data_info={
+                    "data_structure": "unstructured (2D)",
+                    "dimensions": dimensions,
+                    "missing_coordinates": "x and y spatial coordinates",
+                },
+            )
+        else:
+            # Gridded (3D) data - copy dimensions to coordinates
+            coordinates = dimensions.copy()
+            logger.debug("Gridded data detected - copying dimensions to coordinates")
+    else:
+        # Coordinates provided but ensure time coordinate is included if missing
+        if "time" not in coordinates:
+            coordinates = {"time": dimensions.get("time", "time"), **coordinates}
+            logger.debug("Added default time coordinate to provided coordinates")
+
+    # Validate dimensions and coordinates exist in dataset
+    logger.debug("Validating dimensions and coordinates")
+    _validate_dimensions_exist(da, dimensions)
+    _validate_coordinates_exist(da, coordinates)
+
+    return dimensions, coordinates
+
+
 # ============================
 # Methodology Selection
 # ============================
@@ -358,34 +429,8 @@ def preprocess_data(
     log_dask_info(logger, da, "Input data")
     log_memory_usage(logger, "Initial memory state")
 
-    # Handle coordinates parameter based on data structure
-    if coordinates is None:
-        if "y" not in dimensions:
-            # Unstructured (2D) data - requires explicit coordinate specification
-            logger.error("Coordinates parameter required for unstructured data")
-            raise create_data_validation_error(
-                "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for x and y spatial coordinates",
-                suggestions=[
-                    "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
-                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
-                ],
-                data_info={
-                    "data_structure": "unstructured (2D)",
-                    "dimensions": dimensions,
-                    "missing_coordinates": "x and y spatial coordinates",
-                },
-            )
-        else:
-            # Gridded (3D) data - copy dimensions to coordinates
-            coordinates = dimensions.copy()
-            logger.debug("Gridded data detected - copying dimensions to coordinates")
-
-    # Validate dimensions and coordinates exist in dataset
-    logger.debug("Validating dimensions and coordinates")
-    _validate_dimensions_exist(da, dimensions)
-    _validate_coordinates_exist(da, coordinates)
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Check if input data is dask-backed
     if not is_dask_collection(da.data):
@@ -453,8 +498,8 @@ def preprocess_data(
 
         start_year = int(min_year + window_year_baseline)
         logger.info(f"Trimming data to start from {start_year} (removing first {window_year_baseline} years)")
-        time_sel = ds[coordinates["time"]].dt.year >= start_year
-        ds = ds.isel({coordinates["time"]: time_sel})
+        time_sel = (ds[coordinates["time"]].dt.year >= start_year).compute()
+        ds = ds.isel({dimensions["time"]: time_sel})
 
     anomalies = ds.dat_anomaly
 
@@ -775,34 +820,8 @@ def compute_normalised_anomaly(
 
     logger.debug(f"Computing normalised anomaly using {method_anomaly} method")
 
-    # Handle coordinates parameter based on data structure
-    if coordinates is None:
-        if "y" not in dimensions:
-            # Unstructured (2D) data - requires explicit coordinate specification
-            logger.error("Coordinates parameter required for unstructured data")
-            raise create_data_validation_error(
-                "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for x and y spatial coordinates",
-                suggestions=[
-                    "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
-                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
-                ],
-                data_info={
-                    "data_structure": "unstructured (2D)",
-                    "dimensions": dimensions,
-                    "missing_coordinates": "x and y spatial coordinates",
-                },
-            )
-        else:
-            # Gridded (3D) data - copy dimensions to coordinates
-            coordinates = dimensions.copy()
-            logger.debug("Gridded data detected - copying dimensions to coordinates")
-
-    # Validate dimensions and coordinates exist in dataset
-    logger.debug("Validating dimensions and coordinates")
-    _validate_dimensions_exist(da, dimensions)
-    _validate_coordinates_exist(da, coordinates)
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     if method_anomaly == "detrended_baseline":
         logger.debug(
@@ -980,34 +999,8 @@ def identify_extremes(
 
     logger.debug(f"Identifying extremes using {method_extreme} method - {threshold_percentile}th percentile")
 
-    # Handle coordinates parameter based on data structure
-    if coordinates is None:
-        if "y" not in dimensions:
-            # Unstructured (2D) data - requires explicit coordinate specification
-            logger.error("Coordinates parameter required for unstructured data")
-            raise create_data_validation_error(
-                "Coordinates parameter must be explicitly specified for unstructured data",
-                details="Unstructured data requires coordinate names for x and y spatial coordinates",
-                suggestions=[
-                    "Specify coordinates parameter with spatial coordinate names",
-                    "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
-                    f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
-                ],
-                data_info={
-                    "data_structure": "unstructured (2D)",
-                    "dimensions": dimensions,
-                    "missing_coordinates": "x and y spatial coordinates",
-                },
-            )
-        else:
-            # Gridded (3D) data - copy dimensions to coordinates
-            coordinates = dimensions.copy()
-            logger.debug("Gridded data detected - copying dimensions to coordinates")
-
-    # Validate dimensions and coordinates exist in dataset
-    logger.debug("Validating dimensions and coordinates")
-    _validate_dimensions_exist(da, dimensions)
-    _validate_coordinates_exist(da, coordinates)
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Validate percentile parameter when using approximate method
     if threshold_percentile < 60 and not exact_percentile:
@@ -1148,8 +1141,10 @@ def rolling_climatology(
     >>> # Output maintains input chunking structure
     """
 
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    timedim = dimensions["time"]
     time_coord = coordinates["time"]
-    time_dim = dimensions["time"]
     original_chunk_dict = {dim: chunks for dim, chunks in zip(da.dims, da.chunks)}
 
     # Add temporal coordinates
@@ -1195,22 +1190,22 @@ def rolling_climatology(
     dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int64)
 
     # Create long-form dataset by selecting the contributing time points
-    long_form_data = da.isel({time_dim: time_indices})
+    long_form_data = da.isel({timedim: time_indices})
 
     # Create a new time dimension for the long-form data
-    long_time_dim = f"{time_dim}_contrib"
-    long_form_data = long_form_data.rename({time_dim: long_time_dim})
+    long_timedim = f"{timedim}_contrib"
+    long_form_data = long_form_data.rename({timedim: long_timedim})
 
     # Convert grouping arrays to DataArrays with the correct dimension
-    target_year_da = xr.DataArray(target_year_groups, dims=[long_time_dim], name="target_year")
-    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_time_dim], name="dayofyear")
+    target_year_da = xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year")
+    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_timedim], name="dayofyear")
 
     # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
         target_year_da,
         dayofyear_da,
-        dim=long_time_dim,
+        dim=long_timedim,
         func="nanmean",
         expected_groups=(unique_years, np.arange(1, 367)),
         isbin=(False, False),
@@ -1224,8 +1219,8 @@ def rolling_climatology(
 
     # Select appropriate climatology for each time point
     result = climatologies.isel(
-        target_year=xr.DataArray(year_indices, dims=[time_dim]),
-        dayofyear=xr.DataArray(doy_vals - 1, dims=[time_dim]),
+        target_year=xr.DataArray(year_indices, dims=[timedim]),
+        dayofyear=xr.DataArray(doy_vals - 1, dims=[timedim]),
     )
 
     # Clean up dimensions and coordinates
@@ -1347,9 +1342,13 @@ def smoothed_rolling_climatology(
     >>> efficient_clim = marEx.smoothed_rolling_climatology(large_sst)
     """
 
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    timedim = dimensions["time"]
+
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
     da_smoothed = (
-        da.rolling({dimensions["time"]: smooth_days_baseline}, center=True)
+        da.rolling({timedim: smooth_days_baseline}, center=True)
         .mean()
         .chunk({dim: chunks for dim, chunks in zip(da.dims, da.chunks)})
     )
@@ -1374,6 +1373,9 @@ def _compute_anomaly_shifting_baseline(
     xarray.Dataset
         Dataset containing anomalies and mask
     """
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
     # Compute smoothed rolling climatology
     climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
 
@@ -1429,7 +1431,7 @@ def _identify_extremes_hobday(
             Threshold values with dimensions (dayofyear, lat, lon)
     """
     # Add day-of-year coordinate
-    da = da.assign_coords(dayofyear=da[dimensions["time"]].dt.dayofyear)
+    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
 
     # Group by day-of-year and compute percentile
     if exact_percentile:
@@ -1440,7 +1442,7 @@ def _identify_extremes_hobday(
             np.nanpercentile, q=threshold_percentile, dim=("window", dimensions["time"])
         )
     else:  # Optimised histogram approximation method
-        thresholds = compute_histogram_quantile_2d(
+        thresholds = _compute_histogram_quantile_2d(
             da,
             threshold_percentile / 100.0,
             window_days_hobday=window_days_hobday,
@@ -1453,7 +1455,8 @@ def _identify_extremes_hobday(
     thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
-    extremes = da.groupby(da[coordinates["time"]].dt.dayofyear) >= thresholds
+    dayofyear_labels = da[coordinates["time"]].dt.dayofyear.compute()
+    extremes = da.groupby(dayofyear_labels) >= thresholds
     extremes = extremes.astype(bool).chunk(spatial_chunks)
 
     return extremes, thresholds
@@ -1502,6 +1505,9 @@ def _compute_anomaly_detrended(
     Generate normalised anomalies by removing trends, seasonal cycles, and optionally
     standardising by local temporal variability using the detrended baseline method.
     """
+    # Infer and validate dimensions and coordinates
+    dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
     da = da.astype(np.float32)
 
     # Ensure time is the first dimension for efficient processing
@@ -1602,7 +1608,7 @@ def _compute_anomaly_detrended(
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
-    
+
     # Ensure all original coordinates are preserved in the dataset
     coords_to_preserve = {}
     for coord_name in da.coords:
@@ -1707,7 +1713,7 @@ def _rolling_histogram_quantile(
     return threshold.astype(np.float32)
 
 
-def compute_histogram_quantile_2d(
+def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
     window_days_hobday: int = 11,
@@ -1793,7 +1799,7 @@ def compute_histogram_quantile_2d(
     return threshold
 
 
-def compute_histogram_quantile_1d(
+def _compute_histogram_quantile_1d(
     da: xr.DataArray,
     q: float,
     dim: str = "time",
@@ -1875,6 +1881,7 @@ def _identify_extremes_constant(
 
     Returns both the extreme events boolean mask and the thresholds used.
     """
+
     if exact_percentile:  # Compute exact percentile (memory-intensive)
         # Determine appropriate chunk size based on data dimensions
         if "y" in dimensions:
@@ -1890,7 +1897,7 @@ def _identify_extremes_constant(
         threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
 
     else:  # Use an efficient histogram-based method with specified accuracy
-        threshold = compute_histogram_quantile_1d(da, threshold_percentile / 100.0, dim=dimensions["time"])
+        threshold = _compute_histogram_quantile_1d(da, threshold_percentile / 100.0, dim=dimensions["time"])
 
     # Clean up coordinates if needed
     if "quantile" in threshold.coords:

@@ -37,6 +37,7 @@ from .detect import (
     identify_extremes,
     preprocess_data,
     smoothed_rolling_climatology,
+    rolling_climatology,
 )
 
 # Import exception hierarchy
@@ -74,13 +75,13 @@ from .track import regional_tracker, tracker
 # Coordinate validation utilities are now integrated into the main modules
 
 
-
 # Convenience variables
 __all__ = [
     # Core data preprocessing
     "preprocess_data",
     "compute_normalised_anomaly",
     "smoothed_rolling_climatology",
+    "rolling_climatology",
     "identify_extremes",
     # Tracking
     "tracker",
