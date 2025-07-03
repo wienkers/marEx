@@ -90,9 +90,7 @@ class DependencyTracker:
         """Check if a specific dependency is available."""
         return self._dependencies.get(dep_name, False)
 
-    def require_dependencies(
-        self, dependencies: List[str], feature: str = "This functionality"
-    ) -> None:
+    def require_dependencies(self, dependencies: List[str], feature: str = "This functionality") -> None:
         """
         Require specific dependencies for a feature.
 
@@ -114,20 +112,13 @@ class DependencyTracker:
             if len(missing) == 1:
                 dep_name = missing[0]
                 install_cmd = self._get_install_command(dep_name)
-                raise ImportError(
-                    f"{feature} requires {dep_name}. " f"Install with: {install_cmd}"
-                )
+                raise ImportError(f"{feature} requires {dep_name}. " f"Install with: {install_cmd}")
             else:
                 dep_list = ", ".join(missing)
                 install_cmd = "pip install marEx[full]"
-                raise ImportError(
-                    f"{feature} requires the following dependencies: {dep_list}. "
-                    f"Install with: {install_cmd}"
-                )
+                raise ImportError(f"{feature} requires the following dependencies: {dep_list}. " f"Install with: {install_cmd}")
 
-    def warn_missing_dependency(
-        self, dep_name: str, feature: str = "Some functionality"
-    ) -> None:
+    def warn_missing_dependency(self, dep_name: str, feature: str = "Some functionality") -> None:
         """
         Issue a warning for a missing optional dependency.
 
@@ -231,9 +222,7 @@ def has_dependency(dep_name: str) -> bool:
     return _dependency_tracker.has_dependency(dep_name)
 
 
-def require_dependencies(
-    dependencies: List[str], feature: str = "This functionality"
-) -> None:
+def require_dependencies(dependencies: List[str], feature: str = "This functionality") -> None:
     """Require specific dependencies for a feature."""
     _dependency_tracker.require_dependencies(dependencies, feature)
 
