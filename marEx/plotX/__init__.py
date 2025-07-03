@@ -1,10 +1,10 @@
 import warnings
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import xarray as xr
 
-from ..exceptions import ConfigurationError, VisualisationError
+from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 from .base import PlotConfig
 from .gridded import GriddedPlotter
@@ -19,77 +19,115 @@ _fpath_ckdtree: Optional[str] = None
 _grid_type: Optional[str] = None
 
 
-def _detect_grid_type(xarray_obj: Union[xr.Dataset, xr.DataArray]) -> str:
+def _detect_grid_type(
+    xarray_obj: Union[xr.Dataset, xr.DataArray],
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
+) -> str:
     """
-    Deduce grid type based on coordinate structure.
+    Deduce grid type based on coordinate structure and dimension mapping.
+
+    Args:
+        xarray_obj: The xarray object to analyze
+        dimensions: Optional dimension mapping
+        coordinates: Optional coordinate mapping
 
     Returns:
         str: 'gridded' or 'unstructured'
     """
-    has_lat_lon_coords = "lat" in xarray_obj.coords and "lon" in xarray_obj.coords
-    has_lat_lon_dims = "lat" in xarray_obj.dims and "lon" in xarray_obj.dims
+    # Use default mappings if not provided
+    if dimensions is None:
+        dimensions = {"time": "time", "y": "lat", "x": "lon"}
+    if coordinates is None:
+        coordinates = {"time": "time", "y": "lat", "x": "lon"}
 
-    # For unstructured data, lat/lon are coordinates but not dimensions
-    grid_type = (
-        "unstructured" if (has_lat_lon_coords and not has_lat_lon_dims) else "gridded"
-    )
-    logger.debug(
-        f"Detected grid type: {grid_type} (coords: {has_lat_lon_coords}, dims: {has_lat_lon_dims})"
-    )
+    # Check if y dimension exists (key indicator for gridded vs unstructured)
+    has_y_dim = "y" in dimensions and dimensions["y"] in xarray_obj.dims
+
+    # For coordinate checking, use the coordinate mapping
+    x_coord = coordinates.get("x", "lon")
+    y_coord = coordinates.get("y", "lat")
+    has_spatial_coords = x_coord in xarray_obj.coords and y_coord in xarray_obj.coords
+
+    # Gridded: has both x and y dimensions
+    # Unstructured: has only x dimension (typically for cells) but x,y coordinates
+    grid_type = "gridded" if has_y_dim else "unstructured"
+
+    logger.debug(f"Detected grid type: {grid_type} (y_dim: {has_y_dim}, spatial_coords: {has_spatial_coords})")
     return grid_type
 
 
-def register_plotter(
-    xarray_obj: xr.DataArray,
-) -> Union["GriddedPlotter", "UnstructuredPlotter"]:
+class PlotXAccessor:
     """
-    Determine the appropriate plotter to use based on the data structure.
-    This function is called automatically by xarray's accessor system.
-
-    First checks if grid type was specified via specify_grid(),
-    then falls back to coordinate-based detection if needed.
-
-    Returns:
-        Appropriate plotter instance for the data structure
+    Xarray accessor for plotX functionality with support for custom dimensions and coordinates.
     """
-    global _grid_type
 
-    # Determine grid type
-    detected_type = _detect_grid_type(xarray_obj)
+    def __init__(self, xarray_obj: xr.DataArray):
+        self._obj = xarray_obj
 
-    # If grid type was explicitly specified, check for consistency
-    if _grid_type is not None:
-        if _grid_type != detected_type:
-            logger.warning(
-                f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
-                f"based on coordinate structure. Using specified type '{_grid_type}'"
-            )
-            warnings.warn(
-                f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
-                f"based on coordinate structure. Using specified type '{_grid_type}'."
-            )
-        final_type = _grid_type
-    else:
-        final_type = detected_type
+    def __call__(
+        self,
+        dimensions: Optional[Dict[str, str]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
+    ) -> Union["GriddedPlotter", "UnstructuredPlotter"]:
+        """
+        Create a plotter instance with optional custom dimensions and coordinates.
 
-    logger.debug(f"Creating {final_type} plotter")
+        Args:
+            dimensions: Optional mapping of conceptual dimensions to actual dimension names
+            coordinates: Optional mapping of conceptual coordinates to actual coordinate names
 
-    # Create appropriate plotter
-    plotter_class = (
-        UnstructuredPlotter if final_type.lower() == "unstructured" else GriddedPlotter
-    )
-    plotter = plotter_class(xarray_obj)
+        Returns:
+            Appropriate plotter instance for the data structure
+        """
+        # Note: _grid_type is accessed globally
 
-    # Set grid path if available for unstructured grids
-    if (
-        final_type == "unstructured"
-        and _fpath_tgrid is not None
-        and _fpath_ckdtree is not None
-    ):
-        logger.debug("Setting grid paths for unstructured plotter")
-        plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
+        # Determine grid type
+        detected_type = _detect_grid_type(self._obj, dimensions, coordinates)
 
-    return plotter
+        # If grid type was explicitly specified, check for consistency
+        if _grid_type is not None:
+            if _grid_type != detected_type:
+                logger.warning(
+                    f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
+                    f"based on coordinate structure. Using specified type '{_grid_type}'"
+                )
+                warnings.warn(
+                    f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
+                    f"based on coordinate structure. Using specified type '{_grid_type}'."
+                )
+            final_type = _grid_type
+        else:
+            final_type = detected_type
+
+        logger.debug(f"Creating {final_type} plotter")
+
+        # Create appropriate plotter
+        plotter_class = UnstructuredPlotter if final_type.lower() == "unstructured" else GriddedPlotter
+        plotter = plotter_class(self._obj, dimensions, coordinates)
+
+        # Set grid path if available for unstructured grids
+        if final_type == "unstructured" and _fpath_tgrid is not None and _fpath_ckdtree is not None:
+            logger.debug("Setting grid paths for unstructured plotter")
+            plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
+
+        return plotter
+
+    # Also provide methods that work with default parameters for backward compatibility
+    def single_plot(self, config: PlotConfig, **kwargs):
+        """Create a single plot with default dimension detection."""
+        plotter = self()
+        return plotter.single_plot(config, **kwargs)
+
+    def multi_plot(self, config: PlotConfig, **kwargs):
+        """Create multiple plots with default dimension detection."""
+        plotter = self()
+        return plotter.multi_plot(config, **kwargs)
+
+    def animate(self, config: PlotConfig, **kwargs):
+        """Create animation with default dimension detection."""
+        plotter = self()
+        return plotter.animate(config, **kwargs)
 
 
 def specify_grid(
@@ -125,9 +163,7 @@ def specify_grid(
             },
         )
 
-    logger.info(
-        f"Setting global grid specification: type={grid_type}, tgrid={fpath_tgrid}, ckdtree={fpath_ckdtree}"
-    )
+    logger.info(f"Setting global grid specification: type={grid_type}, tgrid={fpath_tgrid}, ckdtree={fpath_ckdtree}")
 
     _fpath_tgrid = str(fpath_tgrid) if fpath_tgrid else None
     _fpath_ckdtree = str(fpath_ckdtree) if fpath_ckdtree else None
@@ -135,4 +171,4 @@ def specify_grid(
 
 
 # Register the accessor
-xr.register_dataarray_accessor("plotX")(register_plotter)
+xr.register_dataarray_accessor("plotX")(PlotXAccessor)
