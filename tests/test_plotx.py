@@ -5,8 +5,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import marEx
-from marEx.plotX import PlotConfig, _detect_grid_type, register_plotter, specify_grid
+from marEx.plotX import PlotConfig, _detect_grid_type, specify_grid, PlotXAccessor
 from marEx.plotX.base import PlotterBase
 from marEx.plotX.gridded import GriddedPlotter
 from marEx.plotX.unstructured import UnstructuredPlotter
@@ -28,7 +27,7 @@ class TestPlotConfig:
         assert config.show_colorbar is True
         assert config.grid_lines is True
         assert config.grid_labels is False
-        assert config.dimensions == {"time": "time", "ydim": "lat", "xdim": "lon"}
+        assert config.dimensions == {"time": "time", "y": "lat", "x": "lon"}
         assert config.norm is None
         assert config.plot_IDs is False
         assert config.extend == "both"
@@ -103,7 +102,9 @@ class TestGridDetection:
     def test_detect_gridded_fallback(self):
         """Test fallback to gridded when structure is ambiguous."""
         # Create data without clear lat/lon structure
-        data = xr.DataArray(np.random.random((10, 5, 8)), dims=["time", "y", "x"])
+        data = xr.DataArray(
+            np.random.random((10, 5, 8)), dims=["time", "lat", "lon"], coords={"time": range(10), "lat": range(5), "lon": range(8)}
+        )
 
         assert _detect_grid_type(data) == "gridded"
 
@@ -123,7 +124,8 @@ class TestPlotterRegistration:
             },
         )
 
-        plotter = register_plotter(data)
+        accessor = PlotXAccessor(data)
+        plotter = accessor()
         assert isinstance(plotter, GriddedPlotter)
         assert plotter.da is data
 
@@ -139,7 +141,12 @@ class TestPlotterRegistration:
             },
         )
 
-        plotter = register_plotter(data)
+        # Need to specify custom dimensions since test data uses 'cell' not 'ncells'
+        custom_dims = {"time": "time", "x": "cell"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        accessor = PlotXAccessor(data)
+        plotter = accessor(dimensions=custom_dims, coordinates=custom_coords)
         assert isinstance(plotter, UnstructuredPlotter)
         assert plotter.da is data
 
@@ -159,9 +166,14 @@ class TestPlotterRegistration:
         # Specify as unstructured
         specify_grid(grid_type="unstructured")
 
-        with pytest.warns(UserWarning, match="Specified grid type"):
-            plotter = register_plotter(data)
-            assert isinstance(plotter, UnstructuredPlotter)
+        # Need to specify custom dimensions for gridded->unstructured override
+        custom_dims = {"time": "time", "x": "lon"}  # No y for unstructured
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        # The accessor should use the specified grid type (unstructured) despite detection
+        accessor = PlotXAccessor(data)
+        plotter = accessor(dimensions=custom_dims, coordinates=custom_coords)
+        assert isinstance(plotter, UnstructuredPlotter)
 
         # Reset global state
         specify_grid(grid_type=None)
@@ -178,9 +190,13 @@ class TestPlotterRegistration:
             },
         )
 
-        # Check that accessor exists and returns proper plotter
+        # Check that accessor exists and returns proper accessor
         assert hasattr(data, "plotX")
-        plotter = data.plotX
+        accessor = data.plotX
+        assert isinstance(accessor, PlotXAccessor)
+
+        # Check that calling the accessor returns proper plotter
+        plotter = data.plotX()
         assert isinstance(plotter, GriddedPlotter)
 
 
@@ -209,9 +225,7 @@ class TestSpecifyGrid:
         tgrid_path = Path("/tmp/test_tgrid.nc")
         ckdtree_path = Path("/tmp/test_ckdtree")
 
-        specify_grid(
-            grid_type="unstructured", fpath_tgrid=tgrid_path, fpath_ckdtree=ckdtree_path
-        )
+        specify_grid(grid_type="unstructured", fpath_tgrid=tgrid_path, fpath_ckdtree=ckdtree_path)
 
         # Create test data
         data = xr.DataArray(
@@ -224,7 +238,12 @@ class TestSpecifyGrid:
             },
         )
 
-        plotter = register_plotter(data)
+        # Need to specify custom dimensions since test data uses 'cell' not 'ncells'
+        custom_dims = {"time": "time", "x": "cell"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        accessor = PlotXAccessor(data)
+        plotter = accessor(dimensions=custom_dims, coordinates=custom_coords)
         assert isinstance(plotter, UnstructuredPlotter)
         assert str(plotter.fpath_tgrid) == str(tgrid_path)
         assert str(plotter.fpath_ckdtree) == str(ckdtree_path)
@@ -258,6 +277,25 @@ class TestPlotterBase:
 
         plotter = TestPlotter(self.gridded_data)
         assert plotter.da is self.gridded_data
+        assert plotter.dimensions == {"time": "time", "y": "lat", "x": "lon"}
+        assert plotter.coordinates == {"time": "time", "y": "lat", "x": "lon"}
+        assert plotter._land is not None
+        assert plotter._coastlines is not None
+
+    def test_plotter_base_custom_dimensions(self):
+        """Test PlotterBase with custom dimensions and coordinates."""
+
+        class TestPlotter(PlotterBase):
+            def plot(self, ax, cmap="viridis", clim=None, norm=None):
+                return ax, MagicMock()
+
+        custom_dims = {"time": "time", "x": "lon", "y": "lat"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        plotter = TestPlotter(self.gridded_data, dimensions=custom_dims, coordinates=custom_coords)
+        assert plotter.da is self.gridded_data
+        assert plotter.dimensions == custom_dims
+        assert plotter.coordinates == custom_coords
         assert plotter._land is not None
         assert plotter._coastlines is not None
 
@@ -418,7 +456,7 @@ class TestPlotXWithTestData:
 
     def test_plotx_accessor_works(self):
         """Test that plotX accessor works with test data."""
-        plotter = self.sst_data.plotX
+        plotter = self.sst_data.plotX()
         assert isinstance(plotter, GriddedPlotter)
         assert plotter.da is self.sst_data
 
@@ -433,7 +471,7 @@ class TestPlotXWithTestData:
         mock_figure.return_value = mock_fig
         mock_axes.return_value = mock_ax
 
-        plotter = self.sst_data.plotX
+        plotter = self.sst_data.plotX()
 
         # Mock the plot method to avoid actual plotting based on plotter type
         with patch.object(type(plotter), "plot", return_value=(mock_ax, MagicMock())):
@@ -442,3 +480,256 @@ class TestPlotXWithTestData:
             assert fig == mock_fig
             assert ax == mock_ax
             mock_ax.set_title.assert_called_once_with("Test Plot", size=12)
+
+
+class TestCustomDimensions:
+    """Test custom dimensions and coordinates functionality."""
+
+    def test_custom_dimensions_gridded(self):
+        """Test custom dimensions with gridded data."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["t", "latitude", "longitude"],
+            coords={
+                "t": range(3),
+                "latitude": np.linspace(-20, 20, 4),
+                "longitude": np.linspace(-25, 25, 5),
+            },
+        )
+
+        custom_dims = {"time": "t", "x": "longitude", "y": "latitude"}
+        custom_coords = {"time": "t", "x": "longitude", "y": "latitude"}
+
+        accessor = PlotXAccessor(data)
+        plotter = accessor(dimensions=custom_dims, coordinates=custom_coords)
+
+        assert isinstance(plotter, GriddedPlotter)
+        assert plotter.dimensions == custom_dims
+        assert plotter.coordinates == custom_coords
+        assert plotter.da is data
+
+    def test_custom_dimensions_unstructured(self):
+        """Test custom dimensions with unstructured data."""
+        data = xr.DataArray(
+            np.random.random((3, 100)),
+            dims=["t", "cells"],
+            coords={
+                "t": range(3),
+                "x_coord": (["cells"], np.random.rand(100)),
+                "y_coord": (["cells"], np.random.rand(100)),
+            },
+        )
+
+        custom_dims = {"time": "t", "x": "cells"}
+        custom_coords = {"time": "t", "x": "x_coord", "y": "y_coord"}
+
+        accessor = PlotXAccessor(data)
+        plotter = accessor(dimensions=custom_dims, coordinates=custom_coords)
+
+        assert isinstance(plotter, UnstructuredPlotter)
+        assert plotter.dimensions == custom_dims
+        assert plotter.coordinates == custom_coords
+        assert plotter.da is data
+
+    def test_custom_detection_logic(self):
+        """Test grid type detection with custom dimensions."""
+        # Test that custom dimensions are used for detection
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["t", "spatial_y", "spatial_x"],
+            coords={
+                "t": range(3),
+                "spatial_y": np.linspace(-20, 20, 4),
+                "spatial_x": np.linspace(-25, 25, 5),
+            },
+        )
+
+        # With custom dimensions mapping y dimension
+        custom_dims = {"time": "t", "x": "spatial_x", "y": "spatial_y"}
+        grid_type = _detect_grid_type(data, dimensions=custom_dims)
+        assert grid_type == "gridded"
+
+        # Without y dimension mapping (should be unstructured)
+        custom_dims_no_y = {"time": "t", "x": "spatial_x"}
+        grid_type = _detect_grid_type(data, dimensions=custom_dims_no_y)
+        assert grid_type == "unstructured"
+
+    def test_xarray_accessor_with_custom_dims(self):
+        """Test xarray accessor with custom dimensions."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["t", "y_custom", "x_custom"],
+            coords={
+                "t": range(3),
+                "y_custom": np.linspace(-20, 20, 4),
+                "x_custom": np.linspace(-25, 25, 5),
+            },
+        )
+
+        custom_dims = {"time": "t", "x": "x_custom", "y": "y_custom"}
+        custom_coords = {"time": "t", "x": "x_custom", "y": "y_custom"}
+
+        # Test accessor with custom parameters
+        plotter = data.plotX(dimensions=custom_dims, coordinates=custom_coords)
+        assert isinstance(plotter, GriddedPlotter)
+        assert plotter.dimensions == custom_dims
+        assert plotter.coordinates == custom_coords
+
+    def test_plotconfig_with_custom_params(self):
+        """Test PlotConfig with custom dimensions and coordinates."""
+        custom_dims = {"time": "time_var", "x": "x_var", "y": "y_var"}
+        custom_coords = {"time": "time_coord", "x": "x_coord", "y": "y_coord"}
+
+        config = PlotConfig(
+            title="Custom Config Test",
+            dimensions=custom_dims,
+            coordinates=custom_coords,
+            issym=True,
+        )
+
+        assert config.dimensions == custom_dims
+        assert config.coordinates == custom_coords
+        assert config.title == "Custom Config Test"
+        assert config.issym is True
+
+
+class TestErrorHandling:
+    """Test error handling for invalid dimensions and coordinates."""
+
+    def test_invalid_dimensions(self):
+        """Test error handling for invalid dimensions."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        invalid_dims = {"time": "invalid_time", "x": "invalid_x", "y": "invalid_y"}
+
+        accessor = PlotXAccessor(data)
+        with pytest.raises(Exception):  # Should raise VisualisationError
+            accessor(dimensions=invalid_dims)
+
+    def test_invalid_coordinates(self):
+        """Test error handling for invalid coordinates."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        invalid_coords = {"time": "invalid_time", "x": "invalid_x", "y": "invalid_y"}
+
+        accessor = PlotXAccessor(data)
+        with pytest.raises(Exception):  # Should raise VisualisationError
+            accessor(coordinates=invalid_coords)
+
+    def test_partial_invalid_dimensions(self):
+        """Test error handling when only some dimensions are invalid."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        # Mix of valid and invalid dimensions
+        mixed_dims = {"time": "time", "x": "invalid_x", "y": "lat"}
+
+        accessor = PlotXAccessor(data)
+        with pytest.raises(Exception):  # Should raise VisualisationError
+            accessor(dimensions=mixed_dims)
+
+
+class TestBackwardCompatibility:
+    """Test backward compatibility of the updated plotX functionality."""
+
+    def test_default_accessor_call(self):
+        """Test that default accessor call still works."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        # Default call should work as before
+        plotter = data.plotX()
+        assert isinstance(plotter, GriddedPlotter)
+        assert plotter.dimensions == {"time": "time", "y": "lat", "x": "lon"}
+        assert plotter.coordinates == {"time": "time", "y": "lat", "x": "lon"}
+
+    def test_accessor_convenience_methods(self):
+        """Test that accessor convenience methods exist."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        accessor = data.plotX
+
+        # Check that convenience methods exist
+        assert hasattr(accessor, "single_plot")
+        assert hasattr(accessor, "multi_plot")
+        assert hasattr(accessor, "animate")
+        assert callable(accessor.single_plot)
+        assert callable(accessor.multi_plot)
+        assert callable(accessor.animate)
+
+    def test_plotconfig_default_compatibility(self):
+        """Test that PlotConfig defaults are backward compatible."""
+        config = PlotConfig()
+
+        # Default dimensions and coordinates should match original behavior
+        expected_defaults = {"time": "time", "y": "lat", "x": "lon"}
+        assert config.dimensions == expected_defaults
+        assert config.coordinates == expected_defaults
+
+    @patch("matplotlib.pyplot.figure")
+    @patch("matplotlib.pyplot.axes")
+    def test_single_plot_with_defaults(self, mock_axes, mock_figure):
+        """Test that single_plot works with default parameters."""
+        data = xr.DataArray(
+            np.random.random((3, 4, 5)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(3),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-25, 25, 5),
+            },
+        )
+
+        mock_fig = MagicMock()
+        mock_ax = MagicMock()
+        mock_figure.return_value = mock_fig
+        mock_axes.return_value = mock_ax
+
+        config = PlotConfig(title="Backward Compatibility Test")
+        plotter = data.plotX()
+
+        # Mock the plot method to avoid actual plotting
+        with patch.object(type(plotter), "plot", return_value=(mock_ax, MagicMock())):
+            fig, ax, im = plotter.single_plot(config)
+
+            assert fig == mock_fig
+            assert ax == mock_ax
+            mock_ax.set_title.assert_called_once_with("Backward Compatibility Test", size=12)

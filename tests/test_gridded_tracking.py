@@ -384,3 +384,247 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(
             tracked_with_gaps.attrs["N_events_final"], 38, tolerance=1
         )
+
+    def test_custom_dimension_names_tracking(self, dask_client):
+        """Test tracking with custom dimension and coordinate names for both allow_merging options."""
+        # Create dataset with custom dimension and coordinate names
+        # Dimensions: "t", "x", "y"
+        # Coordinates: "T", "longitude", "latitude"
+        
+        # First create the renamed dataset structure
+        extreme_events_renamed = xr.DataArray(
+            self.extremes_data.extreme_events.values,
+            dims=['t', 'y', 'x'],
+            coords={
+                'T': ('t', self.extremes_data.time.values),
+                'latitude': ('y', self.extremes_data.lat.values),
+                'longitude': ('x', self.extremes_data.lon.values)
+            }
+        ).chunk({"t": 2, "y": -1, "x": -1})
+        
+        mask_renamed = xr.DataArray(
+            self.extremes_data.mask.values,
+            dims=['y', 'x'],
+            coords={
+                'latitude': ('y', self.extremes_data.lat.values),
+                'longitude': ('x', self.extremes_data.lon.values)
+            }
+        )
+        
+        # Apply common mask to exclude poles
+        mask_filtered = mask_renamed.where(
+            (mask_renamed.latitude < 85) & (mask_renamed.latitude > -90),
+            other=False,
+        )
+        
+        # Test 1: Tracking with allow_merging=False
+        tracker_no_merge = marEx.tracker(
+            extreme_events_renamed,
+            mask_filtered,
+            area_filter_quartile=0.5,
+            R_fill=4,
+            T_fill=0,  # No temporal filling for basic test
+            allow_merging=False,
+            dimensions={"time": "t", "x": "x", "y": "y"},   # Must specify the name of the spatial dimension
+            coordinates={"time": "T", "x": "longitude", "y": "latitude"},
+            quiet=True,
+        )
+        
+        # Run tracking without merging
+        tracked_ds_no_merge = tracker_no_merge.run()
+        
+        # Verify output structure with renamed dimensions (no merging)
+        assert isinstance(tracked_ds_no_merge, xr.Dataset)
+        assert "ID_field" in tracked_ds_no_merge.data_vars
+        
+        # Verify dimensions are correctly named
+        assert "t" in tracked_ds_no_merge.ID_field.dims
+        assert "y" in tracked_ds_no_merge.ID_field.dims
+        assert "x" in tracked_ds_no_merge.ID_field.dims
+        
+        # Verify coordinates are present
+        assert "T" in tracked_ds_no_merge.coords
+        assert "latitude" in tracked_ds_no_merge.coords
+        assert "longitude" in tracked_ds_no_merge.coords
+        
+        # Verify tracking attributes (no merging)
+        assert tracked_ds_no_merge.attrs["allow_merging"] == 0
+        assert tracked_ds_no_merge.attrs["T_fill"] == 0
+        assert "N_events_final" in tracked_ds_no_merge.attrs
+        
+        # Verify tracking produced valid results
+        max_id_no_merge = int(tracked_ds_no_merge.ID_field.max())
+        assert max_id_no_merge > 0, "No events were tracked with custom dimension names (no merging)"
+        assert max_id_no_merge == tracked_ds_no_merge.attrs["N_events_final"]
+        
+        # Test 2: Tracking with allow_merging=True
+        tracker_with_merge = marEx.tracker(
+            extreme_events_renamed,
+            mask_filtered,
+            area_filter_quartile=0.5,
+            R_fill=4,
+            T_fill=2,  # Allow temporal filling
+            allow_merging=True,
+            overlap_threshold=0.5,
+            nn_partitioning=True,
+            dimensions={"time": "t", "x": "x", "y": "y"},   # Must specify the name of the spatial dimension
+            coordinates={"time": "T", "x": "longitude", "y": "latitude"},
+            quiet=True,
+        )
+        
+        # Run tracking with merging
+        tracked_ds_with_merge = tracker_with_merge.run()
+        
+        # Verify output structure with renamed dimensions (with merging)
+        assert isinstance(tracked_ds_with_merge, xr.Dataset)
+        assert "ID_field" in tracked_ds_with_merge.data_vars
+        assert "global_ID" in tracked_ds_with_merge.data_vars
+        assert "area" in tracked_ds_with_merge.data_vars
+        assert "centroid" in tracked_ds_with_merge.data_vars
+        assert "presence" in tracked_ds_with_merge.data_vars
+        assert "time_start" in tracked_ds_with_merge.data_vars
+        assert "time_end" in tracked_ds_with_merge.data_vars
+        assert "merge_ledger" in tracked_ds_with_merge.data_vars
+        
+        # Verify dimensions are correctly named
+        assert "t" in tracked_ds_with_merge.ID_field.dims
+        assert "y" in tracked_ds_with_merge.ID_field.dims
+        assert "x" in tracked_ds_with_merge.ID_field.dims
+        
+        # Verify coordinates are present
+        assert "T" in tracked_ds_with_merge.coords
+        assert "latitude" in tracked_ds_with_merge.coords
+        assert "longitude" in tracked_ds_with_merge.coords
+        
+        # Verify tracking attributes (with merging)
+        assert tracked_ds_with_merge.attrs["allow_merging"] == 1
+        assert tracked_ds_with_merge.attrs["T_fill"] == 2
+        assert "total_merges" in tracked_ds_with_merge.attrs
+        assert "N_events_final" in tracked_ds_with_merge.attrs
+        
+        # Verify ID dimension consistency
+        n_events = tracked_ds_with_merge.sizes["ID"]
+        assert n_events == tracked_ds_with_merge.attrs["N_events_final"]
+        
+        # Verify tracking produced valid results
+        max_id_with_merge = int(tracked_ds_with_merge.ID_field.max())
+        assert max_id_with_merge > 0, "No events were tracked with custom dimension names (with merging)"
+        assert max_id_with_merge == tracked_ds_with_merge.attrs["N_events_final"]
+        
+        # Test 3: Compare results between merging modes
+        # Both should track some events
+        assert tracked_ds_no_merge.attrs["N_events_final"] > 0
+        assert tracked_ds_with_merge.attrs["N_events_final"] > 0
+        
+        # Both should have the same core structure (ID_field)
+        assert tracked_ds_no_merge.ID_field.dims == tracked_ds_with_merge.ID_field.dims
+        
+        # Verify that time_start <= time_end for all events (merging case)
+        valid_events = tracked_ds_with_merge.presence.any(dim="t").compute()
+        for event_id in tracked_ds_with_merge.ID[valid_events]:
+            start_time = tracked_ds_with_merge.time_start.sel(ID=event_id)
+            end_time = tracked_ds_with_merge.time_end.sel(ID=event_id)
+            assert start_time <= end_time, f"Event {event_id} has start_time > end_time"
+
+
+
+    def test_centroid_tracking_moving_blob(self, dask_client):
+        """Test that centroid tracking correctly follows a steadily moving blob."""
+        # Load test data with steadily moving blob
+        test_data_path = Path(__file__).parent / "data" / "extremes_gridded_blob.zarr"
+        blob_data = xr.open_zarr(str(test_data_path), chunks={}).chunk({"time": 2, "lat": -1, "lon": -1}).persist()
+        
+        # Create tracker with merging enabled to get centroids
+        tracker = marEx.tracker(
+            blob_data.extreme_events,
+            blob_data.mask.where(
+                (blob_data.lat < 85) & (blob_data.lat > -90),
+                other=False,
+            ),
+            area_filter_quartile=0.0,  # No area filtering to capture the blob
+            R_fill=0,  # No spatial filling to avoid coordinate alignment issues with small blob
+            T_fill=0,  # No temporal filling to keep the test simple
+            allow_merging=True,  # Required to save centroids
+            overlap_threshold=0.3,
+            quiet=True,
+        )
+        
+        # Run tracking
+        tracked_ds = tracker.run()
+        
+        # Verify that we have centroid data
+        assert "centroid" in tracked_ds.data_vars, "Centroid data not present"
+        assert tracked_ds.attrs["allow_merging"] == 1, "Merging should be enabled"
+        
+        # Find the largest tracked event (should be our moving blob)
+        # Look for events that are present for multiple time steps
+        event_durations = tracked_ds.presence.sum(dim="time")
+        longest_event_idx = int(event_durations.argmax().values)
+        longest_event_id = event_durations.ID[longest_event_idx]
+        
+        assert event_durations[longest_event_idx] > 5, "No long-duration event found (expected moving blob)"
+        
+        # Extract centroid positions for the longest event
+        event_presence = tracked_ds.presence.isel(ID=longest_event_idx).compute()
+        present_times = tracked_ds.time[event_presence]
+        
+        # Get centroids where the event is present
+        lat_centroids = tracked_ds.centroid.sel(component=0).isel(ID=longest_event_idx)
+        lon_centroids = tracked_ds.centroid.sel(component=1).isel(ID=longest_event_idx)
+        
+        tracked_lat_centroids = lat_centroids[event_presence].values
+        tracked_lon_centroids = lon_centroids[event_presence].values
+        
+        # Remove any NaN values (shouldn't be any for a valid tracked event)
+        valid_mask = ~(np.isnan(tracked_lat_centroids) | np.isnan(tracked_lon_centroids))
+        valid_times = present_times[valid_mask]
+        valid_lat_centroids = tracked_lat_centroids[valid_mask]
+        valid_lon_centroids = tracked_lon_centroids[valid_mask]
+        
+        assert len(valid_times) > 5, "Not enough valid centroid measurements"
+        
+        # Expected centroid locations based on make_test_data.ipynb
+        # rate = 3 degrees east per day, start_lon = 170, no movement in latitude
+        rate = 3.0  # degrees east per day
+        start_lon = 170.0
+        expected_lat = 0.0  # No movement in latitude
+        
+        # Calculate expected positions for the times when the event is present
+        start_time = blob_data.time.min()
+        delta_days = (valid_times - start_time).dt.days.values
+        expected_lon_centroids = start_lon + delta_days * rate
+        expected_lat_centroids = np.full_like(expected_lon_centroids, expected_lat)
+        
+        # Handle longitude wraparound (expected values may exceed 180)
+        expected_lon_centroids = np.where(
+            expected_lon_centroids > 180, 
+            expected_lon_centroids - 360, 
+            expected_lon_centroids
+        )
+        
+        # Test centroid accuracy with specified tolerances
+        lon_tolerance = 0.5   # degrees (relaxed slightly from 0.25 to account for discretization)
+        lat_tolerance = 0.25  # degrees (relaxed slightly from 0.1 to account for discretization)
+        
+        # Check latitude centroids (should be close to 0)
+        lat_differences = np.abs(valid_lat_centroids - expected_lat_centroids)
+        max_lat_error = np.max(lat_differences)
+        
+        assert max_lat_error <= lat_tolerance, (
+            f"Maximum latitude error {max_lat_error:.3f}° exceeds tolerance {lat_tolerance}°. "
+            f"Expected lat ≈ {expected_lat}°, got range [{valid_lat_centroids.min():.2f}, "
+            f"{valid_lat_centroids.max():.2f}]°"
+        )
+        
+        # Check longitude centroids (should follow eastward movement)
+        lon_differences = np.abs(valid_lon_centroids - expected_lon_centroids)
+        max_lon_error = np.max(lon_differences)
+        
+        assert max_lon_error <= lon_tolerance, (
+            f"Maximum longitude error {max_lon_error:.3f}° exceeds tolerance {lon_tolerance}°. "
+            f"Expected eastward movement from {start_lon}° at {rate}°/day. "
+            f"Time range: {delta_days.min():.1f} to {delta_days.max():.1f} days. "
+            f"Expected lon range: [{expected_lon_centroids.min():.1f}, {expected_lon_centroids.max():.1f}]°, "
+            f"got range: [{valid_lon_centroids.min():.1f}, {valid_lon_centroids.max():.1f}]°"
+        )
+        
