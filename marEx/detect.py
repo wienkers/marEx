@@ -156,8 +156,6 @@ def _infer_dims_coords(
     """
     if dimensions is None:
         dimensions = {"time": "time", "x": "lon", "y": "lat"}
-    if coordinates is None:
-        coordinates = dimensions.copy()
 
     if "time" not in dimensions:
         dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
@@ -1593,8 +1591,19 @@ def _compute_anomaly_detrended(
         dims.append(dimensions["x"])
         coords.update(da[coordinates["x"]].coords)
 
-    # Fit model to data
-    model_fit_da = xr.DataArray(pmodel_da.dot(da), dims=dims, coords=coords)
+    # Fit model to data - use the actual dimensions of the result
+    dot_result = pmodel_da.dot(da)
+    # For dot product result, dimensions match input data's spatial dimensions
+    spatial_dims = [dim for dim in da.dims if dim != dimensions["time"]]
+    result_dims = ["coeff"] + spatial_dims
+
+    # Build coordinates for the result
+    result_coords = {"coeff": np.arange(1, n_coeffs + 1)}
+    for dim in spatial_dims:
+        if dim in da.coords:
+            result_coords[dim] = da.coords[dim]
+
+    model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords)
 
     # Remove trend and seasonal cycle
     da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)
