@@ -301,8 +301,7 @@ def preprocess_data(
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 50})
     >>> result_unstructured = marEx.preprocess_data(
     ...     icon_sst,
-    ...     dimensions={"time": "time", "x": "ncells"},
-    ...     coordinates={"time": "time", "x": "lon", "y": "lat"}
+    ...     dimensions={"x": "ncells"},   # Must specify the name of the spatial dimension
     ...     dask_chunks={"time": 50}
     ... )
 
