@@ -1,17 +1,14 @@
-"""
-Dependency management for marEx.
-"""
+"""Dependency management for marEx."""
 
 import warnings
 from typing import Dict, List
 
 
 class DependencyTracker:
-    """
-    Tracks availability of optional dependencies
-    """
+    """Tracks availability of optional dependencies"""
 
     def __init__(self):
+        """Initialise the dependency tracker."""
         self._dependencies: Dict[str, bool] = {}
         self._check_all_dependencies()
 
@@ -205,11 +202,11 @@ class DependencyTracker:
 
         missing = self.get_missing_dependencies()
         if missing:
-            print(f"\nInstallation suggestions:")
-            print(f"  All features:     pip install marEx[full]")
-            print(f"  Performance:      pip install marEx[performance]")
-            print(f"  HPC:              pip install marEx[hpc]")
-            print(f"  Visualisation:    pip install marEx[plotting]")
+            print("\nInstallation suggestions:")
+            print("  All features:     pip install marEx[full]")
+            print("  Performance:      pip install marEx[performance]")
+            print("  HPC:              pip install marEx[hpc]")
+            print("  Visualisation:    pip install marEx[plotting]")
 
 
 # Global dependency tracker instance

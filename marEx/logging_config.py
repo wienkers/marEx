@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Union
 
 import psutil
+import xarray as xr
 
 # Handle optional tqdm dependency for progress bars
 try:
@@ -446,7 +447,7 @@ def log_progress(
 
 def log_function_call(logger: Optional[logging.Logger] = None, level: int = logging.DEBUG):
     """
-    Decorator to log function calls with parameters and timing.
+    Log function calls with parameters and timing.
 
     Args:
         logger: Logger instance (defaults to function's module logger)
