@@ -7,26 +7,15 @@ strategies, and realistic scenarios.
 """
 
 import gc
-import shutil
-import tempfile
 from pathlib import Path
 
-import dask.array as dsa
 import numpy as np
-import pandas as pd
 import pytest
 import xarray as xr
-from dask import delayed, persist
-from dask.distributed import as_completed
 
 import marEx
 
-from .conftest import (
-    assert_count_in_reasonable_range,
-    assert_percentile_frequency,
-    assert_reasonable_bounds,
-    assert_statistical_consistency,
-)
+from .conftest import assert_reasonable_bounds
 
 
 class TestFullPipelineGridded:
@@ -437,15 +426,16 @@ class TestFullPipelineUnstructured:
         # Step 2: Basic tracking validation (simplified for unstructured data)
         # Note: Full unstructured tracking is complex and tested separately
         # For integration test, we just verify that the preprocessing output is compatible
-        
+
         # Check that we can create a tracker object (even if we don't run it)
         import tempfile
+
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Simplified tracker creation to verify compatibility
                 # Skip actual tracking due to complexity of mock neighbours/cell_areas setup
                 print(f"Unstructured preprocessing successful. Would track {n_extremes} extreme events.")
-                
+
         except Exception as e:
             # If tracker creation fails, that's OK for this integration test
             # The main goal is to test preprocessing pipeline
@@ -521,7 +511,7 @@ class TestPipelineIntegration:
 
         # Compare results across methods
         frequencies = [r["frequency"] for r in results.values()]
-        time_lengths = [r["time_length"] for r in results.values()]
+        [r["time_length"] for r in results.values()]
 
         # All frequencies should be in reasonable range for 90th percentile
         for freq in frequencies:

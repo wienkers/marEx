@@ -1,17 +1,14 @@
-"""
-Dependency management for marEx.
-"""
+"""Dependency management for marEx."""
 
 import warnings
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class DependencyTracker:
-    """
-    Tracks availability of optional dependencies
-    """
+    """Tracks availability of optional dependencies"""
 
     def __init__(self):
+        """Initialise the dependency tracker."""
         self._dependencies: Dict[str, bool] = {}
         self._check_all_dependencies()
 
@@ -19,14 +16,14 @@ class DependencyTracker:
         """Check availability of all optional dependencies."""
         # Performance dependencies
         try:
-            import jax
+            pass
 
             self._dependencies["jax"] = True
         except ImportError:
             self._dependencies["jax"] = False
 
         try:
-            import jax.lib
+            pass
 
             self._dependencies["jaxlib"] = True
         except ImportError:
@@ -34,7 +31,7 @@ class DependencyTracker:
 
         # HPC dependencies
         try:
-            import dask_jobqueue
+            pass
 
             self._dependencies["dask_jobqueue"] = True
         except (ImportError, ValueError):
@@ -43,7 +40,7 @@ class DependencyTracker:
             self._dependencies["dask_jobqueue"] = False
 
         try:
-            import psutil
+            pass
 
             self._dependencies["psutil"] = True
         except ImportError:
@@ -51,28 +48,28 @@ class DependencyTracker:
 
         # Visualisation dependencies
         try:
-            import matplotlib
+            pass
 
             self._dependencies["matplotlib"] = True
         except ImportError:
             self._dependencies["matplotlib"] = False
 
         try:
-            import cartopy
+            pass
 
             self._dependencies["cartopy"] = True
         except ImportError:
             self._dependencies["cartopy"] = False
 
         try:
-            import seaborn
+            pass
 
             self._dependencies["seaborn"] = True
         except ImportError:
             self._dependencies["seaborn"] = False
 
         try:
-            import cmocean
+            pass
 
             self._dependencies["cmocean"] = True
         except ImportError:
@@ -80,7 +77,7 @@ class DependencyTracker:
 
         # PIL for image processing
         try:
-            import PIL
+            pass
 
             self._dependencies["pillow"] = True
         except ImportError:
@@ -90,9 +87,7 @@ class DependencyTracker:
         """Check if a specific dependency is available."""
         return self._dependencies.get(dep_name, False)
 
-    def require_dependencies(
-        self, dependencies: List[str], feature: str = "This functionality"
-    ) -> None:
+    def require_dependencies(self, dependencies: List[str], feature: str = "This functionality") -> None:
         """
         Require specific dependencies for a feature.
 
@@ -114,20 +109,13 @@ class DependencyTracker:
             if len(missing) == 1:
                 dep_name = missing[0]
                 install_cmd = self._get_install_command(dep_name)
-                raise ImportError(
-                    f"{feature} requires {dep_name}. " f"Install with: {install_cmd}"
-                )
+                raise ImportError(f"{feature} requires {dep_name}. " f"Install with: {install_cmd}")
             else:
                 dep_list = ", ".join(missing)
                 install_cmd = "pip install marEx[full]"
-                raise ImportError(
-                    f"{feature} requires the following dependencies: {dep_list}. "
-                    f"Install with: {install_cmd}"
-                )
+                raise ImportError(f"{feature} requires the following dependencies: {dep_list}. " f"Install with: {install_cmd}")
 
-    def warn_missing_dependency(
-        self, dep_name: str, feature: str = "Some functionality"
-    ) -> None:
+    def warn_missing_dependency(self, dep_name: str, feature: str = "Some functionality") -> None:
         """
         Issue a warning for a missing optional dependency.
 
@@ -214,11 +202,11 @@ class DependencyTracker:
 
         missing = self.get_missing_dependencies()
         if missing:
-            print(f"\nInstallation suggestions:")
-            print(f"  All features:     pip install marEx[full]")
-            print(f"  Performance:      pip install marEx[performance]")
-            print(f"  HPC:              pip install marEx[hpc]")
-            print(f"  Visualisation:    pip install marEx[plotting]")
+            print("\nInstallation suggestions:")
+            print("  All features:     pip install marEx[full]")
+            print("  Performance:      pip install marEx[performance]")
+            print("  HPC:              pip install marEx[hpc]")
+            print("  Visualisation:    pip install marEx[plotting]")
 
 
 # Global dependency tracker instance
@@ -231,9 +219,7 @@ def has_dependency(dep_name: str) -> bool:
     return _dependency_tracker.has_dependency(dep_name)
 
 
-def require_dependencies(
-    dependencies: List[str], feature: str = "This functionality"
-) -> None:
+def require_dependencies(dependencies: List[str], feature: str = "This functionality") -> None:
     """Require specific dependencies for a feature."""
     _dependency_tracker.require_dependencies(dependencies, feature)
 

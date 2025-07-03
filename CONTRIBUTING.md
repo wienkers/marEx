@@ -184,7 +184,7 @@ git push origin feature/your-feature-name
 
 ### Test Structure
 
-marEx uses pytest with the following test organization:
+marEx uses pytest with the following test organisation:
 
 ```
 tests/
@@ -200,7 +200,7 @@ tests/
 
 ### Test Categories
 
-Tests are organized using pytest markers:
+Tests are organised using pytest markers:
 
 - `@pytest.mark.slow`: Computationally expensive tests (skip with `-m "not slow"`)
 - `@pytest.mark.integration`: End-to-end workflow tests
@@ -362,7 +362,7 @@ When requesting features:
 
 ## Recognition
 
-Contributors are recognized in:
+Contributors are recognised in:
 
 - GitHub contributors list
 - Release notes

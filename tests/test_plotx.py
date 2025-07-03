@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from marEx.plotX import PlotConfig, _detect_grid_type, specify_grid, PlotXAccessor
+from marEx.plotX import PlotConfig, PlotXAccessor, _detect_grid_type, specify_grid
 from marEx.plotX.base import PlotterBase
 from marEx.plotX.gridded import GriddedPlotter
 from marEx.plotX.unstructured import UnstructuredPlotter

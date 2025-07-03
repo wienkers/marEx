@@ -6,11 +6,7 @@ Comprehensive tests for the marEx exception system to ensure proper
 error handling, exception chaining, and informative error messages.
 """
 
-from typing import Any, Dict
-
-import numpy as np
 import pytest
-import xarray as xr
 
 # Import all marEx exceptions
 from marEx.exceptions import (
@@ -147,9 +143,7 @@ class TestConvenienceConstructors:
     def test_create_data_validation_error(self):
         """Test data validation error constructor."""
         data_info = {"dtype": "float32", "shape": (100, 200)}
-        error = create_data_validation_error(
-            "Invalid data type", data_info=data_info, details="Expected boolean array"
-        )
+        error = create_data_validation_error("Invalid data type", data_info=data_info, details="Expected boolean array")
 
         assert isinstance(error, DataValidationError)
         assert error.message == "Invalid data type"
@@ -250,9 +244,7 @@ class TestExceptionChaining:
             try:
                 raise ValueError("Original error")
             except ValueError as e:
-                raise DataValidationError(
-                    "Validation failed", details="Caused by value error"
-                ) from e
+                raise DataValidationError("Validation failed", details="Caused by value error") from e
         except DataValidationError as caught:
             assert caught.__cause__ is not None
             assert isinstance(caught.__cause__, ValueError)

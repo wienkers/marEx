@@ -21,14 +21,8 @@ import xarray as xr
 from dask.distributed import Client, LocalCluster
 from numpy.typing import NDArray
 
-from .exceptions import ConfigurationError, DependencyError, ProcessingError
-from .logging_config import (
-    configure_logging,
-    get_logger,
-    is_verbose_mode,
-    log_memory_usage,
-    log_timing,
-)
+from .exceptions import ConfigurationError
+from .logging_config import configure_logging, get_logger, is_verbose_mode, log_memory_usage, log_timing
 
 # Get module logger
 logger = get_logger(__name__)
@@ -194,11 +188,7 @@ def get_cluster_info(client: Client) -> Dict[str, str]:
     >>> client.close()
     """
     # Get hostname and dashboard port
-    remote_node = (
-        subprocess.run(["hostname"], capture_output=True, text=True)
-        .stdout.strip()
-        .split(".")[0]
-    )
+    remote_node = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip().split(".")[0]
     port = re.search(r":(\d+)/", client.dashboard_link).group(1)
 
     # Print connection information
@@ -324,18 +314,12 @@ def start_local_cluster(
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
 
-    logger.info(
-        f"Starting local Dask cluster with {n_workers} workers, {threads_per_worker} threads each"
-    )
+    logger.info(f"Starting local Dask cluster with {n_workers} workers, {threads_per_worker} threads each")
 
     # Enhanced logging in verbose mode
     if is_verbose_mode():
-        logger.debug(
-            f"System resources - CPUs: {psutil.cpu_count()}, Memory: {psutil.virtual_memory().total / 1024**3:.1f} GB"
-        )
-        logger.debug(
-            f"Cluster configuration: n_workers={n_workers}, threads_per_worker={threads_per_worker}"
-        )
+        logger.debug(f"System resources - CPUs: {psutil.cpu_count()}, Memory: {psutil.virtual_memory().total / 1024**3:.1f} GB")
+        logger.debug(f"Cluster configuration: n_workers={n_workers}, threads_per_worker={threads_per_worker}")
 
     # Configure Dask
     temp_dir = configure_dask(scratch_dir)
@@ -357,9 +341,7 @@ def start_local_cluster(
             f"Requested {n_workers} workers with {threads_per_worker} threads each, "
             f"but only {physical_cores} physical cores available"
         )
-        logger.warning(
-            "Hyper-threading can reduce performance for compute-intensive tasks!"
-        )
+        logger.warning("Hyper-threading can reduce performance for compute-intensive tasks!")
     elif total_threads > logical_cores:
         logger.warning(
             f"Requested {n_workers} workers with {threads_per_worker} threads each, "
@@ -373,19 +355,15 @@ def start_local_cluster(
 
     # Create cluster and client
     logger.debug("Creating local cluster and client")
-    with log_timing(
-        logger, "Local cluster startup", log_memory=True, show_progress=True
-    ):
-        cluster = LocalCluster(
-            n_workers=n_workers, threads_per_worker=threads_per_worker, **kwargs
-        )
+    with log_timing(logger, "Local cluster startup", log_memory=True, show_progress=True):
+        cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, **kwargs)
         client = Client(cluster)
 
     # Store temporary directory (so it isn't garbage collected)
     client._temp_dir = temp_dir
 
     # Get and display connection information
-    cluster_info = get_cluster_info(client)
+    get_cluster_info(client)
 
     # Enhanced verbose mode reporting
     if is_verbose_mode():
@@ -394,9 +372,7 @@ def start_local_cluster(
         logger.debug(f"Workers: {list(client.nthreads().keys())}")
         logger.debug(f"Total threads: {sum(client.nthreads().values())}")
 
-    logger.info(
-        f"Local cluster started successfully - Dashboard: {client.dashboard_link}"
-    )
+    logger.info(f"Local cluster started successfully - Dashboard: {client.dashboard_link}")
     log_memory_usage(logger, "After cluster startup", level=20)  # DEBUG level
 
     return client
@@ -540,12 +516,8 @@ def start_distributed_cluster(
     ...     n_workers=64, workers_per_node=16, node_memory=256
     ... )
     """
-    logger.info(
-        f"Starting distributed SLURM cluster - {n_workers} workers on {n_workers//workers_per_node} nodes"
-    )
-    logger.info(
-        f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime}h runtime"
-    )
+    logger.info(f"Starting distributed SLURM cluster - {n_workers} workers on {n_workers//workers_per_node} nodes")
+    logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime}h runtime")
 
     if SLURMCluster is None:
         logger.error("dask_jobqueue not available - cannot create SLURM cluster")
@@ -564,7 +536,7 @@ def start_distributed_cluster(
     if node_memory not in MEMORY_CONFIGS:
         logger.error(f"Unsupported node_memory value: {node_memory}")
         raise ConfigurationError(
-            f"Unsupported node_memory configuration",
+            "Unsupported node_memory configuration",
             details=f"Value '{node_memory}' is not supported",
             suggestions=[
                 f"Use one of the supported configurations: {list(MEMORY_CONFIGS.keys())}",
@@ -639,7 +611,6 @@ def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
         DataArray with materialised chunks that can be safely saved to Zarr
 
     """
-
     # N.B.: Analyse the outputs of:
     #   first_key = result.data.__dask_keys__()[0]
     #   first_chunk = dask.compute(first_key)[0]
@@ -663,6 +634,4 @@ def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
     )
 
     # Create new DataArray with clean dask array
-    return xr.DataArray(
-        clean_data, dims=da.dims, coords=da.coords, attrs=da.attrs, name=da.name
-    )
+    return xr.DataArray(clean_data, dims=da.dims, coords=da.coords, attrs=da.attrs, name=da.name)

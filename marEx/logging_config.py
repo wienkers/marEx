@@ -14,9 +14,10 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import psutil
+import xarray as xr
 
 # Handle optional tqdm dependency for progress bars
 try:
@@ -29,9 +30,7 @@ except ImportError:
 
 # Default configuration
 DEFAULT_LOG_LEVEL = logging.INFO
-DEFAULT_LOG_FORMAT = (
-    "%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s"
-)
+DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s"
 DEFAULT_VERBOSE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(funcName)s:%(lineno)d - %(message)s"
 DEFAULT_QUIET_FORMAT = "%(levelname)s - %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -176,9 +175,7 @@ def configure_logging(
         _configure_external_loggers()
 
     # Log configuration
-    root_logger.info(
-        f"MarEx logging configured - Level: {logging.getLevelName(level)}, Mode: {_current_verbosity_level}"
-    )
+    root_logger.info(f"MarEx logging configured - Level: {logging.getLevelName(level)}, Mode: {_current_verbosity_level}")
     if log_file:
         root_logger.info(f"Logging to file: {log_file}")
 
@@ -264,9 +261,7 @@ def get_memory_usage() -> Dict[str, float]:
     }
 
 
-def log_memory_usage(
-    logger: logging.Logger, message: str = "", level: int = logging.DEBUG
-) -> None:
+def log_memory_usage(logger: logging.Logger, message: str = "", level: int = logging.DEBUG) -> None:
     """
     Log current memory usage.
 
@@ -334,10 +329,7 @@ def log_timing(
 
         # More detailed timing in verbose mode
         if is_verbose_mode():
-            logger.debug(
-                f"Completed {operation} - Duration: {duration:.3f}s, "
-                f"Performance: {1/duration:.2f} ops/sec"
-            )
+            logger.debug(f"Completed {operation} - Duration: {duration:.3f}s, " f"Performance: {1/duration:.2f} ops/sec")
         else:
             logger.log(level, f"Completed {operation} in {duration:.2f}s")
 
@@ -447,18 +439,15 @@ def log_progress(
     if percentage % frequency == 0 or current == total:
         if is_verbose_mode():
             logger.debug(
-                f"{operation}: {current}/{total} ({percentage:.1f}%) - "
-                f"Rate: {current/(time.perf_counter()):.2f} items/sec"
+                f"{operation}: {current}/{total} ({percentage:.1f}%) - " f"Rate: {current/(time.perf_counter()):.2f} items/sec"
             )
         else:
             logger.info(f"{operation}: {percentage:.0f}% complete ({current}/{total})")
 
 
-def log_function_call(
-    logger: Optional[logging.Logger] = None, level: int = logging.DEBUG
-):
+def log_function_call(logger: Optional[logging.Logger] = None, level: int = logging.DEBUG):
     """
-    Decorator to log function calls with parameters and timing.
+    Log function calls with parameters and timing.
 
     Args:
         logger: Logger instance (defaults to function's module logger)
@@ -528,7 +517,6 @@ def log_dask_info(
         message: Additional context message
     """
     try:
-        import dask
         from dask.base import is_dask_collection
 
         if hasattr(da_or_ds, "chunks"):
@@ -538,11 +526,7 @@ def log_dask_info(
 
             nbytes = da_or_ds.nbytes if hasattr(da_or_ds, "nbytes") else "unknown"
 
-            log_msg = (
-                f"Dask object - Shape: {da_or_ds.shape}, "
-                f"Chunks: {chunks_info}, "
-                f"Size: {nbytes}"
-            )
+            log_msg = f"Dask object - Shape: {da_or_ds.shape}, " f"Chunks: {chunks_info}, " f"Size: {nbytes}"
 
             if message:
                 log_msg = f"{message} - {log_msg}"

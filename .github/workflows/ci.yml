@@ -130,7 +130,7 @@ jobs:
 
     - name: Run unit tests
       run: |
-        pytest tests/test_detect_units.py tests/test_track_units.py -v --tb=short
+        pytest tests/test_detect_helpers.py tests/test_track_helpers.py -v --tb=short
 
     - name: Run preprocessing tests (gridded)
       run: |

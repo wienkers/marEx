@@ -5,7 +5,7 @@ MarEx Exception Hierarchy: Error Handling
 This module provides a structured exception hierarchy for the marEx package.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 class MarExError(Exception):
@@ -319,9 +319,7 @@ class VisualisationError(MarExError):
 # Backward compatibility aliases and specific error constructors
 
 
-def create_data_validation_error(
-    message: str, data_info: Optional[Dict[str, Any]] = None, **kwargs
-) -> DataValidationError:
+def create_data_validation_error(message: str, data_info: Optional[Dict[str, Any]] = None, **kwargs) -> DataValidationError:
     """
     Convenience function to create DataValidationError with common data context.
 
@@ -380,9 +378,7 @@ def create_coordinate_error(
     return CoordinateError(message, **kwargs)
 
 
-def create_processing_error(
-    message: str, computation_info: Optional[Dict[str, Any]] = None, **kwargs
-) -> ProcessingError:
+def create_processing_error(message: str, computation_info: Optional[Dict[str, Any]] = None, **kwargs) -> ProcessingError:
     """
     Convenience function to create ProcessingError with computation context.
 

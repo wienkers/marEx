@@ -25,17 +25,14 @@ Example
 """
 
 # Import dependency management
-from ._dependencies import (
-    get_installation_profile,
-    has_dependency,
-    print_dependency_status,
-)
+from ._dependencies import get_installation_profile, has_dependency, print_dependency_status
 
 # Import core functionality
 from .detect import (
     compute_normalised_anomaly,
     identify_extremes,
     preprocess_data,
+    rolling_climatology,
     smoothed_rolling_climatology,
 )
 
@@ -74,13 +71,13 @@ from .track import regional_tracker, tracker
 # Coordinate validation utilities are now integrated into the main modules
 
 
-
 # Convenience variables
 __all__ = [
     # Core data preprocessing
     "preprocess_data",
     "compute_normalised_anomaly",
     "smoothed_rolling_climatology",
+    "rolling_climatology",
     "identify_extremes",
     # Tracking
     "tracker",

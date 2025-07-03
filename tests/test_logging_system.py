@@ -5,9 +5,7 @@ Tests the verbose/quiet mode functionality and logging configuration.
 """
 
 import logging
-import os
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import dask.array as da
@@ -118,9 +116,7 @@ class TestFunctionLevelVerbosity:
 
     def test_preprocess_data_verbose(self, sample_data):
         """Test verbose mode in preprocess_data."""
-        result = marEx.preprocess_data(
-            sample_data, threshold_percentile=90, verbose=True
-        )
+        result = marEx.preprocess_data(sample_data, threshold_percentile=90, verbose=True)
 
         # Verify the function runs successfully and returns expected structure
         assert isinstance(result, xr.Dataset)
@@ -132,9 +128,7 @@ class TestFunctionLevelVerbosity:
     def test_preprocess_data_quiet(self, sample_data, caplog):
         """Test quiet mode in preprocess_data."""
         with caplog.at_level(logging.WARNING, logger="marEx"):
-            result = marEx.preprocess_data(
-                sample_data, threshold_percentile=90, quiet=True
-            )
+            result = marEx.preprocess_data(sample_data, threshold_percentile=90, quiet=True)
 
             # Should have fewer log messages in quiet mode
             info_messages = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -143,9 +137,7 @@ class TestFunctionLevelVerbosity:
 
     def test_compute_normalised_anomaly_verbose(self, sample_data):
         """Test verbose mode in compute_normalised_anomaly."""
-        result = marEx.compute_normalised_anomaly(
-            sample_data, method_anomaly="detrended_baseline", verbose=True
-        )
+        result = marEx.compute_normalised_anomaly(sample_data, method_anomaly="detrended_baseline", verbose=True)
 
         # Verify the function runs successfully and returns expected structure
         assert isinstance(result, xr.Dataset)
@@ -181,7 +173,7 @@ class TestTrackerVerbosity:
         binary_data = (sample_data > sample_data.mean()).astype(bool)
         mask = xr.ones_like(sample_data.isel(time=0), dtype=bool)
 
-        # Test that verbose mode is properly set and tracker initializes
+        # Test that verbose mode is properly set and tracker initialises
         tracker = marEx.tracker(
             binary_data,
             mask,
@@ -201,7 +193,7 @@ class TestTrackerVerbosity:
         assert tracker.area_filter_quartile == 0.5
 
     def test_tracker_run_verbose(self, sample_data, dask_client):
-        """Test verbose tracker can be initialized and has verbose mode set."""
+        """Test verbose tracker can be initialised and has verbose mode set."""
         # Create binary data
         binary_data = (sample_data > sample_data.mean()).astype(bool)
         mask = xr.ones_like(sample_data.isel(time=0), dtype=bool)
@@ -226,7 +218,7 @@ class TestTrackerVerbosity:
             # If preprocessing succeeds, verify we get expected output types
             assert hasattr(data_bin_preprocessed, "compute")  # Should be a dask array
             assert isinstance(object_stats, dict)
-        except Exception as e:
+        except Exception:
             # If preprocessing fails, that's okay for a logging test - the important
             # thing is that verbose mode was properly configured
             assert tracker.verbose is True
@@ -258,15 +250,11 @@ class TestClusterLogging:
         """Test verbose local cluster startup."""
         with caplog.at_level(logging.DEBUG):
             try:
-                client = marEx.start_local_cluster(
-                    n_workers=1, threads_per_worker=1, verbose=True
-                )
+                client = marEx.start_local_cluster(n_workers=1, threads_per_worker=1, verbose=True)
                 client.close()
 
                 # Check for detailed system information
-                assert any(
-                    "System resources" in record.message for record in caplog.records
-                )
+                assert any("System resources" in record.message for record in caplog.records)
 
             except Exception:
                 # Skip test if cluster creation fails (e.g., in CI environment)
