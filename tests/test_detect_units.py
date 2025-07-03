@@ -125,7 +125,7 @@ class TestComputeHistogramQuantile1D:
         )
 
         # Test 95th percentile
-        result = detect.compute_histogram_quantile_1d(da, 0.95, dim="x")
+        result = detect._compute_histogram_quantile_1d(da, 0.95, dim="x")
 
         # Compare with numpy percentile
         expected = np.percentile(data, 95)
@@ -146,7 +146,7 @@ class TestComputeHistogramQuantile1D:
         quantiles = [0.5, 0.9, 0.95, 0.99]
 
         for q in quantiles:
-            result = detect.compute_histogram_quantile_1d(da, q, dim="x")
+            result = detect._compute_histogram_quantile_1d(da, q, dim="x")
             expected = np.percentile(data, q * 100)
             assert np.isclose(result.values[0, 0], expected, atol=0.2)
 
@@ -168,7 +168,7 @@ class TestComputeHistogramQuantile1D:
         )
 
         # Test 95th percentile should be in the extreme range
-        result = detect.compute_histogram_quantile_1d(da, 0.95, dim="x")
+        result = detect._compute_histogram_quantile_1d(da, 0.95, dim="x")
 
         # Should be above normal values but reasonable
         assert result.values[0, 0] > 2.0
@@ -189,7 +189,7 @@ class TestComputeHistogramQuantile1D:
         # Custom bin edges
         bin_edges = np.linspace(-3, 4, 100)
 
-        result = detect.compute_histogram_quantile_1d(
+        result = detect._compute_histogram_quantile_1d(
             da, 0.5, dim="x", bin_edges=bin_edges
         )
 
@@ -207,7 +207,7 @@ class TestComputeHistogramQuantile1D:
             name="test_data",
         )
 
-        result = detect.compute_histogram_quantile_1d(da_const, 0.95, dim="x")
+        result = detect._compute_histogram_quantile_1d(da_const, 0.95, dim="x")
         assert np.isclose(result.values[0, 0], 2.5, atol=0.01)
 
         # Test with very small dataset
@@ -218,7 +218,7 @@ class TestComputeHistogramQuantile1D:
             name="test_data",
         )
 
-        result = detect.compute_histogram_quantile_1d(da_small, 0.5, dim="x")
+        result = detect._compute_histogram_quantile_1d(da_small, 0.5, dim="x")
         assert np.isclose(result.values[0, 0], 2.0, atol=0.1)
 
 

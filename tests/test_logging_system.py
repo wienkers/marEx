@@ -188,7 +188,7 @@ class TestTrackerVerbosity:
             R_fill=2,
             area_filter_quartile=0.5,
             verbose=True,
-            regional_mode=True,
+            regional_mode=False,
             coordinate_units="degrees",
         )
 
@@ -212,7 +212,7 @@ class TestTrackerVerbosity:
             R_fill=2,
             area_filter_quartile=0.5,
             verbose=True,
-            regional_mode=True,
+            regional_mode=False,
             coordinate_units="degrees",
         )
 
@@ -291,7 +291,7 @@ class TestIntegration:
                 R_fill=2,
                 area_filter_quartile=0.5,
                 verbose=True,
-                regional_mode=True,
+                regional_mode=False,
                 coordinate_units="degrees",
             )
 
@@ -320,7 +320,7 @@ class TestIntegration:
                 R_fill=2,
                 area_filter_quartile=0.5,
                 quiet=True,
-                regional_mode=True,
+                regional_mode=False,
                 coordinate_units="degrees",
             )
 
