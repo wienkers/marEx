@@ -603,8 +603,8 @@ class TestGriddedTracking:
         )
         
         # Test centroid accuracy with specified tolerances
-        lon_tolerance = 0.5   # degrees (relaxed slightly from 0.25 to account for discretization)
-        lat_tolerance = 0.25  # degrees (relaxed slightly from 0.1 to account for discretization)
+        lon_tolerance = 0.5   # degrees (relaxed slightly from 0.25 to account for discretisation)
+        lat_tolerance = 0.25  # degrees (relaxed slightly from 0.1 to account for discretisation)
         
         # Check latitude centroids (should be close to 0)
         lat_differences = np.abs(valid_lat_centroids - expected_lat_centroids)
