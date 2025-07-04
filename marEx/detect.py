@@ -211,6 +211,7 @@ def preprocess_data(
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
     window_days_hobday: int = 11,  # for hobday_extreme
+    window_spatial_hobday: Optional[int] = None,  # "
     std_normalise: bool = False,  # for detrended_baseline
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
@@ -531,6 +532,7 @@ def preprocess_data(
             dimensions,
             coordinates,
             window_days_hobday,
+            window_spatial_hobday,
             method_percentile,
             precision,
             max_anomaly,
@@ -557,6 +559,7 @@ def preprocess_data(
                 dimensions,
                 coordinates,
                 window_days_hobday,
+                window_spatial_hobday,
                 method_percentile,
                 precision,
                 max_anomaly,
@@ -591,6 +594,7 @@ def preprocess_data(
                 window_year_baseline,
                 smooth_days_baseline,
                 window_days_hobday,
+                window_spatial_hobday,
             ),
         }
     )
@@ -675,6 +679,7 @@ def _get_preprocessing_steps(
     window_year_baseline: int,
     smooth_days_baseline: int,
     window_days_hobday: int,
+    window_spatial_hobday: Optional[int],
 ) -> List[str]:
     """Generate preprocessing steps description based on selected methods."""
     steps = []
@@ -691,7 +696,12 @@ def _get_preprocessing_steps(
     if method_extreme == "global_extreme":
         steps.append("Global percentile threshold applied to all days")
     elif method_extreme == "hobday_extreme":
-        steps.append(f"Day-of-year thresholds with {window_days_hobday} day window")
+        if window_spatial_hobday is not None:
+            steps.append(
+                f"Day-of-year thresholds with {window_days_hobday} day window & {window_spatial_hobday} spatial neighbours"
+            )
+        else:
+            steps.append(f"Day-of-year thresholds with {window_days_hobday} day window")
 
     return steps
 
@@ -870,6 +880,7 @@ def identify_extremes(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     window_days_hobday: int = 11,  # for hobday_extreme
+    window_spatial_hobday: Optional[int] = None,  # for hobday_extreme
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
@@ -899,6 +910,8 @@ def identify_extremes(
     Hobday Extreme Method Parameters:
     window_days_hobday : int, optional
         Window for day-of-year threshold (hobday_extreme only)
+    window_spatial_hobday : int, optional
+        Window for day-of-year threshold spatial clustering (hobday_extreme only)
 
     Percentile Computation Parameters:
     method_percentile : str, optional
@@ -947,6 +960,7 @@ def identify_extremes(
     ...     method_extreme="hobday_extreme",
     ...     threshold_percentile=95,
     ...     window_days_hobday=11  # 11-day window around each day-of-year
+    ...     window_spatial_hobday=3  # 3x3 spatial window for clustering percentile calcuation
     ... )
     >>> print(f"Hobday thresholds shape: {thresholds_hobday.shape}")
     Hobday thresholds shape: (366, 180, 360)
@@ -1107,15 +1121,129 @@ def identify_extremes(
             },
         )
 
+    # Validate window_spatial_hobday parameter
+    if window_spatial_hobday is not None:
+        # Check if window_spatial_hobday is specified for unstructured grid
+        has_y_dim = "y" in dimensions and dimensions["y"] in da.dims
+
+        if not has_y_dim:
+            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified for unstructured grid")
+            raise ConfigurationError(
+                "window_spatial_hobday is not supported for unstructured grids",
+                details=(
+                    "Spatial smoothing with window_spatial_hobday requires structured grids with both x and y dimensions. "
+                    "Unstructured grids do not support spatial window operations due to computational and memory "
+                    "limitations of the algorithms."
+                ),
+                suggestions=[
+                    "Remove the window_spatial_hobday parameter for unstructured grids",
+                    "Use structured grid data if spatial smoothing is required",
+                    "Set window_spatial_hobday=None to use default behavior",
+                ],
+                context={
+                    "grid_type": "unstructured",
+                    "window_spatial_hobday": window_spatial_hobday,
+                    "dimensions": dimensions,
+                    "available_dims": list(da.dims),
+                },
+            )
+
+        # Check if window_spatial_hobday is specified when hobday_extreme is not used
+        if method_extreme != "hobday_extreme":
+            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified with method_extreme='{method_extreme}'")
+            raise ConfigurationError(
+                "window_spatial_hobday can only be used with method_extreme='hobday_extreme'",
+                details=(
+                    "The window_spatial_hobday parameter is only implemented for the Hobday extreme method. "
+                    "Other extreme methods do not support spatial smoothing due to computational and memory "
+                    "limitations of the algorithms."
+                ),
+                suggestions=[
+                    "Remove the window_spatial_hobday parameter when using method_extreme='global_extreme'",
+                    "Use method_extreme='hobday_extreme' if spatial smoothing is required",
+                    "Set window_spatial_hobday=None to use default behavior",
+                ],
+                context={
+                    "method_extreme": method_extreme,
+                    "window_spatial_hobday": window_spatial_hobday,
+                    "compatible_methods": ["hobday_extreme"],
+                },
+            )
+
+        # Check if window_spatial_hobday is specified when method_percentile is "exact"
+        if method_percentile == "exact":
+            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified with method_percentile='exact'")
+            raise ConfigurationError(
+                "window_spatial_hobday is not supported with method_percentile='exact'",
+                details=(
+                    "The window_spatial_hobday parameter is only implemented for the approximate percentile method. "
+                    "Exact percentile computation does not support spatial smoothing due to computational and memory "
+                    "limitations of the algorithms."
+                ),
+                suggestions=[
+                    "Remove the window_spatial_hobday parameter when using method_percentile='exact'",
+                    "Use method_percentile='approximate' if spatial smoothing is required",
+                    "Set window_spatial_hobday=None to use default behavior",
+                ],
+                context={
+                    "method_percentile": method_percentile,
+                    "window_spatial_hobday": window_spatial_hobday,
+                    "compatible_methods": ["approximate"],
+                },
+            )
+
+    # Validate that window parameters are odd numbers
+    if window_days_hobday % 2 == 0:
+        logger.error(f"window_days_hobday={window_days_hobday} is not an odd number")
+        raise ConfigurationError(
+            "window_days_hobday must be an odd number",
+            details=(
+                f"Window parameters require odd numbers to ensure symmetric windows around a central point. "
+                f"window_days_hobday={window_days_hobday} is even, which would create asymmetric temporal windows."
+            ),
+            suggestions=[
+                f"Use window_days_hobday={window_days_hobday + 1} or {window_days_hobday - 1}",
+                "Choose an odd number",
+            ],
+            context={
+                "window_days_hobday": window_days_hobday,
+                "is_odd": False,
+            },
+        )
+
+    # Set default spatial window
+    if window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in da.dims:
+        window_spatial_hobday = 5  # Default to 5x5 spatial window for structured grids
+
+    if window_spatial_hobday is not None and window_spatial_hobday % 2 == 0:
+        logger.error(f"window_spatial_hobday={window_spatial_hobday} is not an odd number")
+        raise ConfigurationError(
+            "window_spatial_hobday must be an odd number",
+            details=(
+                f"Window parameters require odd numbers to ensure symmetric windows around a central point. "
+                f"window_spatial_hobday={window_spatial_hobday} is even, which would create asymmetric spatial windows."
+            ),
+            suggestions=[
+                f"Use window_days_hobday={window_days_hobday + 1} or {window_days_hobday - 1}",
+                "Choose an odd number.",
+            ],
+            context={
+                "window_spatial_hobday": window_spatial_hobday,
+                "is_odd": False,
+            },
+        )
+
     if method_extreme == "global_extreme":
         logger.debug(f"Global extreme method - method_percentile={method_percentile}")
         return _identify_extremes_constant(da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly)
     elif method_extreme == "hobday_extreme":
         logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, method_percentile={method_percentile}")
+
         return _identify_extremes_hobday(
             da,
             threshold_percentile,
             window_days_hobday,
+            window_spatial_hobday,
             method_percentile,
             dimensions,
             coordinates,
@@ -1483,6 +1611,7 @@ def _identify_extremes_hobday(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     window_days_hobday: int = 11,
+    window_spatial_hobday: Optional[int] = None,
     method_percentile: Literal["exact", "approximate"] = "approximate",
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
@@ -1505,6 +1634,8 @@ def _identify_extremes_hobday(
         Percentile to compute (0-100)
     window_days_hobday : int, default 11
         Window in days
+    window_spatial_hobday : int, default None
+        Window in cells
     method_percentile : str, optional
         Method for percentile computation ('exact' or 'approximate')
     precision : float, optional
@@ -1521,6 +1652,19 @@ def _identify_extremes_hobday(
         thresholds : xarray.DataArray
             Threshold values with dimensions (dayofyear, lat, lon)
     """
+    # Check if there is sufficient samples
+    N_years = np.unique(da[coordinates["time"]].dt.year).size
+    N_samples = N_years * window_days_hobday * (window_spatial_hobday if window_spatial_hobday is not None else 1) ** 2
+    N_above_threshold = N_samples * (1.0 - threshold_percentile / 100.0)
+    if N_above_threshold < 50:
+        # Make warning
+        logger.warning(
+            f"Not enough samples for accurate extreme detection: {N_above_threshold} < 50. "
+            "Consider using a lower threshold_percentile, increasing your time-series size, "
+            "increasing the window_days_hobday, or using a larger window_spatial_hobday."
+            "If your time-series is very short, consider using method_percentile='exact'."
+        )
+
     # Add day-of-year coordinate
     da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
 
@@ -1537,6 +1681,7 @@ def _identify_extremes_hobday(
             da,
             threshold_percentile / 100.0,
             window_days_hobday=window_days_hobday,
+            window_spatial_hobday=window_spatial_hobday,
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
@@ -1760,7 +1905,7 @@ def _compute_anomaly_detrended(
 
 
 def _rolling_histogram_quantile(
-    hist_chunk: NDArray[np.float64],
+    hist_chunk: NDArray[np.int32],
     window_days_hobday: int,
     q: float,
     bin_centers: NDArray[np.float64],
@@ -1796,57 +1941,62 @@ def _rolling_histogram_quantile(
     windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
     hist_windowed = np.sum(windowed_view, axis=-1)
 
-    # Compute PDF and CDF in single pass
-    hist_sum = np.sum(hist_windowed, axis=1, keepdims=True) + eps
-    pdf = hist_windowed / hist_sum
-    cdf = np.cumsum(pdf, axis=1)
+    # Apply gaussian smoothing along bin dimension
+    # sigma = 2
+    # hist_smoothed = gaussian_filter1d(
+    #     hist_windowed.astype(np.float32), sigma=sigma, axis=1, mode="constant", cval=0.0  # Along bin dimension
+    # ).astype(np.float32)
 
-    # Find interpolation bounds using robust approach
-    # Find first bin where CDF >= (q - eps) for each day-of-year
-    cdf_above_q = cdf >= (q - eps)
-    idx_upper = np.argmax(cdf_above_q, axis=1)
+    # Count-based interpolation (rather than interpolating CDF in probability space)
+    # Calculate cumulative counts (not normalized CDF)
+    cumsum = np.cumsum(hist_windowed, axis=1, dtype=np.int32)
+    total_counts = cumsum[:, -1]  # Total count for each day
 
-    # Get CDF value one point to the left of idx_upper
-    idx_before_upper = np.maximum(0, idx_upper - 1)
+    # Calculate the exact position where the quantile should be
+    # For n samples, the q-th quantile is at position q*(n-1)
+    # It is q*n here since we're working with cumulative counts
+    quantile_position = q * total_counts
 
-    # Extract the target CDF value using advanced indexing
+    # Vectorised search for the bins containing the quantile position
+    # searchsorted with side='right' gives the first bin where cumsum > quantile_position
+    idx_upper = np.zeros(n_doy, dtype=np.int32)
+
+    for i in range(n_doy):
+        if total_counts[i] <= 0:  # No data
+            idx_upper[i] = 0
+        else:
+            # Find first bin where cumulative count exceeds target position
+            idx_upper[i] = np.searchsorted(cumsum[i], quantile_position[i], side="right")
+
+    # Clip to valid range
+    idx_upper = np.clip(idx_upper, 0, n_bins - 1)
+    idx_lower = np.maximum(0, idx_upper - 1)
+
+    # Extract values for vectorised interpolation
     doy_indices = np.arange(n_doy)
-    cdf_target = cdf[doy_indices, idx_before_upper]
 
-    # Find idx_lower: first bin where CDF > cdf_target
-    # Broadcast cdf_target for vectorised comparison across bins
-    cdf_target_broadcast = cdf_target[:, np.newaxis]  # Shape: (n_doy, 1)
-    cdf_above_target = cdf > cdf_target_broadcast  # Shape: (n_doy, n_bins)
-    idx_lower = np.argmax(cdf_above_target, axis=1)
+    # Get cumulative counts at the boundaries
+    count_lower = np.where(idx_lower >= 0, cumsum[doy_indices, idx_lower], 0)
+    count_upper = cumsum[doy_indices, idx_upper]
 
-    # Ensure bounds are valid
-    idx_lower = np.clip(idx_lower, 0, n_bins - 2)
-    idx_upper = np.clip(idx_upper, 1, n_bins - 1)
-
-    # Extract CDF values for robust interpolation
-    cdf_lower = cdf[doy_indices, idx_lower]
-    cdf_upper = cdf[doy_indices, idx_upper]
+    # Bin centers for interpolation
     bin_lower = bin_centers[idx_lower]
     bin_upper = bin_centers[idx_upper]
 
-    # Robust interpolation with proper handling of degenerate cases
-    denom = cdf_upper - cdf_lower
+    # Compute interpolation fraction based on counts
+    count_diff = count_upper - count_lower
+    safe_diff = np.where(count_diff > eps, count_diff, 1.0)
+    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.5)  # If no difference, use midpoint
 
-    # Handle exact matches and zero denominators
-    exact_match = np.abs(cdf_lower - q) < eps
-    zero_denom = np.abs(denom) <= eps
-
-    # Standard interpolation
-    safe_denom = np.where(np.abs(denom) > eps, denom, 1.0)
-    frac = (q - cdf_lower) / safe_denom
+    # Linear interpolation between bin centers
     threshold = bin_lower + frac * (bin_upper - bin_lower)
 
-    # For exact matches, use the lower bin centre
-    threshold = np.where(exact_match, bin_lower, threshold)
+    # Handle edge cases
+    # If total_counts is 0, return NaN
+    threshold = np.where(total_counts > 0, threshold, np.nan)
 
-    # For zero denominator without exact match, use bin midpoint
-    no_exact_match = zero_denom & ~exact_match
-    threshold = np.where(no_exact_match, (bin_lower + bin_upper) / 2, threshold)
+    # If at the first bin (all data is negative), use the first bin center
+    threshold = np.where((idx_upper == 0) & (total_counts > 0), bin_centers[0], threshold)
 
     return threshold.astype(np.float32)
 
@@ -1855,6 +2005,7 @@ def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
     window_days_hobday: int = 11,
+    window_spatial_hobday: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
     dimensions: Dict[str, str] = None,
     precision: float = 0.01,
@@ -1872,6 +2023,8 @@ def _compute_histogram_quantile_2d(
         Quantile to compute (0-1)
     window_days_hobday : int, optional
         Rolling window size for day-of-year quantiles (default: 11)
+    window_spatial_hobday : int
+        Spatial window size for day-of-year quantiles (default: None)
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
     dimensions : dict, optional
@@ -1888,7 +2041,9 @@ def _compute_histogram_quantile_2d(
     """
     if bin_edges is None:
         # Create optimised asymmetric bins
-        bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+        bin_edges = np.concatenate(
+            [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
+        )
 
     bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers_array[0] = 0.0
@@ -1925,6 +2080,25 @@ def _compute_histogram_quantile_2d(
         fill_value=0,
     )
     hist_raw.name = None
+
+    # Apply spatial-kernel smoothing to the histogram
+    if window_spatial_hobday is not None and window_spatial_hobday > 1:
+        pad_size = window_spatial_hobday // 2
+        lon_dim, lat_dim = dimensions.get("x"), dimensions.get("y")
+
+        hist_rolled = hist_raw
+
+        # Periodic padding in longitude, rolling mean in both dimensions, then trim
+        if lon_dim in hist_raw.dims:
+            hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
+            hist_rolled = hist_rolled.rolling({lon_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+            hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
+
+        # Standard rolling in latitude
+        if lat_dim in hist_raw.dims:
+            hist_rolled = hist_rolled.rolling({lat_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+
+        hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
         return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
