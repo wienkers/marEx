@@ -26,14 +26,16 @@ class TestGriddedPreprocessing:
 
     def test_shifting_baseline_hobday_extreme(self):
         """Test preprocessing with shifting_baseline + hobday_extreme combination."""
+        window_year_baseline = 5
+
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
             threshold_percentile=95,
-            window_year_baseline=5,  # Reduced for test data
+            window_year_baseline=window_year_baseline,  # Reduced for test data
             smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_days_hobday=3,  # Reduced for test data
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -63,7 +65,7 @@ class TestGriddedPreprocessing:
         # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
         input_time_size = self.sst_data.sizes["time"]
         output_time_size = extremes_ds.sizes["time"]
-        window_year_baseline = 5  # From test parameters
+
         expected_time_reduction = window_year_baseline * 365  # Approximate daily reduction
         assert (
             output_time_size < input_time_size
@@ -202,7 +204,7 @@ class TestGriddedPreprocessing:
         assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
         assert extremes_ds.attrs["method_extreme"] == "global_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
-        assert extremes_ds.attrs["std_normalise"] == True
+        assert extremes_ds.attrs["std_normalise"] is True
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
@@ -247,7 +249,7 @@ class TestGriddedPreprocessing:
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
             threshold_percentile=95,
-            exact_percentile=True,
+            method_percentile="exact",
             window_year_baseline=5,  # Reduced for test data
             smooth_days_baseline=11,  # Reduced for test data
             window_days_hobday=5,  # Reduced for test data
@@ -266,7 +268,7 @@ class TestGriddedPreprocessing:
         assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
         assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
-        assert extremes_ds.attrs["exact_percentile"] == True
+        assert extremes_ds.attrs["method_percentile"] == "exact"
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
@@ -308,7 +310,7 @@ class TestGriddedPreprocessing:
             method_anomaly="detrended_baseline",
             method_extreme="global_extreme",
             threshold_percentile=95,
-            exact_percentile=True,
+            method_percentile="exact",
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
@@ -325,7 +327,7 @@ class TestGriddedPreprocessing:
         assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
         assert extremes_ds.attrs["method_extreme"] == "global_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
-        assert extremes_ds.attrs["exact_percentile"] == True
+        assert extremes_ds.attrs["exact_percentile"] is True
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
