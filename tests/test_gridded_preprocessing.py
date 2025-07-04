@@ -268,7 +268,7 @@ class TestGriddedPreprocessing:
         assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
         assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
-        assert extremes_ds.attrs["exact_percentile"] is True
+        assert extremes_ds.attrs["method_percentile"] == "exact"
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
