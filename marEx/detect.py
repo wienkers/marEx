@@ -2230,7 +2230,7 @@ def _compute_histogram_quantile_1d(
     idx_upper = cdf_above_q.argmax(dim=f"{da.name}_bin")
 
     # Get CDF value one point to the left of idx_upper
-    idx_before_upper = max(0, idx_upper - 1)
+    idx_before_upper = xr.where(idx_upper - 1 > 0, idx_upper - 1, 0)
 
     # Extract the target CDF value (avoiding negative indexing issues)
     idx_before_upper_computed = idx_before_upper.compute()
@@ -2241,8 +2241,8 @@ def _compute_histogram_quantile_1d(
     idx_lower = cdf_above_target.argmax(dim=f"{da.name}_bin")
 
     # Ensure bounds are valid
-    idx_lower = np.clip(idx_lower, 0, len(bin_centers) - 2)
-    idx_upper = np.clip(idx_upper, 1, len(bin_centers) - 1)
+    idx_lower = xr.where(idx_lower < 0, 0, xr.where(idx_lower > len(bin_centers) - 2, len(bin_centers) - 2, idx_lower))
+    idx_upper = xr.where(idx_upper < 1, 1, xr.where(idx_upper > len(bin_centers) - 1, len(bin_centers) - 1, idx_upper))
 
     # Extract CDF and bin values for interpolation
     idx_lower_computed = idx_lower.compute()
