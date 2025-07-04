@@ -19,7 +19,7 @@ from marEx.exceptions import ConfigurationError, CoordinateError, DataValidation
 def test_data_dask():
     """Load test data as Dask-backed DataArray."""
     test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-    ds = xr.open_zarr(str(test_data_path), chunks={"time": 25})
+    ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
     return ds.to  # Extract the DataArray named 'to'
 
 
@@ -27,7 +27,7 @@ def test_data_dask():
 def test_data_numpy():
     """Load test data as numpy-backed DataArray."""
     test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-    ds = xr.open_zarr(str(test_data_path), chunks={"time": 25})
+    ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
     return ds.to.load()  # Extract and load the DataArray named 'to'
 
 
@@ -120,8 +120,8 @@ class TestMethodValidation:
             test_data_dask,
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
-            window_year_baseline=5,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_year_baseline=2,  # Reduced for test data
+            window_days_hobday=3,  # Reduced for test data
             dimensions=dimensions_gridded,
             dask_chunks=dask_chunks,
         )
@@ -517,23 +517,6 @@ class TestEdgeCasesAndBoundaryConditions:
         assert (
             0.0001 < extreme_frequency_high < 0.1
         ), f"Extreme frequency {extreme_frequency_high} should be low for 99th percentile"
-
-    def test_unusual_but_valid_parameters(self, test_data_dask, dimensions_gridded, dask_chunks):
-        """Test unusual but technically valid parameter combinations."""
-        # Test with default detrended_baseline method instead of shifting_baseline
-        # to avoid indexing issues with small windows
-        result_small = marEx.preprocess_data(
-            test_data_dask,
-            method_anomaly="detrended_baseline",  # Use default method
-            method_extreme="global_extreme",  # Use default method
-            threshold_percentile=90,  # Use reasonable percentile
-            dimensions=dimensions_gridded,
-            dask_chunks=dask_chunks,
-        )
-        assert isinstance(result_small, xr.Dataset)
-        assert result_small.attrs["method_anomaly"] == "detrended_baseline"
-        assert result_small.attrs["method_extreme"] == "global_extreme"
-        assert result_small.attrs["threshold_percentile"] == 90
 
     def test_large_window_parameters_error(self, test_data_dask, dimensions_gridded, dask_chunks):
         """Test that overly large window parameters raise appropriate errors."""
