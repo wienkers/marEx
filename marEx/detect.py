@@ -214,7 +214,9 @@ def preprocess_data(
     std_normalise: bool = False,  # for detrended_baseline
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
-    exact_percentile: bool = False,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
     dask_chunks: Optional[Dict[str, int]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
@@ -283,9 +285,13 @@ def preprocess_data(
         Whether to enforce zero mean in detrended anomalies (detrended_baseline method only)
 
     Extreme Method Parameters:
-    exact_percentile : bool, optional
-        Whether to use exact or approximate percentile calculation (both global_extreme & hobday_extreme methods)
+    method_percentile : str, optional
+        Method for percentile calculation ('exact' or 'approximate') for both global_extreme & hobday_extreme methods
         N.B. Using exact percentile calculation requires both careful/thoughtful chunking & sufficient memory.
+    precision : float, optional
+        Precision for histogram bins in approximate method (default: 0.01)
+    max_anomaly : float, optional
+        Maximum anomaly value for histogram binning in approximate method (default: 5.0)
 
 
     Logging Parameters:
@@ -394,7 +400,7 @@ def preprocess_data(
     >>> result = marEx.preprocess_data(
     ...     large_sst,
     ...     dask_chunks={"time": 25},
-    ...     exact_percentile=False  # Use approximate method for long time-series calculations
+    ...     method_percentile="approximate"  # Use approximate method (Default) for long time-series calculations
     ... )
 
     Integration with tracking workflow:
@@ -422,7 +428,7 @@ def preprocess_data(
 
     # Log preprocessing start with parameters
     logger.info(f"Starting data preprocessing - Method: {method_anomaly} -> {method_extreme}")
-    logger.info(f"Parameters: percentile={threshold_percentile}%, exact={exact_percentile}")
+    logger.info(f"Parameters: percentile={threshold_percentile}%, method_percentile={method_percentile}")
     logger.debug(
         f"Anomaly method parameters: window_year={window_year_baseline}, smooth_days={smooth_days_baseline}, "
         + f"std_normalise={std_normalise}, detrend_orders={detrend_orders}, force_zero_mean={force_zero_mean}"
@@ -516,7 +522,7 @@ def preprocess_data(
     ):
         logger.debug(
             f"Identifying extremes with parameters: method={method_extreme}, "
-            f"percentile={threshold_percentile}%, exact={exact_percentile}"
+            f"percentile={threshold_percentile}%, method_percentile={method_percentile}"
         )
         extremes, thresholds = identify_extremes(
             anomalies,
@@ -525,7 +531,9 @@ def preprocess_data(
             dimensions,
             coordinates,
             window_days_hobday,
-            exact_percentile,
+            method_percentile,
+            precision,
+            max_anomaly,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -549,7 +557,9 @@ def preprocess_data(
                 dimensions,
                 coordinates,
                 window_days_hobday,
-                exact_percentile,
+                method_percentile,
+                precision,
+                max_anomaly,
             )
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
@@ -605,7 +615,7 @@ def preprocess_data(
     if method_extreme == "hobday_extreme":
         ds.attrs.update({"window_days_hobday": window_days_hobday})
 
-    ds.attrs.update({"exact_percentile": exact_percentile})
+    ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
     # Final rechunking
     time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 10))
@@ -860,7 +870,9 @@ def identify_extremes(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     window_days_hobday: int = 11,  # for hobday_extreme
-    exact_percentile: bool = False,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
@@ -888,9 +900,13 @@ def identify_extremes(
     window_days_hobday : int, optional
         Window for day-of-year threshold (hobday_extreme only)
 
-    Global Extreme Method Parameters:
-    exact_percentile : bool, optional
-        Whether to compute exact percentiles
+    Percentile Computation Parameters:
+    method_percentile : str, optional
+        Method for percentile computation ('exact' or 'approximate')
+    precision : float, optional
+        Precision for histogram bins in approximate method (default: 0.01)
+    max_anomaly : float, optional
+        Maximum anomaly value for histogram binning (default: 5.0)
 
     Returns
     -------
@@ -944,12 +960,12 @@ def identify_extremes(
 
     >>> # Approximate method (faster, default)
     >>> extremes_approx, thresh_approx = marEx.identify_extremes(
-    ...     anomalies, exact_percentile=False
+    ...     anomalies, method_percentile="approximate"
     ... )
     >>>
     >>> # Exact method (slower & memory intensive)
     >>> extremes_exact, thresh_exact = marEx.identify_extremes(
-    ...     anomalies, exact_percentile=True
+    ...     anomalies, method_percentile="exact"
     ... )
     >>>
     >>> # Compare threshold precision — ~0.005C
@@ -1008,39 +1024,103 @@ def identify_extremes(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
-    # Validate percentile parameter when using approximate method
-    if threshold_percentile < 60 and not exact_percentile:
-        logger.error(f"Invalid percentile threshold: {threshold_percentile}% with exact_percentile=False")
+    # Validate method_percentile parameter
+    valid_methods = ["exact", "approximate"]
+    if method_percentile not in valid_methods:
+        logger.error(f"Unknown method_percentile: {method_percentile}")
         raise ConfigurationError(
-            f"Percentile threshold {threshold_percentile}% is not supported with exact_percentile=False",
+            f"Unknown method_percentile '{method_percentile}'",
+            details="Invalid method_percentile parameter",
+            suggestions=[
+                "Use 'exact' for precise percentile computation (memory intensive)",
+                "Use 'approximate' for efficient histogram-based computation (default)",
+            ],
+            context={
+                "provided_method": method_percentile,
+                "valid_methods": valid_methods,
+            },
+        )
+
+    # Validate parameter compatibility for exact percentile method
+    if method_percentile == "exact":
+        default_precision = 0.01
+        default_max_anomaly = 5.0
+
+        # Check if precision parameter was explicitly set to a non-default value
+        if precision != default_precision:
+            logger.error(f"Invalid parameter: precision={precision} with method_percentile='exact'")
+            raise ConfigurationError(
+                "Parameter 'precision' cannot be used with method_percentile='exact'",
+                details=(
+                    f"The precision parameter (precision={precision}) is only used by the approximate "
+                    "histogram method and is ignored when using exact percentile computation"
+                ),
+                suggestions=[
+                    "Remove the 'precision' parameter when using method_percentile='exact'",
+                    "Use method_percentile='approximate' if you want to control histogram precision",
+                ],
+                context={
+                    "method_percentile": method_percentile,
+                    "provided_precision": precision,
+                    "default_precision": default_precision,
+                },
+            )
+
+        # Check if max_anomaly parameter was explicitly set to a non-default value
+        if max_anomaly != default_max_anomaly:
+            logger.error(f"Invalid parameter: max_anomaly={max_anomaly} with method_percentile='exact'")
+            raise ConfigurationError(
+                "Parameter 'max_anomaly' cannot be used with method_percentile='exact'",
+                details=(
+                    f"The max_anomaly parameter (max_anomaly={max_anomaly}) is only used by the approximate "
+                    "histogram method and is ignored when using exact percentile computation"
+                ),
+                suggestions=[
+                    "Remove the 'max_anomaly' parameter when using method_percentile='exact'",
+                    "Use method_percentile='approximate' if you want to control histogram binning range",
+                ],
+                context={
+                    "method_percentile": method_percentile,
+                    "provided_max_anomaly": max_anomaly,
+                    "default_max_anomaly": default_max_anomaly,
+                },
+            )
+
+    # Validate percentile parameter when using approximate method
+    if threshold_percentile < 60 and method_percentile == "approximate":
+        logger.error(f"Invalid percentile threshold: {threshold_percentile}% with method_percentile='approximate'")
+        raise ConfigurationError(
+            f"Percentile threshold {threshold_percentile}% is not supported with method_percentile='approximate'",
             details=(
                 "Low percentile thresholds (<60%) produce undefined and unsupported behaviour "
                 "when using approximate histogram methods"
             ),
             suggestions=[
-                "Use exact_percentile=True for percentiles below 60%",
-                "Use a higher percentile threshold (≥60%) with exact_percentile=False",
+                "Use method_percentile='exact' for percentiles below 60%",
+                "Use a higher percentile threshold (≥60%) with method_percentile='approximate'",
                 "Consider if such low percentiles are appropriate for extreme event identification",
             ],
             context={
                 "threshold_percentile": threshold_percentile,
-                "exact_percentile": exact_percentile,
+                "method_percentile": method_percentile,
                 "min_supported_percentile": 60,
             },
         )
 
     if method_extreme == "global_extreme":
-        logger.debug(f"Global extreme method - exact_percentile={exact_percentile}")
-        return _identify_extremes_constant(da, threshold_percentile, exact_percentile, dimensions)
+        logger.debug(f"Global extreme method - method_percentile={method_percentile}")
+        return _identify_extremes_constant(da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly)
     elif method_extreme == "hobday_extreme":
-        logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, exact_percentile={exact_percentile}")
+        logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, method_percentile={method_percentile}")
         return _identify_extremes_hobday(
             da,
             threshold_percentile,
             window_days_hobday,
-            exact_percentile,
+            method_percentile,
             dimensions,
             coordinates,
+            precision,
+            max_anomaly,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")
@@ -1403,9 +1483,11 @@ def _identify_extremes_hobday(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     window_days_hobday: int = 11,
-    exact_percentile: bool = False,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -1423,8 +1505,12 @@ def _identify_extremes_hobday(
         Percentile to compute (0-100)
     window_days_hobday : int, default 11
         Window in days
-    exact_percentile : bool, optional
-        Whether to compute exact percentiles
+    method_percentile : str, optional
+        Method for percentile computation ('exact' or 'approximate')
+    precision : float, optional
+        Precision for histogram bins in approximate method
+    max_anomaly : float, optional
+        Maximum anomaly value for histogram binning
 
     Returns:
     --------
@@ -1439,7 +1525,7 @@ def _identify_extremes_hobday(
     da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
 
     # Group by day-of-year and compute percentile
-    if exact_percentile:
+    if method_percentile == "exact":
         # Construct rolling window dimension
         da_windowed = da.rolling({dimensions["time"]: window_days_hobday}, center=True).construct("window")
 
@@ -1452,6 +1538,8 @@ def _identify_extremes_hobday(
             threshold_percentile / 100.0,
             window_days_hobday=window_days_hobday,
             dimensions=dimensions,
+            precision=precision,
+            max_anomaly=max_anomaly,
         )
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
@@ -1679,6 +1767,7 @@ def _rolling_histogram_quantile(
 ) -> NDArray[np.float32]:
     """
     Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
+    Improved robust interpolation handles sparse histograms, especially in the tails.
 
     Parameters
     ----------
@@ -1697,37 +1786,67 @@ def _rolling_histogram_quantile(
         Quantile thresholds with shape (dayofyear,)
     """
     n_doy, n_bins = hist_chunk.shape
+    eps = 1e-10
 
     # Pad histogram with wrap mode for day-of-year cycling
     pad_size = window_days_hobday // 2
     hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
 
-    # Apply rolling sum using stride tricks (FTW)
+    # Apply rolling sum using stride tricks FTW
     windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
     hist_windowed = np.sum(windowed_view, axis=-1)
 
     # Compute PDF and CDF in single pass
-    hist_sum = np.sum(hist_windowed, axis=1, keepdims=True) + 1e-10
+    hist_sum = np.sum(hist_windowed, axis=1, keepdims=True) + eps
     pdf = hist_windowed / hist_sum
     cdf = np.cumsum(pdf, axis=1)
 
-    # Find first bin exceeding quantile threshold
-    mask = cdf >= q
-    first_true = np.argmax(mask, axis=1)
-    idx_prev = np.clip(first_true - 1, 0, n_bins - 1)
+    # Find interpolation bounds using robust approach
+    # Find first bin where CDF >= (q - eps) for each day-of-year
+    cdf_above_q = cdf >= (q - eps)
+    idx_upper = np.argmax(cdf_above_q, axis=1)
 
-    # Extract CDF values for linear interpolation
+    # Get CDF value one point to the left of idx_upper
+    idx_before_upper = np.maximum(0, idx_upper - 1)
+
+    # Extract the target CDF value using advanced indexing
     doy_indices = np.arange(n_doy)
-    cdf_prev = cdf[doy_indices, idx_prev]
-    cdf_next = cdf[doy_indices, first_true]
+    cdf_target = cdf[doy_indices, idx_before_upper]
 
-    bin_prev = bin_centers[idx_prev]
-    bin_next = bin_centers[first_true]
+    # Find idx_lower: first bin where CDF > cdf_target
+    # Broadcast cdf_target for vectorised comparison across bins
+    cdf_target_broadcast = cdf_target[:, np.newaxis]  # Shape: (n_doy, 1)
+    cdf_above_target = cdf > cdf_target_broadcast  # Shape: (n_doy, n_bins)
+    idx_lower = np.argmax(cdf_above_target, axis=1)
 
-    denom = cdf_next - cdf_prev
-    denom = np.where(np.abs(denom) < 1e-10, 1e-10, denom)
-    frac = (q - cdf_prev) / denom
-    threshold = bin_prev + frac * (bin_next - bin_prev)
+    # Ensure bounds are valid
+    idx_lower = np.clip(idx_lower, 0, n_bins - 2)
+    idx_upper = np.clip(idx_upper, 1, n_bins - 1)
+
+    # Extract CDF values for robust interpolation
+    cdf_lower = cdf[doy_indices, idx_lower]
+    cdf_upper = cdf[doy_indices, idx_upper]
+    bin_lower = bin_centers[idx_lower]
+    bin_upper = bin_centers[idx_upper]
+
+    # Robust interpolation with proper handling of degenerate cases
+    denom = cdf_upper - cdf_lower
+
+    # Handle exact matches and zero denominators
+    exact_match = np.abs(cdf_lower - q) < eps
+    zero_denom = np.abs(denom) <= eps
+
+    # Standard interpolation
+    safe_denom = np.where(np.abs(denom) > eps, denom, 1.0)
+    frac = (q - cdf_lower) / safe_denom
+    threshold = bin_lower + frac * (bin_upper - bin_lower)
+
+    # For exact matches, use the lower bin centre
+    threshold = np.where(exact_match, bin_lower, threshold)
+
+    # For zero denominator without exact match, use bin midpoint
+    no_exact_match = zero_denom & ~exact_match
+    threshold = np.where(no_exact_match, (bin_lower + bin_upper) / 2, threshold)
 
     return threshold.astype(np.float32)
 
@@ -1738,6 +1857,8 @@ def _compute_histogram_quantile_2d(
     window_days_hobday: int = 11,
     bin_edges: Optional[NDArray[np.float64]] = None,
     dimensions: Dict[str, str] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -1749,6 +1870,16 @@ def _compute_histogram_quantile_2d(
         Input data array
     q : float
         Quantile to compute (0-1)
+    window_days_hobday : int, optional
+        Rolling window size for day-of-year quantiles (default: 11)
+    bin_edges : numpy.ndarray, optional
+        Custom bin edges for histogram computation
+    dimensions : dict, optional
+        Dimension mapping dictionary
+    precision : float, optional
+        Precision for positive anomaly bins (default: 0.01)
+    max_anomaly : float, optional
+        Maximum anomaly value for binning (default: 5.0)
 
     Returns
     -------
@@ -1756,10 +1887,8 @@ def _compute_histogram_quantile_2d(
         Computed quantile value for each spatial location
     """
     if bin_edges is None:
-        # Default asymmetric bins
-        precision = 0.01
-        max_anomaly = 5.0
-        bin_edges = np.concatenate([[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)])
+        # Create optimised asymmetric bins
+        bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
 
     bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers_array[0] = 0.0
@@ -1814,6 +1943,60 @@ def _compute_histogram_quantile_2d(
         keep_attrs=True,
     )
 
+    # Validate threshold values against bounds (only for default bin_edges)
+    if bin_edges[1] == -precision:
+        upper_bound = max_anomaly - 5 * precision
+        lower_bound = 5 * precision
+
+        # Check if any values are too high
+        too_high = threshold > upper_bound
+        if too_high.any():
+            logger.error(f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}")
+            from .exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                f"Quantile computation failed: threshold values ({threshold.max().compute():.4f}) "
+                f"exceed max_anomaly bounds ({upper_bound:.4f})",
+                details=f"When searching for quantile values in the high tails (percentile={q*100:.1f}%), "
+                "the computed quantile exceeds the histogram binning range",
+                suggestions=[
+                    f"Increase max_anomaly parameter (currently {max_anomaly:.2f}) to accommodate higher anomaly values",
+                    f"Consider using a lower percentile threshold (currently {q*100:.1f}%) if searching for less extreme events",
+                    "Use method_percentile='exact' for unbounded quantile determination if memory permits",
+                ],
+                context={
+                    "computed_quantile": float(threshold.max().compute()),
+                    "max_anomaly": max_anomaly,
+                    "upper_bound": upper_bound,
+                    "percentile": q * 100,
+                    "precision": precision,
+                },
+            )
+
+        # Check if any values are too low
+        too_low = threshold < lower_bound
+        if too_low.any():
+            logger.error(f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}")
+            from .exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                f"Quantile computation failed: threshold values ({threshold.min().compute():.4f}) "
+                f"below minimum expected range ({lower_bound:.4f})",
+                details="The computed quantile is unexpectedly low, suggesting insufficient data or "
+                "inappropriate percentile threshold",
+                suggestions=[
+                    f"Increase the percentile threshold (currently {q*100:.1f}%) to avoid searching in the low tails",
+                    "Check if your data has sufficient variability for the chosen percentile",
+                    "Consider using method_percentile='exact' for unrestricted quantile determination if memory permits",
+                ],
+                context={
+                    "computed_quantile": float(threshold.min().compute()),
+                    "lower_bound": lower_bound,
+                    "percentile": q * 100,
+                    "precision": precision,
+                },
+            )
+
     return threshold
 
 
@@ -1822,10 +2005,13 @@ def _compute_histogram_quantile_1d(
     q: float,
     dim: str = "time",
     bin_edges: Optional[NDArray[np.float64]] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
     Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    Improved robust interpolation handles empty bins in the tails.
 
     Parameters
     ----------
@@ -1835,6 +2021,12 @@ def _compute_histogram_quantile_1d(
         Quantile to compute (0-1)
     dim : str, optional
         Dimension along which to compute quantile
+    bin_edges : numpy.ndarray, optional
+        Custom bin edges for histogram computation
+    precision : float, optional
+        Precision for positive anomaly bins (default: 0.01)
+    max_anomaly : float, optional
+        Maximum anomaly value for binning (default: 5.0)
 
     Returns
     -------
@@ -1842,10 +2034,8 @@ def _compute_histogram_quantile_1d(
         Computed quantile value for each spatial location
     """
     if bin_edges is None:
-        # Default asymmetric bins
-        precision = 0.01
-        max_anomaly = 5.0
-        bin_edges = np.concatenate([[-np.inf, 0.0], np.arange(precision, max_anomaly + precision, precision)])
+        # Create optimised asymmetric bins
+        bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
 
     # Compute histogram
     hist = histogram(da, bins=[bin_edges], dim=[dim])
@@ -1858,71 +2048,110 @@ def _compute_histogram_quantile_1d(
     # Get bin centers
     bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers[0] = 0.0  # Set negative bin centre to 0
-
-    # Find the correct bins for interpolation around the quantile
-    cdf_values = cdf.values
     eps = 1e-10
 
-    # Vectorized approach: find indices for all spatial points at once
-    # Find last bin where CDF < q for each spatial point
-    below_mask = cdf_values < (q - eps)
-    # For efficiency, use np.argmax on reversed array to find last True value
-    # argmax on ~below_mask gives us first False, which is first bin >= q
-    idx_next = np.argmax(~below_mask, axis=-1)
+    # Find bins for interpolation
+    # Find first bin where CDF >= (q - eps) - this becomes upper bound
+    cdf_above_q = cdf >= (q - eps)
+    idx_upper = cdf_above_q.argmax(dim=f"{da.name}_bin")
 
-    # Handle case where all values are < q (idx_next would be 0 but that's wrong)
-    all_below = np.all(below_mask, axis=-1)
-    idx_next = np.where(all_below, cdf_values.shape[-1] - 1, idx_next)
+    # Get CDF value one point to the left of idx_upper
+    idx_before_upper = max(0, idx_upper - 1)
 
-    # idx_prev is the bin immediately before idx_next
-    idx_prev = np.maximum(0, idx_next - 1)
+    # Extract the target CDF value (avoiding negative indexing issues)
+    idx_before_upper_computed = idx_before_upper.compute()
+    cdf_target = cdf.isel({f"{da.name}_bin": idx_before_upper_computed})
 
-    # Handle case where all values are >= q (set idx_prev to 0)
-    all_above = np.all(~below_mask, axis=-1)
-    idx_prev = np.where(all_above, 0, idx_prev)
-    idx_next = np.where(all_above, 0, idx_next)
+    # Find idx_lower: first bin where CDF > cdf_target
+    cdf_above_target = cdf > cdf_target
+    idx_lower = cdf_above_target.argmax(dim=f"{da.name}_bin")
 
-    # Create index arrays for advanced indexing
-    spatial_indices = np.arange(cdf_values.size // cdf_values.shape[-1]).reshape(cdf_values.shape[:-1])
+    # Ensure bounds are valid
+    idx_lower = np.clip(idx_lower, 0, len(bin_centers) - 2)
+    idx_upper = np.clip(idx_upper, 1, len(bin_centers) - 1)
 
-    # Extract CDF and bin values using advanced indexing
-    flat_cdf = cdf_values.reshape(-1, cdf_values.shape[-1])
-    flat_spatial = spatial_indices.reshape(-1)
-    flat_idx_prev = idx_prev.reshape(-1)
-    flat_idx_next = idx_next.reshape(-1)
+    # Extract CDF and bin values for interpolation
+    idx_lower_computed = idx_lower.compute()
+    idx_upper_computed = idx_upper.compute()
 
-    cdf_prev_val = flat_cdf[flat_spatial, flat_idx_prev].reshape(cdf_values.shape[:-1])
-    cdf_next_val = flat_cdf[flat_spatial, flat_idx_next].reshape(cdf_values.shape[:-1])
-    bin_prev_val = bin_centers[idx_prev]
-    bin_next_val = bin_centers[idx_next]
+    cdf_lower = cdf.isel({f"{da.name}_bin": idx_lower_computed})
+    cdf_upper = cdf.isel({f"{da.name}_bin": idx_upper_computed})
+    bin_lower = bin_centers[idx_lower_computed]
+    bin_upper = bin_centers[idx_upper_computed]
 
-    # Vectorized interpolation
-    denom = cdf_next_val - cdf_prev_val
+    # Robust interpolation with proper handling of degenerate cases
+    denom = cdf_upper - cdf_lower
 
-    # Use safe division: avoid division by zero
-    safe_denom = np.where(np.abs(denom) > eps, denom, 1.0)  # Use 1.0 to avoid division by zero
-    frac = (q - cdf_prev_val) / safe_denom
+    # Handle exact matches and zero denominators
+    exact_match = xr.ufuncs.fabs(cdf_lower - q) < eps
+    zero_denom = xr.ufuncs.fabs(denom) <= eps
 
-    # Interpolated result
-    result_data = bin_prev_val + frac * (bin_next_val - bin_prev_val)
+    # Standard interpolation
+    frac = (q - cdf_lower) / xr.where(xr.ufuncs.fabs(denom) > eps, denom, 1.0)
+    result_data = bin_lower + frac * (bin_upper - bin_lower)
 
-    # Handle special cases where denom is effectively zero
-    zero_denom_mask = np.abs(denom) <= eps
-    exact_match_mask = zero_denom_mask & (np.abs(cdf_prev_val - q) < eps)
+    # For exact matches, use the lower bin center
+    result_data = xr.where(exact_match, bin_lower, result_data)
 
-    # For exact matches, use the bin center
-    result_data = np.where(exact_match_mask, bin_prev_val, result_data)
+    # For zero denominator without exact match, use bin midpoint
+    no_exact_match = zero_denom & ~exact_match
+    result_data = xr.where(no_exact_match, (bin_lower + bin_upper) / 2, result_data)
 
-    # For zero denominator without exact match, use average of bins
-    no_exact_match = zero_denom_mask & ~exact_match_mask
-    result_data = np.where(no_exact_match, (bin_prev_val + bin_next_val) / 2, result_data)
+    # Validate result_data against bounds (only for default bin_edges)
+    if bin_edges[1] == -precision:
+        upper_bound = max_anomaly - 5 * precision
+        lower_bound = 5 * precision
 
-    # Create result DataArray with same structure as input but without bin dimension
-    result_dims = [dim for dim in cdf.dims if dim != f"{da.name}_bin"]
-    result_coords = {dim: cdf.coords[dim] for dim in result_dims if dim in cdf.coords}
-    result = xr.DataArray(result_data, dims=result_dims, coords=result_coords)
+        # Check if any values are too high
+        too_high = result_data > upper_bound
+        if too_high.any():
+            logger.error(f"Quantile values exceed expected range: max={result_data.max().compute():.4f} > {upper_bound:.4f}")
+            from .exceptions import ConfigurationError
 
-    return result
+            raise ConfigurationError(
+                f"Quantile computation failed: threshold values ({result_data.max().compute():.4f}) "
+                f"exceed max_anomaly bounds ({upper_bound:.4f})",
+                details=f"When searching for quantile values in the high tails (percentile={q*100:.1f}%), "
+                "the computed quantile exceeds the histogram binning range",
+                suggestions=[
+                    f"Increase max_anomaly parameter (currently {max_anomaly:.2f}) to accommodate higher anomaly values",
+                    f"Consider using a lower percentile threshold (currently {q*100:.1f}%) if searching for less extreme events",
+                    "Use method_percentile='exact' for unbounded quantile determination if memory permits",
+                ],
+                context={
+                    "computed_quantile": float(result_data.max().compute()),
+                    "max_anomaly": max_anomaly,
+                    "upper_bound": upper_bound,
+                    "percentile": q * 100,
+                    "precision": precision,
+                },
+            )
+
+        # Check if any values are too low
+        too_low = result_data < lower_bound
+        if too_low.any():
+            logger.error(f"Quantile values below expected range: min={result_data.min().compute():.4f} < {lower_bound:.4f}")
+            from .exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                f"Quantile computation failed: threshold values ({result_data.min().compute():.4f}) "
+                f"below minimum expected range ({lower_bound:.4f})",
+                details="The computed quantile is unexpectedly low, suggesting insufficient data or "
+                "inappropriate percentile threshold",
+                suggestions=[
+                    f"Increase the percentile threshold (currently {q*100:.1f}%) to avoid searching in the low tails",
+                    "Check if your data has sufficient variability for the chosen percentile",
+                    "Consider using method_percentile='exact' for unrestricted quantile determination if memory permits",
+                ],
+                context={
+                    "computed_quantile": float(result_data.min().compute()),
+                    "lower_bound": lower_bound,
+                    "percentile": q * 100,
+                    "precision": precision,
+                },
+            )
+
+    return result_data
 
 
 # ======================================
@@ -1933,8 +2162,10 @@ def _compute_histogram_quantile_1d(
 def _identify_extremes_constant(
     da: xr.DataArray,
     threshold_percentile: float = 95,
-    exact_percentile: bool = False,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
     dimensions: Dict[str, str] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a constant (in time) percentile threshold.
@@ -1942,7 +2173,7 @@ def _identify_extremes_constant(
 
     Returns both the extreme events boolean mask and the thresholds used.
     """
-    if exact_percentile:  # Compute exact percentile (memory-intensive)
+    if method_percentile == "exact":  # Compute exact percentile (memory-intensive)
         # Determine appropriate chunk size based on data dimensions
         if "y" in dimensions:
             rechunk_size = "auto"
@@ -1957,7 +2188,9 @@ def _identify_extremes_constant(
         threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
 
     else:  # Use an efficient histogram-based method with specified accuracy
-        threshold = _compute_histogram_quantile_1d(da, threshold_percentile / 100.0, dim=dimensions["time"])
+        threshold = _compute_histogram_quantile_1d(
+            da, threshold_percentile / 100.0, dim=dimensions["time"], precision=precision, max_anomaly=max_anomaly
+        )
 
     # Clean up coordinates if needed
     if "quantile" in threshold.coords:
