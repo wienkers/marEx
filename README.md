@@ -163,7 +163,9 @@ Optional arguments for `marEx.preprocess_data()` include:
   - `'hobday_extreme'`: Defines a local day-of-year specific threshold within a window of `window_days_hobday` (closer to the Hobday et al. (2016) definition for simple time-series). This method is more "correct", but is very computationally- & memory-demanding (requires ~5x additional scratch space). Requires the additional argument:
     - `window_days_hobday`: The window size to include in the day-of-year threshold calculation. Default is `11` days.
 - `threshold_percentile`: The percentile threshold for extreme event detection. Default is `95`.
-- `exact_percentile`: Whether to use exact or an approximate (PDF-based) percentile calculation. Default is `True`. N.B. Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory, in consideration of the limitations inherent to distributed parallel I/O & processing.
+- `method_percentile`: Whether to use `exact` or an `approximate` (PDF-based) percentile calculation. Default is `approximate`. N.B. Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory, in consideration of the limitations inherent to distributed parallel I/O & processing.
+- `precision`: The precision (in degrees) of the approximate percentile calculation. Default is `0.01` degrees.
+- `max_anomaly: The maximum anomaly to search for in the approximate percentile calculation. Default is `5` degrees.
 - `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
 - `dask_chunks`: The chunk size for the output dataset. Default is `{'time': 25}`.
 
