@@ -587,6 +587,42 @@ class tracker:
             logger.info(f"Rechunking mask spatial dimensions: {mask_rechunk_dims}")
             self.mask = self.mask.chunk(mask_rechunk_dims)
 
+        # Check coordinate spatial dimensions for single chunks
+        coord_rechunk_needed = False
+        coord_rechunk_dims = {}
+
+        # Check xdim chunking in lon coordinate
+        if self.lon.chunks is not None and self.xdim in self.lon.chunksizes:
+            xdim_chunks = self.lon.chunksizes[self.xdim]
+            if len(xdim_chunks) > 1:
+                warnings.warn(
+                    f"Longitude coordinate spatial dimension '{self.xdim}' has multiple chunks ({len(xdim_chunks)} chunks). "
+                    f"This will cause issues with apply_ufunc operations. Rechunking to single chunk.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                coord_rechunk_needed = True
+                coord_rechunk_dims[self.xdim] = -1
+
+        # Check ydim chunking in lat coordinate for structured grids
+        if self.ydim is not None and self.lat.chunks is not None and self.ydim in self.lat.chunksizes:
+            ydim_chunks = self.lat.chunksizes[self.ydim]
+            if len(ydim_chunks) > 1:
+                warnings.warn(
+                    f"Latitude coordinate spatial dimension '{self.ydim}' has multiple chunks ({len(ydim_chunks)} chunks). "
+                    f"This will cause issues with apply_ufunc operations. Rechunking to single chunk.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                coord_rechunk_needed = True
+                coord_rechunk_dims[self.ydim] = -1
+
+        # Rechunk coordinates if needed
+        if coord_rechunk_needed:
+            logger.info(f"Rechunking coordinate spatial dimensions: {coord_rechunk_dims}")
+            self.lat = self.lat.chunk(coord_rechunk_dims).persist()
+            self.lon = self.lon.chunk(coord_rechunk_dims).persist()
+
     def _validate_unstructured_chunking(self, neighbours: xr.DataArray, cell_areas: xr.DataArray) -> None:
         """Validate that neighbours and cell_areas are in single chunks for unstructured grids."""
         # Check neighbours spatial dimensions for single chunks

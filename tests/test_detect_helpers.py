@@ -119,7 +119,7 @@ class TestComputeHistogramQuantile1D:
 
         # Compare with numpy percentile
         expected = np.percentile(data, 95)
-        assert np.isclose(result.values[0, 0], expected, atol=0.02)
+        assert np.isclose(result.values[0, 0], expected, atol=0.01)
 
     def test_histogram_quantile_multiple_quantiles(self):
         """Test multiple quantile values."""
@@ -138,7 +138,16 @@ class TestComputeHistogramQuantile1D:
         for q in quantiles:
             result = detect._compute_histogram_quantile_1d(da, q, dim="x")
             expected = np.percentile(data, q * 100)
-            assert np.isclose(result.values[0, 0], expected, atol=0.02)
+
+            histogram_value = result.values[0, 0]
+            error = abs(histogram_value - expected)
+
+            assert np.isclose(histogram_value, expected, atol=0.01), (
+                f"Approximate percentile histogram method has too high error for {q*100:.1f}th percentile. "
+                f"Histogram result: {histogram_value:.6f}, NumPy result: {expected:.6f}, "
+                f"Error: {error:.6f} (tolerance: 0.01). "
+                f"Consider using exact_percentile=True for high percentiles or percentiles with sparse data."
+            )
 
     def test_histogram_quantile_extreme_values(self):
         """Test quantile calculation with extreme values."""
@@ -361,64 +370,238 @@ class TestValidationFunctions:
             detect.preprocess_data(da)
 
 
-class TestRollingHistogramQuantile:
-    """Test _rolling_histogram_quantile helper function."""
+class TestComputeHistogramQuantile2D:
+    """Test _compute_histogram_quantile_2d function for 2D quantile calculation."""
 
-    def test_rolling_histogram_basic(self):
-        """Test basic rolling histogram quantile calculation."""
-        # Create simple histogram data (365 days, 10 bins)
+    def test_histogram_quantile_2d_basic(self):
+        """Test basic 2D histogram quantile calculation."""
+        # Create synthetic temperature anomaly data
         np.random.seed(42)
-        hist_chunk = np.random.randint(0, 100, size=(365, 10))
-        bin_centers = np.linspace(-2, 3, 10)
+        n_years = 3
+        n_days_per_year = 365
+        lat_size, lon_size = 5, 5
 
-        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
+        # Create time coordinate with proper DatetimeIndex
+        time_coord = pd.date_range("2020-01-01", periods=n_years * n_days_per_year, freq="D")
 
-        # Check output shape
-        assert result.shape == (365,)
-        assert result.dtype == np.float32
+        # Generate data with seasonal cycle and anomalies
+        temp_data = np.random.normal(0, 1, (len(time_coord), lat_size, lon_size))
 
-        # Check reasonable output range
-        assert np.all(result >= bin_centers[0])
-        assert np.all(result <= bin_centers[-1])
+        da = xr.DataArray(
+            temp_data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": time_coord,
+                "lat": np.arange(lat_size),
+                "lon": np.arange(lon_size),
+            },
+            name="temperature_anomaly",
+        ).chunk({"time": 100, "lat": -1, "lon": -1})
 
-    def test_rolling_histogram_edge_wrapping(self):
-        """Test that rolling window properly wraps around year boundaries."""
-        # Create histogram with distinct pattern at year boundaries
-        hist_chunk_jan1 = np.ones((365, 10), dtype=np.float64)
-        hist_chunk_dec31 = np.ones((365, 10), dtype=np.float64)
-
-        # Make January 1st (day 0) and December 31st (day 364) have high values in last bin
-        hist_chunk_jan1[0:2, -1] = 1000  # Jan 1st
-        hist_chunk_dec31[362:364, -1] = 1000  # Dec 31st
-
-        bin_centers = np.linspace(0, 10, 10)
-
-        result_jan1 = detect._rolling_histogram_quantile(hist_chunk_jan1, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
-        result_dec31 = detect._rolling_histogram_quantile(hist_chunk_dec31, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
-
-        # Due to wrapping, both Jan 1st and Dec 31st should see influence from each other
-        # The 95th percentile near these dates should be higher than in the middle of year
-        jan_1_quantile_on_dec31 = result_dec31[0]
-        mid_year_quantile = result_dec31[182]  # Around July
-        dec_31_quantile_on_jan1 = result_jan1[364]
-
-        assert jan_1_quantile_on_dec31 > mid_year_quantile
-        assert dec_31_quantile_on_jan1 > mid_year_quantile
-        assert jan_1_quantile_on_dec31 == dec_31_quantile_on_jan1, "Jan 1st and Dec 31st should have same quantile due to wrapping"
-
-    def test_rolling_histogram_realistic_input(self):
-        """Test rolling histogram with realistic input dimensions."""
-        # Test with standard yearly data (365 days) and reasonable bin count
-        np.random.seed(42)
-        hist_chunk = np.random.randint(0, 100, size=(365, 20)).astype(np.float64)
-        bin_centers = np.linspace(-2, 3, 20)
+        # Add dayofyear coordinate as expected by the function
+        da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
 
         # Test 95th percentile calculation
-        result = detect._rolling_histogram_quantile(hist_chunk, window_days_hobday=11, q=0.95, bin_centers=bin_centers)
+        result = detect._compute_histogram_quantile_2d(
+            da, q=0.95, window_days_hobday=11, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        )
 
-        # Basic validation of output shape and reasonable values
-        assert len(result) == 365
-        assert result.dtype == np.float32
-        assert np.all(result >= bin_centers[0])
-        assert np.all(result <= bin_centers[-1])
-        assert np.all(np.isfinite(result))
+        # Check output shape - should have dayofyear and spatial dimensions
+        assert "dayofyear" in result.dims
+        assert "lat" in result.dims
+        assert "lon" in result.dims
+        assert result.sizes["dayofyear"] == 366  # Includes leap day
+        assert result.sizes["lat"] == lat_size
+        assert result.sizes["lon"] == lon_size
+
+        # Check that results are reasonable (should be positive for 95th percentile)
+        assert np.all(result >= -5.0)  # Should be reasonable anomaly values
+        assert np.all(result <= 10.0)
+
+    def test_histogram_quantile_2d_vs_exact_quantile(self):
+        """Test 2D histogram quantile vs exact quantile computation with custom bins."""
+        # Create controlled test data
+        np.random.seed(42)
+        n_years = 3
+        lat_size, lon_size = 2, 2
+
+        # Create time coordinate
+        time_coord = pd.date_range("2020-01-01", periods=n_years * 365, freq="D")
+
+        # Generate simple positive anomaly data (range 0 to 4)
+        temp_data = np.random.uniform(0, 4, (len(time_coord), lat_size, lon_size))
+
+        da = xr.DataArray(
+            temp_data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": time_coord,
+                "lat": np.arange(lat_size),
+                "lon": np.arange(lon_size),
+            },
+            name="temperature_anomaly",
+        ).chunk({"time": 200, "lat": -1, "lon": -1})
+
+        # Add dayofyear coordinate as expected by the function
+        da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
+
+        # Use custom bins that match our data range
+        custom_bins = np.linspace(-0.5, 4.5, 25)  # Good resolution for our data range
+
+        # Test a single quantile with custom bins
+        q = 0.9
+        window_days = 11
+
+        # Get 2D histogram-based quantile
+        hist_result = detect._compute_histogram_quantile_2d(
+            da, q=q, window_days_hobday=window_days, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        )
+
+        # Compare against exact quantile for a few representative points
+        test_days = [1, 100, 200]  # Test a few days
+        pad_size = window_days // 2
+
+        for lat_idx in range(lat_size):
+            for lon_idx in range(lon_size):
+                for doy in test_days:
+                    # Get window around this day of year with wrapping
+                    window_doys = [(doy + offset - 1) % 365 + 1 for offset in range(-pad_size, pad_size + 1)]
+
+                    # Collect data for these days across all years for this spatial point
+                    window_data = []
+                    for wd in window_doys:
+                        wd_mask = time_coord.dayofyear == wd
+                        if np.any(wd_mask):
+                            point_data = da.isel(lat=lat_idx, lon=lon_idx).values
+                            window_data.extend(point_data[wd_mask])
+
+                    if len(window_data) > 15:  # Need sufficient data for meaningful comparison
+                        exact_value = np.percentile(window_data, q * 100)
+                        hist_value = hist_result.isel(lat=lat_idx, lon=lon_idx, dayofyear=doy - 1).values
+
+                        # Use tolerance based on bin width
+                        bin_width = custom_bins[1] - custom_bins[0]
+                        tolerance = bin_width * 3  # Allow up to 3 bin widths of error
+
+                        assert np.isclose(hist_value, exact_value, atol=tolerance), (
+                            f"2D histogram quantile differs from exact quantile for {q*100:.1f}th percentile "
+                            f"at lat={lat_idx}, lon={lon_idx}, day={doy}. "
+                            f"Histogram: {hist_value:.4f}, Exact: {exact_value:.4f}, "
+                            f"Error: {abs(hist_value - exact_value):.4f} (tolerance: {tolerance:.4f}). "
+                            f"Bin width: {bin_width:.4f}"
+                        )
+
+    def test_histogram_quantile_2d_custom_bins(self):
+        """Test 2D histogram quantile with custom bin edges."""
+        # Create test data
+        np.random.seed(123)
+        time_coord = pd.date_range("2020-01-01", periods=365, freq="D")
+        temp_data = np.random.uniform(-2, 4, (365, 2, 2))  # Uniform distribution
+
+        da = xr.DataArray(
+            temp_data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": time_coord,
+                "lat": [0, 1],
+                "lon": [0, 1],
+            },
+            name="test_data",
+        ).chunk({"time": 100, "lat": -1, "lon": -1})
+
+        # Add dayofyear coordinate as expected by the function
+        da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
+
+        # Custom bin edges with fine resolution
+        custom_bins = np.linspace(-3, 5, 50)
+
+        result = detect._compute_histogram_quantile_2d(
+            da, q=0.5, window_days_hobday=5, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        )
+
+        # For uniform distribution, median should be reasonable
+        # Check a few representative values (accounting for bin precision)
+        median_values = result.isel(lat=0, lon=0, dayofyear=[0, 100, 200]).values
+
+        # With small window (5 days) and custom bins, results should be within the data range
+        for val in median_values:
+            assert 0 <= val <= 5, f"Median value {val} outside expected range [0, 5] for uniform distribution with custom bins"
+
+    def test_histogram_quantile_2d_window_sizes(self):
+        """Test 2D histogram quantile with different window sizes."""
+        # Create simple test data
+        np.random.seed(456)
+        time_coord = pd.date_range("2019-01-01", periods=365 * 2, freq="D")
+        temp_data = np.random.normal(0, 1, (len(time_coord), 2, 2))
+
+        da = xr.DataArray(
+            temp_data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": time_coord,
+                "lat": [0, 1],
+                "lon": [0, 1],
+            },
+            name="test_data",
+        ).chunk({"time": 200, "lat": -1, "lon": -1})
+
+        # Add dayofyear coordinate as expected by the function
+        da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
+
+        # Test different window sizes
+        window_sizes = [5, 11, 21]
+        quantile = 0.9
+
+        results = {}
+        for window_days in window_sizes:
+            result = detect._compute_histogram_quantile_2d(
+                da, q=quantile, window_days_hobday=window_days, dimensions={"time": "time", "x": "lon", "y": "lat"}
+            )
+            results[window_days] = result
+
+        # Larger windows should give smoother results (less variation between adjacent days)
+        for window_days in window_sizes:
+            result = results[window_days]
+            # Check that results are finite and reasonable
+            assert np.all(np.isfinite(result.values))
+            assert np.all(result.values >= -5.0)
+            assert np.all(result.values <= 5.0)
+
+            # Larger windows should have less day-to-day variation
+            daily_variation = np.std(result.isel(lat=0, lon=0).diff("dayofyear").values)
+            assert daily_variation < 1.0, f"Daily variation {daily_variation} too high for window {window_days}"
+
+    def test_histogram_quantile_2d_edge_cases(self):
+        """Test edge cases for 2D histogram quantile calculation."""
+        # Test with minimal data
+        time_coord = pd.date_range("2020-01-01", periods=30, freq="D")
+        temp_data = np.ones((30, 1, 1))  # Constant values
+
+        da = xr.DataArray(
+            temp_data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": time_coord,
+                "lat": [0],
+                "lon": [0],
+            },
+            name="constant_data",
+        ).chunk({"time": 30, "lat": -1, "lon": -1})
+
+        # Add dayofyear coordinate as expected by the function
+        da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
+
+        result = detect._compute_histogram_quantile_2d(
+            da, q=0.95, window_days_hobday=5, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        )
+
+        # With constant data, quantiles should be either 1.0 (the value) or 0.0 (due to asymmetric bins)
+        # Since we have constant value of 1.0 (positive), most should be ~1.0
+        # But some might be 0.0 due to insufficient data in certain day-of-year bins
+        result_values = result.values
+        unique_values = np.unique(result_values[np.isfinite(result_values)])
+
+        # Should only have values around 0.0 or 1.0 for constant input
+        assert np.all(
+            (unique_values < 0.1) | (np.abs(unique_values - 1.0) < 0.1)
+        ), f"Unexpected values in constant data result: {unique_values}"

@@ -1859,24 +1859,68 @@ def _compute_histogram_quantile_1d(
     bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
     bin_centers[0] = 0.0  # Set negative bin centre to 0
 
-    # Find first bin exceeding quantile
-    mask = cdf >= q
-    first_true = mask.argmax(dim=f"{da.name}_bin")
+    # Find the correct bins for interpolation around the quantile
+    cdf_values = cdf.values
+    eps = 1e-10
 
-    # Linearly interpolate between the two points around the 0 crossing
-    idx = first_true.compute()
-    idx_prev = np.clip(idx - 1, 0, len(bin_centers) - 1)
+    # Vectorized approach: find indices for all spatial points at once
+    # Find last bin where CDF < q for each spatial point
+    below_mask = cdf_values < (q - eps)
+    # For efficiency, use np.argmax on reversed array to find last True value
+    # argmax on ~below_mask gives us first False, which is first bin >= q
+    idx_next = np.argmax(~below_mask, axis=-1)
 
-    cdf_prev = cdf.isel({f"{da.name}_bin": xr.DataArray(idx_prev, dims=first_true.dims)}).data
-    cdf_next = cdf.isel({f"{da.name}_bin": xr.DataArray(idx, dims=first_true.dims)}).data
-    bin_prev = bin_centers[idx_prev]
-    bin_next = bin_centers[idx]
+    # Handle case where all values are < q (idx_next would be 0 but that's wrong)
+    all_below = np.all(below_mask, axis=-1)
+    idx_next = np.where(all_below, cdf_values.shape[-1] - 1, idx_next)
 
-    denom = cdf_next - cdf_prev
-    frac = (q - cdf_prev) / denom
-    result_data = bin_prev + frac * (bin_next - bin_prev)
+    # idx_prev is the bin immediately before idx_next
+    idx_prev = np.maximum(0, idx_next - 1)
 
-    result = first_true.copy(data=result_data)
+    # Handle case where all values are >= q (set idx_prev to 0)
+    all_above = np.all(~below_mask, axis=-1)
+    idx_prev = np.where(all_above, 0, idx_prev)
+    idx_next = np.where(all_above, 0, idx_next)
+
+    # Create index arrays for advanced indexing
+    spatial_indices = np.arange(cdf_values.size // cdf_values.shape[-1]).reshape(cdf_values.shape[:-1])
+
+    # Extract CDF and bin values using advanced indexing
+    flat_cdf = cdf_values.reshape(-1, cdf_values.shape[-1])
+    flat_spatial = spatial_indices.reshape(-1)
+    flat_idx_prev = idx_prev.reshape(-1)
+    flat_idx_next = idx_next.reshape(-1)
+
+    cdf_prev_val = flat_cdf[flat_spatial, flat_idx_prev].reshape(cdf_values.shape[:-1])
+    cdf_next_val = flat_cdf[flat_spatial, flat_idx_next].reshape(cdf_values.shape[:-1])
+    bin_prev_val = bin_centers[idx_prev]
+    bin_next_val = bin_centers[idx_next]
+
+    # Vectorized interpolation
+    denom = cdf_next_val - cdf_prev_val
+
+    # Use safe division: avoid division by zero
+    safe_denom = np.where(np.abs(denom) > eps, denom, 1.0)  # Use 1.0 to avoid division by zero
+    frac = (q - cdf_prev_val) / safe_denom
+
+    # Interpolated result
+    result_data = bin_prev_val + frac * (bin_next_val - bin_prev_val)
+
+    # Handle special cases where denom is effectively zero
+    zero_denom_mask = np.abs(denom) <= eps
+    exact_match_mask = zero_denom_mask & (np.abs(cdf_prev_val - q) < eps)
+
+    # For exact matches, use the bin center
+    result_data = np.where(exact_match_mask, bin_prev_val, result_data)
+
+    # For zero denominator without exact match, use average of bins
+    no_exact_match = zero_denom_mask & ~exact_match_mask
+    result_data = np.where(no_exact_match, (bin_prev_val + bin_next_val) / 2, result_data)
+
+    # Create result DataArray with same structure as input but without bin dimension
+    result_dims = [dim for dim in cdf.dims if dim != f"{da.name}_bin"]
+    result_coords = {dim: cdf.coords[dim] for dim in result_dims if dim in cdf.coords}
+    result = xr.DataArray(result_data, dims=result_dims, coords=result_coords)
 
     return result
 
