@@ -1588,6 +1588,20 @@ class tracker:
 
             # Filter based on area threshold
             N_objects_unfiltered = len(object_areas)
+            if N_objects_unfiltered == 0:
+                raise TrackingError(
+                    "No objects found for area-based filtering",
+                    details={
+                        "objects_count": N_objects_unfiltered,
+                        "area_filter_quartile": self.area_filter_quartile,
+                        "grid_type": "unstructured",
+                    },
+                    suggestions=[
+                        "Check if input data contains any extreme events",
+                        "Verify that preprocessing parameters are appropriate",
+                        "Consider lowering the extreme threshold percentile",
+                    ],
+                )
             area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100)
             N_objects_filtered = np.sum(object_areas > area_threshold)
 
@@ -1621,6 +1635,20 @@ class tracker:
             object_areas, object_ids = object_props.area, object_props.ID
 
             # Calculate area threshold
+            if len(object_areas) == 0:
+                raise TrackingError(
+                    "No objects found for area-based filtering",
+                    details={
+                        "objects_count": len(object_areas),
+                        "area_filter_quartile": self.area_filter_quartile,
+                        "grid_type": "structured",
+                    },
+                    suggestions=[
+                        "Check if input data contains any extreme events",
+                        "Verify that preprocessing parameters are appropriate",
+                        "Consider lowering the extreme threshold percentile",
+                    ],
+                )
             area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100.0)
 
             # Keep only objects above threshold
@@ -2618,7 +2646,12 @@ class tracker:
             result = xr.full_like(time_block, -1)
 
             # Get unique times in this block
-            unique_times = np.unique(time_block[self.timecoord])
+            # time_block might not have the coordinate, so get it from the dimension index
+            if self.timecoord in time_block.coords:
+                unique_times = np.unique(time_block.coords[self.timecoord])
+            else:
+                # Fall back to using the dimension index
+                unique_times = np.unique(time_block[self.timedim])
 
             for time_val in unique_times:
                 # Get IDs for this time
