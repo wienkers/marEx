@@ -18,6 +18,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        lfs: true
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -78,6 +80,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        lfs: true
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
@@ -165,6 +169,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        lfs: true
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -231,6 +237,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        lfs: true
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -269,6 +277,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
+        lfs: true
         fetch-depth: 0  # Needed for setuptools_scm
 
     - name: Set up Python
