@@ -97,6 +97,60 @@ class TestAddDecimalYear:
         expected = 2020.0 + 182 / 366
         assert np.isclose(result.decimal_year.values[0], expected, atol=1e-6)
 
+    def test_add_decimal_year_custom_coordinates(self):
+        """Test add_decimal_year with custom dimension and coordinate names."""
+        # Create test data mimicking the custom dimension test scenario
+        dates = pd.date_range("1982-01-01", "1982-01-10", freq="D")
+
+        # Create DataArray with custom dimension and coordinate names
+        # Dimension name: 't', Coordinate name: 'T'
+        da = xr.DataArray(
+            np.random.randn(len(dates), 3, 4),  # Add spatial dimensions
+            dims=["t", "y", "x"],
+            coords={
+                "T": ("t", dates),  # Coordinate 'T' is associated with dimension 't'
+                "latitude": ("y", [35.0, 36.0, 37.0]),
+                "longitude": ("x", [-40.0, -39.0, -38.0, -37.0]),
+            },
+        )
+
+        # Test with both dimension and coordinate specified
+        result = detect.add_decimal_year(da, dim="t", coord="T")
+
+        # Check that decimal_year coordinate was added
+        assert "decimal_year" in result.coords
+        assert len(result.decimal_year) == len(dates)
+
+        # Check that decimal_year is associated with the correct dimension 't'
+        assert result.decimal_year.dims == ("t",)
+
+        # Test specific known values for 1982
+        decimal_years = result.decimal_year.values
+
+        # January 1st should be exactly 1982.0
+        assert np.isclose(decimal_years[0], 1982.0, atol=1e-6)
+
+        # January 10th should be 9/365 through 1982 (1982 was not a leap year)
+        expected_jan_10 = 1982.0 + 9 / 365
+        assert np.isclose(decimal_years[-1], expected_jan_10, atol=1e-6)
+
+        # All values should be in 1982
+        assert np.all(decimal_years >= 1982.0)
+        assert np.all(decimal_years < 1982.1)
+
+        # Test that the old behavior (without coord parameter) would fail or give wrong results
+        try:
+            # This should now fail because dimension 't' doesn't have a coordinate named 't'
+            # It should try to access da['t'] which doesn't exist as a coordinate
+            old_result = detect.add_decimal_year(da, dim="t")
+            # If it doesn't fail, the decimal years should be wrong (e.g., 1970 epoch dates)
+            old_decimal_years = old_result.decimal_year.values
+            # The old bug would produce 1970 values instead of 1982 values
+            assert not np.all(old_decimal_years >= 1982.0), "Something is fishy..."
+        except (KeyError, ValueError):
+            # This is expected - the old behavior should fail when dim != coord name
+            pass
+
 
 class TestComputeHistogramQuantile1D:
     """Test compute_histogram_quantile_1d function for quantile calculation."""

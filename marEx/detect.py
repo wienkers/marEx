@@ -1704,7 +1704,7 @@ def _identify_extremes_hobday(
 # ===============================================
 
 
-def add_decimal_year(da: xr.DataArray, dim: str = "time") -> xr.DataArray:
+def add_decimal_year(da: xr.DataArray, dim: str = "time", coord: str = None) -> xr.DataArray:
     """
     Add decimal year coordinate to DataArray for trend analysis.
 
@@ -1714,13 +1714,17 @@ def add_decimal_year(da: xr.DataArray, dim: str = "time") -> xr.DataArray:
         Input data with datetime coordinate
     dim : str, optional
         Name of the time dimension
+    coord : str, optional
+        Name of the time coordinate (if different from dimension name)
 
     Returns
     -------
     xarray.DataArray
         Input data with added 'decimal_year' coordinate
     """
-    time = pd.to_datetime(da[dim])
+    # Use coordinate name if provided, otherwise use dimension name
+    coord_name = coord if coord is not None else dim
+    time = pd.to_datetime(da[coord_name])
     start_of_year = pd.to_datetime(time.year.astype(str) + "-01-01")
     start_of_next_year = pd.to_datetime((time.year + 1).astype(str) + "-01-01")
     year_elapsed = (time - start_of_year).days
@@ -1760,7 +1764,7 @@ def _compute_anomaly_detrended(
         print("Warning: Higher-order detrending without linear term may be unstable")
 
     # Add decimal year for trend modelling
-    da = add_decimal_year(da, dim=dimensions["time"])
+    da = add_decimal_year(da, dim=dimensions["time"], coord=coordinates["time"])
     dy = da.decimal_year.compute()
 
     # Build model matrix with constant term, trends, and seasonal harmonics
