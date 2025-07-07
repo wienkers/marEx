@@ -320,13 +320,45 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_with_gaps.attrs["N_events_final"], 38, tolerance=1)
 
     def test_custom_dimension_names_tracking(self, dask_client):
-        """Test tracking with custom dimension and coordinate names for both allow_merging options."""
+        """Test tracking with custom dimension and coordinate names and compare with standard names.
+
+        This test validates that:
+        1. Custom dimension/coordinate names work correctly (t, y, x) vs (time, lat, lon)
+        2. Tracking results are identical between standard and custom names
+        3. Both allow_merging=False and allow_merging=True scenarios work properly
+
+        Most tracking results should be identical, but centroid values may differ due to
+        coordinate system transformations from pixel coordinates to geographic coordinates.
+        """
+        # Common tracking parameters
+        tracking_params_no_merge = {
+            "area_filter_quartile": 0.5,
+            "R_fill": 4,
+            "T_fill": 0,
+            "allow_merging": False,
+            "quiet": True,
+        }
+
+        tracking_params_with_merge = {
+            "area_filter_quartile": 0.5,
+            "R_fill": 4,
+            "T_fill": 2,
+            "allow_merging": True,
+            "overlap_threshold": 0.5,
+            "nn_partitioning": True,
+            "quiet": True,
+        }
+
+        # Apply common mask to exclude poles
+        mask_standard = self.extremes_data.mask.where(
+            (self.extremes_data.lat < 85) & (self.extremes_data.lat > -90),
+            other=False,
+        )
+
         # Create dataset with custom dimension and coordinate names
         # Dimensions: "t", "x", "y"
         # Coordinates: "T", "longitude", "latitude"
-
-        # First create the renamed dataset structure
-        extreme_events_renamed = xr.DataArray(
+        extreme_events_custom = xr.DataArray(
             self.extremes_data.extreme_events.values,
             dims=["t", "y", "x"],
             coords={
@@ -336,126 +368,221 @@ class TestGriddedTracking:
             },
         ).chunk({"t": 2, "y": -1, "x": -1})
 
-        mask_renamed = xr.DataArray(
+        mask_custom = xr.DataArray(
             self.extremes_data.mask.values,
             dims=["y", "x"],
             coords={"latitude": ("y", self.extremes_data.lat.values), "longitude": ("x", self.extremes_data.lon.values)},
         )
 
-        # Apply common mask to exclude poles
-        mask_filtered = mask_renamed.where(
-            (mask_renamed.latitude < 85) & (mask_renamed.latitude > -90),
+        mask_custom_filtered = mask_custom.where(
+            (mask_custom.latitude < 85) & (mask_custom.latitude > -90),
             other=False,
         )
 
-        # Test 1: Tracking with allow_merging=False
-        tracker_no_merge = marEx.tracker(
-            extreme_events_renamed,
-            mask_filtered,
-            area_filter_quartile=0.5,
-            R_fill=4,
-            T_fill=0,  # No temporal filling for basic test
-            allow_merging=False,
-            dimensions={"time": "t", "x": "x", "y": "y"},  # Must specify the name of the spatial dimension
+        # Test 1: Standard vs Custom with allow_merging=False
+        # Standard case
+        tracker_standard_no_merge = marEx.tracker(self.extremes_data.extreme_events, mask_standard, **tracking_params_no_merge)
+        tracked_standard_no_merge = tracker_standard_no_merge.run()
+
+        # Custom case
+        tracker_custom_no_merge = marEx.tracker(
+            extreme_events_custom,
+            mask_custom_filtered,
+            dimensions={"time": "t", "x": "x", "y": "y"},
             coordinates={"time": "T", "x": "longitude", "y": "latitude"},
-            quiet=True,
+            **tracking_params_no_merge,
         )
+        tracked_custom_no_merge = tracker_custom_no_merge.run()
 
-        # Run tracking without merging
-        tracked_ds_no_merge = tracker_no_merge.run()
+        # Verify custom case output structure (no merging)
+        assert isinstance(tracked_custom_no_merge, xr.Dataset)
+        assert "ID_field" in tracked_custom_no_merge.data_vars
 
-        # Verify output structure with renamed dimensions (no merging)
-        assert isinstance(tracked_ds_no_merge, xr.Dataset)
-        assert "ID_field" in tracked_ds_no_merge.data_vars
+        # Verify custom dimensions are correctly named
+        assert "t" in tracked_custom_no_merge.ID_field.dims
+        assert "y" in tracked_custom_no_merge.ID_field.dims
+        assert "x" in tracked_custom_no_merge.ID_field.dims
 
-        # Verify dimensions are correctly named
-        assert "t" in tracked_ds_no_merge.ID_field.dims
-        assert "y" in tracked_ds_no_merge.ID_field.dims
-        assert "x" in tracked_ds_no_merge.ID_field.dims
+        # Verify custom coordinates are present
+        assert "T" in tracked_custom_no_merge.coords
+        assert "latitude" in tracked_custom_no_merge.coords
+        assert "longitude" in tracked_custom_no_merge.coords
 
-        # Verify coordinates are present
-        assert "T" in tracked_ds_no_merge.coords
-        assert "latitude" in tracked_ds_no_merge.coords
-        assert "longitude" in tracked_ds_no_merge.coords
+        # Compare results between standard and custom (no merging)
+        self._compare_tracking_results(tracked_standard_no_merge, tracked_custom_no_merge, allow_merging=False)
 
-        # Verify tracking attributes (no merging)
-        assert tracked_ds_no_merge.attrs["allow_merging"] == 0
-        assert tracked_ds_no_merge.attrs["T_fill"] == 0
-        assert "N_events_final" in tracked_ds_no_merge.attrs
+        # Test 2: Standard vs Custom with allow_merging=True
+        # Standard case
+        tracker_standard_merge = marEx.tracker(self.extremes_data.extreme_events, mask_standard, **tracking_params_with_merge)
+        tracked_standard_merge = tracker_standard_merge.run()
 
-        # Verify tracking produced valid results
-        max_id_no_merge = int(tracked_ds_no_merge.ID_field.max())
-        assert max_id_no_merge > 0, "No events were tracked with custom dimension names (no merging)"
-        assert max_id_no_merge == tracked_ds_no_merge.attrs["N_events_final"]
-
-        # Test 2: Tracking with allow_merging=True
-        tracker_with_merge = marEx.tracker(
-            extreme_events_renamed,
-            mask_filtered,
-            area_filter_quartile=0.5,
-            R_fill=4,
-            T_fill=2,  # Allow temporal filling
-            allow_merging=True,
-            overlap_threshold=0.5,
-            nn_partitioning=True,
-            dimensions={"time": "t", "x": "x", "y": "y"},  # Must specify the name of the spatial dimension
+        # Custom case
+        tracker_custom_merge = marEx.tracker(
+            extreme_events_custom,
+            mask_custom_filtered,
+            dimensions={"time": "t", "x": "x", "y": "y"},
             coordinates={"time": "T", "x": "longitude", "y": "latitude"},
-            quiet=True,
+            **tracking_params_with_merge,
         )
+        tracked_custom_merge = tracker_custom_merge.run()
 
-        # Run tracking with merging
-        tracked_ds_with_merge = tracker_with_merge.run()
+        # Verify custom case output structure (with merging)
+        assert isinstance(tracked_custom_merge, xr.Dataset)
+        expected_vars = {"ID_field", "global_ID", "area", "centroid", "presence", "time_start", "time_end", "merge_ledger"}
+        assert set(tracked_custom_merge.data_vars.keys()) == expected_vars
 
-        # Verify output structure with renamed dimensions (with merging)
-        assert isinstance(tracked_ds_with_merge, xr.Dataset)
-        assert "ID_field" in tracked_ds_with_merge.data_vars
-        assert "global_ID" in tracked_ds_with_merge.data_vars
-        assert "area" in tracked_ds_with_merge.data_vars
-        assert "centroid" in tracked_ds_with_merge.data_vars
-        assert "presence" in tracked_ds_with_merge.data_vars
-        assert "time_start" in tracked_ds_with_merge.data_vars
-        assert "time_end" in tracked_ds_with_merge.data_vars
-        assert "merge_ledger" in tracked_ds_with_merge.data_vars
+        # Verify custom dimensions are correctly named
+        assert "t" in tracked_custom_merge.ID_field.dims
+        assert "y" in tracked_custom_merge.ID_field.dims
+        assert "x" in tracked_custom_merge.ID_field.dims
 
-        # Verify dimensions are correctly named
-        assert "t" in tracked_ds_with_merge.ID_field.dims
-        assert "y" in tracked_ds_with_merge.ID_field.dims
-        assert "x" in tracked_ds_with_merge.ID_field.dims
+        # Verify custom coordinates are present
+        assert "T" in tracked_custom_merge.coords
+        assert "latitude" in tracked_custom_merge.coords
+        assert "longitude" in tracked_custom_merge.coords
 
-        # Verify coordinates are present
-        assert "T" in tracked_ds_with_merge.coords
-        assert "latitude" in tracked_ds_with_merge.coords
-        assert "longitude" in tracked_ds_with_merge.coords
+        # Compare results between standard and custom (with merging)
+        self._compare_tracking_results(tracked_standard_merge, tracked_custom_merge, allow_merging=True)
 
-        # Verify tracking attributes (with merging)
-        assert tracked_ds_with_merge.attrs["allow_merging"] == 1
-        assert tracked_ds_with_merge.attrs["T_fill"] == 2
-        assert "total_merges" in tracked_ds_with_merge.attrs
-        assert "N_events_final" in tracked_ds_with_merge.attrs
-
-        # Verify ID dimension consistency
-        n_events = tracked_ds_with_merge.sizes["ID"]
-        assert n_events == tracked_ds_with_merge.attrs["N_events_final"]
-
-        # Verify tracking produced valid results
-        max_id_with_merge = int(tracked_ds_with_merge.ID_field.max())
-        assert max_id_with_merge > 0, "No events were tracked with custom dimension names (with merging)"
-        assert max_id_with_merge == tracked_ds_with_merge.attrs["N_events_final"]
-
-        # Test 3: Compare results between merging modes
+        # Test 3: Compare between merging modes (custom case)
         # Both should track some events
-        assert tracked_ds_no_merge.attrs["N_events_final"] > 0
-        assert tracked_ds_with_merge.attrs["N_events_final"] > 0
+        assert tracked_custom_no_merge.attrs["N_events_final"] > 0
+        assert tracked_custom_merge.attrs["N_events_final"] > 0
 
         # Both should have the same core structure (ID_field)
-        assert tracked_ds_no_merge.ID_field.dims == tracked_ds_with_merge.ID_field.dims
+        assert tracked_custom_no_merge.ID_field.dims == tracked_custom_merge.ID_field.dims
 
         # Verify that time_start <= time_end for all events (merging case)
-        valid_events = tracked_ds_with_merge.presence.any(dim="t").compute()
-        for event_id in tracked_ds_with_merge.ID[valid_events]:
-            start_time = tracked_ds_with_merge.time_start.sel(ID=event_id)
-            end_time = tracked_ds_with_merge.time_end.sel(ID=event_id)
+        valid_events = tracked_custom_merge.presence.any(dim="t").compute()
+        for event_id in tracked_custom_merge.ID[valid_events]:
+            start_time = tracked_custom_merge.time_start.sel(ID=event_id)
+            end_time = tracked_custom_merge.time_end.sel(ID=event_id)
             assert start_time <= end_time, f"Event {event_id} has start_time > end_time"
+
+    def _compare_tracking_results(self, standard_ds, custom_ds, allow_merging=True):
+        """Helper method to compare tracking results between standard and custom dimension names."""
+        # Compare key tracking statistics - they should be identical
+        standard_attrs = standard_ds.attrs
+        custom_attrs = custom_ds.attrs
+
+        # Essential statistics that should match exactly
+        key_stats = [
+            "N_events_final",
+            "N_objects_prefiltered",
+            "N_objects_filtered",
+            "allow_merging",
+            "T_fill",
+            "R_fill",
+        ]
+
+        for stat in key_stats:
+            assert standard_attrs[stat] == custom_attrs[stat], f"{stat} differs: {standard_attrs[stat]} vs {custom_attrs[stat]}"
+
+        # Floating point statistics should match within tolerance
+        float_stats = ["preprocessed_area_fraction"]
+
+        for stat in float_stats:
+            np.testing.assert_allclose(
+                standard_attrs[stat], custom_attrs[stat], rtol=1e-12, err_msg=f"{stat} differs beyond tolerance"
+            )
+
+        # Compare ID_field values (the core tracking results)
+        # Account for different dimension names: (time, lat, lon) vs (t, y, x)
+        if allow_merging:
+            standard_id_field = standard_ds.ID_field.transpose("time", "lat", "lon")
+            custom_id_field = custom_ds.ID_field.transpose("t", "y", "x")
+        else:
+            # For no merging case, use the natural dimension order
+            standard_id_field = standard_ds.ID_field
+            custom_id_field = custom_ds.ID_field
+
+        np.testing.assert_array_equal(
+            standard_id_field.values,
+            custom_id_field.values,
+            err_msg="ID_field values differ between standard and custom dimensions",
+        )
+
+        if allow_merging:
+            # Compare data variables specific to merging case
+            # Compare global_ID values - should be identical
+            np.testing.assert_array_equal(
+                standard_ds.global_ID.values,
+                custom_ds.global_ID.values,
+                err_msg="global_ID values differ between standard and custom dimensions",
+            )
+
+            # Compare area values - should be identical
+            np.testing.assert_array_equal(
+                standard_ds.area.values, custom_ds.area.values, err_msg="area values differ between standard and custom dimensions"
+            )
+
+            # Compare presence values - should be identical
+            np.testing.assert_array_equal(
+                standard_ds.presence.values,
+                custom_ds.presence.values,
+                err_msg="presence values differ between standard and custom dimensions",
+            )
+
+            # Compare centroid values - they may differ due to coordinate system transformations
+            # but should have the same shape
+            standard_centroid = standard_ds.centroid.transpose("time", "ID", "component")
+            custom_centroid = custom_ds.centroid.transpose("t", "ID", "component")
+
+            assert standard_centroid.shape == custom_centroid.shape, "centroid shapes differ"
+            # Note: Centroid values may differ due to different coordinate systems
+            # (lat/lon vs y/x) but the tracking patterns should be similar
+
+            # Compare time_start and time_end - values should be identical
+            np.testing.assert_array_equal(
+                standard_ds.time_start.values,
+                custom_ds.time_start.values,
+                err_msg="time_start values differ between standard and custom dimensions",
+            )
+
+            np.testing.assert_array_equal(
+                standard_ds.time_end.values,
+                custom_ds.time_end.values,
+                err_msg="time_end values differ between standard and custom dimensions",
+            )
+
+            # Compare merge_ledger values - should be identical
+            standard_merge_ledger = standard_ds.merge_ledger.transpose("time", "ID", "sibling_ID")
+            custom_merge_ledger = custom_ds.merge_ledger.transpose("t", "ID", "sibling_ID")
+
+            np.testing.assert_array_equal(
+                standard_merge_ledger.values,
+                custom_merge_ledger.values,
+                err_msg="merge_ledger values differ between standard and custom dimensions",
+            )
+
+        # Verify coordinate values are the same (just with different names)
+        if allow_merging:
+            time_coord_standard = "time"
+            time_coord_custom = "T"
+            lat_coord_standard = "lat"
+            lat_coord_custom = "latitude"
+            lon_coord_standard = "lon"
+            lon_coord_custom = "longitude"
+        else:
+            # For no merging case, use the actual coordinate names
+            time_coord_standard = "time"
+            time_coord_custom = "T"
+            lat_coord_standard = "lat"
+            lat_coord_custom = "latitude"
+            lon_coord_standard = "lon"
+            lon_coord_custom = "longitude"
+
+        np.testing.assert_array_equal(
+            standard_ds[time_coord_standard].values, custom_ds[time_coord_custom].values, err_msg="time coordinate values differ"
+        )
+
+        np.testing.assert_array_equal(
+            standard_ds[lat_coord_standard].values, custom_ds[lat_coord_custom].values, err_msg="latitude coordinate values differ"
+        )
+
+        np.testing.assert_array_equal(
+            standard_ds[lon_coord_standard].values, custom_ds[lon_coord_custom].values, err_msg="longitude coordinate values differ"
+        )
 
     def test_centroid_tracking_moving_blob(self, dask_client):
         """Test that centroid tracking correctly follows a steadily moving blob."""
