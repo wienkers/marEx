@@ -1,3 +1,10 @@
+"""Base classes and utilities for the plotX visualisation system.
+
+This module provides the core infrastructure for plotting marine extreme event data,
+supporting both structured and unstructured grids with comprehensive configuration
+and animation capabilities.
+"""
+
 import os
 import shutil
 import subprocess
@@ -86,6 +93,7 @@ class PlotConfig:
     quiet: Optional[bool] = None
 
     def __post_init__(self) -> None:
+        """Initialize default values and configure logging."""
         if self.cperc is None:
             self.cperc = [4, 96]
         if self.dimensions is None:
@@ -101,9 +109,12 @@ class PlotConfig:
 
 
 def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
-    """Validate that all specified dimensions exist in the dataset."""
+    """Validate that required dimensions exist in the dataset. Time dimension is optional."""
     missing_dims = []
     for concept_dim, actual_dim in dimensions.items():
+        # Time dimension is optional for plotting - only spatial dimensions are required
+        if concept_dim == "time" and actual_dim not in da.dims:
+            continue
         if actual_dim not in da.dims:
             missing_dims.append(f"'{actual_dim}' (for {concept_dim})")
 
@@ -126,9 +137,12 @@ def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> 
 
 
 def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -> None:
-    """Validate that all specified coordinates exist in the dataset."""
+    """Validate that required coordinates exist in the dataset. Time coordinate is optional."""
     missing_coords = []
     for concept_coord, actual_coord in coordinates.items():
+        # Time coordinate is optional for plotting - only spatial coordinates are required
+        if concept_coord == "time" and actual_coord not in da.coords:
+            continue
         if actual_coord not in da.coords:
             missing_coords.append(f"'{actual_coord}' (for {concept_coord})")
 
@@ -151,12 +165,25 @@ def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -
 
 
 class PlotterBase:
+    """Base class for all plotters providing common functionality.
+
+    This class provides the core infrastructure for plotting marine extreme event data,
+    including parameter setup, map features, colorbars, and animation capabilities.
+    """
+
     def __init__(
         self,
         xarray_obj: xr.DataArray,
         dimensions: Optional[Dict[str, str]] = None,
         coordinates: Optional[Dict[str, str]] = None,
     ) -> None:
+        """Initialize the plotter with data and coordinate mappings.
+
+        Args:
+            xarray_obj: The data to plot
+            dimensions: Mapping of conceptual to actual dimension names
+            coordinates: Mapping of conceptual to actual coordinate names
+        """
         _check_plotting_dependencies()
         self.da = xarray_obj
 
@@ -269,7 +296,6 @@ class PlotterBase:
 
     def single_plot(self, config: PlotConfig, ax: Optional[Axes] = None) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
-
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
         fig, ax = self._setup_axes(ax)
@@ -349,7 +375,6 @@ class PlotterBase:
         file_name: Optional[str] = None,
     ) -> Optional[str]:
         """Create an animation from time series data"""
-
         # Check if PIL is available for image processing
         from .._dependencies import require_dependencies
 
@@ -362,7 +387,8 @@ class PlotterBase:
                 "Please install ffmpeg using one of the following methods:\n"
                 "  - Linux: sudo apt install ffmpeg (Ubuntu/Debian) or sudo yum install ffmpeg (CentOS/RHEL)\n"
                 "  - Conda: conda install -c conda-forge ffmpeg\n"
-                "Alternatively, use matplotlib for animation in Jupyter notebooks."
+                "Alternatively, use matplotlib for animation in Jupyter notebooks.",
+                stacklevel=2,
             )
             return None
 
@@ -440,8 +466,10 @@ class PlotterBase:
 
         return str(output_file)
 
-    def clim_robust(self, data: NDArray[Any], issym: bool, percentiles: List[int] = [2, 98]) -> NDArray[np.float64]:
-        """Base method for computing colour limits"""
+    def clim_robust(self, data: NDArray[Any], issym: bool, percentiles: Optional[List[int]] = None) -> NDArray[np.float64]:
+        """Compute robust colour limits from data percentiles."""
+        if percentiles is None:
+            percentiles = [2, 98]
         clim = np.nanpercentile(data, percentiles)
 
         if issym:

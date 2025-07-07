@@ -1,0 +1,65 @@
+{
+    "metadata": {
+        ".zattrs": {},
+        ".zgroup": {
+            "zarr_format": 2
+        },
+        "time/.zarray": {
+            "chunks": [
+                18262
+            ],
+            "compressor": null,
+            "dtype": "<f8",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                14611
+            ],
+            "zarr_format": 2
+        },
+        "time/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time"
+            ],
+            "calendar": "gregorian",
+            "standard_name": "time",
+            "units": "minutes since 1950-01-01"
+        },
+        "to/.zarray": {
+            "chunks": [
+                32,
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                14611,
+                405
+            ],
+            "zarr_format": 2
+        },
+        "to/.zattrs": {
+            "CDI_grid_type": "unstructured",
+            "_ARRAY_DIMENSIONS": [
+                "time",
+                "ncells"
+            ],
+            "long_name": "sea water potential temperature",
+            "number_of_grid_in_reference": 1,
+            "param": "18.4.10",
+            "standard_name": "sea_water_potential_temperature",
+            "units": "C"
+        }
+    },
+    "zarr_consolidated_format": 1
+}

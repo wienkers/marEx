@@ -17,6 +17,7 @@ Compatible data formats:
 """
 
 import logging
+import warnings
 from typing import Dict, List, Literal, Optional, Tuple
 
 import dask
@@ -24,6 +25,7 @@ import flox.xarray
 import numpy as np
 import pandas as pd
 import xarray as xr
+from dask import persist
 from dask.base import is_dask_collection
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
@@ -537,6 +539,7 @@ def preprocess_data(
             precision,
             max_anomaly,
         )
+        extremes, thresholds = persist(extremes, thresholds)
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
     # Add extreme events and thresholds to dataset
@@ -564,6 +567,7 @@ def preprocess_data(
                 precision,
                 max_anomaly,
             )
+            extremes_stn, thresholds_stn = persist(extremes_stn, thresholds_stn)
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
 
@@ -1427,7 +1431,7 @@ def rolling_climatology(
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
-    )
+    ).persist()
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
@@ -1689,12 +1693,12 @@ def _identify_extremes_hobday(
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    thresholds = thresholds.chunk(spatial_chunks)
+    thresholds = thresholds.chunk(spatial_chunks).persist()
 
     # Compare anomalies to day-of-year specific thresholds
     dayofyear_labels = da[coordinates["time"]].dt.dayofyear.compute()
     extremes = da.groupby(dayofyear_labels) >= thresholds
-    extremes = extremes.astype(bool).chunk(spatial_chunks)
+    extremes = extremes.astype(bool).chunk(spatial_chunks).persist()
 
     return extremes, thresholds
 
@@ -1843,7 +1847,7 @@ def _compute_anomaly_detrended(
     model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords)
 
     # Remove trend and seasonal cycle
-    da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)
+    da_detrend = (da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)).persist()
 
     # Force zero mean if requested
     if force_zero_mean:
@@ -2123,7 +2127,7 @@ def _compute_histogram_quantile_2d(
 
     # Set threshold to NaN for spatial points that contain NaN values
     nan_mask = da.isnull().any(dim=dimensions["time"])
-    threshold = threshold.where(~nan_mask)
+    threshold = threshold.where(~nan_mask).persist()
 
     # Validate threshold values against bounds
     upper_bound = bin_edges[-2]
@@ -2132,50 +2136,21 @@ def _compute_histogram_quantile_2d(
     # Check if any values are too high (ignore NaN values)
     too_high = (threshold > upper_bound) & threshold.notnull()
     if too_high.any():
-        logger.error(f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}")
-        from .exceptions import ConfigurationError
-
-        raise ConfigurationError(
-            f"Quantile computation failed: threshold values ({threshold.max().compute():.4f}) "
-            f"exceed max_anomaly bounds ({upper_bound:.4f})",
-            details=f"When searching for quantile values in the high tails (percentile={q*100:.1f}%), "
-            "the computed quantile exceeds the histogram binning range",
-            suggestions=[
-                f"Increase max_anomaly parameter (currently {max_anomaly:.2f}) to accommodate higher anomaly values",
-                f"Consider using a lower percentile threshold (currently {q*100:.1f}%) if searching for less extreme events",
-                "Use method_percentile='exact' for unbounded quantile determination if memory permits",
-            ],
-            context={
-                "computed_quantile": float(threshold.max().compute()),
-                "max_anomaly": max_anomaly,
-                "upper_bound": upper_bound,
-                "percentile": q * 100,
-                "precision": precision,
-            },
+        warnings.warn(
+            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
+            UserWarning,
+            stacklevel=2,
         )
 
     # Check if any values are too low (ignore NaN values)
     too_low = (threshold < lower_bound) & threshold.notnull()
     if too_low.any():
-        logger.error(f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}")
-        from .exceptions import ConfigurationError
-
-        raise ConfigurationError(
-            f"Quantile computation failed: threshold values ({threshold.min().compute():.4f}) "
-            f"below minimum expected range ({lower_bound:.4f})",
-            details="The computed quantile is unexpectedly low, suggesting insufficient data or "
-            "inappropriate percentile threshold",
-            suggestions=[
-                f"Increase the percentile threshold (currently {q*100:.1f}%) to avoid searching in the negative anomaly data",
-                "Check if your data has sufficient variability for the chosen percentile",
-                "Consider using method_percentile='exact' for unrestricted quantile determination if memory permits",
-            ],
-            context={
-                "computed_quantile": float(threshold.min().compute()),
-                "lower_bound": lower_bound,
-                "percentile": q * 100,
-                "precision": precision,
-            },
+        warnings.warn(
+            f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Consider increasing the percentile threshold (currently {q*100:.1f}%) or check data variability.",
+            UserWarning,
+            stacklevel=2,
         )
 
     return threshold
@@ -2219,12 +2194,12 @@ def _compute_histogram_quantile_1d(
         bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
 
     # Compute histogram
-    hist = histogram(da, bins=[bin_edges], dim=[dim])
+    hist = histogram(da, bins=[bin_edges], dim=[dim]).persist()
 
     # Convert to PDF and CDF
     hist_sum = hist.sum(dim=f"{da.name}_bin") + 1e-10
     pdf = hist / hist_sum
-    cdf = pdf.cumsum(dim=f"{da.name}_bin")
+    cdf = pdf.cumsum(dim=f"{da.name}_bin").persist()
 
     # Get bin centers
     bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
@@ -2264,8 +2239,8 @@ def _compute_histogram_quantile_1d(
     denom = cdf_upper - cdf_lower
 
     # Handle exact matches and zero denominators
-    exact_match = xr.ufuncs.fabs(cdf_lower - q) < eps
-    zero_denom = xr.ufuncs.fabs(denom) <= eps
+    exact_match = (xr.ufuncs.fabs(cdf_lower - q) < eps).persist()
+    zero_denom = (xr.ufuncs.fabs(denom) <= eps).persist()
 
     # Standard interpolation
     frac = (q - cdf_lower) / xr.where(xr.ufuncs.fabs(denom) > eps, denom, 1.0)
@@ -2280,7 +2255,7 @@ def _compute_histogram_quantile_1d(
 
     # Set threshold to NaN for spatial points that contain NaN values
     nan_mask = da.isnull().any(dim=dim)
-    threshold = threshold.where(~nan_mask)
+    threshold = threshold.where(~nan_mask).persist()
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]
@@ -2289,50 +2264,21 @@ def _compute_histogram_quantile_1d(
     # Check if any values are too high (ignore NaN values)
     too_high = (threshold > upper_bound) & threshold.notnull()
     if too_high.any():
-        logger.error(f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}")
-        from .exceptions import ConfigurationError
-
-        raise ConfigurationError(
-            f"Quantile computation failed: threshold values ({threshold.max().compute():.4f}) "
-            f"exceed max_anomaly bounds ({upper_bound:.4f})",
-            details=f"When searching for quantile values in the high tails (percentile={q*100:.1f}%), "
-            "the computed quantile exceeds the histogram binning range",
-            suggestions=[
-                f"Increase max_anomaly parameter (currently {max_anomaly:.2f}) to accommodate higher anomaly values",
-                f"Consider using a lower percentile threshold (currently {q*100:.1f}%) if searching for less extreme events",
-                "Use method_percentile='exact' for unbounded quantile determination if memory permits",
-            ],
-            context={
-                "computed_quantile": float(threshold.max().compute()),
-                "max_anomaly": max_anomaly,
-                "upper_bound": upper_bound,
-                "percentile": q * 100,
-                "precision": precision,
-            },
+        warnings.warn(
+            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
+            UserWarning,
+            stacklevel=2,
         )
 
     # Check if any values are too low (ignore NaN values)
     too_low = (threshold < lower_bound) & threshold.notnull()
     if too_low.any():
-        logger.error(f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}")
-        from .exceptions import ConfigurationError
-
-        raise ConfigurationError(
-            f"Quantile computation failed: threshold values ({threshold.min().compute():.4f}) "
-            f"below minimum expected range ({lower_bound:.4f})",
-            details="The computed quantile is unexpectedly low, suggesting insufficient data or "
-            "inappropriate percentile threshold",
-            suggestions=[
-                f"Increase the percentile threshold (currently {q*100:.1f}%) to avoid searching in the negative anomaly data",
-                "Check if your data has sufficient variability for the chosen percentile",
-                "Consider using method_percentile='exact' for unrestricted quantile determination if memory permits",
-            ],
-            context={
-                "computed_quantile": float(threshold.min().compute()),
-                "lower_bound": lower_bound,
-                "percentile": q * 100,
-                "precision": precision,
-            },
+        warnings.warn(
+            f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Consider increasing the percentile threshold (currently {q*100:.1f}%) or check data variability.",
+            UserWarning,
+            stacklevel=2,
         )
 
     return threshold
@@ -2382,7 +2328,7 @@ def _identify_extremes_constant(
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    threshold = threshold.chunk(spatial_chunks)
+    threshold = threshold.chunk(spatial_chunks).persist()
 
     # Create boolean mask for values exceeding threshold
     extremes = da >= threshold
@@ -2391,6 +2337,6 @@ def _identify_extremes_constant(
     if "quantile" in extremes.coords:
         extremes = extremes.drop_vars("quantile")
 
-    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks)))
+    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks))).persist()
 
     return extremes, threshold

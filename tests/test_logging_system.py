@@ -110,6 +110,12 @@ class TestLoggingConfiguration:
             # Check that log file was created
             assert log_file.exists()
 
+            # Close all handlers to prevent Windows file locking issues
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers[:]:
+                handler.close()
+                root_logger.removeHandler(handler)
+
 
 class TestFunctionLevelVerbosity:
     """Test verbose/quiet parameters in main functions."""
