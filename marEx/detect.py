@@ -1401,9 +1401,9 @@ def rolling_climatology(
         contributing_dayofyears.extend([doy_val] * n_targets)
 
     # Convert to numpy arrays with explicit dtypes
-    time_indices = np.array(contributing_time_indices, dtype=np.int64)
-    target_year_groups = np.array(contributing_target_years, dtype=np.int64)
-    dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int64)
+    time_indices = np.array(contributing_time_indices, dtype=np.int32)
+    target_year_groups = np.array(contributing_target_years, dtype=np.int32)
+    dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int32)
 
     # Create long-form dataset by selecting the contributing time points
     long_form_data = da.isel({timedim: time_indices})
@@ -1423,7 +1423,7 @@ def rolling_climatology(
         dayofyear_da,
         dim=long_timedim,
         func="nanmean",
-        expected_groups=(unique_years, np.arange(1, 367)),
+        expected_groups=(unique_years, np.arange(1, 367, dtype=np.int32)),
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
@@ -1977,7 +1977,7 @@ def _rolling_histogram_quantile(
     idx_lower = np.maximum(0, idx_upper - 1)
 
     # Extract values for vectorised interpolation
-    doy_indices = np.arange(n_doy)
+    doy_indices = np.arange(n_doy, dtype=np.int32)
 
     # Get cumulative counts at the boundaries
     count_lower = np.where(idx_lower >= 0, cumsum[doy_indices, idx_lower], 0)
@@ -2055,7 +2055,7 @@ def _compute_histogram_quantile_2d(
     bin_centers = xr.DataArray(
         bin_centers_array,
         dims=["da_bin"],
-        coords={"da_bin": np.arange(len(bin_centers_array))},
+        coords={"da_bin": np.arange(len(bin_centers_array), dtype=np.int32)},
         name="bin_centers",
     )
 
@@ -2078,7 +2078,7 @@ def _compute_histogram_quantile_2d(
         da_bin,
         dim=[dimensions["time"]],
         func="count",
-        expected_groups=(np.arange(1, 367), np.arange(len(bin_edges) - 1)),
+        expected_groups=(np.arange(1, 367, dtype=np.int32), np.arange(len(bin_edges) - 1, dtype=np.int32)),
         isbin=(False, False),
         dtype=np.int32,
         fill_value=0,

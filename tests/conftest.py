@@ -1,9 +1,59 @@
 """Test configuration and fixtures for marEx package."""
 
+import logging
+
 import dask
 import numpy as np
 import pytest
 from dask.distributed import Client, LocalCluster
+
+
+# Configure logging to suppress noisy distributed messages
+def pytest_configure(config):
+    """Configure pytest with custom logging settings."""
+    # Suppress all distributed logging to ERROR level or higher
+    # This removes all the noisy INFO messages from distributed components
+    distributed_loggers = [
+        "distributed",  # Root distributed logger
+        "distributed.protocol.core",
+        "distributed.comm.tcp",
+        "distributed.worker",
+        "distributed.scheduler",
+        "distributed.nanny",
+        "distributed.core",
+        "distributed.batched",
+        "distributed.http.proxy",
+        "distributed.client",
+        "distributed.utils",
+        "distributed.comm.core",
+        "distributed.shuffle",
+        "distributed.stealing",
+        "distributed.metrics",
+    ]
+
+    for logger_name in distributed_loggers:
+        logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+
+    # Also suppress tornado logging which can be noisy
+    logging.getLogger("tornado").setLevel(logging.ERROR)
+
+    # Create a custom filter to catch any remaining protocol messages
+    class DistributedFilter(logging.Filter):
+        def filter(self, record):
+            # Filter out specific message patterns
+            message = record.getMessage()
+            if "Failed to serialize" in message:
+                return False
+            if "Starting worker" in message and record.levelname == "INFO":
+                return False
+            if "Registered to:" in message and record.levelname == "INFO":
+                return False
+            if "dashboard at:" in message and record.levelname == "INFO":
+                return False
+            return True
+
+    # Add the filter to the root logger to catch everything
+    logging.getLogger().addFilter(DistributedFilter())
 
 
 @pytest.fixture(scope="session")
