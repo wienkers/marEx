@@ -1847,7 +1847,7 @@ def _compute_anomaly_detrended(
     model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords)
 
     # Remove trend and seasonal cycle
-    da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)
+    da_detrend = (da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)).persist()
 
     # Force zero mean if requested
     if force_zero_mean:
@@ -2194,12 +2194,12 @@ def _compute_histogram_quantile_1d(
         bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
 
     # Compute histogram
-    hist = histogram(da, bins=[bin_edges], dim=[dim])
+    hist = histogram(da, bins=[bin_edges], dim=[dim]).persist()
 
     # Convert to PDF and CDF
     hist_sum = hist.sum(dim=f"{da.name}_bin") + 1e-10
     pdf = hist / hist_sum
-    cdf = pdf.cumsum(dim=f"{da.name}_bin")
+    cdf = pdf.cumsum(dim=f"{da.name}_bin").persist()
 
     # Get bin centers
     bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
@@ -2239,8 +2239,8 @@ def _compute_histogram_quantile_1d(
     denom = cdf_upper - cdf_lower
 
     # Handle exact matches and zero denominators
-    exact_match = xr.ufuncs.fabs(cdf_lower - q) < eps
-    zero_denom = xr.ufuncs.fabs(denom) <= eps
+    exact_match = (xr.ufuncs.fabs(cdf_lower - q) < eps).persist()
+    zero_denom = (xr.ufuncs.fabs(denom) <= eps).persist()
 
     # Standard interpolation
     frac = (q - cdf_lower) / xr.where(xr.ufuncs.fabs(denom) > eps, denom, 1.0)
