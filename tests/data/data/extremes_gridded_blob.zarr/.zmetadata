@@ -1,0 +1,179 @@
+{
+    "metadata": {
+        ".zattrs": {
+            "exact_percentile": false,
+            "method_anomaly": "shifting_baseline",
+            "method_extreme": "hobday_extreme",
+            "preprocessing_steps": [
+                "Rolling climatology using 15 years",
+                "Smoothed with 21-day window",
+                "Day-of-year thresholds with 11 day window"
+            ],
+            "smooth_days_baseline": 21,
+            "threshold_percentile": 95,
+            "window_days_hobday": 11,
+            "window_year_baseline": 15
+        },
+        ".zgroup": {
+            "zarr_format": 2
+        },
+        "extreme_events/.zarray": {
+            "chunks": [
+                16,
+                90,
+                180
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "|i1",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                32,
+                180,
+                360
+            ],
+            "zarr_format": 2
+        },
+        "extreme_events/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time",
+                "lat",
+                "lon"
+            ],
+            "dtype": "bool"
+        },
+        "lat/.zarray": {
+            "chunks": [
+                180
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                180
+            ],
+            "zarr_format": 2
+        },
+        "lat/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "lat"
+            ],
+            "axis": "Y",
+            "comment": " Latitude geographical coordinates,WGS84 projection",
+            "long_name": "latitude",
+            "standard_name": "latitude",
+            "units": "degrees_north",
+            "valid_max": 90.0,
+            "valid_min": -90.0
+        },
+        "lon/.zarray": {
+            "chunks": [
+                360
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                360
+            ],
+            "zarr_format": 2
+        },
+        "lon/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "lon"
+            ]
+        },
+        "mask/.zarray": {
+            "chunks": [
+                180,
+                360
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "|i1",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                180,
+                360
+            ],
+            "zarr_format": 2
+        },
+        "mask/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "lat",
+                "lon"
+            ],
+            "comment": " OSTIA foundation SST",
+            "dtype": "bool",
+            "long_name": "analysed sea surface temperature",
+            "reference": "C.J. Donlon, M. Martin,J.D. Stark, J. Roberts-Jones, E. Fiedler, W. Wimmer. The operational sea surface temperature and sea ice analysis (OSTIA) system. Remote Sensing Environ., 116 (2012), pp. 140-158 http://dx.doi.org/10.1016/j.rse.2010.10.017",
+            "source": "AMSR2-REMSS-L2P-v2.0, AMSRE-REMSS-L2P-v2.0, TMI-REMSS-L2P-v04, GOES13-OSISAF-L3C-v2.0, SEVIRI-OSISAF-L3C-v2.0, SLSTRA-C3S-L3C-v2.0, ATSR<1,2>-ESACCI-L3U-v2.0, AATSR-ESACCI-L3U-v2.0, AVHRR<06,07,08,09,10,11,12,14,15,16,17,18,19>-ESACCI-L3U-v2.0, AVHRRMTA-ESACCI-L3U-v2.0, GMI-REMSS-L3U-v2.0, VIIRS-OSPO-L3U-v2.0",
+            "standard_name": "sea_surface_foundation_temperature",
+            "units": "kelvin",
+            "valid_max": 4500,
+            "valid_min": -300
+        },
+        "time/.zarray": {
+            "chunks": [
+                10
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<i4",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                32
+            ],
+            "zarr_format": 2
+        },
+        "time/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time"
+            ],
+            "axis": "T",
+            "calendar": "proleptic_gregorian",
+            "comment": "",
+            "long_name": "reference time of sst field",
+            "standard_name": "time",
+            "units": "seconds since 1981-01-01"
+        }
+    },
+    "zarr_consolidated_format": 1
+}

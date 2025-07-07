@@ -1,0 +1,12 @@
+{
+    "CDI_grid_type": "unstructured",
+    "_ARRAY_DIMENSIONS": [
+        "time",
+        "ncells"
+    ],
+    "long_name": "sea water potential temperature",
+    "number_of_grid_in_reference": 1,
+    "param": "18.4.10",
+    "standard_name": "sea_water_potential_temperature",
+    "units": "C"
+}

@@ -1,0 +1,14 @@
+{
+    "exact_percentile": false,
+    "method_anomaly": "shifting_baseline",
+    "method_extreme": "hobday_extreme",
+    "preprocessing_steps": [
+        "Rolling climatology using 15 years",
+        "Smoothed with 21-day window",
+        "Day-of-year thresholds with 11 day window"
+    ],
+    "smooth_days_baseline": 21,
+    "threshold_percentile": 95,
+    "window_days_hobday": 11,
+    "window_year_baseline": 15
+}
