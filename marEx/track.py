@@ -1715,12 +1715,14 @@ class tracker:
 
                 for i in range(t):
                     # Get indices of True values
-                    true_indices = np.where(arr[i])[0]
+                    true_indices = np.where(arr[i])[0].astype(np.int32)
                     mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(true_indices)}
 
                     # Find connected components
                     valid_mask = (neighbours_int != -1) & arr[i][neighbours_int]
                     row_ind, col_ind = np.where(valid_mask)
+                    row_ind = row_ind.astype(np.int32)
+                    col_ind = col_ind.astype(np.int32)
 
                     # Map to compact indices for graph algorithm
                     mapped_row_ind = []
@@ -1733,7 +1735,7 @@ class tracker:
                     # Create graph and find connected components
                     graph = csr_matrix(
                         (
-                            np.ones(len(mapped_row_ind)),
+                            np.ones(len(mapped_row_ind), dtype=np.int32),
                             (mapped_row_ind, mapped_col_ind),
                         ),
                         shape=(len(true_indices), len(true_indices)),
@@ -1927,7 +1929,7 @@ class tracker:
                         return result, padded_ids
 
                 # Map IDs to consecutive indices
-                mapped_indices = np.searchsorted(ids_chunk, ids[valid_mask])
+                mapped_indices = np.searchsorted(ids_chunk, ids[valid_mask]).astype(np.int32)
 
                 # Pre-allocate arrays
                 areas = np.zeros(n_ids, dtype=np.float32)
@@ -2174,6 +2176,7 @@ class tracker:
         if self.unstructured_grid:
             # Get unique pairs and their inverse indices
             unique_pairs, inverse_indices = np.unique(pair_ids, return_inverse=True)
+            inverse_indices = inverse_indices.astype(np.int32)  # Ensure int32 for serialisation
 
             # Sum areas for overlapping cells
             areas_valid = self.cell_area.values[combined_mask]
@@ -2233,6 +2236,7 @@ class tracker:
 
         # Get unique pairs and their indices
         unique_pairs, inverse_indices = np.unique(all_pairs_with_areas[:, :2], axis=0, return_inverse=True)
+        inverse_indices = inverse_indices.astype(np.int32)  # Ensure int32 for serialisation
 
         # Sum the overlap areas using the inverse indices
         output_dtype = np.float32 if self.unstructured_grid else np.int32
@@ -2335,13 +2339,15 @@ class tracker:
             search_ids = xr.DataArray(
                 np.arange(max_objects, dtype=np.int32),
                 dims=["child_id"],
-                coords={"child_id": np.arange(max_objects)},
+                coords={"child_id": np.arange(max_objects, dtype=np.int32)},
             ).chunk(
                 {"child_id": 10000}
             )  # Chunk for better parallelism
 
         # Find the first time index where each ID appears
-        time_indices = (unique_ids_by_time == search_ids).any(dim=["unique_values"]).argmax(dim=self.timedim).compute()
+        time_indices = (
+            (unique_ids_by_time == search_ids).any(dim=["unique_values"]).argmax(dim=self.timedim).compute().astype(np.int32)
+        )
 
         # Convert to dictionary for fast lookup
         time_index_map = {int(id_val): int(idx.values) for id_val, idx in zip(time_indices.child_id, time_indices)}
@@ -2457,7 +2463,9 @@ class tracker:
         # Cluster the overlap_pairs into groups of IDs that are actually the same object
         # Get IDs from overlap pairs
         max_ID = int(object_id_field_unique.max().compute().values.item()) + 1
-        IDs = np.arange(max_ID)
+        if max_ID >= np.iinfo(np.int32).max:
+            raise ValueError(f"Maximum object ID {max_ID} exceeds int32 limit. Consider using a larger data type.")
+        IDs = np.arange(max_ID, dtype=np.int32)
 
         # Convert overlap pairs to indices
         overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_objects_list])
@@ -2504,7 +2512,7 @@ class tracker:
         ID_to_cluster_index_da = xr.DataArray(
             ID_to_cluster_index_array,
             dims="ID",
-            coords={"ID": np.arange(max_old_ID + 1)},
+            coords={"ID": np.arange(max_old_ID + 1, dtype=np.int32)},
         )
 
         def map_IDs_to_indices(block: NDArray[np.int32], ID_to_cluster_index_array: NDArray[np.int32]) -> NDArray[np.int32]:
@@ -2697,12 +2705,12 @@ class tracker:
         if not self.unstructured_grid:
             y_values = xr.DataArray(
                 split_merged_relabeled_object_id_field[self.ydim].values,
-                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.ydim]))],
+                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.ydim]), dtype=np.int32)],
                 dims=["pixels"],
             )
             x_values = xr.DataArray(
                 split_merged_relabeled_object_id_field[self.xdim].values,
-                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.xdim]))],
+                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.xdim]), dtype=np.int32)],
                 dims=["pixels"],
             )
 
@@ -2720,9 +2728,11 @@ class tracker:
         valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
         object_props_extended["presence"] = valid_presence
-        object_props_extended["time_start"] = valid_presence[self.timecoord][valid_presence.argmax(dim=self.timedim)]
+        object_props_extended["time_start"] = valid_presence[self.timecoord][
+            valid_presence.argmax(dim=self.timedim).astype(np.int32)
+        ]
         object_props_extended["time_end"] = valid_presence[self.timecoord][
-            (valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)
+            ((valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)).astype(np.int32)
         ]
 
         # Combine all components into final dataset
@@ -2796,7 +2806,7 @@ class tracker:
 
         # Assign objects to chunks
         for object_id in merging_objects:
-            chunk_idx = np.searchsorted(chunk_boundaries, time_index_map[object_id], side="right") - 1
+            chunk_idx = (np.searchsorted(chunk_boundaries, time_index_map[object_id], side="right") - 1).astype(np.int32)
             objects_by_chunk.setdefault(chunk_idx, []).append(object_id)
 
         future_chunk_merges = []
@@ -2853,7 +2863,7 @@ class tracker:
 
                 # Find all pairs involving this child
                 child_mask = overlap_objects_list[:, 1] == child_id
-                child_where = np.where(overlap_objects_list[:, 1] == child_id)[0]
+                child_where = np.where(overlap_objects_list[:, 1] == child_id)[0].astype(np.int32)
                 merge_group = overlap_objects_list[child_mask]
 
                 # Get parent objects (LHS) that overlap with this child object
@@ -2947,7 +2957,7 @@ class tracker:
                         distances = wrapped_euclidian_distance_mask_parallel(child_mask_2d, parent_centroids, Nx)
 
                         # Assign based on closest parent
-                        new_labels = child_ids[np.argmin(distances, axis=1)]
+                        new_labels = child_ids[np.argmin(distances, axis=1).astype(np.int32)]
 
                 # Update values in child_time_idx and assign the updated slice back to the original DataArray
                 temp = np.zeros_like(object_id_time)
@@ -3368,13 +3378,15 @@ class tracker:
                     data_t[child_mask] = new_labels
 
                     # Record which cells get which new IDs for later updates
-                    spatial_indices_all = np.where(child_mask)[0]
+                    spatial_indices_all = np.where(child_mask)[0].astype(np.int32)
                     child_mask = None  # Free memory
                     gc.collect()
 
                     # Record update information for each new ID
                     for new_id in child_ids[1:]:
-                        update_idx = np.where(updates_ids[t] == -1)[0][0]  # Find next non-negative index in updates_ids
+                        update_idx = np.where(updates_ids[t] == -1)[0].astype(np.int32)[
+                            0
+                        ]  # Find next non-negative index in updates_ids
                         updates_ids[t, update_idx] = new_id
                         updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
 
@@ -3612,7 +3624,7 @@ class tracker:
 
             # Create time indices for slicing
             time_coords = object_id_field[self.timecoord].values
-            time_indices = np.arange(len(time_coords))
+            time_indices = np.arange(len(time_coords), dtype=np.int32)
             time_index_da = xr.DataArray(time_indices, dims=[self.timedim], coords={self.timecoord: time_coords})
 
             # Create dataset with all necessary components
@@ -3705,11 +3717,11 @@ class tracker:
 
             # Create uniform array of merging objects for each timestep
             max_merges = max(len([b for b in merging_objects if time_index_map.get(b, -1) == t]) for t in range(n_time))
-            uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int64)
+            uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int32)
             for t in range(n_time):
                 objects_at_t = [b for b in merging_objects if time_index_map.get(b, -1) == t]
                 if objects_at_t:  # Only fill if there are objects at this time
-                    uniform_merging_objects_array[t, : len(objects_at_t)] = np.array(objects_at_t, dtype=np.int64)
+                    uniform_merging_objects_array[t, : len(objects_at_t)] = np.array(objects_at_t, dtype=np.int32)
 
             # Create DataArrays for parallel processing
             merging_objects_da = xr.DataArray(
@@ -3719,7 +3731,7 @@ class tracker:
             )
 
             # Calculate ID offsets for each timestep to ensure unique IDs
-            next_id_offsets = np.arange(n_time) * max_merges * self.timechunks + global_id_counter
+            next_id_offsets = np.arange(n_time, dtype=np.int64) * max_merges * self.timechunks + global_id_counter
             # N.B.: We also need to account for possibility of newly-split objects subsequently creating
             #          more than max_merges by the end of the iteration through the chunk
             # !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
@@ -3826,7 +3838,7 @@ class tracker:
 
             # Get time indices where merges occurred
             has_merge = has_merge.compute()
-            time_indices = np.where(has_merge)[0]
+            time_indices = np.where(has_merge)[0].astype(np.int32)
 
             # Clean up temporary arrays to save memory
             del (
@@ -4439,7 +4451,7 @@ def partition_nn_unstructured(
             visited[parent_idx, overlap_mask] = True
             unclaimed_overlap = distances[overlap_mask] == np.inf
             if np.any(unclaimed_overlap):
-                overlap_points = np.where(overlap_mask)[0]
+                overlap_points = np.where(overlap_mask)[0].astype(np.int32)
                 valid_points = overlap_points[unclaimed_overlap]
                 distances[valid_points] = 0
                 parent_assignments[valid_points] = parent_idx
@@ -4495,17 +4507,17 @@ def partition_nn_unstructured(
         parent_lon_rad = np.deg2rad(parent_centroids[:, 1])
         cos_parent_lat = np.cos(parent_lat_rad)
 
-        unassigned_points = np.where(unassigned_mask)[0]
+        unassigned_points = np.where(unassigned_mask)[0].astype(np.int32)
         for point in unassigned_points:
             # Vectoised haversine calculation
             dlat = parent_lat_rad - lat_rad[point]
             dlon = parent_lon_rad - lon_rad[point]
             a = np.sin(dlat / 2) ** 2 + cos_lat[point] * cos_parent_lat * np.sin(dlon / 2) ** 2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-            parent_assignments[point] = np.argmin(dist)
+            parent_assignments[point] = np.argmin(dist).astype(np.int32)
 
     # Return only the assignments for points in child_mask
-    child_points = np.where(child_mask)[0]
+    child_points = np.where(child_mask)[0].astype(np.int32)
     return child_ids[parent_assignments[child_points]]
 
 
@@ -4600,7 +4612,7 @@ def partition_nn_unstructured_optimised(
         cos_parent_lat = np.cos(parent_lat_rad)
 
         # Process each unassigned point
-        unassigned_points = np.where(unassigned_mask)[0]
+        unassigned_points = np.where(unassigned_mask)[0].astype(np.int32)
         for point in unassigned_points:
             dlat = parent_lat_rad - np.deg2rad(lat[point])
             dlon = parent_lon_rad - np.deg2rad(lon[point])
@@ -4608,7 +4620,7 @@ def partition_nn_unstructured_optimised(
             a = np.sin(dlat / 2) ** 2 + np.cos(np.deg2rad(lat[point])) * cos_parent_lat * np.sin(dlon / 2) ** 2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
-            parent_frontiers_working[point] = np.argmin(dist)
+            parent_frontiers_working[point] = np.argmin(dist).astype(np.int32)
 
     # Extract result for child points only
     result = parent_frontiers_working[child_mask_working].copy()
