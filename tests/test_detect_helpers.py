@@ -621,7 +621,7 @@ class TestComputeHistogramQuantile2D:
             q=0.95,
             window_days_hobday=5,
             dimensions={"time": "time", "x": "lon", "y": "lat"},
-            bin_edges=np.linspace(-0.1, 1.1, 10),  # Custom bins for constant data
+            bin_edges=np.linspace(-0.2, 1.2, 20),  # Custom bins for constant data
         )
 
         # With constant data, quantiles should be either 1.0 (the value) or 0.0 (due to asymmetric bins)
