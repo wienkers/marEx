@@ -25,7 +25,6 @@ import flox.xarray
 import numpy as np
 import pandas as pd
 import xarray as xr
-from dask import persist
 from dask.base import is_dask_collection
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
@@ -539,7 +538,6 @@ def preprocess_data(
             precision,
             max_anomaly,
         )
-        extremes, thresholds = persist(extremes, thresholds)
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
     # Add extreme events and thresholds to dataset
@@ -567,7 +565,6 @@ def preprocess_data(
                 precision,
                 max_anomaly,
             )
-            extremes_stn, thresholds_stn = persist(extremes_stn, thresholds_stn)
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
 
@@ -651,6 +648,7 @@ def preprocess_data(
     ):
         ds = ds.persist(optimize_graph=True)
         ds["thresholds"] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
+        ds["mask"] = ds.mask.compute()
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
         # Patch for same dask-Zarr bug:
@@ -1909,7 +1907,7 @@ def _compute_anomaly_detrended(
         data_vars["STD"] = std_rolling
 
     # Build output dataset with metadata
-    return xr.Dataset(data_vars=data_vars, coords=coords_to_preserve)
+    return xr.Dataset(data_vars=data_vars, coords=coords_to_preserve).drop_vars("decimal_year")
 
 
 def _rolling_histogram_quantile(
@@ -2255,7 +2253,7 @@ def _compute_histogram_quantile_1d(
 
     # Set threshold to NaN for spatial points that contain NaN values
     nan_mask = da.isnull().any(dim=dim)
-    threshold = threshold.where(~nan_mask).persist()
+    threshold = threshold.where(~nan_mask).drop_vars(f"{da.name}_bin").persist()
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]
