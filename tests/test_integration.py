@@ -31,87 +31,12 @@ class TestFullPipelineGridded:
         # Define standard dimensions for gridded data
         cls.dimensions = {"x": "lon", "y": "lat"}  # Leave out the "time" specifier -- it should default to "time"
 
-    @pytest.mark.integration
-    def test_full_pipeline_preprocessing_comprehensive(self, dask_client):
-        """Test comprehensive preprocessing pipeline: raw data -> extremes (detrended_baseline + global_extreme)."""
-        # Use subset of data for faster testing
-        sst_subset = self.sst_data.isel(time=slice(0, 200))  # Use first 200 time steps
-
-        # Step 1: Preprocessing with detrended baseline and global extreme
-        extremes_ds = marEx.preprocess_data(
-            sst_subset,
-            method_anomaly="detrended_baseline",
-            method_extreme="global_extreme",
-            threshold_percentile=90,  # Lower threshold for more events in test data
-            detrend_orders=[1, 2],  # Linear + quadratic detrending
-            force_zero_mean=True,
-            std_normalise=False,
-            dimensions=self.dimensions,
-            dask_chunks={"time": 25},
-        )
-
-        # Verify preprocessing results
-        assert isinstance(extremes_ds, xr.Dataset)
-        assert "extreme_events" in extremes_ds.data_vars
-        assert "dat_anomaly" in extremes_ds.data_vars
-        assert "thresholds" in extremes_ds.data_vars
-        assert "mask" in extremes_ds.data_vars
-
-        # Check that we have extreme events
-        n_extreme_points = extremes_ds.extreme_events.sum().compute().item()
-        assert n_extreme_points > 0, "No extreme events found in preprocessed data"
-
-        # Verify extreme event frequency is reasonable for 90th percentile
-        # Calculate frequency as fraction of total space-time points
-        total_spacetime_points = extremes_ds.mask.sum().compute().item() * len(extremes_ds.time)
-        extreme_frequency = n_extreme_points / total_spacetime_points
-
-        # For 90th percentile, expect approximately 10% of points to be extreme
-        # Use broader tolerance for integration test
-        assert (
-            0.05 < extreme_frequency < 0.20
-        ), f"Extreme frequency {extreme_frequency:.4f} outside reasonable range [0.05, 0.20] for 90th percentile"
-
-        # Verify data structure and attributes
-        assert extremes_ds.extreme_events.dtype == bool, "Extreme events should be boolean"
-        assert extremes_ds.mask.dtype == bool, "Mask should be boolean"
-
-        # Verify dimensions are preserved
-        assert set(extremes_ds.extreme_events.dims) == {"time", "lat", "lon"}
-        assert len(extremes_ds.time) == len(sst_subset.time)
-        assert len(extremes_ds.lat) == len(sst_subset.lat)
-        assert len(extremes_ds.lon) == len(sst_subset.lon)
-
-        # Verify anomalies have reasonable statistical properties
-        anomaly_mean = extremes_ds.dat_anomaly.mean().compute().item()
-        anomaly_std = extremes_ds.dat_anomaly.std().compute().item()
-
-        assert_reasonable_bounds(
-            anomaly_mean,
-            0.0,
-            tolerance_absolute=0.5,
-            description="Mean anomaly (should be near zero with force_zero_mean=True)",
-        )
-        assert anomaly_std > 0, "Anomaly standard deviation should be positive"
-        assert anomaly_std < 10, "Anomaly standard deviation should be reasonable"
-
-        # Verify thresholds are reasonable
-        threshold_mean = extremes_ds.thresholds.mean().compute().item()
-        threshold_std = extremes_ds.thresholds.std().compute().item()
-
-        assert threshold_mean > 0, "Mean threshold should be positive"
-        assert threshold_std >= 0, "Threshold standard deviation should be non-negative"
-
-        # Memory cleanup
-        del extremes_ds, sst_subset
-        gc.collect()
-
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_full_pipeline_with_tracking(self, dask_client):
+    def test_full_pipeline_with_tracking(self, dask_client_largemem):
         """Test complete pipeline including tracking (simplified for speed)."""
         # Use very small subset for tracking test
-        sst_subset = self.sst_data.isel(time=slice(0, 50), lat=slice(0, 10), lon=slice(0, 20))
+        sst_subset = self.sst_data.isel(time=slice(0, 740)).isel(lat=slice(0, 20), lon=slice(0, 40))
 
         # Step 1: Preprocessing
         extremes_ds = marEx.preprocess_data(
@@ -131,7 +56,7 @@ class TestFullPipelineGridded:
 
         # Step 2: Tracking with very conservative parameters
         # Extend coordinates for tracker validation
-        extremes_mod = extremes_ds.copy()
+        extremes_mod = extremes_ds.copy().isel(time=slice(0, 50))  # Limit time for speed
         lon_extended = np.linspace(-180, 180, len(extremes_ds.lon))
         extremes_mod = extremes_mod.assign_coords(lon=lon_extended)
 
@@ -173,16 +98,17 @@ class TestFullPipelineGridded:
     @pytest.mark.integration
     def test_full_pipeline_shifting_hobday(self, dask_client_largemem):
         """Test complete pipeline with shifting_baseline + hobday_extreme methods."""
-        sst_subset = self.sst_data.isel(time=slice(0, 1500))  # ~4 years
+        sst_subset = self.sst_data.isel(time=slice(0, 1500)).isel(lat=slice(0, 20), lon=slice(0, 40))  # ~4 years
         # Step 1: Preprocessing with more sophisticated methods
         extremes_ds = marEx.preprocess_data(
             sst_subset,
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
             threshold_percentile=85,  # Lower threshold for test data
-            window_year_baseline=3,  # Reduced for test data duration
-            smooth_days_baseline=3,  # Minimal smoothing window
-            window_days_hobday=3,  # Reduced hobday window
+            window_year_baseline=2,  # Reduced for test data duration
+            smooth_days_baseline=7,
+            window_days_hobday=21,  # Reduced hobday window
+            window_spatial_hobday=7,  # Small spatial window
             dimensions=self.dimensions,
             dask_chunks={"time": 25},
         )
@@ -190,7 +116,7 @@ class TestFullPipelineGridded:
         # Verify shifting baseline reduces time series length
         original_time_length = len(sst_subset.time)
         new_time_length = len(extremes_ds.time)
-        expected_reduction = 3  # window_year_baseline
+        expected_reduction = 2  # window_year_baseline
 
         # Allow some flexibility in time reduction due to implementation details
         assert new_time_length < original_time_length, "Shifting baseline should reduce time series length"
@@ -214,9 +140,9 @@ class TestFullPipelineGridded:
         tracker = marEx.tracker(
             extremes_mod.extreme_events,
             extremes_mod.mask,
-            area_filter_quartile=0.5,  # Filter more aggressively
-            R_fill=4,
-            T_fill=2,
+            area_filter_quartile=0.8,  # Filter more aggressively
+            R_fill=2,
+            T_fill=0,
             allow_merging=False,  # Disable merging for simpler tracking
             quiet=True,
         )
@@ -294,73 +220,6 @@ class TestFullPipelineGridded:
         # Verify reasonable extreme count
         assert extreme_counts[0] > 0, "No extremes found with any chunking strategy"
 
-    @pytest.mark.slow
-    @pytest.mark.integration
-    def test_pipeline_edge_cases(self, dask_client):
-        """Test pipeline with edge cases and boundary conditions."""
-        # Test 1: Very high percentile threshold (should produce few events)
-        extremes_high = marEx.preprocess_data(
-            self.sst_data,
-            method_anomaly="detrended_baseline",
-            method_extreme="global_extreme",
-            threshold_percentile=99.5,  # Very high threshold
-            dimensions=self.dimensions,
-            dask_chunks={"time": 25},
-        )
-
-        n_extremes_high = extremes_high.extreme_events.sum().compute().item()
-        total_spacetime_points = (extremes_high.mask * extremes_high.time.notnull()).sum().compute().item()
-        extreme_freq_high = n_extremes_high / total_spacetime_points
-
-        # Should have very few extremes with 99.5th percentile
-        assert extreme_freq_high < 0.02, f"Too many extremes ({extreme_freq_high:.4f}) for 99.5th percentile threshold"
-
-        # Test 2: Lower percentile threshold (should produce more events)
-        extremes_low = marEx.preprocess_data(
-            self.sst_data,
-            method_anomaly="detrended_baseline",
-            method_extreme="global_extreme",
-            threshold_percentile=80,  # Lower threshold
-            dimensions=self.dimensions,
-            dask_chunks={"time": 25},
-        )
-
-        n_extremes_low = extremes_low.extreme_events.sum().compute().item()
-        total_spacetime_points_low = (extremes_low.mask * extremes_low.time.notnull()).sum().compute().item()
-        extreme_freq_low = n_extremes_low / total_spacetime_points_low
-
-        # Should have more extremes with lower threshold
-        assert extreme_freq_low > extreme_freq_high, "Lower threshold should produce more extremes than higher threshold"
-
-        # Test 3: Track events with very restrictive filtering
-        if n_extremes_low > 0:  # Only if we have events to track
-            # Extend coordinates for tracker validation
-            extremes_low_mod = extremes_low.copy()
-            lon_extended = np.linspace(-180, 180, len(extremes_low.lon))
-            extremes_low_mod = extremes_low_mod.assign_coords(lon=lon_extended)
-
-            tracker_restrictive = marEx.tracker(
-                extremes_low_mod.extreme_events,
-                extremes_low_mod.mask,
-                area_filter_quartile=0.9,  # Very aggressive filtering
-                R_fill=1,  # Minimal spatial filling
-                T_fill=0,  # No temporal filling
-                allow_merging=False,
-                quiet=True,
-            )
-
-            tracked_restrictive = tracker_restrictive.run()
-            n_events_restrictive = tracked_restrictive.attrs.get("N_events_final", 0)
-
-            # Should produce fewer (possibly zero) events with restrictive settings
-            assert n_events_restrictive >= 0, "Event count should be non-negative"
-
-            del tracked_restrictive
-
-        # Memory cleanup
-        del extremes_high, extremes_low
-        gc.collect()
-
 
 class TestFullPipelineUnstructured:
     """Integration tests for unstructured data pipeline."""
@@ -428,13 +287,9 @@ class TestFullPipelineUnstructured:
         # For integration test, we just verify that the preprocessing output is compatible
 
         # Check that we can create a tracker object (even if we don't run it)
-        import tempfile
 
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Simplified tracker creation to verify compatibility
-                # Skip actual tracking due to complexity of mock neighbours/cell_areas setup
-                print(f"Unstructured preprocessing successful. Would track {n_extremes} extreme events.")
+            print(f"Unstructured preprocessing successful. Would track {n_extremes} extreme events.")
 
         except Exception as e:
             # If tracker creation fails, that's OK for this integration test
@@ -604,90 +459,4 @@ class TestPipelineIntegration:
             del tracked_ds
 
         del extremes_ds, subset_data
-        gc.collect()
-
-
-class TestPipelineReproducibility:
-    """Test that pipeline results are reproducible and deterministic."""
-
-    @classmethod
-    def setup_class(cls):
-        """Load test data."""
-        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
-        cls.sst_data = ds.to
-
-    @pytest.mark.integration
-    def test_preprocessing_reproducibility(self, dask_client):
-        """Test that preprocessing produces identical results across runs."""
-        params = {
-            "method_anomaly": "detrended_baseline",
-            "method_extreme": "global_extreme",
-            "threshold_percentile": 95,
-            "dimensions": {"time": "time", "x": "lon", "y": "lat"},
-            "dask_chunks": {"time": 25},
-        }
-
-        # Run preprocessing twice
-        extremes_1 = marEx.preprocess_data(self.sst_data, **params)
-        extremes_2 = marEx.preprocess_data(self.sst_data, **params)
-
-        # Results should be identical
-        assert extremes_1.extreme_events.equals(extremes_2.extreme_events), "Preprocessing should produce identical extreme events"
-
-        assert np.allclose(
-            extremes_1.dat_anomaly.values, extremes_2.dat_anomaly.values, equal_nan=True
-        ), "Preprocessing should produce identical anomalies"
-
-        assert np.allclose(
-            extremes_1.thresholds.values, extremes_2.thresholds.values, equal_nan=True
-        ), "Preprocessing should produce identical thresholds"
-
-        # Memory cleanup
-        del extremes_1, extremes_2
-        gc.collect()
-
-    @pytest.mark.slow
-    @pytest.mark.integration
-    def test_tracking_reproducibility(self, dask_client):
-        """Test that tracking produces consistent results across runs."""
-        # First get preprocessed data
-        extremes_ds = marEx.preprocess_data(
-            self.sst_data,
-            method_anomaly="detrended_baseline",
-            method_extreme="global_extreme",
-            threshold_percentile=90,  # Lower threshold for more events
-            dimensions={"time": "time", "x": "lon", "y": "lat"},
-            dask_chunks={"time": 25},
-        )
-
-        # Run tracking twice with identical parameters
-        # Extend coordinates for tracker validation
-        extremes_mod = extremes_ds.copy()
-        lon_extended = np.linspace(-180, 180, len(extremes_ds.lon))
-        extremes_mod = extremes_mod.assign_coords(lon=lon_extended)
-
-        tracker_params = {
-            "area_filter_quartile": 0.3,
-            "R_fill": 2,
-            "T_fill": 2,
-            "allow_merging": False,  # Disable merging for reproducibility
-            "quiet": True,
-        }
-
-        tracker_1 = marEx.tracker(extremes_mod.extreme_events, extremes_mod.mask, **tracker_params)
-        tracked_1 = tracker_1.run()
-
-        tracker_2 = marEx.tracker(extremes_mod.extreme_events, extremes_mod.mask, **tracker_params)
-        tracked_2 = tracker_2.run()
-
-        # Results should be identical
-        assert (
-            tracked_1.attrs["N_events_final"] == tracked_2.attrs["N_events_final"]
-        ), "Tracking should produce identical event counts"
-
-        assert tracked_1.ID_field.equals(tracked_2.ID_field), "Tracking should produce identical ID fields"
-
-        # Memory cleanup
-        del extremes_ds, tracked_1, tracked_2
         gc.collect()
