@@ -63,6 +63,9 @@ class TestGriddedTracking:
         # Verify that background is labeled as 0
         assert int(tracked_ds.ID_field.min()) == 0
 
+        # Verify ID_field is int
+        assert np.issubdtype(tracked_ds.ID_field.dtype, np.integer), "ID_field should be integer type"
+
         # Assert tracking statistics are within reasonable bounds
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],

@@ -18,6 +18,9 @@ class TestUnstructuredPreprocessing:
         ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
         cls.sst_data = ds.to  # Extract the DataArray named 'to'
 
+        # Artificially make some masked NaN data in the 2nd cell
+        cls.sst_data = cls.sst_data.where(~((cls.sst_data.ncells == 2)), np.nan)
+
         # Define standard dimensions for unstructured data (no y)
         cls.dimensions = {
             "time": "time",
@@ -51,8 +54,8 @@ class TestUnstructuredPreprocessing:
             method_extreme="hobday_extreme",
             threshold_percentile=95,
             window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            smooth_days_baseline=5,  # Reduced for test data
+            window_days_hobday=3,  # Reduced for test data
             dimensions=self.dimensions,
             coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
