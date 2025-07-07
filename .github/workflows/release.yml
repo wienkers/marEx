@@ -75,19 +75,17 @@ jobs:
     - name: Configure Dask for CI
       run: |
         mkdir -p ~/.dask
-        cat > ~/.dask/config.yaml << 'EOF'
-        distributed:
-          worker:
-            memory:
-              target: 0.8
-              spill: 0.9
-              pause: 0.95
-              terminate: 0.98
-          admin:
-            log-format: '%(name)s - %(levelname)s - %(message)s'
-        array:
-          chunk-size: 64MiB
-        EOF
+        echo "distributed:" > ~/.dask/config.yaml
+        echo "  worker:" >> ~/.dask/config.yaml
+        echo "    memory:" >> ~/.dask/config.yaml
+        echo "      target: 0.8" >> ~/.dask/config.yaml
+        echo "      spill: 0.9" >> ~/.dask/config.yaml
+        echo "      pause: 0.95" >> ~/.dask/config.yaml
+        echo "      terminate: 0.98" >> ~/.dask/config.yaml
+        echo "  admin:" >> ~/.dask/config.yaml
+        echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
+        echo "array:" >> ~/.dask/config.yaml
+        echo "  chunk-size: 64MiB" >> ~/.dask/config.yaml
 
     - name: Run comprehensive test suite
       run: |
