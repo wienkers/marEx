@@ -2911,7 +2911,7 @@ class tracker:
                         )
                     else:
                         # Calculate distances to each parent centroid
-                        distances = wrapped_euclidian_parallel(child_mask_2d, parent_centroids, Nx)
+                        distances = wrapped_euclidian_distance_mask_parallel(child_mask_2d, parent_centroids, Nx)
 
                         # Assign based on closest parent
                         new_labels = child_ids[np.argmin(distances, axis=1)]
@@ -4071,7 +4071,7 @@ operations on both structured and unstructured grids.
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def wrapped_euclidian_parallel(
+def wrapped_euclidian_distance_mask_parallel(
     mask_values: NDArray[np.bool_],
     parent_centroids_values: NDArray[np.float64],
     Nx: int,
@@ -4176,7 +4176,7 @@ def create_grid_index_arrays(
 
 
 @jit(nopython=True, fastmath=True)
-def calculate_wrapped_distance(y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float) -> float:
+def wrapped_euclidian_distance_points(y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float) -> float:
     """
     Calculate distance with periodic boundary conditions in x dimension.
 
@@ -4292,7 +4292,7 @@ def partition_nn_grid(
                         if point_idx == -1:
                             break
 
-                        dist = calculate_wrapped_distance(child_y, child_x, py[point_idx], px[point_idx], Nx, half_Nx)
+                        dist = wrapped_euclidian_distance_points(child_y, child_x, py[point_idx], px[point_idx], Nx, half_Nx)
 
                         if dist > max_distance:
                             continue
@@ -4326,7 +4326,7 @@ def partition_nn_grid(
 
             for parent_idx in range(n_parents):
                 # Calculate distance to centroid with periodic boundary conditions
-                dist = calculate_wrapped_distance(
+                dist = wrapped_euclidian_distance_points(
                     child_y,
                     child_x,
                     parent_centroids[parent_idx, 0],

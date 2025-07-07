@@ -15,8 +15,12 @@ class TestGriddedPreprocessing:
     def setup_class(cls):
         """Load test data for all tests."""
         test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
-        cls.sst_data = ds.to_array().squeeze()
+        cls.sst_data = xr.open_zarr(str(test_data_path), chunks={}).to.persist()
+
+        # Artificially make some masked NaN data in the 2nd lat and 2nd lon point
+        cls.sst_data = cls.sst_data.where(
+            ~((cls.sst_data.lat == cls.sst_data.lat[1]) & (cls.sst_data.lon == cls.sst_data.lon[1])), np.nan
+        )
 
         # Define standard dimensions for gridded data
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
@@ -244,15 +248,16 @@ class TestGriddedPreprocessing:
 
     def test_shifting_baseline_hobday_extreme_exact_percentile(self):
         """Test preprocessing with shifting_baseline + hobday_extreme combination and exact_percentile=True."""
+        window_year_baseline = 5
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
             method_extreme="hobday_extreme",
             threshold_percentile=95,
             method_percentile="exact",
-            window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_year_baseline=window_year_baseline,  # Reduced for test data
+            smooth_days_baseline=5,  # Reduced for test data
+            window_days_hobday=3,  # Reduced for test data
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -283,7 +288,6 @@ class TestGriddedPreprocessing:
         # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
         input_time_size = self.sst_data.sizes["time"]
         output_time_size = extremes_ds.sizes["time"]
-        window_year_baseline = 5  # From test parameters
         expected_time_reduction = window_year_baseline * 365  # Approximate daily reduction
         assert (
             output_time_size < input_time_size
@@ -423,18 +427,12 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency_detrended = float(extremes_ds_detrended.extreme_events.mean())
-        # Use higher tolerance for custom dimension test due to coordinate transformation effects
-        # Note: Custom dimensions may produce higher variability in extreme frequency
-        # Allow broader tolerance (50% relative) for this specific transformation case
-        expected_freq = 0.05  # 5% for 95th percentile
-        tolerance = 0.05  # Allow up to 10% frequency
-        assert extreme_frequency_detrended <= expected_freq + tolerance, (
-            f"Extreme frequency {extreme_frequency_detrended:.4f} too high for 95th percentile "
-            f"(max expected: {expected_freq + tolerance:.4f}) - Custom dimensions: detrended_baseline + global_extreme"
+        print(f"extreme_frequency for detrended_baseline + global_extreme: {extreme_frequency_detrended}")
+        assert_percentile_frequency(
+            extreme_frequency_detrended,
+            95,
+            description="detrended_baseline + global_extreme",
         )
-        assert (
-            extreme_frequency_detrended >= 0.01
-        ), f"Extreme frequency {extreme_frequency_detrended:.4f} too low for reasonable threshold detection"
 
         # Test 2: shifting_baseline + hobday_extreme
         extremes_ds_shifting = marEx.preprocess_data(
@@ -444,7 +442,7 @@ class TestGriddedPreprocessing:
             threshold_percentile=95,
             window_year_baseline=5,  # Reduced for test data
             smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_days_hobday=3,  # Reduced for test data
             dimensions=custom_dimensions,
             coordinates=custom_coordinates,
             dask_chunks={"t": 25},
@@ -483,17 +481,12 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency_shifting = float(extremes_ds_shifting.extreme_events.mean())
-        # Use higher tolerance for custom dimension test due to coordinate transformation effects
-        # Note: Custom dimensions may produce higher variability in extreme frequency
-        expected_freq = 0.05  # 5% for 95th percentile
-        tolerance = 0.05  # Allow up to 10% frequency
-        assert extreme_frequency_shifting <= expected_freq + tolerance, (
-            f"Extreme frequency {extreme_frequency_shifting:.4f} too high for 95th percentile "
-            f"(max expected: {expected_freq + tolerance:.4f}) - Custom dimensions: shifting_baseline + hobday_extreme"
+        print(f"extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency_shifting}")
+        assert_percentile_frequency(
+            extreme_frequency_shifting,
+            95,
+            description="shifting_baseline + hobday_extreme",
         )
-        assert (
-            extreme_frequency_shifting >= 0.01
-        ), f"Extreme frequency {extreme_frequency_shifting:.4f} too low for reasonable threshold detection"
 
         # Test 3: Verify both methods produce consistent core structure
         core_vars = ["extreme_events", "dat_anomaly", "mask"]
