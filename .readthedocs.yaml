@@ -10,10 +10,6 @@ build:
   tools:
     python: "3.11"
   jobs:
-    # Install system dependencies
-    pre_create_environment:
-      - apt-get update
-      - apt-get install -y libproj-dev proj-data proj-bin libgeos-dev
     # Pre-install requirements to handle problematic packages
     pre_install:
       - pip install --upgrade pip setuptools wheel
