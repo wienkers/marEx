@@ -25,10 +25,7 @@ sphinx:
   builder: html
   fail_on_warning: false
 
-# Explicitly set the version control system
-vcs:
-  submodules:
-    include: all
+# VCS submodules are automatically detected by Read the Docs
 
 # Set the Python environment and dependencies
 python:

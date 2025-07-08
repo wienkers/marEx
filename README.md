@@ -4,6 +4,7 @@
 [![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
 [![PyPI version](https://badge.fury.io/py/marEx.svg)](https://badge.fury.io/py/marEx)
+[![Documentation Status](https://readthedocs.org/projects/marex/badge/?version=latest)](https://marex.readthedocs.io/en/latest/?badge=latest)
 [![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 
 Marine Extremes Python Package
@@ -309,10 +310,11 @@ pre-commit install
 
 If you encounter installation issues:
 
-1. **Check Dependencies**: Run `marEx.print_dependency_status()` to identify missing components
-2. **Search Issues**: Check the [GitHub Issues](https://github.com/wienkers/marEx/issues) for similar problems
-3. **System Information**: Include your OS, Python version, and error messages when reporting issues
-4. **Support**: Reach out to [Aaron Wienkers](mailto:aaron.wienkers@gmail.com)
+1. **Documentation**: Check the [full documentation](https://marex.readthedocs.io/) for detailed guides and API reference
+2. **Check Dependencies**: Run `marEx.print_dependency_status()` to identify missing components
+3. **Search Issues**: Check the [GitHub Issues](https://github.com/wienkers/marEx/issues) for similar problems
+4. **System Information**: Include your OS, Python version, and error messages when reporting issues
+5. **Support**: Reach out to [Aaron Wienkers](mailto:aaron.wienkers@gmail.com)
 
 
 ---
