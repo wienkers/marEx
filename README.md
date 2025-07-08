@@ -167,7 +167,7 @@ Optional arguments for `marEx.preprocess_data()` include:
 - `method_percentile`: Whether to use `exact` or an `approximate` (PDF-based) percentile calculation. Default is `approximate`. N.B. Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory, in consideration of the limitations inherent to distributed parallel I/O & processing.
 - `precision`: The precision (in degrees) of the approximate percentile calculation. Default is `0.01` degrees.
 - `max_anomaly`: The maximum anomaly to search for in the approximate percentile calculation. Default is `5` degrees.
-- `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `('time', 'lat', 'lon')`.
+- `dimensions`: The names of the time, latitude, and longitude dimensions in the data array. Default is `{'time': 'time', 'x': 'lon', 'y': 'lat')`.
 - `dask_chunks`: The chunk size for the output dataset. Default is `{'time': 25}`.
 
 
