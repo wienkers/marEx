@@ -2146,7 +2146,7 @@ def _compute_histogram_quantile_2d(
     if too_low.any():
         warnings.warn(
             f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
@@ -2277,7 +2277,7 @@ def _compute_histogram_quantile_1d(
     if too_low.any():
         warnings.warn(
             f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
