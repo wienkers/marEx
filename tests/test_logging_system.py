@@ -117,6 +117,17 @@ class TestLoggingConfiguration:
                     handler.close()
                     root_logger.removeHandler(handler)
 
+                # Also close handlers on the marEx logger specifically
+                marex_logger = logging.getLogger("marEx")
+                for handler in marex_logger.handlers[:]:
+                    handler.close()
+                    marex_logger.removeHandler(handler)
+
+                # Force garbage collection to ensure file handles are released
+                import gc
+
+                gc.collect()
+
 
 class TestFunctionLevelVerbosity:
     """Test verbose/quiet parameters in main functions."""
