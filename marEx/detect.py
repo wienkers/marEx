@@ -2129,7 +2129,7 @@ def _compute_histogram_quantile_2d(
 
     # Validate threshold values against bounds
     upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[2]
+    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
     # Check if any values are too high (ignore NaN values)
     too_high = (threshold > upper_bound) & threshold.notnull()
@@ -2145,11 +2145,14 @@ def _compute_histogram_quantile_2d(
     too_low = (threshold < lower_bound) & threshold.notnull()
     if too_low.any():
         warnings.warn(
-            f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            f"Consider increasing the percentile threshold (currently {q*100:.1f}%) or check data variability.",
+            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
         )
+        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
+        threshold = threshold.where(~too_low, lower_bound).persist()
 
     return threshold
 
@@ -2257,7 +2260,7 @@ def _compute_histogram_quantile_1d(
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[2]
+    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
     # Check if any values are too high (ignore NaN values)
     too_high = (threshold > upper_bound) & threshold.notnull()
@@ -2273,11 +2276,14 @@ def _compute_histogram_quantile_1d(
     too_low = (threshold < lower_bound) & threshold.notnull()
     if too_low.any():
         warnings.warn(
-            f"Quantile values below expected range: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            f"Consider increasing the percentile threshold (currently {q*100:.1f}%) or check data variability.",
+            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
         )
+        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
+        threshold = threshold.where(~too_low, lower_bound).persist()
 
     return threshold
 
