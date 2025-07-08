@@ -193,20 +193,34 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev,full]"
 
-    - name: Configure Dask for CI
+    - name: Configure Dask for Coverage
       run: |
         mkdir -p ~/.dask
         echo "distributed:" > ~/.dask/config.yaml
         echo "  worker:" >> ~/.dask/config.yaml
         echo "    memory:" >> ~/.dask/config.yaml
-        echo "      target: 0.8" >> ~/.dask/config.yaml
-        echo "      spill: 0.9" >> ~/.dask/config.yaml
-        echo "      pause: 0.95" >> ~/.dask/config.yaml
-        echo "      terminate: 0.98" >> ~/.dask/config.yaml
+        echo "      target: 0.7" >> ~/.dask/config.yaml
+        echo "      spill: 0.8" >> ~/.dask/config.yaml
+        echo "      pause: 0.85" >> ~/.dask/config.yaml
+        echo "      terminate: 0.9" >> ~/.dask/config.yaml
+        echo "      recent-to-old-time: 5s" >> ~/.dask/config.yaml
+        echo "  scheduler:" >> ~/.dask/config.yaml
+        echo "    allowed-failures: 30" >> ~/.dask/config.yaml
+        echo "    work-stealing: false" >> ~/.dask/config.yaml
+        echo "    worker-ttl: 300s" >> ~/.dask/config.yaml
+        echo "  comm:" >> ~/.dask/config.yaml
+        echo "    timeouts:" >> ~/.dask/config.yaml
+        echo "      connect: 180s" >> ~/.dask/config.yaml
+        echo "      tcp: 180s" >> ~/.dask/config.yaml
+        echo "    retry:" >> ~/.dask/config.yaml
+        echo "      count: 10" >> ~/.dask/config.yaml
+        echo "      delay:" >> ~/.dask/config.yaml
+        echo "        min: 2s" >> ~/.dask/config.yaml
+        echo "        max: 20s" >> ~/.dask/config.yaml
         echo "  admin:" >> ~/.dask/config.yaml
         echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
         echo "array:" >> ~/.dask/config.yaml
-        echo "  chunk-size: 64MiB" >> ~/.dask/config.yaml
+        echo "  chunk-size: 32MiB" >> ~/.dask/config.yaml
 
     - name: Generate coverage report
       run: |
