@@ -52,8 +52,5 @@ formats:
   - pdf
   - epub
 
-# Environment variables for build
-environment:
-  READTHEDOCS: "True"
-  MPLBACKEND: "Agg"  # Use non-interactive matplotlib backend
-  DASK_DISTRIBUTED__LOGGING__DISTRIBUTED: "error"  # Reduce dask logging
+# Environment variables are automatically set by Read the Docs
+# READTHEDOCS=True is automatically available during builds
