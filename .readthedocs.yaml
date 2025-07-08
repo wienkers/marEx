@@ -10,10 +10,6 @@ build:
   tools:
     python: "3.11"
   jobs:
-    # Install system dependencies
-    pre_create_environment:
-      - apt-get update
-      - apt-get install -y libproj-dev proj-data proj-bin libgeos-dev
     # Pre-install requirements to handle problematic packages
     pre_install:
       - pip install --upgrade pip setuptools wheel
@@ -25,10 +21,7 @@ sphinx:
   builder: html
   fail_on_warning: false
 
-# Explicitly set the version control system
-vcs:
-  submodules:
-    include: all
+# VCS submodules are automatically detected by Read the Docs
 
 # Set the Python environment and dependencies
 python:
@@ -55,8 +48,5 @@ formats:
   - pdf
   - epub
 
-# Environment variables for build
-environment:
-  READTHEDOCS: "True"
-  MPLBACKEND: "Agg"  # Use non-interactive matplotlib backend
-  DASK_DISTRIBUTED__LOGGING__DISTRIBUTED: "error"  # Reduce dask logging
+# Environment variables are automatically set by Read the Docs
+# READTHEDOCS=True is automatically available during builds

@@ -102,19 +102,31 @@ class TestLoggingConfiguration:
         """Test logging to file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
-            configure_logging(log_file=log_file, verbose=True)
+            try:
+                configure_logging(log_file=log_file, verbose=True)
 
-            logger = get_logger("test_file")
-            logger.info("Test message")
+                logger = get_logger("test_file")
+                logger.info("Test message")
 
-            # Check that log file was created
-            assert log_file.exists()
+                # Check that log file was created
+                assert log_file.exists()
+            finally:
+                # Close all handlers to prevent Windows file locking issues
+                root_logger = logging.getLogger()
+                for handler in root_logger.handlers[:]:
+                    handler.close()
+                    root_logger.removeHandler(handler)
 
-            # Close all handlers to prevent Windows file locking issues
-            root_logger = logging.getLogger()
-            for handler in root_logger.handlers[:]:
-                handler.close()
-                root_logger.removeHandler(handler)
+                # Also close handlers on the marEx logger specifically
+                marex_logger = logging.getLogger("marEx")
+                for handler in marex_logger.handlers[:]:
+                    handler.close()
+                    marex_logger.removeHandler(handler)
+
+                # Force garbage collection to ensure file handles are released
+                import gc
+
+                gc.collect()
 
 
 class TestFunctionLevelVerbosity:

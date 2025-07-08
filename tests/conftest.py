@@ -72,20 +72,30 @@ def dask_client():
             "distributed.worker.memory.recent-to-old-time": "3s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
             # Optimise task scheduling for memory-intensive workflows
-            "distributed.scheduler.allowed-failures": 10,
-            "distributed.comm.timeouts.connect": "60s",
-            "distributed.comm.timeouts.tcp": "60s",
+            "distributed.scheduler.allowed-failures": 20,  # Increased from 10
+            "distributed.comm.timeouts.connect": "120s",  # Increased from 60s
+            "distributed.comm.timeouts.tcp": "120s",  # Increased from 60s
+            # Add additional robustness for coverage runs
+            "distributed.worker.multiprocessing.initializer": None,
+            "distributed.worker.multiprocessing.initialize": None,
+            "distributed.comm.retry.count": 5,
+            "distributed.comm.retry.delay.min": "1s",
+            "distributed.comm.retry.delay.max": "10s",
+            "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
         }
     )
 
     # Create a LocalCluster with optimised resources for CI
-    # Use more workers with smaller memory per worker for better parallelisation
+    # Use fewer workers with more memory per worker for better stability under coverage
     cluster = LocalCluster(
-        n_workers=4,
+        n_workers=2,  # Reduced from 4 for better stability
         threads_per_worker=1,
-        memory_limit="3GB",  # Github Linux Runners have 14GB RAM & 4 CPUs
+        memory_limit="6GB",  # Increased from 3GB for better stability
         dashboard_address=None,  # Disable dashboard in CI
         silence_logs=True,
+        # Add explicit process handling for coverage compatibility
+        processes=True,
+        protocol="tcp",
     )
 
     client = Client(cluster)
@@ -119,41 +129,56 @@ def configure_dask():
 @pytest.fixture(scope="function")
 def dask_client_largemem():
     """Create a Dask client optimised for memory-intensive computations."""
-    # Configure Dask for memory-intensive tests
+    # Configure Dask for memory-intensive tests with coverage-aware settings
     dask.config.set(
         {
             "distributed.worker.daemon": False,
             "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
-            "distributed.worker.memory.target": 0.8,
-            "distributed.worker.memory.spill": 0.9,
-            "distributed.worker.memory.pause": 0.95,
-            "distributed.worker.memory.terminate": 0.98,
+            "distributed.worker.memory.target": 0.5,  # More conservative for coverage
+            "distributed.worker.memory.spill": 0.6,
+            "distributed.worker.memory.pause": 0.7,
+            "distributed.worker.memory.terminate": 0.8,
             # Add more aggressive memory management
-            "distributed.worker.memory.recent-to-old-time": "3s",
+            "distributed.worker.memory.recent-to-old-time": "10s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
             # Optimise task scheduling for memory-intensive workflows
-            "distributed.scheduler.allowed-failures": 10,
-            "distributed.comm.timeouts.connect": "60s",
-            "distributed.comm.timeouts.tcp": "60s",
+            "distributed.scheduler.allowed-failures": 30,  # Increased for coverage stability
+            "distributed.comm.timeouts.connect": "300s",  # Increased for coverage overhead
+            "distributed.comm.timeouts.tcp": "300s",  # Increased for coverage overhead
+            # Add additional robustness for coverage runs
+            "distributed.worker.multiprocessing.initializer": None,
+            "distributed.worker.multiprocessing.initialize": None,
+            "distributed.comm.retry.count": 10,  # Increased retry count
+            "distributed.comm.retry.delay.min": "2s",  # Increased retry delays
+            "distributed.comm.retry.delay.max": "30s",
+            "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
+            "distributed.scheduler.worker-ttl": "300s",  # Longer worker timeout
         }
     )
 
     # Create a LocalCluster with larger memory for intensive computations
     cluster = LocalCluster(
-        n_workers=2,
+        n_workers=1,
         threads_per_worker=1,
-        memory_limit="7GB",  # Larger memory per worker for complex computations
+        memory_limit="13GB",  # Increased memory per worker for coverage overhead
         dashboard_address=None,  # Disable dashboard in CI
         silence_logs=True,
+        # Add explicit process handling for coverage compatibility
+        processes=True,
+        protocol="tcp",
     )
 
     client = Client(cluster)
 
     yield client
 
-    # Cleanup
-    client.close()
-    cluster.close()
+    # Cleanup with timeout to prevent hanging
+    try:
+        client.close(timeout=30)
+        cluster.close(timeout=30)
+    except Exception:
+        # Force cleanup if normal cleanup fails
+        pass
 
 
 # Statistical Test Helper Functions

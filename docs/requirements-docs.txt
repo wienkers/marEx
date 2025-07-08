@@ -1,0 +1,51 @@
+# Documentation dependencies for marEx
+# This file specifies all packages needed to build the documentation
+
+# Core Sphinx and theme
+sphinx>=5.0.0
+sphinx_rtd_theme>=1.0.0
+
+# Sphinx extensions for scientific documentation
+sphinx-copybutton>=0.5.0
+sphinx-autodoc-typehints>=1.12.0
+myst-parser>=0.18.0
+nbsphinx>=0.8.0
+
+# For notebook execution (optional)
+ipykernel
+jupyter
+pandoc
+
+# Scientific Python stack (needed for autodoc to import modules)
+# Core dependencies - must match pyproject.toml
+numpy
+scipy
+pandas
+xarray[complete]
+dask[complete]==2025.3.0
+netcdf4
+scikit-image
+dask_image
+numba
+matplotlib>=3.5.0
+cartopy
+pillow
+xhistogram
+flox>=0.10.1
+
+# Optional dependencies for full functionality
+# These are optional but recommended for complete documentation builds
+jax; python_version>="3.10"
+jaxlib; python_version>="3.10"
+dask_jobqueue
+psutil
+seaborn>=0.11.0
+cmocean
+
+# Development tools for documentation quality
+doc8
+rstcheck
+sphinx-lint
+
+# For live reloading during development
+sphinx-autobuild

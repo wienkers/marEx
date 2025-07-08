@@ -167,6 +167,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "benchmark: marks tests as benchmark tests",
+    "nocov: marks tests to be excluded from coverage reporting",
 ]
 
 [tool.coverage.run]

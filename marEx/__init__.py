@@ -7,8 +7,8 @@ such as Marine Heatwaves (MHWs).
 
 Core Functionality
 -----------------
-- detect: Convert raw time series into standardised anomalies
-- track: Identify and track extreme events through time
+- `detect`: Convert raw time series into standardised anomalies
+- `track`: Identify and track extreme events through time
 
 Example
 -------
@@ -19,9 +19,8 @@ Example
 >>> # Preprocess data to identify extreme events
 >>> extreme_events_ds = marEx.preprocess_data(sst, threshold_percentile=95)
 >>> # Track events through time
->>> tracker = marEx.tracker(extreme_events_ds.extreme_events, extreme_events_ds.mask,
-...                         R_fill=8, area_filter_quartile=0.5)
->>> events_ds = tracker.run()
+>>> events_ds = marEx.tracker(extreme_events_ds.extreme_events, extreme_events_ds.mask,
+...                         R_fill=8, area_filter_quartile=0.5).run()
 """
 
 # Import dependency management

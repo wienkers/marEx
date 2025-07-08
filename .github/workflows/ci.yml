@@ -171,6 +171,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: always()
+    timeout-minutes: 60
 
     steps:
     - name: Checkout code
@@ -193,24 +194,50 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev,full]"
 
-    - name: Configure Dask for CI
+    - name: Configure Dask for Coverage (Conservative)
       run: |
         mkdir -p ~/.dask
         echo "distributed:" > ~/.dask/config.yaml
         echo "  worker:" >> ~/.dask/config.yaml
         echo "    memory:" >> ~/.dask/config.yaml
-        echo "      target: 0.8" >> ~/.dask/config.yaml
-        echo "      spill: 0.9" >> ~/.dask/config.yaml
-        echo "      pause: 0.95" >> ~/.dask/config.yaml
-        echo "      terminate: 0.98" >> ~/.dask/config.yaml
+        echo "      target: 0.4" >> ~/.dask/config.yaml
+        echo "      spill: 0.5" >> ~/.dask/config.yaml
+        echo "      pause: 0.6" >> ~/.dask/config.yaml
+        echo "      terminate: 0.8" >> ~/.dask/config.yaml
+        echo "      recent-to-old-time: 10s" >> ~/.dask/config.yaml
+        echo "    daemon: false" >> ~/.dask/config.yaml
+        echo "  scheduler:" >> ~/.dask/config.yaml
+        echo "    allowed-failures: 50" >> ~/.dask/config.yaml
+        echo "    work-stealing: false" >> ~/.dask/config.yaml
+        echo "    worker-ttl: 600s" >> ~/.dask/config.yaml
+        echo "  comm:" >> ~/.dask/config.yaml
+        echo "    timeouts:" >> ~/.dask/config.yaml
+        echo "      connect: 300s" >> ~/.dask/config.yaml
+        echo "      tcp: 300s" >> ~/.dask/config.yaml
+        echo "    retry:" >> ~/.dask/config.yaml
+        echo "      count: 15" >> ~/.dask/config.yaml
+        echo "      delay:" >> ~/.dask/config.yaml
+        echo "        min: 3s" >> ~/.dask/config.yaml
+        echo "        max: 30s" >> ~/.dask/config.yaml
         echo "  admin:" >> ~/.dask/config.yaml
         echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
         echo "array:" >> ~/.dask/config.yaml
-        echo "  chunk-size: 64MiB" >> ~/.dask/config.yaml
+        echo "  chunk-size: 24MiB" >> ~/.dask/config.yaml
+        echo "  slicing:" >> ~/.dask/config.yaml
+        echo "    split-large-chunks: false" >> ~/.dask/config.yaml
+
+    - name: Set environment for conservative execution
+      run: |
+        echo "DASK_NUM_WORKERS=1" >> $GITHUB_ENV
+        echo "OMP_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "MKL_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "NUMBA_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "PYTHONHASHSEED=42" >> $GITHUB_ENV
 
     - name: Generate coverage report
+      timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ -m "not slow"
+        coverage run -m pytest tests/ --tb=short -m "not nocov"  -x --maxfail=3
         coverage report -m
         coverage html
         coverage xml

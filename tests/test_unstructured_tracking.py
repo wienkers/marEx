@@ -46,6 +46,8 @@ class TestUnstructuredTracking:
         if hasattr(cls, "temp_dir") and Path(cls.temp_dir).exists():
             shutil.rmtree(cls.temp_dir)
 
+    @pytest.mark.nocov
+    @pytest.mark.slow
     def test_unstructured_tracker_initialisation(self, dask_client_largemem):
         """Test that unstructured tracker initialisation succeeds."""
         tracker = marEx.tracker(
@@ -344,7 +346,6 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 3, tolerance=3)
 
     @pytest.mark.slow
-    @pytest.mark.slow
     def test_unstructured_different_filtering_parameters(self, dask_client_largemem):
         """Test unstructured tracking with different area filtering parameters."""
         # Test with minimal filtering (quartile = 0.1)
@@ -538,10 +539,11 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_filtered"], 10, tolerance=5)
         assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 5, tolerance=5)
 
+    @pytest.mark.slow
     def test_unstructured_grid_requirements(self, dask_client_largemem):
         """Test that unstructured tracking properly validates grid requirements."""
         # Test that tracking fails gracefully without neighbors information
-        with pytest.raises((ValueError, TypeError, AttributeError)):
+        with pytest.raises((ValueError, TypeError, AttributeError, marEx.exceptions.DataValidationError)):
             tracker = marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
@@ -676,6 +678,7 @@ class TestUnstructuredTracking:
         # Basic validation
         assert tracked_ds.attrs["N_events_final"] >= 0
 
+    @pytest.mark.slow
     def test_custom_dimension_names_unstructured_tracking(self, dask_client_largemem):
         """Test unstructured tracking with custom dimension and coordinate names for both allow_merging options."""
         # Use a larger subset for custom dimension tests: 200 timesteps
@@ -794,6 +797,7 @@ class TestUnstructuredTracking:
         assert hasattr(tracker_no_merge, "allow_merging")
         assert hasattr(tracker_with_merge, "allow_merging")
 
+    @pytest.mark.slow
     def test_custom_dimension_names_comparison_with_original(self, dask_client_largemem):
         """Test that custom dimension names produce equivalent results to original dimension names."""
         # Use a larger subset for custom dimension tests: 200 timesteps

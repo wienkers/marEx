@@ -6,14 +6,16 @@ Converts raw time series into standardised anomalies and identifies extreme even
 (e.g., Marine Heatwaves using Sea Surface Temperature).
 
 Core capabilities:
-- Two preprocessing methodologies: Detrended Baseline and Shifting Baseline
-- Two definitions for extreme events: Global Extreme and Hobday Extreme
-- Threshold-based extreme event identification
-- Efficient processing of both structured (gridded) and unstructured data
+
+* Two preprocessing methodologies: Detrended Baseline and Shifting Baseline
+* Two definitions for extreme events: Global Extreme and Hobday Extreme
+* Threshold-based extreme event identification
+* Efficient processing of both structured (gridded) and unstructured data
 
 Compatible data formats:
-- Structured data:   3D arrays (time, lat, lon)
-- Unstructured data: 2D arrays (time, cell)
+
+* Structured data: 3D arrays (time, lat, lon)
+* Unstructured data: 2D arrays (time, cell)
 """
 
 import logging
@@ -126,7 +128,7 @@ def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -
 
 
 def _infer_dims_coords(
-    da: xr.DataArray, dimensions: Dict[str, str], coordinates: Optional[Dict[str, str]]
+    da: xr.DataArray, dimensions: Optional[Dict[str, str]], coordinates: Optional[Dict[str, str]]
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Determine full set of dimensions and coordinates for the DataArray.
@@ -233,74 +235,63 @@ def preprocess_data(
     Supports separate methods for anomaly computation and extreme identification:
 
     Anomaly Methods:
-    - 'detrended_baseline': Detrending with harmonics and polynomials -- more efficient, but biases statistics
-    - 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct",
-                           but shortens time series by window_year_baseline years
+
+    * 'detrended_baseline': Detrending with harmonics and polynomials -- more efficient, but biases statistics
+    * 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct",
+      but shortens time series by window_year_baseline years
 
     Extreme Methods:
-    - 'global_extreme': Global-in-time threshold value
-    - 'hobday_extreme': Local day-of-year specific thresholds with windowing
+
+    * 'global_extreme': Global-in-time threshold value
+    * 'hobday_extreme': Local day-of-year specific thresholds with windowing
 
     Parameters
     ----------
     da : xarray.DataArray
         Raw input data
-
-    Method Selection:
-    method_anomaly : str, optional
-        Anomaly computation method ('detrended_baseline' or 'shifting_baseline')
-    method_extreme : str, optional
-        Extreme identification method ('global_extreme' or 'hobday_extreme')
-
-    General Parameters:
-    threshold_percentile : float, optional
-        Percentile threshold for extreme event identification
+    method_anomaly : str, default='detrended_baseline'
+        Anomaly computation method ('detrended_baseline' or 'shifting_baseline').
+    method_extreme : str, default='global_extreme'
+        Extreme identification method ('global_extreme' or 'hobday_extreme').
+    threshold_percentile : float, default=95
+        Percentile threshold for extreme event detection.
+    window_year_baseline : int, default=15
+        Number of previous years for rolling climatology (shifting_baseline method only).
+    smooth_days_baseline : int, default=21
+        Days for smoothing rolling climatology (shifting_baseline method only).
+    window_days_hobday : int, default=11
+        Window size for day-of-year threshold calculation (hobday_extreme method only).
+    window_spatial_hobday : int, default=None
+        Spatial window size (2D centred window) for the day-of-year threshold calculation (hobday_extreme method only).
+    std_normalise : bool, default=False
+        Whether to standardise anomalies by rolling standard deviation (detrended_baseline only).
+    detrend_orders : list, default=[1]
+        Polynomial orders for detrending (detrended_baseline method only).
+        Default is 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
+    force_zero_mean : bool, default=True
+        Whether to enforce zero mean in detrended anomalies (detrended_baseline method only).
+    method_percentile : str, default='approximate'
+        Method for percentile calculation ('exact' or 'approximate') for both global_extreme & hobday_extreme methods.
+        N.B.: Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory,
+        in consideration of the limitations inherent to distributed parallel I/O & processing.
+    precision : float, default=0.01
+        Precision for histogram bins in approximate percentile method.
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for histogram binning in the approximate percentile method.
     dask_chunks : dict, optional
-        Chunking specification for distributed computation
-    dimensions : dict, optional
-        Mapping of dimensions to names in the data
-        Defaults to {"time": "time", "x": "lon", "y": "lat"}
+        Chunking specification for distributed computation.
+    dimensions : dict, default={"time": "time", "x": "lon", "y": "lat"}
+        Mapping of dimensions to names in the data.
     coordinates : dict, optional
-        Mapping of coordinates to names in the data
-        Defaults to dimensions mapping
+        Mapping of coordinates to names in the data. Defaults to dimensions mapping.
     neighbours : xarray.DataArray, optional
-        Neighbour connectivity for spatial clustering (optional)
+        Neighbour connectivity for spatial clustering.
     cell_areas : xarray.DataArray, optional
-        Cell areas for weighted spatial statistics (optional)
-
-    Shifting Baseline Method Parameters:
-    window_year_baseline : int, optional
-        Number of years for rolling climatology (shifting_baseline method only)
-    smooth_days_baseline : int, optional
-        Days for smoothing rolling climatology (shifting_baseline method only)
-
-    Hobday Extreme Method Parameters:
-    window_days_hobday : int, optional
-        Window for day-of-year threshold calculation (hobday_extreme method only)
-
-    Detrended Baseline Method Parameters:
-    std_normalise : bool, optional
-        Whether to standardise anomalies by rolling standard deviation (detrended_baseline only)
-    detrend_orders : list, optional
-        Polynomial orders for detrending (detrended_baseline method only)
-    force_zero_mean : bool, optional
-        Whether to enforce zero mean in detrended anomalies (detrended_baseline method only)
-
-    Extreme Method Parameters:
-    method_percentile : str, optional
-        Method for percentile calculation ('exact' or 'approximate') for both global_extreme & hobday_extreme methods
-        N.B. Using exact percentile calculation requires both careful/thoughtful chunking & sufficient memory.
-    precision : float, optional
-        Precision for histogram bins in approximate method (default: 0.01)
-    max_anomaly : float, optional
-        Maximum anomaly value for histogram binning in approximate method (default: 5.0)
-
-
-    Logging Parameters:
-    verbose : bool, optional
+        Cell areas for weighted spatial statistics.
+    verbose : bool, default=None
         Enable verbose logging with detailed progress information.
         If None, uses current global logging configuration.
-    quiet : bool, optional
+    quiet : bool, default=None
         Enable quiet logging with minimal output (warnings and errors only).
         If None, uses current global logging configuration.
         Note: quiet takes precedence over verbose if both are True.
@@ -728,29 +719,21 @@ def compute_normalised_anomaly(
     ----------
     da : xarray.DataArray
         Input data with dimensions matching the 'dimensions' parameter
-
-    Method Selection:
-    method_anomaly : str, optional
+    method_anomaly : str, default='detrended_baseline
         Anomaly computation method ('detrended_baseline' or 'shifting_baseline')
-
-    General Parameters:
     dimensions : dict, optional
         Mapping of conceptual dimensions to actual dimension names in the data
     coordinates : dict, optional
         Mapping of conceptual coordinates to actual coordinate names in the data
-
-    Shifting Baseline Method Parameters:
-    window_year_baseline : int, optional
+    window_year_baseline : int, default=15
         Number of years for rolling climatology (shifting_baseline only)
-    smooth_days_baseline : int, optional
+    smooth_days_baseline : int, default=21
         Days for smoothing rolling climatology (shifting_baseline only)
-
-    Detrended Baseline Method Parameters:
-    std_normalise : bool, optional
+    std_normalise : bool, default=False
         Whether to normalise by 30-day rolling standard deviation (detrended_baseline only)
-    detrend_orders : list, optional
+    detrend_orders : list, default=[1]
         Polynomial orders for trend removal (detrended_baseline only)
-    force_zero_mean : bool, optional
+    force_zero_mean : bool, default=True
         Explicitly enforce zero mean in final anomalies (detrended_baseline only)
 
 
@@ -896,32 +879,24 @@ def identify_extremes(
     ----------
     da : xarray.DataArray
         DataArray containing anomalies
-
-    Method Selection:
-    method_extreme : str, optional
+    method_extreme : str, default='global_extreme'
         Method for threshold calculation ('global_extreme' or 'hobday_extreme')
-
-    General Parameters:
-    threshold_percentile : float, optional
+    threshold_percentile : float, default=95
         Percentile threshold (e.g., 95 for 95th percentile)
     dimensions : dict, optional
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Mapping of coordinates to names in the data
-
-    Hobday Extreme Method Parameters:
-    window_days_hobday : int, optional
+    window_days_hobday : int, default=11
         Window for day-of-year threshold (hobday_extreme only)
-    window_spatial_hobday : int, optional
+    window_spatial_hobday : int, default=None
         Window for day-of-year threshold spatial clustering (hobday_extreme only)
-
-    Percentile Computation Parameters:
-    method_percentile : str, optional
+    method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
-    precision : float, optional
-        Precision for histogram bins in approximate method (default: 0.01)
-    max_anomaly : float, optional
-        Maximum anomaly value for histogram binning (default: 5.0)
+    precision : float, default=0.01
+        Precision for histogram bins in approximate method
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for histogram binning
 
     Returns
     -------
@@ -1632,17 +1607,17 @@ def _identify_extremes_hobday(
     da : xarray.DataArray
         Anomaly data with dimensions (time, lat, lon)
         Must be chunked with time dimension unbounded (time: -1)
-    threshold_percentile : float, default 95
+    threshold_percentile : float, default=95
         Percentile to compute (0-100)
-    window_days_hobday : int, default 11
+    window_days_hobday : int, default=11
         Window in days
-    window_spatial_hobday : int, default None
-        Window in cells
-    method_percentile : str, optional
+    window_spatial_hobday : int, default=None
+        Window size in cells
+    method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
-    precision : float, optional
+    precision : float, default=0.01
         Precision for histogram bins in approximate method
-    max_anomaly : float, optional
+    max_anomaly : float, default=5.0
         Maximum anomaly value for histogram binning
 
     Returns:
@@ -1706,7 +1681,7 @@ def _identify_extremes_hobday(
 # ===============================================
 
 
-def add_decimal_year(da: xr.DataArray, dim: str = "time", coord: str = None) -> xr.DataArray:
+def add_decimal_year(da: xr.DataArray, dim: str = "time", coord: Optional[str] = None) -> xr.DataArray:
     """
     Add decimal year coordinate to DataArray for trend analysis.
 
@@ -2013,7 +1988,7 @@ def _compute_histogram_quantile_2d(
     window_days_hobday: int = 11,
     window_spatial_hobday: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
-    dimensions: Dict[str, str] = None,
+    dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
 ) -> xr.DataArray:
@@ -2027,18 +2002,18 @@ def _compute_histogram_quantile_2d(
         Input data array
     q : float
         Quantile to compute (0-1)
-    window_days_hobday : int, optional
-        Rolling window size for day-of-year quantiles (default: 11)
-    window_spatial_hobday : int
-        Spatial window size for day-of-year quantiles (default: None)
+    window_days_hobday : int, default=11
+        Rolling window size for day-of-year quantiles
+    window_spatial_hobday : int, default=None
+        Spatial window size for day-of-year quantiles
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
     dimensions : dict, optional
         Dimension mapping dictionary
-    precision : float, optional
-        Precision for positive anomaly bins (default: 0.01)
-    max_anomaly : float, optional
-        Maximum anomaly value for binning (default: 5.0)
+    precision : float, default=0.01
+        Precision for positive anomaly bins
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for binnin
 
     Returns
     -------
@@ -2146,7 +2121,7 @@ def _compute_histogram_quantile_2d(
     if too_low.any():
         warnings.warn(
             f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
@@ -2180,10 +2155,10 @@ def _compute_histogram_quantile_1d(
         Dimension along which to compute quantile
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
-    precision : float, optional
-        Precision for positive anomaly bins (default: 0.01)
-    max_anomaly : float, optional
-        Maximum anomaly value for binning (default: 5.0)
+    precision : float, default=0.01
+        Precision for positive anomaly bins
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for binning
 
     Returns
     -------
@@ -2277,7 +2252,7 @@ def _compute_histogram_quantile_1d(
     if too_low.any():
         warnings.warn(
             f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). ",
+            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
@@ -2297,7 +2272,7 @@ def _identify_extremes_constant(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     method_percentile: Literal["exact", "approximate"] = "approximate",
-    dimensions: Dict[str, str] = None,
+    dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
 ) -> Tuple[xr.DataArray, xr.DataArray]:

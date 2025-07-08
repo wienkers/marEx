@@ -93,7 +93,7 @@ class PlotConfig:
     quiet: Optional[bool] = None
 
     def __post_init__(self) -> None:
-        """Initialize default values and configure logging."""
+        """Initialise default values and configure logging."""
         if self.cperc is None:
             self.cperc = [4, 96]
         if self.dimensions is None:
@@ -177,7 +177,7 @@ class PlotterBase:
         dimensions: Optional[Dict[str, str]] = None,
         coordinates: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Initialize the plotter with data and coordinate mappings.
+        """Initialise the plotter with data and coordinate mappings.
 
         Args:
             xarray_obj: The data to plot
@@ -427,8 +427,8 @@ class PlotterBase:
 
         # Generate frames using dask for parallel processing
         delayed_tasks = []
-        time_dim = config.dimensions["time"]
-        time_coord = config.coordinates.get("time", time_dim)
+        time_dim = config.dimensions["time"] if config.dimensions else "time"
+        time_coord = config.coordinates.get("time", time_dim) if config.coordinates else time_dim
 
         for time_ind in range(len(self.da[time_dim])):
             data_slice = self.da.isel({time_dim: time_ind})

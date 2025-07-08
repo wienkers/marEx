@@ -5,7 +5,7 @@ MarEx Exception Hierarchy: Error Handling
 This module provides a structured exception hierarchy for the marEx package.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 
 class MarExError(Exception):
@@ -14,9 +14,10 @@ class MarExError(Exception):
 
     This is the root of the MarEx exception hierarchy and provides
     common functionality for all marEx exceptions including:
-    - Structured error context
-    - Exception chaining support
-    - Consistent error formatting
+
+    * Structured error context
+    * Exception chaining support
+    * Consistent error formatting
 
     Parameters
     ----------
@@ -40,6 +41,7 @@ class MarExError(Exception):
         error_code: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         self.message = message
         self.details = details
         self.suggestions = suggestions or []
@@ -81,17 +83,18 @@ class MarExError(Exception):
 
 class DataValidationError(MarExError):
     """
-    Exception raised for input data validation issues.
+    Raise exception for input data validation issues.
 
     This exception covers problems with input data structure, format,
     content, or compatibility with marEx processing requirements.
 
     Common scenarios:
-    - Non-Dask arrays when Dask is required
-    - Missing required coordinates or dimensions
-    - Invalid data types or ranges
-    - Incompatible chunking strategies
-    - Malformed input datasets
+
+    * Non-Dask arrays when Dask is required
+    * Missing required coordinates or dimensions
+    * Invalid data types or ranges
+    * Incompatible chunking strategies
+    * Malformed input datasets
 
     Examples
     --------
@@ -112,23 +115,25 @@ class DataValidationError(MarExError):
         error_code: str = "DATA_VALIDATION",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class CoordinateError(MarExError):
     """
-    Exception raised for coordinate system problems.
+    Raise exception for coordinate system problems.
 
     This exception handles issues with geographic coordinates including
     unit mismatches, invalid ranges, missing coordinate information,
     and coordinate system inconsistencies.
 
     Common scenarios:
-    - Latitude/longitude values outside valid ranges
-    - Unit mismatches (degrees vs radians)
-    - Missing coordinate dimensions
-    - Inconsistent coordinate systems between datasets
-    - Auto-detection failures
+
+    * Latitude/longitude values outside valid ranges
+    * Unit mismatches (degrees vs radians)
+    * Missing coordinate dimensions
+    * Inconsistent coordinate systems between datasets
+    * Auto-detection failures
     """
 
     def __init__(
@@ -139,23 +144,25 @@ class CoordinateError(MarExError):
         error_code: str = "COORDINATE_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class ProcessingError(MarExError):
     """
-    Exception raised for computational and algorithmic issues.
+    Raise exception for computational and algorithmic issues.
 
     This exception covers problems that occur during data processing,
     including numerical computation errors, algorithm convergence issues,
     and memory/performance problems.
 
     Common scenarios:
-    - Insufficient memory for computation
-    - Numerical instability or overflow
-    - Algorithm convergence failures
-    - Chunking strategy problems
-    - Dask computation errors
+
+    * Insufficient memory for computation
+    * Numerical instability or overflow
+    * Algorithm convergence failures
+    * Chunking strategy problems
+    * Dask computation errors
     """
 
     def __init__(
@@ -166,21 +173,23 @@ class ProcessingError(MarExError):
         error_code: str = "PROCESSING_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class ConfigurationError(MarExError):
     """
-    Exception raised for parameter and setup issues.
+    Raise exception for parameter and setup issues.
 
     This exception handles problems with function parameters, configuration
     settings, and setup requirements that prevent proper operation.
 
     Common scenarios:
-    - Invalid parameter values or combinations
-    - Missing required configuration
-    - Incompatible parameter settings
-    - Environment setup issues
+
+    * Invalid parameter values or combinations
+    * Missing required configuration
+    * Incompatible parameter settings
+    * Environment setup issues
 
     Examples
     --------
@@ -201,21 +210,23 @@ class ConfigurationError(MarExError):
         error_code: str = "CONFIGURATION_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class DependencyError(MarExError):
     """
-    Exception raised for missing or incompatible dependencies.
+    Raise exception for missing or incompatible dependencies.
 
     This exception handles issues with optional or required dependencies
     that are missing, incompatible, or incorrectly configured.
 
     Common scenarios:
-    - Missing optional dependencies (JAX, ffmpeg)
-    - Version incompatibilities
-    - Import failures
-    - System dependency issues
+
+    * Missing optional dependencies (JAX, ffmpeg)
+    * Version incompatibilities
+    * Import failures
+    * System dependency issues
 
     Examples
     --------
@@ -237,23 +248,25 @@ class DependencyError(MarExError):
         error_code: str = "DEPENDENCY_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class TrackingError(MarExError):
     """
-    Exception raised for object tracking and identification issues.
+    Raise exception for object tracking and identification issues.
 
     This exception covers problems specific to the tracking module
     including binary object identification, temporal linking,
     and merge/split handling.
 
     Common scenarios:
-    - Invalid binary input data
-    - Tracking parameter conflicts
-    - Temporal continuity issues
-    - Memory overflow during tracking
-    - Checkpoint/resume failures
+
+    * Invalid binary input data
+    * Tracking parameter conflicts
+    * Temporal continuity issues
+    * Memory overflow during tracking
+    * Checkpoint/resume failures
 
     Examples
     --------
@@ -275,23 +288,25 @@ class TrackingError(MarExError):
         error_code: str = "TRACKING_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
 class VisualisationError(MarExError):
     """
-    Exception raised for plotting and visualisation problems.
+    Raise exception for plotting and visualisation problems.
 
     This exception handles issues with the plotX visualisation system
     including matplotlib configuration, cartopy projections,
     and animation generation.
 
     Common scenarios:
-    - Missing plotting dependencies
-    - Cartopy projection issues
-    - Invalid plot configuration
-    - Animation encoding failures
-    - Grid type detection problems
+
+    * Missing plotting dependencies
+    * Cartopy projection issues
+    * Invalid plot configuration
+    * Animation encoding failures
+    * Grid type detection problems
 
     Examples
     --------
@@ -313,6 +328,7 @@ class VisualisationError(MarExError):
         error_code: str = "VISUALISATION_ERROR",
         context: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the Error."""
         super().__init__(message, details, suggestions, error_code, context)
 
 
@@ -321,7 +337,7 @@ class VisualisationError(MarExError):
 
 def create_data_validation_error(message: str, data_info: Optional[Dict[str, Any]] = None, **kwargs) -> DataValidationError:
     """
-    Convenience function to create DataValidationError with common data context.
+    Create DataValidationError with common data context.
 
     Parameters
     ----------
@@ -351,7 +367,7 @@ def create_coordinate_error(
     **kwargs,
 ) -> CoordinateError:
     """
-    Convenience function to create CoordinateError with coordinate context.
+    Create CoordinateError with coordinate context.
 
     Parameters
     ----------
@@ -380,7 +396,7 @@ def create_coordinate_error(
 
 def create_processing_error(message: str, computation_info: Optional[Dict[str, Any]] = None, **kwargs) -> ProcessingError:
     """
-    Convenience function to create ProcessingError with computation context.
+    Create ProcessingError with computation context.
 
     Parameters
     ----------
@@ -404,7 +420,7 @@ def create_processing_error(message: str, computation_info: Optional[Dict[str, A
 
 
 # Exception type mapping for backward compatibility
-EXCEPTION_MAP = {
+EXCEPTION_MAP: Dict[str, Type[MarExError]] = {
     "ValueError": DataValidationError,
     "RuntimeError": ProcessingError,
     "TypeError": DataValidationError,
@@ -418,7 +434,7 @@ EXCEPTION_MAP = {
 def wrap_exception(
     original_exception: Exception,
     message: Optional[str] = None,
-    marex_exception_type: Optional[type] = None,
+    marex_exception_type: Optional[Type[MarExError]] = None,
 ) -> MarExError:
     """
     Wrap a generic exception in an appropriate MarEx exception.

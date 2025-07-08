@@ -1,5 +1,5 @@
 """
-MarEx: Marine Extreme Event Identification, Tracking, and Splitting/Merging Module
+MarEx-Track: Marine Extreme Event Identification, Tracking, and Splitting/Merging Module
 
 MarEx identifies and tracks extreme events in oceanographic data across time,
 supporting both structured (regular grid) and unstructured datasets. It can identify
@@ -7,15 +7,17 @@ discrete objects at single time points and track them as evolving events through
 seamlessly handling splitting and merging.
 
 This package provides algorithms to:
-- Identify binary objects in spatial data at each time step
-- Track these objects across time to form coherent events
-- Handle merging and splitting of objects over time
-- Calculate and maintain object/event properties through time
-- Filter by size criteria to focus on significant events
+
+* Identify binary objects in spatial data at each time step
+* Track these objects across time to form coherent events
+* Handle merging and splitting of objects over time
+* Calculate and maintain object/event properties through time
+* Filter by size criteria to focus on significant events
 
 Key terminology:
-- Object: A connected region in binary data at a single time point
-- Event: One or more objects tracked through time and identified as the same entity
+
+* Object: A connected region in binary data at a single time point
+* Event: One or more objects tracked through time and identified as the same entity
 """
 
 import gc
@@ -52,7 +54,7 @@ logger = get_logger(__name__)
 try:
     import jax.numpy as jnp
 except ImportError:
-    jnp = np  # Alias for jnp
+    jnp = np  # type: ignore[misc]  # Alias for jnp when JAX not available
     warn_missing_dependency("jax", "Some functionality")
 
 
@@ -71,6 +73,7 @@ class tracker:
     evolving events through time.
 
     Main workflow:
+
     1. Preprocessing: Fill spatiotemporal holes, filter small objects
     2. Object identification: Label connected components at each time
     3. Tracking: Determine object correspondences across time
@@ -79,26 +82,36 @@ class tracker:
     Parameters
     ----------
     data_bin : xarray.DataArray
-        Binary data to identify and track objects in (True = object, False = background)
+        Binary field of extreme points to group, label, and track (True = object, False = background)
+        Must represent and underlying `dask` array.
     mask : xarray.DataArray
         Binary mask indicating valid regions (True = valid, False = invalid)
     R_fill : int
-        Radius for filling holes/gaps in spatial domain (in grid cells)
+        The radius of the kernel used in morphological opening & closing, relating to the largest hole/gap that can be filled.
+        In units of grid cells.
     area_filter_quartile : float
-        Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%)
+        The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
+        Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%)
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     T_fill : int, default=2
-        Number of timesteps for filling temporal gaps (must be even)
+        The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
     allow_merging : bool, default=True
-        Allow objects to split and merge across time
+        Allow objects to split and merge across time.
+        Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
+        N.B.: `False` reverts to classical `ndmeasure.label` with simplar time connectivity, i.e. Scannell et al.
     nn_partitioning : bool, default=False
-        Use nearest-neighbor partitioning for merging events
+        Implement a better partitioning of merged child objects based on closest parent cell.
+        `False` reverts to using parent centroids to determine partitioning between new child objects,
+        i.e. Di Sun & Bohai Zhang 2023.
+        N.B.: Centroid-based partitioning has major problems with small merging objects suddenly obtaining unrealistically-large
+        (and often disjoint) fractions of the larger object.
     overlap_threshold : float, default=0.5
-        Minimum fraction of overlap between objects to consider them the same
+        The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event
+        and continue tracking with the same ID.
     unstructured_grid : bool, default=False
         Whether data is on an unstructured grid
-    dimensions : dict, optional
+    dimensions : dict, default={"time": "time", "x": "lon", "y": "lat"}
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Coordinate names for unstructured grids.
@@ -267,7 +280,7 @@ class tracker:
         nn_partitioning: bool = False,
         overlap_threshold: float = 0.5,
         unstructured_grid: bool = False,
-        dimensions: Dict[str, str] = None,
+        dimensions: Optional[Dict[str, str]] = None,
         coordinates: Optional[Dict[str, str]] = None,
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
@@ -311,7 +324,7 @@ class tracker:
         dimensions = dimensions or {}
         self.timedim = dimensions.get("time", "time")
         self.xdim = dimensions.get("x", "lon")
-        self.ydim = dimensions.get("y", "lat")
+        self.ydim: Optional[str] = dimensions.get("y", "lat")
         if unstructured_grid:
             self.timecoord = coordinates["time"] if coordinates and "time" in coordinates else self.timedim
             self.xcoord = coordinates["x"] if coordinates and "x" in coordinates else "lon"
@@ -336,7 +349,14 @@ class tracker:
         self.overlap_threshold = overlap_threshold
         self.lat = data_bin[self.ycoord].persist()
         self.lon = data_bin[self.xcoord].persist()
-        self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
+        if data_bin.chunks is not None:
+            self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
+        else:
+            raise create_data_validation_error(
+                "Data must be chunked",
+                details="The input data_bin must have chunk information",
+                suggestions=["Use data_bin.chunk({'time': 10}) to chunk the data"],
+            )
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # For structured grids, units are pixels
         self.checkpoint = checkpoint
@@ -356,6 +376,24 @@ class tracker:
 
         # Special setup for unstructured grids
         if unstructured_grid:
+            if temp_dir is None:
+                raise create_data_validation_error(
+                    "temp_dir is required for unstructured grids",
+                    details="Unstructured grid processing requires a temporary directory",
+                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
+                )
+            if neighbours is None:
+                raise create_data_validation_error(
+                    "neighbours array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell connectivity information",
+                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
+                )
+            if cell_areas is None:
+                raise create_data_validation_error(
+                    "cell_areas array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell area information",
+                    suggestions=["Provide a cell_areas parameter when using unstructured_grid=True"],
+                )
             self._setup_unstructured_grid(temp_dir, neighbours, cell_areas, max_iteration)
 
         self._configure_warnings()
@@ -742,7 +780,7 @@ class tracker:
             self.data_bin[self.xcoord] = self.data_bin[self.xcoord] * 180.0 / np.pi
             self.data_bin[self.ycoord] = self.data_bin[self.ycoord] * 180.0 / np.pi
 
-    def _remap_coordinates(self, events_ds) -> None:
+    def _remap_coordinates(self, events_ds: xr.Dataset) -> xr.Dataset:
         """Remap coordinates to original lat/lon values after processing.
         Map centroids from lat=[-180,180] back into original lat/lon units & range.
         """
@@ -937,6 +975,7 @@ class tracker:
         Run the complete object identification and tracking pipeline.
 
         This method executes the full workflow:
+
         1. Preprocessing: morphological operations and size filtering
         2. Identification and tracking of objects through time
         3. Computing and attaching statistics to the results
@@ -1025,13 +1064,13 @@ class tracker:
 
         def load_data_from_checkpoint() -> xr.DataArray:
             """Load preprocessed data from checkpoint files."""
-            data_bin_preprocessed = xr.open_zarr(
+            data_bin_preprocessed: xr.DataArray = xr.open_zarr(
                 f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr",
                 chunks={self.timedim: self.timechunks},
             )["data_bin_preproc"]
             return data_bin_preprocessed
 
-        def load_stats_from_checkpoint() -> List[Union[float, int]]:
+        def load_stats_from_checkpoint() -> Tuple[float, int, int, float, float, float]:
             object_stats_npz = np.load(f"{self.scratch_dir}/marEx_checkpoint_stats.npz")
             object_stats = [
                 object_stats_npz[key]
@@ -1044,7 +1083,7 @@ class tracker:
                     "preprocessed_area_fraction",
                 ]
             ]
-            return object_stats
+            return tuple(object_stats)  # type: ignore[return-value]
 
         if checkpoint == "load":
             logger.info("Loading preprocessed data from checkpoint")
@@ -2036,7 +2075,7 @@ class tracker:
                 # Check if we have any valid IDs before stacking
                 if np.any(valid_ids_mask):
                     ids = ids_buffer[valid_ids_mask]
-                    props = props_buffer.stack(combined=("time", "out_id")).isel(combined=valid_ids_mask)
+                    props = props_buffer.stack(combined=(self.timedim, "out_id")).isel(combined=valid_ids_mask)
                 else:
                     # No valid IDs found
                     ids = np.array([], dtype=np.int32)
@@ -2211,8 +2250,8 @@ class tracker:
             Array of object ID pairs that overlap across time, with overlap area
             The object in the first column precedes the second column in time.
             The third column contains:
-                - For structured grid: number of overlapping pixels (int32)
-                - For unstructured grid: total overlapping area in m^2 (float32)
+                * For structured grid: number of overlapping pixels (int32)
+                * For unstructured grid: total overlapping area in m^2 (float32)
         """
         # Check just for overlap with next time slice.
         #  Keep a running list of all object IDs that overlap
@@ -2581,7 +2620,7 @@ class tracker:
             return result
 
         # Process in parallel
-        input_dim = ["ncells"] if self.unstructured_grid else ["z"]
+        input_dim = [self.xdim] if self.unstructured_grid else ["z"]
         global_id_mapping = (
             xr.apply_ufunc(
                 process_timestep,

@@ -189,7 +189,10 @@ def get_cluster_info(client: Client) -> Dict[str, str]:
     """
     # Get hostname and dashboard port
     remote_node = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip().split(".")[0]
-    port = re.search(r":(\d+)/", client.dashboard_link).group(1)
+    port_match = re.search(r":(\d+)/", client.dashboard_link)
+    if port_match is None:
+        raise ValueError(f"Could not extract port from dashboard link: {client.dashboard_link}")
+    port = port_match.group(1)
 
     # Print connection information
     print(f"Hostname: {remote_node}")
@@ -367,7 +370,8 @@ def start_local_cluster(
 
     # Enhanced verbose mode reporting
     if is_verbose_mode():
-        logger.debug(f"Cluster address: {client.cluster.scheduler_address}")
+        if hasattr(client, "cluster") and client.cluster is not None:
+            logger.debug(f"Cluster address: {client.cluster.scheduler_address}")
         logger.debug(f"Dashboard URL: {client.dashboard_link}")
         logger.debug(f"Workers: {list(client.nthreads().keys())}")
         logger.debug(f"Total threads: {sum(client.nthreads().values())}")
@@ -520,9 +524,9 @@ def start_distributed_cluster(
     logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime}h runtime")
 
     if SLURMCluster is None:
-        logger.error("dask_jobqueue not available - cannot create SLURM cluster")
         from ._dependencies import require_dependencies
 
+        logger.error("dask_jobqueue not available - cannot create SLURM cluster")
         require_dependencies(["dask_jobqueue"], "SLURM cluster functionality")
 
     # Configure Dask

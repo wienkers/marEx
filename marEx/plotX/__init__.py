@@ -1,3 +1,25 @@
+"""
+MarEx-PlotX: Marine Extremes Visualisation Module
+
+Comprehensive visualisation module for marine extreme events supporting both
+structured (regular grid) and unstructured oceanographic data.
+Provides automated grid detection and specialised plotting capabilities optimised
+for each data structure type.
+
+Core capabilities:
+
+* Polymorphic plotting with automatic grid type detection
+* Single plot generation with customisable styling and projections
+* Multi-panel plotting for comparative analysis
+* Animation generation for temporal visualisation
+* Memory-efficient handling of large oceanographic datasets
+
+Supported data formats:
+
+* Structured data: 3D arrays (time, lat, lon) for regular rectangular grids
+* Unstructured data: 2D arrays (time, cell) for irregular triangular meshes
+"""
+
 import warnings
 from pathlib import Path
 from typing import Dict, Optional, Union
@@ -58,11 +80,10 @@ def _detect_grid_type(
 
 
 class PlotXAccessor:
-    """
-    Xarray accessor for plotX functionality with support for custom dimensions and coordinates.
-    """
+    """Xarray accessor for plotX functionality with support for custom dimensions and coordinates."""
 
     def __init__(self, xarray_obj: xr.DataArray):
+        """Initialise the PlotXAccessor."""
         self._obj = xarray_obj
 
     def __call__(
@@ -94,7 +115,8 @@ class PlotXAccessor:
                 )
                 warnings.warn(
                     f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
-                    f"based on coordinate structure. Using specified type '{_grid_type}'."
+                    f"based on coordinate structure. Using specified type '{_grid_type}'.",
+                    stacklevel=2,
                 )
             final_type = _grid_type
         else:
@@ -109,7 +131,9 @@ class PlotXAccessor:
         # Set grid path if available for unstructured grids
         if final_type == "unstructured" and _fpath_tgrid is not None and _fpath_ckdtree is not None:
             logger.debug("Setting grid paths for unstructured plotter")
-            plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
+            # Type check to ensure we have an UnstructuredPlotter before calling specify_grid
+            if isinstance(plotter, UnstructuredPlotter):
+                plotter.specify_grid(fpath_tgrid=_fpath_tgrid, fpath_ckdtree=_fpath_ckdtree)
 
         return plotter
 
