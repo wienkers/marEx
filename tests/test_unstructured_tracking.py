@@ -732,7 +732,7 @@ class TestUnstructuredTracking:
     def test_unstructured_grid_requirements(self, dask_client_largemem):
         """Test that unstructured tracking properly validates grid requirements."""
         # Test that tracking fails gracefully without neighbors information
-        with pytest.raises((ValueError, TypeError, AttributeError)):
+        with pytest.raises((ValueError, TypeError, AttributeError, marEx.exceptions.DataValidationError)):
             tracker = marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
@@ -765,7 +765,7 @@ class TestUnstructuredTracking:
             mock_tracker_class.side_effect = side_effect
 
             # Test that tracking fails gracefully without neighbors information
-            with pytest.raises((ValueError, TypeError, AttributeError)):
+            with pytest.raises((ValueError, TypeError, AttributeError, marEx.exceptions.DataValidationError)):
                 tracker = marEx.tracker(
                     self.extremes_data.extreme_events,
                     self.extremes_data.mask,
