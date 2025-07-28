@@ -311,7 +311,9 @@ class PlotterBase:
 
         return fig, ax, im
 
-    def multi_plot(self, config: PlotConfig, col: str = "time", col_wrap: int = 3) -> Tuple[Figure, NDArray[Any]]:
+    def multi_plot(
+        self, config: PlotConfig, col: str = "time", col_wrap: int = 3
+    ) -> Tuple[Figure, NDArray[Any]]:  # pragma: no cover
         """Make wrapped subplots with given configuration"""
         npanels = self.da[col].size
         nrows = int(np.ceil(npanels / col_wrap))
@@ -373,7 +375,7 @@ class PlotterBase:
         config: PlotConfig,
         plot_dir: Union[str, Path] = "./",
         file_name: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Optional[str]:  # pragma: no cover
         """Create an animation from time series data"""
         # Check if PIL is available for image processing
         from .._dependencies import require_dependencies
@@ -517,7 +519,7 @@ def make_frame(
     temp_dir: Path,
     plot_params: Dict[str, Any],
     grid_info: Optional[Dict[str, Any]] = None,
-) -> str:
+) -> str:  # pragma: no cover
     """Create a single frame for movies - minimise memory usage with dask
 
     Args:

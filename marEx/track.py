@@ -515,7 +515,7 @@ class tracker:
                 data_info={"mask_dtype": str(self.mask.data.dtype)},
             )
 
-        if (~self.mask).all():
+        if not self.mask.any().compute().item():
             raise create_data_validation_error(
                 "Mask contains only False values",
                 details="Mask should indicate valid regions with True values",
@@ -1621,7 +1621,11 @@ class tracker:
             cluster_sizes, unique_cluster_IDs = results
 
             # Pre-filter tiny objects for performance
-            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
+            if self.area_filter_quartile < 0.05:
+                # No area filtering, just return the binary data
+                cluster_sizes_filtered_dask = cluster_sizes.data
+            else:
+                cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
             object_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
@@ -4159,7 +4163,7 @@ def wrapped_euclidian_distance_mask_parallel(
     mask_values: NDArray[np.bool_],
     parent_centroids_values: NDArray[np.float64],
     Nx: int,
-) -> NDArray[np.float64]:
+) -> NDArray[np.float64]:  # pragma: no cover
     """
     Optimised function for computing wrapped Euclidean distances.
 
@@ -4218,7 +4222,7 @@ def create_grid_index_arrays(
     grid_size: int,
     ny: int,
     nx: int,
-) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:
+) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:  # pragma: no cover
     """
     Create a grid-based spatial index for efficient point lookup.
 
@@ -4260,7 +4264,9 @@ def create_grid_index_arrays(
 
 
 @jit(nopython=True, fastmath=True)
-def wrapped_euclidian_distance_points(y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float) -> float:
+def wrapped_euclidian_distance_points(
+    y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float
+) -> float:  # pragma: no cover
     """
     Calculate distance with periodic boundary conditions in x dimension.
 
@@ -4299,7 +4305,7 @@ def partition_nn_grid(
     parent_centroids: NDArray[np.float64],
     Nx: int,
     max_distance: int = 20,
-) -> NDArray[np.int32]:
+) -> NDArray[np.int32]:  # pragma: no cover
     """
     Partition a child object based on nearest parent object points.
 
@@ -4441,7 +4447,7 @@ def partition_nn_unstructured(
     lat: NDArray[np.float32],
     lon: NDArray[np.float32],
     max_distance: int = 20,
-) -> NDArray[np.int32]:
+) -> NDArray[np.int32]:  # pragma: no cover
     """
     Partition a child object on an unstructured grid based on nearest parent points.
 
@@ -4569,7 +4575,7 @@ def partition_nn_unstructured_optimised(
     lat: NDArray[np.float32],
     lon: NDArray[np.float32],
     max_distance: int = 20,
-) -> NDArray[np.uint8]:
+) -> NDArray[np.uint8]:  # pragma: no cover
     """
     Memory-optimised nearest neighbor partitioning for unstructured grids.
 
@@ -4678,7 +4684,7 @@ def partition_centroid_unstructured(
     child_ids: NDArray[np.int32],
     lat: NDArray[np.float32],
     lon: NDArray[np.float32],
-) -> NDArray[np.int32]:
+) -> NDArray[np.int32]:  # pragma: no cover
     """
     Partition a child object based on closest parent centroids on an unstructured grid.
 
@@ -4744,7 +4750,7 @@ def sparse_bool_power(
     indices: NDArray[np.int32],
     indptr: NDArray[np.int32],
     exponent: int,
-) -> NDArray[np.bool_]:
+) -> NDArray[np.bool_]:  # pragma: no cover
     """
     Efficient sparse boolean matrix power operation.
 

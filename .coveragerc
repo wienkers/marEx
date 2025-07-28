@@ -1,0 +1,34 @@
+[run]
+source = marEx
+parallel = True
+concurrency = thread,multiprocessing
+sigterm = True
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */site-packages/*
+    */_coverage_init.py
+
+[report]
+show_missing = true
+precision = 2
+exclude_lines =
+    pragma: no cover
+    @jit
+    @njit
+    @numba\.jit
+    @numba\.njit
+    @numba\.vectorize
+    @numba\.guvectorize
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    except ImportError:
+    if 0:
+    if __name__ == .__main__.:
+    class .*\bProtocol\):
+    @(abc\.)?abstractmethod
+
+[html]
+directory = htmlcov

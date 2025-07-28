@@ -1,0 +1,7 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "time",
+        "ncells"
+    ],
+    "coordinates": "lat lon"
+}

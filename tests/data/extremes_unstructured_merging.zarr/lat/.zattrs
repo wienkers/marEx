@@ -1,0 +1,9 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "ncells"
+    ],
+    "bounds": "clat_vertices",
+    "long_name": "center latitude",
+    "standard_name": "grid_latitude",
+    "units": "radian"
+}

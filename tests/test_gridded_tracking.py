@@ -20,7 +20,7 @@ class TestGriddedTracking:
         # Standard chunk size for tracking (spatial dimensions must be contiguous)
         cls.chunk_size = {"time": 2, "lat": -1, "lon": -1}
 
-    def test_basic_tracking(self, dask_client):
+    def test_basic_tracking(self, dask_client_gridded):
         """Test basic tracking without merging/splitting."""
         # Create tracker with basic settings
         tracker = marEx.tracker(
@@ -76,7 +76,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 274, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 24, tolerance=1)
 
-    def test_advanced_tracking_with_merging(self, dask_client):
+    def test_advanced_tracking_with_merging(self, dask_client_gridded):
         """Test advanced tracking with temporal filling and merging enabled."""
         # Create tracker with advanced settings
         tracker = marEx.tracker(
@@ -144,7 +144,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 20, tolerance=1)
         assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 26, tolerance=2)
 
-    def test_tracking_data_consistency(self, dask_client):
+    def test_tracking_data_consistency(self, dask_client_gridded):
         """Test that tracking produces consistent data structures."""
         tracker = marEx.tracker(
             self.extremes_data.extreme_events,
@@ -202,7 +202,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 19, tolerance=1)
         assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 27, tolerance=2)
 
-    def test_different_filtering_parameters(self, dask_client):
+    def test_different_filtering_parameters(self, dask_client_gridded):
         """Test tracking with different area filtering parameters."""
         # Test with no filtering (quartile = 0)
         tracker_no_filter = marEx.tracker(
@@ -259,7 +259,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_high_filter.attrs["N_objects_filtered"], 209, tolerance=2)
         assert_count_in_reasonable_range(tracked_high_filter.attrs["N_events_final"], 21, tolerance=1)
 
-    def test_temporal_gap_filling(self, dask_client):
+    def test_temporal_gap_filling(self, dask_client_gridded):
         """Test that temporal gap filling works correctly."""
         # Test with no gap filling
         tracker_no_gaps = marEx.tracker(
@@ -319,7 +319,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_with_gaps.attrs["N_objects_filtered"], 522, tolerance=2)
         assert_count_in_reasonable_range(tracked_with_gaps.attrs["N_events_final"], 38, tolerance=1)
 
-    def test_custom_dimension_names_tracking(self, dask_client):
+    def test_custom_dimension_names_tracking(self, dask_client_gridded):
         """Test tracking with custom dimension and coordinate names and compare with standard names.
 
         This test validates that:
@@ -584,7 +584,7 @@ class TestGriddedTracking:
             standard_ds[lon_coord_standard].values, custom_ds[lon_coord_custom].values, err_msg="longitude coordinate values differ"
         )
 
-    def test_centroid_tracking_moving_blob(self, dask_client):
+    def test_centroid_tracking_moving_blob(self, dask_client_gridded):
         """Test that centroid tracking correctly follows a steadily moving blob."""
         # Load test data with steadily moving blob
         test_data_path = Path(__file__).parent / "data" / "extremes_gridded_blob.zarr"

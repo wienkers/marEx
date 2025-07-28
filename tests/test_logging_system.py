@@ -210,7 +210,7 @@ class TestTrackerVerbosity:
         assert tracker.R_fill == 2
         assert tracker.area_filter_quartile == 0.5
 
-    def test_tracker_run_verbose(self, sample_data, dask_client):
+    def test_tracker_run_verbose(self, sample_data, dask_client_integration):
         """Test verbose tracker can be initialised and has verbose mode set."""
         # Create binary data
         binary_data = (sample_data > sample_data.mean()).astype(bool)
@@ -282,7 +282,7 @@ class TestClusterLogging:
 class TestIntegration:
     """Integration tests for logging system."""
 
-    def test_end_to_end_workflow_verbose(self, sample_data, dask_client):
+    def test_end_to_end_workflow_verbose(self, sample_data, dask_client_integration):
         """Test preprocessing workflow with verbose logging."""
         set_verbose_mode()
 
@@ -311,7 +311,7 @@ class TestIntegration:
             # Reset logging
             set_normal_logging()
 
-    def test_end_to_end_workflow_quiet(self, sample_data, dask_client):
+    def test_end_to_end_workflow_quiet(self, sample_data, dask_client_integration):
         """Test preprocessing workflow with quiet logging."""
         set_quiet_mode()
 

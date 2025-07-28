@@ -200,25 +200,25 @@ jobs:
         echo "distributed:" > ~/.dask/config.yaml
         echo "  worker:" >> ~/.dask/config.yaml
         echo "    memory:" >> ~/.dask/config.yaml
-        echo "      target: 0.4" >> ~/.dask/config.yaml
-        echo "      spill: 0.5" >> ~/.dask/config.yaml
-        echo "      pause: 0.6" >> ~/.dask/config.yaml
+        echo "      target: 0.5" >> ~/.dask/config.yaml
+        echo "      spill: 0.6" >> ~/.dask/config.yaml
+        echo "      pause: 0.7" >> ~/.dask/config.yaml
         echo "      terminate: 0.8" >> ~/.dask/config.yaml
-        echo "      recent-to-old-time: 10s" >> ~/.dask/config.yaml
+        echo "      recent-to-old-time: 15s" >> ~/.dask/config.yaml
         echo "    daemon: false" >> ~/.dask/config.yaml
         echo "  scheduler:" >> ~/.dask/config.yaml
-        echo "    allowed-failures: 50" >> ~/.dask/config.yaml
+        echo "    allowed-failures: 100" >> ~/.dask/config.yaml
         echo "    work-stealing: false" >> ~/.dask/config.yaml
         echo "    worker-ttl: 600s" >> ~/.dask/config.yaml
         echo "  comm:" >> ~/.dask/config.yaml
         echo "    timeouts:" >> ~/.dask/config.yaml
-        echo "      connect: 300s" >> ~/.dask/config.yaml
-        echo "      tcp: 300s" >> ~/.dask/config.yaml
+        echo "      connect: 600s" >> ~/.dask/config.yaml
+        echo "      tcp: 600s" >> ~/.dask/config.yaml
         echo "    retry:" >> ~/.dask/config.yaml
-        echo "      count: 15" >> ~/.dask/config.yaml
+        echo "      count: 20" >> ~/.dask/config.yaml
         echo "      delay:" >> ~/.dask/config.yaml
         echo "        min: 3s" >> ~/.dask/config.yaml
-        echo "        max: 30s" >> ~/.dask/config.yaml
+        echo "        max: 60s" >> ~/.dask/config.yaml
         echo "  admin:" >> ~/.dask/config.yaml
         echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
         echo "array:" >> ~/.dask/config.yaml
@@ -233,11 +233,15 @@ jobs:
         echo "MKL_NUM_THREADS=1" >> $GITHUB_ENV
         echo "NUMBA_NUM_THREADS=1" >> $GITHUB_ENV
         echo "PYTHONHASHSEED=42" >> $GITHUB_ENV
+        echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
 
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ --tb=short -m "not nocov"  -x --maxfail=3
+        # Run with parallel mode and multiprocessing support
+        coverage run --parallel-mode -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Combine all coverage data files from subprocesses
+        coverage combine
         coverage report -m
         coverage html
         coverage xml
@@ -255,7 +259,7 @@ jobs:
       with:
         name: coverage-report
         path: htmlcov/
-        retention-days: 30
+        retention-days: 90
 
 
   build-test:

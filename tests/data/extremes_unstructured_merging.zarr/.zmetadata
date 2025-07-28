@@ -1,0 +1,306 @@
+{
+    "metadata": {
+        ".zattrs": {
+            "detrend_orders": [
+                1
+            ],
+            "exact_percentile": false,
+            "force_zero_mean": true,
+            "method_anomaly": "detrended_baseline",
+            "method_extreme": "global_extreme",
+            "preprocessing_steps": [
+                "Removed polynomial trend orders=[1] & seasonal cycle",
+                "Global percentile threshold applied to all days"
+            ],
+            "std_normalise": false,
+            "threshold_percentile": 95
+        },
+        ".zgroup": {
+            "zarr_format": 2
+        },
+        "cell_areas/.zarray": {
+            "chunks": [
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                405
+            ],
+            "zarr_format": 2
+        },
+        "cell_areas/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "ncells"
+            ],
+            "coordinates": "lat lon",
+            "grid_type": "unstructured",
+            "long_name": "area of grid cell",
+            "number_of_grid_in_reference": 1,
+            "standard_name": "area",
+            "units": "m2"
+        },
+        "dat_anomaly/.zarray": {
+            "chunks": [
+                100,
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                100,
+                405
+            ],
+            "zarr_format": 2
+        },
+        "dat_anomaly/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time",
+                "ncells"
+            ],
+            "coordinates": "lat lon"
+        },
+        "extreme_events/.zarray": {
+            "chunks": [
+                100,
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "|i1",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                100,
+                405
+            ],
+            "zarr_format": 2
+        },
+        "extreme_events/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time",
+                "ncells"
+            ],
+            "coordinates": "lat lon",
+            "dtype": "bool"
+        },
+        "lat/.zarray": {
+            "chunks": [
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                405
+            ],
+            "zarr_format": 2
+        },
+        "lat/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "ncells"
+            ],
+            "bounds": "clat_vertices",
+            "long_name": "center latitude",
+            "standard_name": "grid_latitude",
+            "units": "radian"
+        },
+        "lon/.zarray": {
+            "chunks": [
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                405
+            ],
+            "zarr_format": 2
+        },
+        "lon/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "ncells"
+            ],
+            "bounds": "clon_vertices",
+            "long_name": "center longitude",
+            "standard_name": "grid_longitude",
+            "units": "radian"
+        },
+        "mask/.zarray": {
+            "chunks": [
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "|i1",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                405
+            ],
+            "zarr_format": 2
+        },
+        "mask/.zattrs": {
+            "CDI_grid_type": "unstructured",
+            "_ARRAY_DIMENSIONS": [
+                "ncells"
+            ],
+            "coordinates": "lat lon",
+            "dtype": "bool",
+            "long_name": "sea water potential temperature",
+            "number_of_grid_in_reference": 1,
+            "param": "18.4.10",
+            "standard_name": "sea_water_potential_temperature",
+            "units": "C"
+        },
+        "neighbours/.zarray": {
+            "chunks": [
+                3,
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<i4",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                3,
+                405
+            ],
+            "zarr_format": 2
+        },
+        "neighbours/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "nv",
+                "ncells"
+            ],
+            "coordinates": "lat lon"
+        },
+        "nv/.zarray": {
+            "chunks": [
+                3
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<i8",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                3
+            ],
+            "zarr_format": 2
+        },
+        "nv/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "nv"
+            ]
+        },
+        "thresholds/.zarray": {
+            "chunks": [
+                405
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                405
+            ],
+            "zarr_format": 2
+        },
+        "thresholds/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "ncells"
+            ],
+            "coordinates": "lat lon"
+        },
+        "time/.zarray": {
+            "chunks": [
+                18262
+            ],
+            "compressor": null,
+            "dtype": "<f8",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                100
+            ],
+            "zarr_format": 2
+        },
+        "time/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time"
+            ],
+            "calendar": "gregorian",
+            "standard_name": "time",
+            "units": "minutes since 1950-01-01"
+        }
+    },
+    "zarr_consolidated_format": 1
+}

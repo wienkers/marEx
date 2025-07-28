@@ -7,3 +7,6 @@ dist/
 build/
 *.egg-info/
 *.egg
+
+# Environment variables
+.env
