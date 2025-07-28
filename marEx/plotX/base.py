@@ -427,8 +427,8 @@ class PlotterBase:
 
         # Generate frames using dask for parallel processing
         delayed_tasks = []
-        time_dim = config.dimensions["time"]
-        time_coord = config.coordinates.get("time", time_dim)
+        time_dim = config.dimensions["time"] if config.dimensions else "time"
+        time_coord = config.coordinates.get("time", time_dim) if config.coordinates else time_dim
 
         for time_ind in range(len(self.da[time_dim])):
             data_slice = self.da.isel({time_dim: time_ind})

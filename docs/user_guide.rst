@@ -190,21 +190,21 @@ The preprocessing step transforms raw oceanographic data into anomalies and dete
        dask_chunks={'time': 25}
    )
 
-The resulting xarray dataset ``extremes`` will have the following structure & entries:
-```
-xarray.Dataset
-Dimensions:     (lat, lon, time)
-Coordinates:
-    lat         (lat)
-    lon         (lon)
-    time        (time)
-Data variables:
-    dat_anomaly     (time, lat, lon)        float64     dask.array
-    mask            (lat, lon)              bool        dask.array
-    extreme_events  (time, lat, lon)        bool        dask.array
-    thresholds      (dayofyear, lat, lon)   float64     dask.array
-```
-where
+The resulting xarray dataset ``extremes`` will have the following structure & entries::
+
+   xarray.Dataset
+   Dimensions:     (lat, lon, time)
+   Coordinates:
+       lat         (lat)
+       lon         (lon)
+       time        (time)
+   Data variables:
+       dat_anomaly     (time, lat, lon)        float64     dask.array
+       mask            (lat, lon)              bool        dask.array
+       extreme_events  (time, lat, lon)        bool        dask.array
+       thresholds      (dayofyear, lat, lon)   float64     dask.array
+where:
+
 * ``dat_anomaly`` (time, lat, lon): Anomaly data
 * ``extreme_events`` (time, lat, lon): Binary field locating extreme events (1=event, 0=background)
 * ``thresholds`` (dayofyear, lat, lon): Extreme event thresholds used to determine extreme events
@@ -253,27 +253,26 @@ The tracking step identifies coherent extreme events and follows them through ti
    # Run tracking and return merging data
    tracked_events, merge_events = tracker.run(return_merges=True)
 
-The resulting xarray dataset ``tracked_events`` will have the following structure & entries:
-```
-xarray.Dataset
-Dimensions: (lat, lon, time, ID, component, sibling_ID)
-Coordinates:
-    lat         (lat)
-    lon         (lon)
-    time        (time)
-    ID          (ID)
-Data variables:
-    ID_field              (time, lat, lon)        int32       dask.array
-    global_ID             (time, ID)              int32       ndarray
-    area                  (time, ID)              float32     ndarray
-    centroid              (component, time, ID)   float32     ndarray
-    presence              (time, ID)              bool        ndarray
-    time_start            (ID)                    datetime64  ndarray
-    time_end              (ID)                    datetime64  ndarray
-    merge_ledger          (time, ID, sibling_ID)  int32       ndarray
+The resulting xarray dataset ``tracked_events`` will have the following structure & entries::
 
-```
-where
+   xarray.Dataset
+   Dimensions: (lat, lon, time, ID, component, sibling_ID)
+   Coordinates:
+       lat         (lat)
+       lon         (lon)
+       time        (time)
+       ID          (ID)
+   Data variables:
+       ID_field              (time, lat, lon)        int32       dask.array
+       global_ID             (time, ID)              int32       ndarray
+       area                  (time, ID)              float32     ndarray
+       centroid              (component, time, ID)   float32     ndarray
+       presence              (time, ID)              bool        ndarray
+       time_start            (ID)                    datetime64  ndarray
+       time_end              (ID)                    datetime64  ndarray
+       merge_ledger          (time, ID, sibling_ID)  int32       ndarray
+where:
+
 * ``ID_field``: Field containing the IDs of tracked events (0=background)
 * ``global_ID``: Unique global ID of each object; ``global_ID.sel(ID=10)`` maps event ID 10 to its original ID at each time
 * ``area``: Area of each event as a function of time
@@ -283,19 +282,19 @@ where
 * ``time_end``: End time of each event
 * ``merge_ledger``: Sibling IDs for merging events (matching ``ID_field``); ``-1`` indicates no merging event occurred
 
-When running with ``return_merges=True``, the resulting xarray dataset ``merge_events`` will have the following structure & entries:
-```
-xarray.Dataset
-Dimensions: (merge_ID, parent_idx, child_idx)
-Data variables:
-    parent_IDs      (merge_ID, parent_idx)  int32       ndarray
-    child_IDs       (merge_ID, child_idx)   int32       ndarray
-    overlap_areas   (merge_ID, parent_idx)  int32       ndarray
-    merge_time      (merge_ID)              datetime64  ndarray
-    n_parents       (merge_ID)              int8        ndarray
-    n_children      (merge_ID)              int8        ndarray
-```
-where
+When running with ``return_merges=True``, the resulting xarray dataset ``merge_events`` will have the following structure & entries::
+
+   xarray.Dataset
+   Dimensions: (merge_ID, parent_idx, child_idx)
+   Data variables:
+       parent_IDs      (merge_ID, parent_idx)  int32       ndarray
+       child_IDs       (merge_ID, child_idx)   int32       ndarray
+       overlap_areas   (merge_ID, parent_idx)  int32       ndarray
+       merge_time      (merge_ID)              datetime64  ndarray
+       n_parents       (merge_ID)              int8        ndarray
+       n_children      (merge_ID)              int8        ndarray
+where:
+
 * ``parent_IDs``: Original parent IDs of each merging event
 * ``child_IDs``: Original child IDs of each merging event
 * ``overlap_areas``: Area of overlap between parent and child objects in each merging event
@@ -566,4 +565,4 @@ When using marEx in publications, please cite:
 * **marEx package**
 * **Marine heatwave methods**: Hobday et al. (2016) for standard MHW definition
 
-For more detailed examples and advanced usage, see the tutorial notebooks in :doc:`tutorials/index`.
+For more detailed examples and advanced usage, see the :doc:`examples/index`.

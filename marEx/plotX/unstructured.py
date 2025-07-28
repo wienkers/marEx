@@ -1,3 +1,10 @@
+"""
+Unstructured data visualisation module for irregular meshes.
+
+Provides specialised plotting capabilities for irregular oceanographic data
+on triangular grids (2D arrays: time, cell) with triangulation support.
+"""
+
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -107,19 +114,11 @@ def _load_ckdtree(fpath_ckdtree: Union[str, Path], res: float) -> Dict[str, NDAr
 
 
 class UnstructuredPlotter(PlotterBase):
-    def __init__(
-        self,
-        xarray_obj: xr.DataArray,
-        dimensions: Optional[Dict[str, str]] = None,
-        coordinates: Optional[Dict[str, str]] = None,
-    ) -> None:
-        # Set default dimensions and coordinates for unstructured data if not provided
-        if dimensions is None:
-            dimensions = {"time": "time", "x": "ncells"}
-        if coordinates is None:
-            coordinates = {"time": "time", "x": "lon", "y": "lat"}
+    """Plotter for unstructured oceanographic data on triangular meshes."""
 
-        super().__init__(xarray_obj, dimensions, coordinates)
+    def __init__(self, xarray_obj: xr.DataArray) -> None:
+        """Initialise UnstructuredPlotter."""
+        super().__init__(xarray_obj)
 
         from . import _fpath_ckdtree, _fpath_tgrid
 
@@ -143,15 +142,9 @@ class UnstructuredPlotter(PlotterBase):
         norm: Optional[Union[BoundaryNorm, Normalize]] = None,
     ) -> Tuple[Axes, Union[TriMesh, QuadMesh]]:
         """Implement plotting for unstructured data."""
-        # Handle case where data might have time dimension
-        data = self.da
-        time_dim = self.dimensions.get("time", "time")
-        if time_dim in data.dims and len(data[time_dim]) == 1:
-            data = data.squeeze(dim=time_dim)
-
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
-            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(data.values, res=0.3)
+            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=0.3)
 
             plot_kwargs = {
                 "transform": ccrs.PlateCarree(),
@@ -193,7 +186,7 @@ class UnstructuredPlotter(PlotterBase):
                 plot_kwargs["vmax"] = clim[1]
 
             # Mask NaNs
-            native_data = data.copy()
+            native_data = self.da.copy()
             native_data = np.ma.masked_invalid(native_data)
 
             im = ax.tripcolor(triang, native_data, **plot_kwargs)

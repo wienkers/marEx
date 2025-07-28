@@ -99,9 +99,7 @@ System Requirements
 ===================
 
 **Python Version**: 3.10 or higher
-
 **Operating Systems**: Linux, macOS, Windows
-
 **Storage**: SSD or Lustre system recommended for optimal I/O performance
 
 Performance Dependencies

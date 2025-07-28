@@ -128,7 +128,7 @@ def _validate_coordinates_exist(da: xr.DataArray, coordinates: Dict[str, str]) -
 
 
 def _infer_dims_coords(
-    da: xr.DataArray, dimensions: Dict[str, str], coordinates: Optional[Dict[str, str]]
+    da: xr.DataArray, dimensions: Optional[Dict[str, str]], coordinates: Optional[Dict[str, str]]
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Determine full set of dimensions and coordinates for the DataArray.
@@ -238,7 +238,7 @@ def preprocess_data(
 
     * 'detrended_baseline': Detrending with harmonics and polynomials -- more efficient, but biases statistics
     * 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct",
-    but shortens time series by window_year_baseline years
+      but shortens time series by window_year_baseline years
 
     Extreme Methods:
 
@@ -1681,7 +1681,7 @@ def _identify_extremes_hobday(
 # ===============================================
 
 
-def add_decimal_year(da: xr.DataArray, dim: str = "time", coord: str = None) -> xr.DataArray:
+def add_decimal_year(da: xr.DataArray, dim: str = "time", coord: Optional[str] = None) -> xr.DataArray:
     """
     Add decimal year coordinate to DataArray for trend analysis.
 
@@ -1988,7 +1988,7 @@ def _compute_histogram_quantile_2d(
     window_days_hobday: int = 11,
     window_spatial_hobday: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
-    dimensions: Dict[str, str] = None,
+    dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
 ) -> xr.DataArray:
@@ -2272,7 +2272,7 @@ def _identify_extremes_constant(
     da: xr.DataArray,
     threshold_percentile: float = 95,
     method_percentile: Literal["exact", "approximate"] = "approximate",
-    dimensions: Dict[str, str] = None,
+    dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
 ) -> Tuple[xr.DataArray, xr.DataArray]:

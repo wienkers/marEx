@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 try:
     import jax.numpy as jnp
 except ImportError:
-    jnp = np  # Alias for jnp
+    jnp = np  # type: ignore[misc]  # Alias for jnp when JAX not available
     warn_missing_dependency("jax", "Some functionality")
 
 
@@ -280,7 +280,7 @@ class tracker:
         nn_partitioning: bool = False,
         overlap_threshold: float = 0.5,
         unstructured_grid: bool = False,
-        dimensions: Dict[str, str] = None,
+        dimensions: Optional[Dict[str, str]] = None,
         coordinates: Optional[Dict[str, str]] = None,
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
@@ -324,7 +324,7 @@ class tracker:
         dimensions = dimensions or {}
         self.timedim = dimensions.get("time", "time")
         self.xdim = dimensions.get("x", "lon")
-        self.ydim = dimensions.get("y", "lat")
+        self.ydim: Optional[str] = dimensions.get("y", "lat")
         if unstructured_grid:
             self.timecoord = coordinates["time"] if coordinates and "time" in coordinates else self.timedim
             self.xcoord = coordinates["x"] if coordinates and "x" in coordinates else "lon"
@@ -349,7 +349,14 @@ class tracker:
         self.overlap_threshold = overlap_threshold
         self.lat = data_bin[self.ycoord].persist()
         self.lon = data_bin[self.xcoord].persist()
-        self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
+        if data_bin.chunks is not None:
+            self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
+        else:
+            raise create_data_validation_error(
+                "Data must be chunked",
+                details="The input data_bin must have chunk information",
+                suggestions=["Use data_bin.chunk({'time': 10}) to chunk the data"],
+            )
         self.unstructured_grid = unstructured_grid
         self.mean_cell_area = 1.0  # For structured grids, units are pixels
         self.checkpoint = checkpoint
@@ -369,6 +376,24 @@ class tracker:
 
         # Special setup for unstructured grids
         if unstructured_grid:
+            if temp_dir is None:
+                raise create_data_validation_error(
+                    "temp_dir is required for unstructured grids",
+                    details="Unstructured grid processing requires a temporary directory",
+                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
+                )
+            if neighbours is None:
+                raise create_data_validation_error(
+                    "neighbours array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell connectivity information",
+                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
+                )
+            if cell_areas is None:
+                raise create_data_validation_error(
+                    "cell_areas array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell area information",
+                    suggestions=["Provide a cell_areas parameter when using unstructured_grid=True"],
+                )
             self._setup_unstructured_grid(temp_dir, neighbours, cell_areas, max_iteration)
 
         self._configure_warnings()
@@ -755,7 +780,7 @@ class tracker:
             self.data_bin[self.xcoord] = self.data_bin[self.xcoord] * 180.0 / np.pi
             self.data_bin[self.ycoord] = self.data_bin[self.ycoord] * 180.0 / np.pi
 
-    def _remap_coordinates(self, events_ds) -> None:
+    def _remap_coordinates(self, events_ds: xr.Dataset) -> xr.Dataset:
         """Remap coordinates to original lat/lon values after processing.
         Map centroids from lat=[-180,180] back into original lat/lon units & range.
         """
@@ -1039,13 +1064,13 @@ class tracker:
 
         def load_data_from_checkpoint() -> xr.DataArray:
             """Load preprocessed data from checkpoint files."""
-            data_bin_preprocessed = xr.open_zarr(
+            data_bin_preprocessed: xr.DataArray = xr.open_zarr(
                 f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr",
                 chunks={self.timedim: self.timechunks},
             )["data_bin_preproc"]
             return data_bin_preprocessed
 
-        def load_stats_from_checkpoint() -> List[Union[float, int]]:
+        def load_stats_from_checkpoint() -> Tuple[float, int, int, float, float, float]:
             object_stats_npz = np.load(f"{self.scratch_dir}/marEx_checkpoint_stats.npz")
             object_stats = [
                 object_stats_npz[key]
@@ -1058,7 +1083,7 @@ class tracker:
                     "preprocessed_area_fraction",
                 ]
             ]
-            return object_stats
+            return tuple(object_stats)  # type: ignore[return-value]
 
         if checkpoint == "load":
             logger.info("Loading preprocessed data from checkpoint")

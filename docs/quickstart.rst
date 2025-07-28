@@ -11,7 +11,7 @@ Here's a simple example to detect and track marine heatwaves:
 
 Pre-process SST Data
 --------------------
-*cf. ``01_preprocess_extremes.ipynb``*
+*cf.* ``01_preprocess_extremes.ipynb``
 
 .. code-block:: python
 
@@ -46,7 +46,7 @@ Pre-process SST Data
 
 Identify & Track Marine Heatwaves
 ---------------------------------
-*cf. ``02_id_track_events.ipynb``*
+*cf.* ``02_id_track_events.ipynb``
 
 .. code-block:: python
 
@@ -92,7 +92,7 @@ Identify & Track Marine Heatwaves
 
 Visualise Results
 -----------------
-*cf. ``03_visualise_events.ipynb``*
+*cf.* ``03_visualise_events.ipynb``
 
 .. code-block:: python
 
