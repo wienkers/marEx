@@ -19,7 +19,7 @@ For research environments with comprehensive analysis workflows and maximum func
 HPC Installation (Supercomputing Environments)
 ----------------------------------------------
 
-For deployment on SLURM clusters, cloud computing, or multi-node processing:
+For deployment on SLURM clusters, cloud computing, or multi-node processing scaling to 1000+ cores with optimised memory management:
 
 .. code-block:: bash
 

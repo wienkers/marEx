@@ -2,7 +2,7 @@
 API Reference
 =============
 
-This page provides a comprehensive reference for all public functions, classes, and modules in marEx.
+This page provides a comprehensive reference for all public functions, classes, and modules in ``marEx``.
 
 Main Package
 ============

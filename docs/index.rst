@@ -67,29 +67,24 @@ Here's a simple example of detecting and tracking marine heatwaves:
    import marEx
 
    # Load your sea surface temperature data
-   sst = xr.open_dataset('sst_data.nc').sst
+   sst = xr.open_dataset('sst_data.nc', chunks={}).sst
 
    # Preprocess data to identify extreme events
    extreme_events_ds = marEx.preprocess_data(
        sst,
-       threshold_percentile=95,
-       method_anomaly='detrended_baseline',
-       method_extreme='global_extreme'
+       threshold_percentile=95
    )
 
    # Track events through time
-   tracker = marEx.tracker(
+   events_ds = marEx.tracker(
        extreme_events_ds.extreme_events,
        extreme_events_ds.mask,
        R_fill=8,
        area_filter_quartile=0.5
-   )
-
-   # Run tracking algorithm
-   events_ds = tracker.run()
+   ).run()
 
    # Visualise results
-   fig, ax, im = (tracked_events.ID_field > 0).mean("time").plotX.single_plot(marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96]))
+   fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96]))
 
 Core Architecture
 =================

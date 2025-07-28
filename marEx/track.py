@@ -1,5 +1,5 @@
 """
-MarEx: Marine Extreme Event Identification, Tracking, and Splitting/Merging Module
+MarEx-Track: Marine Extreme Event Identification, Tracking, and Splitting/Merging Module
 
 MarEx identifies and tracks extreme events in oceanographic data across time,
 supporting both structured (regular grid) and unstructured datasets. It can identify
@@ -7,15 +7,17 @@ discrete objects at single time points and track them as evolving events through
 seamlessly handling splitting and merging.
 
 This package provides algorithms to:
-- Identify binary objects in spatial data at each time step
-- Track these objects across time to form coherent events
-- Handle merging and splitting of objects over time
-- Calculate and maintain object/event properties through time
-- Filter by size criteria to focus on significant events
+
+* Identify binary objects in spatial data at each time step
+* Track these objects across time to form coherent events
+* Handle merging and splitting of objects over time
+* Calculate and maintain object/event properties through time
+* Filter by size criteria to focus on significant events
 
 Key terminology:
-- Object: A connected region in binary data at a single time point
-- Event: One or more objects tracked through time and identified as the same entity
+
+* Object: A connected region in binary data at a single time point
+* Event: One or more objects tracked through time and identified as the same entity
 """
 
 import gc
@@ -71,6 +73,7 @@ class tracker:
     evolving events through time.
 
     Main workflow:
+
     1. Preprocessing: Fill spatiotemporal holes, filter small objects
     2. Object identification: Label connected components at each time
     3. Tracking: Determine object correspondences across time
@@ -79,26 +82,36 @@ class tracker:
     Parameters
     ----------
     data_bin : xarray.DataArray
-        Binary data to identify and track objects in (True = object, False = background)
+        Binary field of extreme points to group, label, and track (True = object, False = background)
+        Must represent and underlying `dask` array.
     mask : xarray.DataArray
         Binary mask indicating valid regions (True = valid, False = invalid)
     R_fill : int
-        Radius for filling holes/gaps in spatial domain (in grid cells)
+        The radius of the kernel used in morphological opening & closing, relating to the largest hole/gap that can be filled.
+        In units of grid cells.
     area_filter_quartile : float
-        Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%)
+        The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
+        Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%)
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     T_fill : int, default=2
-        Number of timesteps for filling temporal gaps (must be even)
+        The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
     allow_merging : bool, default=True
-        Allow objects to split and merge across time
+        Allow objects to split and merge across time.
+        Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
+        N.B.: `False` reverts to classical `ndmeasure.label` with simplar time connectivity, i.e. Scannell et al.
     nn_partitioning : bool, default=False
-        Use nearest-neighbor partitioning for merging events
+        Implement a better partitioning of merged child objects based on closest parent cell.
+        `False` reverts to using parent centroids to determine partitioning between new child objects,
+        i.e. Di Sun & Bohai Zhang 2023.
+        N.B.: Centroid-based partitioning has major problems with small merging objects suddenly obtaining unrealistically-large
+        (and often disjoint) fractions of the larger object.
     overlap_threshold : float, default=0.5
-        Minimum fraction of overlap between objects to consider them the same
+        The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event
+        and continue tracking with the same ID.
     unstructured_grid : bool, default=False
         Whether data is on an unstructured grid
-    dimensions : dict, optional
+    dimensions : dict, default={"time": "time", "x": "lon", "y": "lat"}
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Coordinate names for unstructured grids.
@@ -937,6 +950,7 @@ class tracker:
         Run the complete object identification and tracking pipeline.
 
         This method executes the full workflow:
+
         1. Preprocessing: morphological operations and size filtering
         2. Identification and tracking of objects through time
         3. Computing and attaching statistics to the results
@@ -2211,8 +2225,8 @@ class tracker:
             Array of object ID pairs that overlap across time, with overlap area
             The object in the first column precedes the second column in time.
             The third column contains:
-                - For structured grid: number of overlapping pixels (int32)
-                - For unstructured grid: total overlapping area in m^2 (float32)
+                * For structured grid: number of overlapping pixels (int32)
+                * For unstructured grid: total overlapping area in m^2 (float32)
         """
         # Check just for overlap with next time slice.
         #  Keep a running list of all object IDs that overlap

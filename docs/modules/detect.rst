@@ -557,9 +557,7 @@ Method Selection Guidelines
 ---------------------------
 
 1. **Exploratory Analysis**: Use ``detrended_baseline`` + ``global_extreme``
-2. **Research Applications**: Use ``shifting_baseline`` + ``hobday_extreme``
-3. **Operational Monitoring**: Use ``shifting_baseline`` + ``global_extreme``
-4. **Climate Change Studies**: Use ``shifting_baseline`` + ``hobday_extreme``
+2. **Climate Change Research Studies**: Use ``shifting_baseline`` + ``hobday_extreme``
 
 Chunking Guidelines
 -------------------

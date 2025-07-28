@@ -152,7 +152,7 @@ The marEx workflow consists of three main steps:
 Step 1: Preprocessing
 ---------------------
 
-The preprocessing step transforms raw oceanographic data into anomalies and identifies extreme events.
+The preprocessing step transforms raw oceanographic data into anomalies and detects extreme event locations.
 
 **Basic preprocessing:**
 
@@ -161,7 +161,7 @@ The preprocessing step transforms raw oceanographic data into anomalies and iden
    import marEx
 
    # Basic preprocessing with default settings
-   processed = marEx.preprocess_data(
+   extremes = marEx.preprocess_data(
        sst,
        threshold_percentile=95,
        method_anomaly='detrended_baseline',
@@ -173,7 +173,7 @@ The preprocessing step transforms raw oceanographic data into anomalies and iden
 .. code-block:: python
 
    # Advanced preprocessing configuration
-   processed = marEx.preprocess_data(
+   extremes = marEx.preprocess_data(
        sst,
        # Anomaly computation method
        method_anomaly='shifting_baseline',  # or 'detrended_baseline'
@@ -190,12 +190,27 @@ The preprocessing step transforms raw oceanographic data into anomalies and iden
        dask_chunks={'time': 25}
    )
 
-**Output variables:**
+The resulting xarray dataset ``extremes`` will have the following structure & entries:
+```
+xarray.Dataset
+Dimensions:     (lat, lon, time)
+Coordinates:
+    lat         (lat)
+    lon         (lon)
+    time        (time)
+Data variables:
+    dat_anomaly     (time, lat, lon)        float64     dask.array
+    mask            (lat, lon)              bool        dask.array
+    extreme_events  (time, lat, lon)        bool        dask.array
+    thresholds      (dayofyear, lat, lon)   float64     dask.array
+```
+where
+* ``dat_anomaly`` (time, lat, lon): Anomaly data
+* ``extreme_events`` (time, lat, lon): Binary field locating extreme events (1=event, 0=background)
+* ``thresholds`` (dayofyear, lat, lon): Extreme event thresholds used to determine extreme events
+* ``mask`` (lat, lon): Valid data mask
 
-* ``dat_anomaly``: Anomaly data
-* ``extreme_events``: Binary extreme events
-* ``thresholds``: Extreme event threshold
-* ``mask``: Valid data mask
+See, e.g. ``./examples/unstructured data/01_preprocess_extremes.ipynb`` for a detailed example of pre-processing on an *unstructured* grid.
 
 Step 2: Event Tracking
 ----------------------
@@ -206,28 +221,24 @@ The tracking step identifies coherent extreme events and follows them through ti
 
 .. code-block:: python
 
-   # Initialise tracker
-   tracker = marEx.tracker(
-       processed.extreme_events,
-       processed.mask,
+   tracked_events = marEx.tracker(
+       extremes.extreme_events,
+       extremes.mask,
        area_filter_quartile=0.5,  # Filter small events
        R_fill=8,                  # Radius for filling gaps (in grid cells)
-   )
-
-   # Run tracking
-   tracked_events = tracker.run()
+   ).run()
 
 **Advanced tracking options:**
 
 .. code-block:: python
 
-   # Advanced tracking configuration
+   # Initialise advanced tracker
    tracker = marEx.tracker(
-       processed.extreme_events,
-       processed.mask,
+       extremes.extreme_events,
+       extremes.mask,
 
        # Temporal criteria
-       T_fill=4,                    # Fill gaps up to 4 days (to keep continuous events)
+       T_fill=4,                    # Fill gaps up to 4 days (to maintain continuous events)
 
        # Spatial criteria
        R_fill=8,                    # Fill small holes with radius up to 8 grid cells
@@ -235,23 +246,64 @@ The tracking step identifies coherent extreme events and follows them through ti
 
        # Merging criteria
        allow_merging=True,          # Allow merging of events (and keep track of merged IDs & events)
-       overlap_threshold=0.5,       # 50% overlap for merging
-       nn_partitioning=True,        # Use nearest neighbour partitioning when splitting events
+       overlap_threshold=0.5,       # 50% overlap for merging (otherwise events keep independent IDs)
+       nn_partitioning=True,        # Use nearest-neighbour partitioning when splitting events
    )
 
-**Output variables:**
+   # Run tracking and return merging data
+   tracked_events, merge_events = tracker.run(return_merges=True)
 
-* ``event_labels``: Event IDs for each grid point and time
-* ``event_stats``: Statistical properties of each event
-* ``event_tracks``: Temporal evolution of events
-* ``ID_field``: Binary field indicating tracked events (1=event, 0=background)
-* ``global_ID``: Unique global ID for each event; ``global_ID.sel(ID=10)`` maps event ID 10 to its original ID at each time
+The resulting xarray dataset ``tracked_events`` will have the following structure & entries:
+```
+xarray.Dataset
+Dimensions: (lat, lon, time, ID, component, sibling_ID)
+Coordinates:
+    lat         (lat)
+    lon         (lon)
+    time        (time)
+    ID          (ID)
+Data variables:
+    ID_field              (time, lat, lon)        int32       dask.array
+    global_ID             (time, ID)              int32       ndarray
+    area                  (time, ID)              float32     ndarray
+    centroid              (component, time, ID)   float32     ndarray
+    presence              (time, ID)              bool        ndarray
+    time_start            (ID)                    datetime64  ndarray
+    time_end              (ID)                    datetime64  ndarray
+    merge_ledger          (time, ID, sibling_ID)  int32       ndarray
+
+```
+where
+* ``ID_field``: Field containing the IDs of tracked events (0=background)
+* ``global_ID``: Unique global ID of each object; ``global_ID.sel(ID=10)`` maps event ID 10 to its original ID at each time
 * ``area``: Area of each event as a function of time
 * ``centroid``: (x, y) centroid coordinates of each event as a function of time
-* ``presence``: Presence (True/False) of each event at each time (anywhere in space)
+* ``presence``: Presence (boolean) of each event at each time (anywhere in space)
 * ``time_start``: Start time of each event
 * ``time_end``: End time of each event
 * ``merge_ledger``: Sibling IDs for merging events (matching ``ID_field``); ``-1`` indicates no merging event occurred
+
+When running with ``return_merges=True``, the resulting xarray dataset ``merge_events`` will have the following structure & entries:
+```
+xarray.Dataset
+Dimensions: (merge_ID, parent_idx, child_idx)
+Data variables:
+    parent_IDs      (merge_ID, parent_idx)  int32       ndarray
+    child_IDs       (merge_ID, child_idx)   int32       ndarray
+    overlap_areas   (merge_ID, parent_idx)  int32       ndarray
+    merge_time      (merge_ID)              datetime64  ndarray
+    n_parents       (merge_ID)              int8        ndarray
+    n_children      (merge_ID)              int8        ndarray
+```
+where
+* ``parent_IDs``: Original parent IDs of each merging event
+* ``child_IDs``: Original child IDs of each merging event
+* ``overlap_areas``: Area of overlap between parent and child objects in each merging event
+* ``merge_time``: Time of each merging event
+* ``n_parents``: Number of parent objects in each merging event
+* ``n_children``: Number of child objects in each merging event
+
+See, e.g. ``./examples/unstructured data/02_id_track_events.ipynb`` for a detailed example of identification, tracking, & merging on an *unstructured* grid.
 
 Step 3: Visualisation
 ---------------------
@@ -312,13 +364,15 @@ Anomaly Methods
 
 **Detrended Baseline** (``detrended_baseline``):
 
+* Detrends with an OLS 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends)
 * **Best for**: Datasets with linear trends, operational monitoring
 * **Pros**: Fast & memory efficient
-* **Cons**: Does not capture phenological shifts and non-harmonic seasonal variability
+* **Cons**: Does not capture phenological shifts and non-harmonic seasonal variability. Strongly biases certain statistics.
 * **Use when**: Real-time processing
 
 **Shifting Baseline** (``shifting_baseline``):
 
+* Removes seasonal & long-term trends using a smoothed rolling climatology
 * **Best for**: Climate change studies, non-stationary data
 * **Pros**: Captures non-linear trends, adapts to changing climate, and seasonal timing variability
 * **Cons**: Computationally expensive, shortens effective time series
@@ -329,14 +383,17 @@ Extreme Identification Methods
 
 **Global Extreme** (``global_extreme``):
 
-* **Best for**: Simple threshold, consistent across seasons
-* **Pros**: Simple interpretation, fast computation
+* Applies a global-in-time (i.e. constant in time) threshold
+   N.B.: This method is a hack designed for ``ocetrac``, which when paired with ``std_normalise=True`` can approximate ``hobday_extreme`` in very specific cases and with a number of caveats. (However, normalising by local STD is again memory-intensive, at which point there is little gained by this approximate method.)
+* **Best for**: Simple threshold, constant across seasons
+* **Pros**: Simple interpretation, fast computation (without ``std_normalise``)
 * **Cons**: Seasonal bias, may miss winter extremes, variability distribution is skewed
-* **Use when**: Initial analysis, simple comparisons
+* **Use when**: Initial analysis, 0th order comparisons
 
 **Hobday Method** (``hobday_extreme``):
 
-* **Best for**: Long-term climate studies, seasonal studies, biological impacts
+* Defines a local day-of-year specific threshold within a rolling window (equivalent to the Hobday et al. (2016) definition for simple time-series)
+* **Best for**: Long-term scientific climate studies, seasonal studies, biological impacts
 * **Pros**: Accounts for seasonal variability, literature standard
 * **Cons**: Complex threshold interpretation, computationally intensive
 * **Use when**: Ecological studies, seasonal analysis, literature comparison
@@ -449,20 +506,6 @@ Analyse events that exceed multiple thresholds or variables:
 
    # Compound events
    compound_events = sst_extremes.extreme_events & salinity_extremes.extreme_events
-
-Custom Event Criteria
----------------------
-
-Define specialised event detection criteria:
-
-.. code-block:: python
-
-   # Custom intensity-duration criteria
-   def custom_event_filter(binary_events, min_intensity=2.0, min_duration=7):
-       """Apply custom filtering to extreme events"""
-
-       # Implementation --
-       return filtered_events
 
 
 Best Practices and Guidelines
