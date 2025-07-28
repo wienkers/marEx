@@ -2075,7 +2075,7 @@ class tracker:
                 # Check if we have any valid IDs before stacking
                 if np.any(valid_ids_mask):
                     ids = ids_buffer[valid_ids_mask]
-                    props = props_buffer.stack(combined=("time", "out_id")).isel(combined=valid_ids_mask)
+                    props = props_buffer.stack(combined=(self.timedim, "out_id")).isel(combined=valid_ids_mask)
                 else:
                     # No valid IDs found
                     ids = np.array([], dtype=np.int32)
@@ -2620,7 +2620,7 @@ class tracker:
             return result
 
         # Process in parallel
-        input_dim = ["ncells"] if self.unstructured_grid else ["z"]
+        input_dim = [self.xdim] if self.unstructured_grid else ["z"]
         global_id_mapping = (
             xr.apply_ufunc(
                 process_timestep,

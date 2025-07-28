@@ -2,6 +2,10 @@
 marEx: Marine Extremes Detection and Tracking
 ==================================
 
+.. image:: https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg
+   :target: https://github.com/wienkers/marEx/actions/workflows/ci.yml
+   :alt: Continuous Integration
+
 .. image:: https://github.com/wienkers/marEx/workflows/Tests/badge.svg
    :target: https://github.com/wienkers/marEx/actions/workflows/tests.yml
    :alt: Tests

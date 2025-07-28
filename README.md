@@ -1,6 +1,7 @@
 
 ![Logo](media/logo.png)
 
+[![Continuous Integration](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
 [![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
 [![PyPI version](https://badge.fury.io/py/marEx.svg)](https://badge.fury.io/py/marEx)
