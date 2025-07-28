@@ -134,23 +134,23 @@ def dask_client_largemem():
         {
             "distributed.worker.daemon": False,
             "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
-            "distributed.worker.memory.target": 0.7,  # More conservative for coverage
-            "distributed.worker.memory.spill": 0.8,
-            "distributed.worker.memory.pause": 0.85,
-            "distributed.worker.memory.terminate": 0.9,
+            "distributed.worker.memory.target": 0.5,  # More conservative for coverage
+            "distributed.worker.memory.spill": 0.6,
+            "distributed.worker.memory.pause": 0.7,
+            "distributed.worker.memory.terminate": 0.8,
             # Add more aggressive memory management
-            "distributed.worker.memory.recent-to-old-time": "5s",
+            "distributed.worker.memory.recent-to-old-time": "10s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
             # Optimise task scheduling for memory-intensive workflows
             "distributed.scheduler.allowed-failures": 30,  # Increased for coverage stability
-            "distributed.comm.timeouts.connect": "180s",  # Increased for coverage overhead
-            "distributed.comm.timeouts.tcp": "180s",  # Increased for coverage overhead
+            "distributed.comm.timeouts.connect": "300s",  # Increased for coverage overhead
+            "distributed.comm.timeouts.tcp": "300s",  # Increased for coverage overhead
             # Add additional robustness for coverage runs
             "distributed.worker.multiprocessing.initializer": None,
             "distributed.worker.multiprocessing.initialize": None,
             "distributed.comm.retry.count": 10,  # Increased retry count
             "distributed.comm.retry.delay.min": "2s",  # Increased retry delays
-            "distributed.comm.retry.delay.max": "20s",
+            "distributed.comm.retry.delay.max": "30s",
             "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
             "distributed.scheduler.worker-ttl": "300s",  # Longer worker timeout
         }
@@ -158,9 +158,9 @@ def dask_client_largemem():
 
     # Create a LocalCluster with larger memory for intensive computations
     cluster = LocalCluster(
-        n_workers=2,
+        n_workers=1,
         threads_per_worker=1,
-        memory_limit="8GB",  # Increased memory per worker for coverage overhead
+        memory_limit="13GB",  # Increased memory per worker for coverage overhead
         dashboard_address=None,  # Disable dashboard in CI
         silence_logs=True,
         # Add explicit process handling for coverage compatibility
