@@ -224,11 +224,7 @@ jobs:
 
     - name: Generate coverage report
       run: |
-        coverage run -m pytest tests/ -m "not slow" \
-          --deselect=tests/test_unstructured_tracking.py::TestUnstructuredTracking::test_unstructured_tracker_initialisation \
-          --deselect=tests/test_unstructured_tracking.py::TestUnstructuredTracking::test_unstructured_grid_requirements \
-          --deselect=tests/test_unstructured_tracking.py::TestUnstructuredTracking::test_custom_dimension_names_unstructured_tracking \
-          --deselect=tests/test_unstructured_tracking.py::TestUnstructuredTracking::test_custom_dimension_names_comparison_with_original
+        coverage run -m pytest tests/ -m "not slow"
         coverage report -m
         coverage html
         coverage xml

@@ -79,8 +79,6 @@ https://github.com/user-attachments/assets/5acf48eb-56bf-43e5-bfc4-4ef1a7a90eff
 
 
 
-
-
 ## Technical Architecture
 
 **Distributed Computing Stack:**
@@ -153,7 +151,7 @@ pip install -e .[dev]
 pre-commit install
 ```
 
-### Getting Help
+## Getting Help
 
 If you encounter installation issues:
 
@@ -163,6 +161,14 @@ If you encounter installation issues:
 4. **System Information**: Include your OS, Python version, and error messages when reporting issues
 5. **Support**: Reach out to [Aaron Wienkers](mailto:aaron.wienkers@gmail.com)
 
+
+## Funding
+
+This project has received funding through:
+
+* The [EERIE](https://eerie-project.eu) (European Eddy-Rich ESMs) Project
+* The European Union's Horizon Europe research and innovation programme under Grant Agreement No. 101081383
+* The Swiss State Secretariat for Education, Research and Innovation (SERI) under contract #22.00366
 
 ---
 Please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com) with any questions, comments, issues, or bugs.
