@@ -237,7 +237,7 @@ jobs:
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ --tb=short -x --maxfail=3
+        coverage run -m pytest tests/ --tb=short -m "not nocov"  -x --maxfail=3
         coverage report -m
         coverage html
         coverage xml

@@ -46,6 +46,7 @@ class TestUnstructuredTracking:
         if hasattr(cls, "temp_dir") and Path(cls.temp_dir).exists():
             shutil.rmtree(cls.temp_dir)
 
+    @pytest.mark.nocov
     @pytest.mark.slow
     def test_unstructured_tracker_initialisation(self, dask_client_largemem):
         """Test that unstructured tracker initialisation succeeds."""

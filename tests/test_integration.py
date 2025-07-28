@@ -31,6 +31,7 @@ class TestFullPipelineGridded:
         # Define standard dimensions for gridded data
         cls.dimensions = {"x": "lon", "y": "lat"}  # Leave out the "time" specifier -- it should default to "time"
 
+    @pytest.mark.nocov
     @pytest.mark.slow
     @pytest.mark.integration
     def test_full_pipeline_with_tracking(self, dask_client_largemem):
@@ -94,6 +95,7 @@ class TestFullPipelineGridded:
         del extremes_ds, tracked_ds, sst_subset
         gc.collect()
 
+    @pytest.mark.nocov
     @pytest.mark.slow
     @pytest.mark.integration
     def test_full_pipeline_shifting_hobday(self, dask_client_largemem):
