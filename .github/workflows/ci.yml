@@ -233,11 +233,12 @@ jobs:
         echo "MKL_NUM_THREADS=1" >> $GITHUB_ENV
         echo "NUMBA_NUM_THREADS=1" >> $GITHUB_ENV
         echo "PYTHONHASHSEED=42" >> $GITHUB_ENV
+        echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
 
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ --tb=short -m "not nocov"  -x --maxfail=3
+        coverage run -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
         coverage report -m
         coverage html
         coverage xml

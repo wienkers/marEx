@@ -515,7 +515,7 @@ class tracker:
                 data_info={"mask_dtype": str(self.mask.data.dtype)},
             )
 
-        if (~self.mask).all():
+        if not self.mask.any().compute():
             raise create_data_validation_error(
                 "Mask contains only False values",
                 details="Mask should indicate valid regions with True values",

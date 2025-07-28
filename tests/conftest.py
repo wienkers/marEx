@@ -1,6 +1,7 @@
 """Test configuration and fixtures for marEx package."""
 
 import logging
+import os
 
 import dask
 import numpy as np
@@ -129,38 +130,74 @@ def configure_dask():
 @pytest.fixture(scope="function")
 def dask_client_largemem():
     """Create a Dask client optimised for memory-intensive computations."""
-    # Configure Dask for memory-intensive tests with coverage-aware settings
+    # Detect if running under coverage
+    is_coverage_run = (
+        os.environ.get("COVERAGE_PROCESS_START") is not None
+        or os.environ.get("PYTEST_COVERAGE") == "true"
+        or "coverage" in os.environ.get("_", "")
+        or any("coverage" in arg for arg in os.sys.argv)
+    )
+
+    # Configure cluster parameters based on coverage mode
+    if is_coverage_run:
+        # Coverage mode: single-threaded with more memory
+        n_workers = 1
+        threads_per_worker = 1
+        memory_limit = "12GB"
+        memory_target = 0.4  # More conservative for coverage
+        memory_spill = 0.5
+        memory_pause = 0.6
+        memory_terminate = 0.8
+        connect_timeout = "300s"
+        tcp_timeout = "300s"
+        allowed_failures = 50
+        retry_count = 15
+    else:
+        # Normal mode: more workers with less memory each
+        n_workers = 2
+        threads_per_worker = 1
+        memory_limit = "7GB"
+        memory_target = 0.6
+        memory_spill = 0.7
+        memory_pause = 0.8
+        memory_terminate = 0.9
+        connect_timeout = "180s"
+        tcp_timeout = "180s"
+        allowed_failures = 30
+        retry_count = 10
+
+    # Configure Dask for memory-intensive tests
     dask.config.set(
         {
             "distributed.worker.daemon": False,
             "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
-            "distributed.worker.memory.target": 0.5,  # More conservative for coverage
-            "distributed.worker.memory.spill": 0.6,
-            "distributed.worker.memory.pause": 0.7,
-            "distributed.worker.memory.terminate": 0.8,
+            "distributed.worker.memory.target": memory_target,
+            "distributed.worker.memory.spill": memory_spill,
+            "distributed.worker.memory.pause": memory_pause,
+            "distributed.worker.memory.terminate": memory_terminate,
             # Add more aggressive memory management
             "distributed.worker.memory.recent-to-old-time": "10s",
             "distributed.worker.memory.rebalance.measure": "managed_in_memory",
             # Optimise task scheduling for memory-intensive workflows
-            "distributed.scheduler.allowed-failures": 30,  # Increased for coverage stability
-            "distributed.comm.timeouts.connect": "300s",  # Increased for coverage overhead
-            "distributed.comm.timeouts.tcp": "300s",  # Increased for coverage overhead
+            "distributed.scheduler.allowed-failures": allowed_failures,
+            "distributed.comm.timeouts.connect": connect_timeout,
+            "distributed.comm.timeouts.tcp": tcp_timeout,
             # Add additional robustness for coverage runs
             "distributed.worker.multiprocessing.initializer": None,
             "distributed.worker.multiprocessing.initialize": None,
-            "distributed.comm.retry.count": 10,  # Increased retry count
-            "distributed.comm.retry.delay.min": "2s",  # Increased retry delays
+            "distributed.comm.retry.count": retry_count,
+            "distributed.comm.retry.delay.min": "2s",
             "distributed.comm.retry.delay.max": "30s",
             "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
             "distributed.scheduler.worker-ttl": "300s",  # Longer worker timeout
         }
     )
 
-    # Create a LocalCluster with larger memory for intensive computations
+    # Create a LocalCluster with configuration based on coverage mode
     cluster = LocalCluster(
-        n_workers=1,
-        threads_per_worker=1,
-        memory_limit="13GB",  # Increased memory per worker for coverage overhead
+        n_workers=n_workers,
+        threads_per_worker=threads_per_worker,
+        memory_limit=memory_limit,
         dashboard_address=None,  # Disable dashboard in CI
         silence_logs=True,
         # Add explicit process handling for coverage compatibility
