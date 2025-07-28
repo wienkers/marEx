@@ -116,9 +116,14 @@ def _load_ckdtree(fpath_ckdtree: Union[str, Path], res: float) -> Dict[str, NDAr
 class UnstructuredPlotter(PlotterBase):
     """Plotter for unstructured oceanographic data on triangular meshes."""
 
-    def __init__(self, xarray_obj: xr.DataArray) -> None:
+    def __init__(
+        self,
+        xarray_obj: xr.DataArray,
+        dimensions: Optional[Dict[str, str]] = None,
+        coordinates: Optional[Dict[str, str]] = None,
+    ) -> None:
         """Initialise UnstructuredPlotter."""
-        super().__init__(xarray_obj)
+        super().__init__(xarray_obj, dimensions, coordinates)
 
         from . import _fpath_ckdtree, _fpath_tgrid
 
