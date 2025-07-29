@@ -238,7 +238,13 @@ jobs:
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Set environment variables for coverage in subprocesses
+        export COVERAGE_PROCESS_START=.coveragerc
+        export PYTEST_COVERAGE=1
+        # Run with multiprocessing support
+        coverage run --parallel-mode -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Combine parallel coverage data
+        coverage combine
         coverage report -m
         coverage html
         coverage xml

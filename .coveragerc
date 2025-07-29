@@ -1,0 +1,13 @@
+[run]
+source = marEx
+parallel = true
+concurrency = multiprocessing,thread
+
+[report]
+# Combine data from all processes
+precision = 2
+skip_covered = false
+show_missing = true
+
+[html]
+directory = htmlcov
