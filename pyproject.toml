@@ -181,6 +181,8 @@ omit = [
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
+    "@jit",
+    "@njit",
     "def __repr__",
     "if self.debug:",
     "if settings.DEBUG",

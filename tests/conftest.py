@@ -61,6 +61,11 @@ def pytest_configure(config):
 @pytest.fixture(scope="session")
 def dask_client():
     """Create a Dask LocalCluster for tests."""
+    import os
+
+    # Detect if running under coverage
+    is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
+
     # Configure Dask for testing
     dask.config.set(
         {
@@ -87,18 +92,28 @@ def dask_client():
         }
     )
 
-    # Create a LocalCluster with optimised resources for CI
-    # Use fewer workers with more memory per worker for better stability under coverage
-    cluster = LocalCluster(
-        n_workers=2,  # Reduced from 4 for better stability
-        threads_per_worker=1,
-        memory_limit="6GB",  # Increased from 3GB for better stability
-        dashboard_address=None,  # Disable dashboard in CI
-        silence_logs=True,
-        # Add explicit process handling for coverage compatibility
-        processes=True,
-        protocol="tcp",
-    )
+    if is_coverage:
+        # Use threads instead of processes for coverage
+        cluster = LocalCluster(
+            n_workers=1,
+            threads_per_worker=1,
+            processes=False,  # Use threads for coverage
+            memory_limit="8GB",
+            dashboard_address=None,
+            silence_logs=True,
+        )
+    else:
+        # Use processes for normal testing
+        cluster = LocalCluster(
+            n_workers=2,  # Reduced from 4 for better stability
+            threads_per_worker=1,
+            memory_limit="6GB",  # Increased from 3GB for better stability
+            dashboard_address=None,  # Disable dashboard in CI
+            silence_logs=True,
+            # Add explicit process handling for coverage compatibility
+            processes=True,
+            protocol="tcp",
+        )
 
     client = Client(cluster)
 
@@ -313,20 +328,42 @@ def assert_statistical_consistency(
 @pytest.fixture(scope="module")
 def dask_client_per_module():
     """Dask client scoped per test module for isolation."""
+    import os
+
+    # Detect if running under coverage
+    is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
+
     client = None
     try:
-        client = Client(
-            n_workers=2,
-            threads_per_worker=1,
-            memory_limit="7GB",
-            silence_logs=logging.WARNING,
-            dashboard_address=None,
-            # Add more conservative settings for parallel execution
-            timeout="300s",
-            heartbeat_interval="30s",
-        )
-        # Let client fully initialise
-        client.wait_for_workers(2, timeout=60)
+        if is_coverage:
+            # Use threads instead of processes for coverage
+            client = Client(
+                n_workers=1,
+                threads_per_worker=1,
+                processes=False,  # Use threads for coverage
+                memory_limit="8GB",
+                silence_logs=logging.WARNING,
+                dashboard_address=None,
+                # Add more conservative settings for parallel execution
+                timeout="300s",
+                heartbeat_interval="30s",
+            )
+            # Let client fully initialise
+            client.wait_for_workers(1, timeout=60)
+        else:
+            # Use processes for normal testing
+            client = Client(
+                n_workers=2,
+                threads_per_worker=1,
+                memory_limit="7GB",
+                silence_logs=logging.WARNING,
+                dashboard_address=None,
+                # Add more conservative settings for parallel execution
+                timeout="300s",
+                heartbeat_interval="30s",
+            )
+            # Let client fully initialise
+            client.wait_for_workers(2, timeout=60)
         yield client
     finally:
         if client:
