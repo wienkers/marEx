@@ -67,7 +67,7 @@ MEMORY_CONFIGS = {
 def configure_dask(
     scratch_dir: Optional[Union[str, Path]] = None,
     config: Optional[Dict[str, Any]] = None,
-) -> TemporaryDirectory:
+) -> TemporaryDirectory:  # pragma: no cover
     """
     Configure Dask with appropriate settings for HPC environments.
 
@@ -115,7 +115,7 @@ def configure_dask(
     return temp_dir
 
 
-def get_cluster_info(client: Client) -> Dict[str, str]:
+def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
     """
     Get and print cluster connection information.
 
@@ -213,7 +213,7 @@ def start_local_cluster(
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     **kwargs,
-) -> Client:
+) -> Client:  # pragma: no cover
     """
     Start a local Dask cluster.
 
@@ -394,7 +394,7 @@ def start_distributed_cluster(
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     **kwargs,
-) -> Client:
+) -> Client:  # pragma: no cover
     """
     Start a distributed Dask cluster on a SLURM-based supercomputer.
 

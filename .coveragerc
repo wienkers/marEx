@@ -1,0 +1,18 @@
+[run]
+source = marEx
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */site-packages/*
+
+[report]
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+
+[html]
+directory = htmlcov

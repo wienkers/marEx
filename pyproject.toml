@@ -186,6 +186,7 @@ exclude_lines = [
     "if settings.DEBUG",
     "raise AssertionError",
     "raise NotImplementedError",
+    "except ImportError:",
     "if 0:",
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",

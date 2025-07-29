@@ -200,10 +200,10 @@ jobs:
         echo "distributed:" > ~/.dask/config.yaml
         echo "  worker:" >> ~/.dask/config.yaml
         echo "    memory:" >> ~/.dask/config.yaml
-        echo "      target: 0.3" >> ~/.dask/config.yaml
-        echo "      spill: 0.4" >> ~/.dask/config.yaml
-        echo "      pause: 0.5" >> ~/.dask/config.yaml
-        echo "      terminate: 0.7" >> ~/.dask/config.yaml
+        echo "      target: 0.5" >> ~/.dask/config.yaml
+        echo "      spill: 0.6" >> ~/.dask/config.yaml
+        echo "      pause: 0.7" >> ~/.dask/config.yaml
+        echo "      terminate: 0.8" >> ~/.dask/config.yaml
         echo "      recent-to-old-time: 15s" >> ~/.dask/config.yaml
         echo "    daemon: false" >> ~/.dask/config.yaml
         echo "  scheduler:" >> ~/.dask/config.yaml
@@ -238,7 +238,10 @@ jobs:
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        coverage run -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Run with parallel mode and multiprocessing support
+        coverage run --parallel-mode -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Combine all coverage data files from subprocesses
+        coverage combine
         coverage report -m
         coverage html
         coverage xml
@@ -256,7 +259,7 @@ jobs:
       with:
         name: coverage-report
         path: htmlcov/
-        retention-days: 30
+        retention-days: 90
 
 
   build-test:
