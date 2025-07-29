@@ -72,6 +72,7 @@ class TestUnstructuredTracking:
         assert tracker is not None
         assert hasattr(tracker, "dilate_sparse")  # Sparse matrix should be constructed
 
+    @pytest.mark.nocov
     @pytest.mark.slow
     def test_basic_unstructured_tracking(self, dask_client_largemem):
         """Test basic tracking on unstructured grid without merging/splitting."""
