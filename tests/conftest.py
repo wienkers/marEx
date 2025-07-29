@@ -1,7 +1,9 @@
 """Test configuration and fixtures for marEx package."""
 
+import gc
 import logging
 import os
+import time
 
 import dask
 import numpy as np
@@ -398,3 +400,129 @@ def assert_statistical_consistency(
         f"{description} {test_type} {observed:.4f} is outside expected range "
         f"[{lower_bound:.4f}, {upper_bound:.4f}] (expected: {expected_property:.4f})"
     )
+
+
+@pytest.fixture(scope="function")
+def dask_client_coverage_isolated():
+    """
+    Dask client with proper cleanup for test isolation when running coverage.
+
+    This fixture creates a new Dask client for each test, which is needed
+    for unstructured tracking tests when running under coverage to avoid
+    memory and state issues between tests.
+    """
+    # Only use this fixture when running under coverage
+    is_coverage_run = (
+        os.environ.get("COVERAGE_PROCESS_START") is not None
+        or os.environ.get("PYTEST_COVERAGE") == "true"
+        or "coverage" in os.environ.get("_", "")
+        or any("coverage" in arg for arg in os.sys.argv)
+    )
+
+    if not is_coverage_run:
+        # Fall back to regular dask_client_largemem for non-coverage runs
+        pytest.skip("This fixture is only for coverage runs")
+
+    client = None
+    try:
+        # Configure Dask for coverage runs with single worker for stability
+        dask.config.set(
+            {
+                "distributed.worker.daemon": False,
+                "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
+                "distributed.worker.memory.target": 0.3,  # Very conservative for coverage
+                "distributed.worker.memory.spill": 0.4,
+                "distributed.worker.memory.pause": 0.5,
+                "distributed.worker.memory.terminate": 0.7,
+                "distributed.worker.memory.recent-to-old-time": "15s",
+                "distributed.worker.memory.rebalance.measure": "managed_in_memory",
+                "distributed.scheduler.allowed-failures": 100,  # Very high for coverage
+                "distributed.comm.timeouts.connect": "600s",  # Very long timeouts
+                "distributed.comm.timeouts.tcp": "600s",
+                "distributed.worker.multiprocessing.initializer": None,
+                "distributed.worker.multiprocessing.initialize": None,
+                "distributed.comm.retry.count": 20,
+                "distributed.comm.retry.delay.min": "3s",
+                "distributed.comm.retry.delay.max": "60s",
+                "distributed.scheduler.work-stealing": False,
+                "distributed.scheduler.worker-ttl": "600s",
+            }
+        )
+
+        # Create cluster with minimal resources for coverage stability
+        cluster = LocalCluster(
+            n_workers=1,
+            threads_per_worker=1,
+            memory_limit="8GB",
+            dashboard_address=None,  # Disable dashboard to save resources
+            silence_logs=logging.WARNING,
+            processes=True,
+            protocol="tcp",
+        )
+
+        client = Client(cluster)
+        yield client
+
+    finally:
+        if client:
+            try:
+                client.close(timeout=30)
+                client.cluster.close(timeout=30)
+            except Exception as e:
+                print(f"Warning: Error closing Dask client: {e}")
+
+        # Force garbage collection and brief pause for cleanup
+        gc.collect()
+        time.sleep(1)
+
+
+@pytest.fixture(autouse=True, scope="function")
+def reset_dask_between_coverage_tests():
+    """Reset Dask state between test functions when running coverage on unstructured tracking."""
+    # Only apply this for coverage runs and unstructured tracking tests
+    is_coverage_run = (
+        os.environ.get("COVERAGE_PROCESS_START") is not None
+        or os.environ.get("PYTEST_COVERAGE") == "true"
+        or "coverage" in os.environ.get("_", "")
+        or any("coverage" in arg for arg in os.sys.argv)
+    )
+
+    # Check if we're in the unstructured tracking test module
+    if hasattr(pytest, "current_item") and pytest.current_item:
+        test_file = str(pytest.current_item.fspath)
+        is_unstructured_tracking = "test_unstructured_tracking.py" in test_file
+    else:
+        # Fallback check using stack inspection
+        import inspect
+
+        frame = inspect.currentframe()
+        is_unstructured_tracking = False
+        try:
+            while frame:
+                if frame.f_code.co_filename and "test_unstructured_tracking.py" in frame.f_code.co_filename:
+                    is_unstructured_tracking = True
+                    break
+                frame = frame.f_back
+        finally:
+            del frame
+
+    if not (is_coverage_run and is_unstructured_tracking):
+        yield
+        return
+
+    yield  # Run the test
+
+    # Cleanup after each test function in unstructured tracking during coverage
+    try:
+        from distributed import default_client
+
+        try:
+            client = default_client()
+            client.restart()
+        except (ValueError, AttributeError):
+            pass  # No default client exists
+    except ImportError:
+        pass
+
+    gc.collect()
+    time.sleep(0.5)

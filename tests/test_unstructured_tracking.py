@@ -6,6 +6,7 @@ including data validation and tracker initialisation tests.
 
 """
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,6 +18,32 @@ import xarray as xr
 import marEx
 
 from .conftest import assert_count_in_reasonable_range, assert_reasonable_bounds
+
+
+@pytest.fixture(scope="function")
+def dask_client_for_unstructured(request):
+    """
+    Dynamic fixture that chooses appropriate Dask client based on coverage status.
+
+    When running coverage, uses the isolated client for better test stability.
+    Otherwise, uses the regular largemem client.
+    """
+    # Check if running under coverage
+    is_coverage_run = (
+        os.environ.get("COVERAGE_PROCESS_START") is not None
+        or os.environ.get("PYTEST_COVERAGE") == "true"
+        or "coverage" in os.environ.get("_", "")
+        or any("coverage" in arg for arg in os.sys.argv)
+    )
+
+    if is_coverage_run:
+        # Use the isolated client for coverage runs
+        fixture = request.getfixturevalue("dask_client_coverage_isolated")
+    else:
+        # Use the regular largemem client for normal runs
+        fixture = request.getfixturevalue("dask_client_for_unstructured")
+
+    return fixture
 
 
 class TestUnstructuredTracking:
@@ -48,7 +75,7 @@ class TestUnstructuredTracking:
 
     @pytest.mark.nocov
     @pytest.mark.slow
-    def test_unstructured_tracker_initialisation(self, dask_client_largemem):
+    def test_unstructured_tracker_initialisation(self, dask_client_for_unstructured):
         """Test that unstructured tracker initialisation succeeds."""
         tracker = marEx.tracker(
             self.extremes_data.extreme_events,
@@ -74,7 +101,7 @@ class TestUnstructuredTracking:
 
     @pytest.mark.nocov
     @pytest.mark.slow
-    def test_basic_unstructured_tracking(self, dask_client_largemem):
+    def test_basic_unstructured_tracking(self, dask_client_for_unstructured):
         """Test basic tracking on unstructured grid without merging/splitting."""
 
         # Create tracker with basic settings for unstructured data
@@ -131,7 +158,7 @@ class TestUnstructuredTracking:
         # Verify ID_field is int
         assert np.issubdtype(tracked_ds.ID_field.dtype, np.integer), "ID_field should be integer type"
 
-    def test_unstructured_data_validation(self, dask_client_largemem):
+    def test_unstructured_data_validation(self, dask_client_for_unstructured):
         """Test data validation for unstructured grids."""
         # Test that the data has the expected structure
         assert "extreme_events" in self.extremes_data.data_vars
@@ -156,7 +183,7 @@ class TestUnstructuredTracking:
         assert self.extremes_data.mask.dtype == bool
 
     @pytest.mark.slow
-    def test_advanced_unstructured_tracking_with_merging(self, dask_client_largemem):
+    def test_advanced_unstructured_tracking_with_merging(self, dask_client_for_unstructured):
         """Test advanced tracking with temporal filling and merging enabled on unstructured grid."""
         # Array broadcasting issue has been fixed
 
@@ -254,7 +281,7 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 0, tolerance=5)
 
     @pytest.mark.slow
-    def test_unstructured_tracking_data_consistency(self, dask_client_largemem):
+    def test_unstructured_tracking_data_consistency(self, dask_client_for_unstructured):
         """Test that unstructured tracking produces consistent data structures."""
         # Array broadcasting issue has been fixed
         tracker = marEx.tracker(
@@ -347,7 +374,7 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 3, tolerance=3)
 
     @pytest.mark.slow
-    def test_unstructured_different_filtering_parameters(self, dask_client_largemem):
+    def test_unstructured_different_filtering_parameters(self, dask_client_for_unstructured):
         """Test unstructured tracking with different area filtering parameters."""
         # Test with minimal filtering (quartile = 0.1)
         tracker_low_filter = marEx.tracker(
@@ -442,7 +469,7 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_low_filter.attrs["N_events_final"], 3, tolerance=3)
 
     @pytest.mark.slow
-    def test_unstructured_temporal_gap_filling(self, dask_client_largemem):
+    def test_unstructured_temporal_gap_filling(self, dask_client_for_unstructured):
         """Test that temporal gap filling works correctly on unstructured grids."""
 
         # Test with no gap filling
@@ -541,7 +568,7 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 5, tolerance=5)
 
     @pytest.mark.slow
-    def test_unstructured_grid_requirements(self, dask_client_largemem):
+    def test_unstructured_grid_requirements(self, dask_client_for_unstructured):
         """Test that unstructured tracking properly validates grid requirements."""
         # Test that tracking fails gracefully without neighbors information
         with pytest.raises((ValueError, TypeError, AttributeError, marEx.exceptions.DataValidationError)):
@@ -564,7 +591,7 @@ class TestUnstructuredTracking:
             tracker.run()
 
     @pytest.mark.slow
-    def test_unstructured_centroid_calculation(self, dask_client_largemem):
+    def test_unstructured_centroid_calculation(self, dask_client_for_unstructured):
         """Test that centroids are calculated correctly for unstructured data."""
         tracker = marEx.tracker(
             self.extremes_data.extreme_events,
@@ -629,7 +656,7 @@ class TestUnstructuredTracking:
                 assert not np.isnan(lon_centroids).all(), f"All lon centroids are NaN for event {event_id}"
 
     @pytest.mark.slow
-    def test_unstructured_tracking_memory_efficiency(self, dask_client_largemem):
+    def test_unstructured_tracking_memory_efficiency(self, dask_client_for_unstructured):
         """Test that unstructured tracking handles memory efficiently."""
         extremes_rechunked = self.extremes_data.extreme_events.chunk({"time": 1, "ncells": 500})
         mask_rechunked = self.extremes_data.mask.chunk({"ncells": 500})
@@ -680,7 +707,7 @@ class TestUnstructuredTracking:
         assert tracked_ds.attrs["N_events_final"] >= 0
 
     @pytest.mark.slow
-    def test_custom_dimension_names_unstructured_tracking(self, dask_client_largemem):
+    def test_custom_dimension_names_unstructured_tracking(self, dask_client_for_unstructured):
         """Test unstructured tracking with custom dimension and coordinate names for both allow_merging options."""
         # Use a larger subset for custom dimension tests: 200 timesteps
         # This reduces computational load while ensuring enough data for tracking
@@ -799,7 +826,7 @@ class TestUnstructuredTracking:
         assert hasattr(tracker_with_merge, "allow_merging")
 
     @pytest.mark.slow
-    def test_custom_dimension_names_comparison_with_original(self, dask_client_largemem):
+    def test_custom_dimension_names_comparison_with_original(self, dask_client_for_unstructured):
         """Test that custom dimension names produce equivalent results to original dimension names."""
         # Use a larger subset for custom dimension tests: 200 timesteps
         # This reduces computational load while ensuring enough data for tracking

@@ -166,98 +166,97 @@ jobs:
       run: |
         pytest tests/test_integration.py -v --tb=short -m "not slow"
 
-  # Coverage job commented out - now run locally on cluster
-  # coverage:
-  #   name: Coverage Report
-  #   runs-on: ubuntu-latest
-  #   needs: test
-  #   if: always()
-  #   timeout-minutes: 60
+  coverage:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    timeout-minutes: 60
 
-  #   steps:
-  #   - name: Checkout code
-  #     uses: actions/checkout@v4
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v5
-  #     with:
-  #       python-version: '3.11'
-  #       cache: 'pip'
-  #       cache-dependency-path: 'pyproject.toml'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: 'pyproject.toml'
 
-  #   - name: Install system dependencies
-  #     run: |
-  #       sudo apt-get update
-  #       sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
 
-  #   - name: Install dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       pip install -e ".[dev,full]"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev,full]"
 
-  #   - name: Configure Dask for Coverage (Conservative)
-  #     run: |
-  #       mkdir -p ~/.dask
-  #       echo "distributed:" > ~/.dask/config.yaml
-  #       echo "  worker:" >> ~/.dask/config.yaml
-  #       echo "    memory:" >> ~/.dask/config.yaml
-  #       echo "      target: 0.4" >> ~/.dask/config.yaml
-  #       echo "      spill: 0.5" >> ~/.dask/config.yaml
-  #       echo "      pause: 0.6" >> ~/.dask/config.yaml
-  #       echo "      terminate: 0.8" >> ~/.dask/config.yaml
-  #       echo "      recent-to-old-time: 10s" >> ~/.dask/config.yaml
-  #       echo "    daemon: false" >> ~/.dask/config.yaml
-  #       echo "  scheduler:" >> ~/.dask/config.yaml
-  #       echo "    allowed-failures: 50" >> ~/.dask/config.yaml
-  #       echo "    work-stealing: false" >> ~/.dask/config.yaml
-  #       echo "    worker-ttl: 600s" >> ~/.dask/config.yaml
-  #       echo "  comm:" >> ~/.dask/config.yaml
-  #       echo "    timeouts:" >> ~/.dask/config.yaml
-  #       echo "      connect: 300s" >> ~/.dask/config.yaml
-  #       echo "      tcp: 300s" >> ~/.dask/config.yaml
-  #       echo "    retry:" >> ~/.dask/config.yaml
-  #       echo "      count: 15" >> ~/.dask/config.yaml
-  #       echo "      delay:" >> ~/.dask/config.yaml
-  #       echo "        min: 3s" >> ~/.dask/config.yaml
-  #       echo "        max: 30s" >> ~/.dask/config.yaml
-  #       echo "  admin:" >> ~/.dask/config.yaml
-  #       echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
-  #       echo "array:" >> ~/.dask/config.yaml
-  #       echo "  chunk-size: 24MiB" >> ~/.dask/config.yaml
-  #       echo "  slicing:" >> ~/.dask/config.yaml
-  #       echo "    split-large-chunks: false" >> ~/.dask/config.yaml
+    - name: Configure Dask for Coverage (Conservative)
+      run: |
+        mkdir -p ~/.dask
+        echo "distributed:" > ~/.dask/config.yaml
+        echo "  worker:" >> ~/.dask/config.yaml
+        echo "    memory:" >> ~/.dask/config.yaml
+        echo "      target: 0.3" >> ~/.dask/config.yaml
+        echo "      spill: 0.4" >> ~/.dask/config.yaml
+        echo "      pause: 0.5" >> ~/.dask/config.yaml
+        echo "      terminate: 0.7" >> ~/.dask/config.yaml
+        echo "      recent-to-old-time: 15s" >> ~/.dask/config.yaml
+        echo "    daemon: false" >> ~/.dask/config.yaml
+        echo "  scheduler:" >> ~/.dask/config.yaml
+        echo "    allowed-failures: 100" >> ~/.dask/config.yaml
+        echo "    work-stealing: false" >> ~/.dask/config.yaml
+        echo "    worker-ttl: 600s" >> ~/.dask/config.yaml
+        echo "  comm:" >> ~/.dask/config.yaml
+        echo "    timeouts:" >> ~/.dask/config.yaml
+        echo "      connect: 600s" >> ~/.dask/config.yaml
+        echo "      tcp: 600s" >> ~/.dask/config.yaml
+        echo "    retry:" >> ~/.dask/config.yaml
+        echo "      count: 20" >> ~/.dask/config.yaml
+        echo "      delay:" >> ~/.dask/config.yaml
+        echo "        min: 3s" >> ~/.dask/config.yaml
+        echo "        max: 60s" >> ~/.dask/config.yaml
+        echo "  admin:" >> ~/.dask/config.yaml
+        echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
+        echo "array:" >> ~/.dask/config.yaml
+        echo "  chunk-size: 24MiB" >> ~/.dask/config.yaml
+        echo "  slicing:" >> ~/.dask/config.yaml
+        echo "    split-large-chunks: false" >> ~/.dask/config.yaml
 
-  #   - name: Set environment for conservative execution
-  #     run: |
-  #       echo "DASK_NUM_WORKERS=1" >> $GITHUB_ENV
-  #       echo "OMP_NUM_THREADS=1" >> $GITHUB_ENV
-  #       echo "MKL_NUM_THREADS=1" >> $GITHUB_ENV
-  #       echo "NUMBA_NUM_THREADS=1" >> $GITHUB_ENV
-  #       echo "PYTHONHASHSEED=42" >> $GITHUB_ENV
-  #       echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
+    - name: Set environment for conservative execution
+      run: |
+        echo "DASK_NUM_WORKERS=1" >> $GITHUB_ENV
+        echo "OMP_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "MKL_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "NUMBA_NUM_THREADS=1" >> $GITHUB_ENV
+        echo "PYTHONHASHSEED=42" >> $GITHUB_ENV
+        echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
 
-  #   - name: Generate coverage report
-  #     timeout-minutes: 45
-  #     run: |
-  #       coverage run -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
-  #       coverage report -m
-  #       coverage html
-  #       coverage xml
+    - name: Generate coverage report
+      timeout-minutes: 45
+      run: |
+        coverage run -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        coverage report -m
+        coverage html
+        coverage xml
 
-  #   - name: Upload coverage to Codecov
-  #     uses: codecov/codecov-action@v4
-  #     with:
-  #       token: ${{ secrets.CODECOV_TOKEN }}
-  #       files: ./coverage.xml
-  #       fail_ci_if_error: false
-  #       verbose: true
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.xml
+        fail_ci_if_error: false
+        verbose: true
 
-  #   - name: Upload coverage HTML report
-  #     uses: actions/upload-artifact@v4
-  #     with:
-  #       name: coverage-report
-  #       path: htmlcov/
-  #       retention-days: 30
+    - name: Upload coverage HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: htmlcov/
+        retention-days: 30
 
 
   build-test:
@@ -304,7 +303,7 @@ jobs:
   all-checks-passed:
     name: All Checks Passed
     runs-on: ubuntu-latest
-    needs: [code-quality, test, build-test]
+    needs: [code-quality, test, coverage, build-test]
     if: always()
 
     steps:
@@ -312,13 +311,14 @@ jobs:
       run: |
         if [[ "${{ needs.code-quality.result }}" == "success" &&
               "${{ needs.test.result }}" == "success" &&
+              "${{ needs.coverage.result }}" == "success" &&
               "${{ needs.build-test.result }}" == "success" ]]; then
           echo "All checks passed!"
         else
           echo "Some checks failed:"
           echo "Code Quality: ${{ needs.code-quality.result }}"
           echo "Tests: ${{ needs.test.result }}"
+          echo "Coverage: ${{ needs.coverage.result }}"
           echo "Build Test: ${{ needs.build-test.result }}"
-          echo "Note: Coverage now runs locally on cluster"
           exit 1
         fi
