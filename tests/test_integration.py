@@ -34,7 +34,7 @@ class TestFullPipelineGridded:
     @pytest.mark.nocov
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_full_pipeline_with_tracking(self, dask_client_largemem):
+    def test_full_pipeline_with_tracking(self, dask_client_integration):
         """Test complete pipeline including tracking (simplified for speed)."""
         # Use very small subset for tracking test
         sst_subset = self.sst_data.isel(time=slice(0, 740)).isel(lat=slice(0, 20), lon=slice(0, 40))
@@ -98,7 +98,7 @@ class TestFullPipelineGridded:
     @pytest.mark.nocov
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_full_pipeline_shifting_hobday(self, dask_client_largemem):
+    def test_full_pipeline_shifting_hobday(self, dask_client_integration):
         """Test complete pipeline with shifting_baseline + hobday_extreme methods."""
         sst_subset = self.sst_data.isel(time=slice(0, 1500)).isel(lat=slice(0, 20), lon=slice(0, 40))  # ~4 years
         # Step 1: Preprocessing with more sophisticated methods
@@ -173,7 +173,7 @@ class TestFullPipelineGridded:
 
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_pipeline_chunking_strategies(self, dask_client):
+    def test_pipeline_chunking_strategies(self, dask_client_integration):
         """Test pipeline with different chunking strategies for memory efficiency."""
         chunking_strategies = [
             {"time": 10},  # Small time chunks
@@ -259,7 +259,7 @@ class TestFullPipelineUnstructured:
 
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_unstructured_full_pipeline(self, dask_client):
+    def test_unstructured_full_pipeline(self, dask_client_integration):
         """Test complete pipeline for unstructured data."""
         # Step 1: Preprocessing unstructured data
         extremes_ds = marEx.preprocess_data(
@@ -319,7 +319,7 @@ class TestPipelineIntegration:
         cls.unstructured_data = xr.open_zarr(str(unstructured_path), chunks={}).persist().to
 
     @pytest.mark.integration
-    def test_method_combinations_consistency(self, dask_client):
+    def test_method_combinations_consistency(self, dask_client_integration):
         """Test that different method combinations produce reasonable and consistent results."""
         method_combinations = [
             ("detrended_baseline", "global_extreme"),
@@ -414,10 +414,10 @@ class TestPipelineIntegration:
                 ), f"Shifting baseline method {method_name} should reduce time series length"
 
     @pytest.mark.integration
-    def test_memory_management(self, dask_client):
+    def test_memory_management(self, dask_client_integration):
         """Test that pipeline manages memory efficiently without leaks."""
         # Run multiple iterations to check for memory leaks
-        initial_memory = dask_client.cluster.scheduler_info["workers"]
+        initial_memory = dask_client_integration.cluster.scheduler_info["workers"]
 
         for i in range(3):  # Run 3 iterations
             extremes_ds = marEx.preprocess_data(
@@ -442,11 +442,11 @@ class TestPipelineIntegration:
 
         # Memory usage should not grow unboundedly
         # (This is a basic check; more sophisticated monitoring could be added)
-        final_memory = dask_client.cluster.scheduler_info["workers"]
+        final_memory = dask_client_integration.cluster.scheduler_info["workers"]
         assert len(final_memory) == len(initial_memory), "Number of workers should remain constant"
 
     @pytest.mark.integration
-    def test_data_validation_integration(self, dask_client):
+    def test_data_validation_integration(self, dask_client_integration):
         """Test that pipeline properly validates input data and handles edge cases."""
         # Test with subset of data to ensure edge case handling
         subset_data = self.gridded_data.isel(time=slice(0, 50))  # Small time window
