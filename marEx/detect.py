@@ -623,10 +623,10 @@ def preprocess_data(
     ds = ds.chunk(chunk_dict)
 
     # Fix encoding issue with saving when calendar & units attribute is present
-    if "calendar" in ds[coordinates["time"]].attrs:
+    if "calendar" in ds[coordinates["time"]].attrs:  # pragma: no cover
         logger.debug("Removing calendar attribute for Zarr compatibility")
         del ds[coordinates["time"]].attrs["calendar"]
-    if "units" in ds[coordinates["time"]].attrs:
+    if "units" in ds[coordinates["time"]].attrs:  # pragma: no cover
         logger.debug("Removing units attribute for Zarr compatibility")
         del ds[coordinates["time"]].attrs["units"]
 

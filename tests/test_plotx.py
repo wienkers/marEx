@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+import marEx
 from marEx.plotX import PlotConfig, PlotXAccessor, _detect_grid_type, specify_grid
 from marEx.plotX.base import PlotterBase
 from marEx.plotX.gridded import GriddedPlotter
@@ -611,7 +612,7 @@ class TestErrorHandling:
         invalid_dims = {"time": "invalid_time", "x": "invalid_x", "y": "invalid_y"}
 
         accessor = PlotXAccessor(data)
-        with pytest.raises(Exception):  # Should raise VisualisationError
+        with pytest.raises(marEx.VisualisationError):
             accessor(dimensions=invalid_dims)
 
     def test_invalid_coordinates(self):
@@ -629,7 +630,7 @@ class TestErrorHandling:
         invalid_coords = {"time": "invalid_time", "x": "invalid_x", "y": "invalid_y"}
 
         accessor = PlotXAccessor(data)
-        with pytest.raises(Exception):  # Should raise VisualisationError
+        with pytest.raises(marEx.VisualisationError):
             accessor(coordinates=invalid_coords)
 
     def test_partial_invalid_dimensions(self):
@@ -648,7 +649,7 @@ class TestErrorHandling:
         mixed_dims = {"time": "time", "x": "invalid_x", "y": "lat"}
 
         accessor = PlotXAccessor(data)
-        with pytest.raises(Exception):  # Should raise VisualisationError
+        with pytest.raises(marEx.VisualisationError):
             accessor(dimensions=mixed_dims)
 
 
@@ -733,3 +734,482 @@ class TestBackwardCompatibility:
             assert fig == mock_fig
             assert ax == mock_ax
             mock_ax.set_title.assert_called_once_with("Backward Compatibility Test", size=12)
+
+
+class TestGriddedPlotterCoverage:
+    """Test GriddedPlotter functionality with detailed coverage."""
+
+    def setup_method(self):
+        """Create test data for each test."""
+        # Create gridded test data
+        self.gridded_data = xr.DataArray(
+            np.random.random((5, 4, 8)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(5),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-180, 180, 8),
+            },
+        )
+
+        # Create global data that needs longitude wrapping
+        self.global_data = xr.DataArray(
+            np.random.random((2, 3, 6)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(2),
+                "lat": np.linspace(-90, 90, 3),
+                "lon": np.array([0, 60, 120, 180, 240, 300]),  # Global coverage
+            },
+        )
+
+    def test_wrap_lon_global_data(self):
+        """Test wrap_lon with global data that needs wrapping."""
+        plotter = GriddedPlotter(self.global_data)
+
+        wrapped = plotter.wrap_lon(self.global_data)
+
+        # Should add one more longitude point
+        assert wrapped.shape[2] == self.global_data.shape[2] + 1
+        assert wrapped.dims == self.global_data.dims
+
+        # Check that new longitude is added correctly
+        original_lons = self.global_data.lon.values
+        wrapped_lons = wrapped.lon.values
+        assert len(wrapped_lons) == len(original_lons) + 1
+        assert wrapped_lons[-1] == original_lons[0] + 360
+
+    @patch("marEx.plotX.gridded.logger")
+    @patch("marEx.plotX.gridded.log_timing")
+    def test_plot_basic_functionality(self, mock_log_timing, mock_logger):
+        """Test basic plot functionality."""
+        plotter = GriddedPlotter(self.gridded_data)
+
+        # Mock matplotlib components
+        mock_ax = MagicMock()
+        mock_im = MagicMock()
+        mock_ax.pcolormesh.return_value = mock_im
+
+        # Mock log_timing context manager
+        mock_log_timing.return_value.__enter__ = MagicMock()
+        mock_log_timing.return_value.__exit__ = MagicMock()
+
+        # Mock ccrs import
+        with patch("marEx.plotX.gridded.ccrs") as mock_ccrs:
+            mock_ccrs.PlateCarree.return_value = "mock_transform"
+
+            # Select single time slice to avoid squeeze operation
+            single_time_data = self.gridded_data.isel(time=0)
+            plotter.da = single_time_data
+
+            result_ax, result_im = plotter.plot(mock_ax)
+
+            # Verify results
+            assert result_ax is mock_ax
+            assert result_im is mock_im
+
+            # Verify pcolormesh was called
+            mock_ax.pcolormesh.assert_called_once()
+
+            # Verify logging
+            mock_logger.debug.assert_called()
+
+    @patch("marEx.plotX.gridded.logger")
+    @patch("marEx.plotX.gridded.log_timing")
+    def test_plot_with_clim_parameter(self, mock_log_timing, mock_logger):
+        """Test plot with color limits specified."""
+        plotter = GriddedPlotter(self.gridded_data)
+
+        mock_ax = MagicMock()
+        mock_im = MagicMock()
+        mock_ax.pcolormesh.return_value = mock_im
+
+        # Mock log_timing context manager
+        mock_log_timing.return_value.__enter__ = MagicMock()
+        mock_log_timing.return_value.__exit__ = MagicMock()
+
+        with patch("marEx.plotX.gridded.ccrs") as mock_ccrs:
+            mock_ccrs.PlateCarree.return_value = "mock_transform"
+
+            single_time_data = self.gridded_data.isel(time=0)
+            plotter.da = single_time_data
+
+            result_ax, result_im = plotter.plot(mock_ax, clim=(0, 1))
+
+            # Verify pcolormesh was called with vmin/vmax
+            call_args = mock_ax.pcolormesh.call_args
+            kwargs = call_args[1]
+            assert "vmin" in kwargs
+            assert "vmax" in kwargs
+            assert kwargs["vmin"] == 0
+            assert kwargs["vmax"] == 1
+
+
+class TestUnstructuredPlotterCoverage:
+    """Test UnstructuredPlotter functionality with detailed coverage."""
+
+    def setup_method(self):
+        """Create test data for each test."""
+        # Create unstructured test data
+        self.unstructured_data = xr.DataArray(
+            np.random.random((5, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        )
+
+        self.custom_dims = {"time": "time", "x": "cell"}
+        self.custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+    def test_unstructured_plotter_initialization(self):
+        """Test UnstructuredPlotter initialization."""
+        plotter = UnstructuredPlotter(self.unstructured_data, dimensions=self.custom_dims, coordinates=self.custom_coords)
+
+        assert plotter.da is self.unstructured_data
+        assert plotter.dimensions == self.custom_dims
+        assert plotter.coordinates == self.custom_coords
+
+    def test_specify_grid_method(self):
+        """Test specify_grid method with various inputs."""
+        plotter = UnstructuredPlotter(self.unstructured_data, dimensions=self.custom_dims, coordinates=self.custom_coords)
+
+        # Test with string paths
+        tgrid_path = "/path/to/triangulation.nc"
+        ckdtree_path = "/path/to/ckdtree"
+
+        plotter.specify_grid(fpath_tgrid=tgrid_path, fpath_ckdtree=ckdtree_path)
+
+        assert str(plotter.fpath_tgrid).replace("\\", "/") == tgrid_path
+        assert str(plotter.fpath_ckdtree).replace("\\", "/") == ckdtree_path
+
+    def test_specify_grid_with_path_objects(self):
+        """Test specify_grid method with Path objects."""
+        from pathlib import Path
+
+        plotter = UnstructuredPlotter(self.unstructured_data, dimensions=self.custom_dims, coordinates=self.custom_coords)
+
+        # Test with Path objects
+        tgrid_path = Path("/path/to/triangulation.nc")
+        ckdtree_path = Path("/path/to/ckdtree")
+
+        plotter.specify_grid(fpath_tgrid=tgrid_path, fpath_ckdtree=ckdtree_path)
+
+        assert plotter.fpath_tgrid == tgrid_path
+        assert plotter.fpath_ckdtree == ckdtree_path
+
+    def test_specify_grid_partial_paths(self):
+        """Test specify_grid with only some paths specified."""
+        plotter = UnstructuredPlotter(self.unstructured_data, dimensions=self.custom_dims, coordinates=self.custom_coords)
+
+        # Test with only tgrid path
+        tgrid_path = "/path/to/triangulation.nc"
+        plotter.specify_grid(fpath_tgrid=tgrid_path)
+
+        assert str(plotter.fpath_tgrid).replace("\\", "/") == tgrid_path
+        assert plotter.fpath_ckdtree is None
+
+    def test_specify_grid_none_values(self):
+        """Test specify_grid with None values."""
+        plotter = UnstructuredPlotter(self.unstructured_data, dimensions=self.custom_dims, coordinates=self.custom_coords)
+
+        # Set some paths first
+        plotter.specify_grid(fpath_tgrid="/some/path", fpath_ckdtree="/another/path")
+
+        # Then clear them with None
+        plotter.specify_grid(fpath_tgrid=None, fpath_ckdtree=None)
+
+        assert plotter.fpath_tgrid is None
+        assert plotter.fpath_ckdtree is None
+
+
+class TestUnstructuredUtilityFunctions:
+    """Test unstructured module utility functions."""
+
+    def test_clear_cache_function(self):
+        """Test clear_cache function."""
+        from marEx.plotX.unstructured import _GRID_CACHE, clear_cache
+
+        # Add some dummy data to cache
+        _GRID_CACHE["triangulation"]["test_key"] = "test_value"
+        _GRID_CACHE["ckdtree"]["test_key"] = "test_value"
+
+        assert len(_GRID_CACHE["triangulation"]) > 0
+        assert len(_GRID_CACHE["ckdtree"]) > 0
+
+        # Clear cache
+        clear_cache()
+
+        assert len(_GRID_CACHE["triangulation"]) == 0
+        assert len(_GRID_CACHE["ckdtree"]) == 0
+
+    def test_load_triangulation_missing_variables(self):
+        """Test _load_triangulation with missing required variables."""
+        from marEx.exceptions import DataValidationError
+        from marEx.plotX.unstructured import _load_triangulation
+
+        # Mock xarray.open_dataset to return dataset without required variables
+        mock_dataset = MagicMock()
+        mock_dataset.variables = {"other_var": MagicMock()}  # Missing required vars
+
+        with patch("marEx.plotX.unstructured.xr.open_dataset", return_value=mock_dataset):
+            with pytest.raises(DataValidationError, match="Invalid triangulation grid file format"):
+                _load_triangulation("/fake/path.nc")
+
+    def test_load_triangulation_success(self):
+        """Test _load_triangulation with valid data."""
+        from marEx.plotX.unstructured import _load_triangulation, clear_cache
+
+        # Clear cache first
+        clear_cache()
+
+        # Mock valid dataset
+        mock_dataset = MagicMock()
+        mock_dataset.variables = {
+            "vertex_of_cell": MagicMock(),
+            "clon": MagicMock(),
+            "clat": MagicMock(),
+        }
+        mock_dataset.vertex_of_cell.values = np.array([[1, 2, 3], [2, 3, 4], [3, 4, 5]]).T
+        mock_dataset.clon.values = np.array([0, 30, 60])
+        mock_dataset.clat.values = np.array([0, 10, 20])
+        mock_dataset.close = MagicMock()
+
+        with patch("marEx.plotX.unstructured.xr.open_dataset", return_value=mock_dataset):
+            with patch("marEx.plotX.unstructured.Triangulation") as mock_triangulation:
+                mock_triang = MagicMock()
+                mock_triangulation.return_value = mock_triang
+
+                result = _load_triangulation("/test/path.nc")
+
+                assert result is mock_triang
+                mock_dataset.close.assert_called_once()
+                mock_triangulation.assert_called_once()
+
+    def test_load_triangulation_cached(self):
+        """Test _load_triangulation returns cached result."""
+        from marEx.plotX.unstructured import _GRID_CACHE, _load_triangulation, clear_cache
+
+        clear_cache()
+
+        test_path = "/test/path.nc"
+        cached_triangulation = MagicMock()
+
+        # Pre-populate cache
+        _GRID_CACHE["triangulation"][test_path] = cached_triangulation
+
+        result = _load_triangulation(test_path)
+
+        assert result is cached_triangulation
+
+    def test_load_ckdtree_file_not_found(self):
+        """Test _load_ckdtree with missing file."""
+        from marEx.exceptions import DataValidationError
+        from marEx.plotX.unstructured import _load_ckdtree
+
+        with patch("marEx.plotX.unstructured.Path") as mock_path_class:
+            mock_path = MagicMock()
+            mock_ckdtree_file = MagicMock()
+            mock_ckdtree_file.exists.return_value = False
+            mock_path.__truediv__.return_value = mock_ckdtree_file
+            mock_path_class.return_value = mock_path
+
+            with pytest.raises(DataValidationError, match="KDTree file not found"):
+                _load_ckdtree("/test/path", 0.25)
+
+    def test_load_ckdtree_success(self):
+        """Test _load_ckdtree with valid data."""
+        from marEx.plotX.unstructured import _load_ckdtree, clear_cache
+
+        clear_cache()
+
+        mock_dataset = MagicMock()
+        mock_dataset.ickdtree_c.values = np.array([0, 1, 2, 3])
+        mock_dataset.lon.values = np.array([0, 30, 60])
+        mock_dataset.lat.values = np.array([-30, 0, 30])
+        mock_dataset.close = MagicMock()
+
+        with patch("marEx.plotX.unstructured.Path") as mock_path_class:
+            mock_path = MagicMock()
+            mock_ckdtree_file = MagicMock()
+            mock_ckdtree_file.exists.return_value = True
+            mock_path.__truediv__.return_value = mock_ckdtree_file
+            mock_path_class.return_value = mock_path
+
+            with patch("marEx.plotX.unstructured.xr.open_dataset", return_value=mock_dataset):
+                result = _load_ckdtree("/test/path", 0.25)
+
+                assert "indices" in result
+                assert "lon" in result
+                assert "lat" in result
+                assert np.array_equal(result["indices"], mock_dataset.ickdtree_c.values)
+                mock_dataset.close.assert_called_once()
+
+    def test_load_ckdtree_cached(self):
+        """Test _load_ckdtree returns cached result."""
+        from marEx.plotX.unstructured import _GRID_CACHE, _load_ckdtree, clear_cache
+
+        clear_cache()
+
+        test_path = "/test/path"
+        test_res = 0.25
+        cache_key = (test_path, test_res)
+        cached_data = {"indices": np.array([0, 1, 2]), "lon": np.array([0, 30]), "lat": np.array([0, 30])}
+
+        # Pre-populate cache
+        _GRID_CACHE["ckdtree"][cache_key] = cached_data
+
+        result = _load_ckdtree(test_path, test_res)
+
+        assert result is cached_data
+
+
+class TestPlotXImportErrorHandling:
+    """Test behavior when plotting dependencies are not available."""
+
+    def test_gridded_without_plotting_deps(self):
+        """Test GriddedPlotter when plotting dependencies are missing."""
+        gridded_data = xr.DataArray(
+            np.random.random((5, 4, 8)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(5),
+                "lat": np.linspace(-20, 20, 4),
+                "lon": np.linspace(-180, 180, 8),
+            },
+        )
+
+        with patch("marEx.plotX.gridded.HAS_PLOTTING_DEPS", False):
+            # Should still be able to create plotter
+            plotter = GriddedPlotter(gridded_data)
+            assert plotter is not None
+
+    def test_unstructured_without_plotting_deps(self):
+        """Test UnstructuredPlotter when plotting dependencies are missing."""
+        unstructured_data = xr.DataArray(
+            np.random.random((5, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        )
+
+        custom_dims = {"time": "time", "x": "cell"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        with patch("marEx.plotX.unstructured.HAS_PLOTTING_DEPS", False):
+            # Should still be able to create plotter
+            plotter = UnstructuredPlotter(unstructured_data, dimensions=custom_dims, coordinates=custom_coords)
+            assert plotter is not None
+
+
+class TestPlotXEdgeCases:
+    """Test edge cases and error conditions in plotX modules."""
+
+    def test_gridded_wrap_lon_edge_cases(self):
+        """Test wrap_lon method edge cases."""
+        # Test with exactly 360-degree span
+        exact_global_data = xr.DataArray(
+            np.random.random((2, 3, 4)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(2),
+                "lat": np.linspace(-90, 90, 3),
+                "lon": np.array([0, 120, 240, 359.9]),  # Almost exactly 360 degrees
+            },
+        )
+
+        plotter = GriddedPlotter(exact_global_data)
+        wrapped = plotter.wrap_lon(exact_global_data)
+
+        # Should add longitude wrapping
+        assert wrapped.shape[2] == exact_global_data.shape[2] + 1
+
+    def test_gridded_wrap_lon_no_wrapping(self):
+        """Test wrap_lon when no wrapping is needed."""
+        regional_data = xr.DataArray(
+            np.random.random((2, 3, 4)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(2),
+                "lat": np.linspace(-90, 90, 3),
+                "lon": np.array([0, 30, 60, 90]),  # Regional data
+            },
+        )
+
+        plotter = GriddedPlotter(regional_data)
+        wrapped = plotter.wrap_lon(regional_data)
+
+        # Should not add longitude wrapping
+        assert wrapped.shape[2] == regional_data.shape[2]
+
+    def test_unstructured_interpolate_with_ckdtree_no_path(self):
+        """Test _interpolate_with_ckdtree when no ckdtree path is set."""
+        from marEx.exceptions import VisualisationError
+
+        unstructured_data = xr.DataArray(
+            np.random.random((5, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        )
+
+        custom_dims = {"time": "time", "x": "cell"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        plotter = UnstructuredPlotter(unstructured_data, dimensions=custom_dims, coordinates=custom_coords)
+        plotter.fpath_ckdtree = None  # Ensure no path is set
+
+        test_data = np.array([10, 20, 30])
+
+        with pytest.raises(VisualisationError, match="KDTree path not specified"):
+            plotter._interpolate_with_ckdtree(test_data, res=0.3)
+
+    def test_unstructured_interpolate_with_ckdtree_success(self):
+        """Test _interpolate_with_ckdtree with valid data."""
+        from pathlib import Path
+
+        unstructured_data = xr.DataArray(
+            np.random.random((5, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        )
+
+        custom_dims = {"time": "time", "x": "cell"}
+        custom_coords = {"time": "time", "x": "lon", "y": "lat"}
+
+        plotter = UnstructuredPlotter(unstructured_data, dimensions=custom_dims, coordinates=custom_coords)
+        plotter.fpath_ckdtree = Path("/test/ckdtree")
+
+        # Mock ckdtree data
+        mock_ckdt_data = {
+            "indices": np.array([0, 1, 2, 0, 1, 2]),  # 6 indices for 2x3 grid
+            "lon": np.array([0, 30, 60]),  # 3 longitudes
+            "lat": np.array([-30, 30]),  # 2 latitudes
+        }
+
+        test_data = np.array([10, 20, 30])  # 3 data points
+        expected_grid_shape = (2, 3)  # lat x lon
+
+        with patch("marEx.plotX.unstructured._load_ckdtree", return_value=mock_ckdt_data):
+            with patch("marEx.plotX.unstructured.np.meshgrid") as mock_meshgrid:
+                mock_lon_2d = np.ones(expected_grid_shape)
+                mock_lat_2d = np.ones(expected_grid_shape)
+                mock_meshgrid.return_value = (mock_lon_2d, mock_lat_2d)
+
+                grid_lon, grid_lat, grid_data = plotter._interpolate_with_ckdtree(test_data, res=0.3)
+
+                assert grid_lon.shape == expected_grid_shape
+                assert grid_lat.shape == expected_grid_shape
+                assert grid_data.shape == expected_grid_shape

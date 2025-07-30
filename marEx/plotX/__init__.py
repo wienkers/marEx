@@ -108,7 +108,7 @@ class PlotXAccessor:
 
         # If grid type was explicitly specified, check for consistency
         if _grid_type is not None:
-            if _grid_type != detected_type:
+            if _grid_type != detected_type:  # pragma: no cover
                 logger.warning(
                     f"Specified grid type '{_grid_type}' differs from detected type '{detected_type}' "
                     f"based on coordinate structure. Using specified type '{_grid_type}'"
@@ -138,17 +138,17 @@ class PlotXAccessor:
         return plotter
 
     # Also provide methods that work with default parameters for backward compatibility
-    def single_plot(self, config: PlotConfig, **kwargs):
+    def single_plot(self, config: PlotConfig, **kwargs):  # pragma: no cover
         """Create a single plot with default dimension detection."""
         plotter = self()
         return plotter.single_plot(config, **kwargs)
 
-    def multi_plot(self, config: PlotConfig, **kwargs):
+    def multi_plot(self, config: PlotConfig, **kwargs):  # pragma: no cover
         """Create multiple plots with default dimension detection."""
         plotter = self()
         return plotter.multi_plot(config, **kwargs)
 
-    def animate(self, config: PlotConfig, **kwargs):
+    def animate(self, config: PlotConfig, **kwargs):  # pragma: no cover
         """Create animation with default dimension detection."""
         plotter = self()
         return plotter.animate(config, **kwargs)

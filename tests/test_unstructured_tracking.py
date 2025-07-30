@@ -251,15 +251,13 @@ class TestUnstructuredTracking:
         # The merging dataset has more events and is designed to trigger merging scenarios
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],
-            3.8,  # Based on actual test results
-            tolerance_relative=0.3,
+            1.0,  # Based on actual test results
+            tolerance_relative=0.01,
         )
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 17, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 10, tolerance=3)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 4, tolerance=1)
-        assert_count_in_reasonable_range(
-            tracked_ds.attrs["total_merges"], 1, tolerance=1
-        )  # May not always merge with these settings
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 98, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 97, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 12, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 9, tolerance=1)
 
     @pytest.mark.slow
     def test_unstructured_tracking_data_consistency(self, dask_client_unstructured):

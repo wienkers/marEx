@@ -326,7 +326,7 @@ class TestExceptionCatching:
 
     def test_catch_python_exception(self):
         """Test catching marEx errors as standard exceptions."""
-        with pytest.raises(Exception):
+        with pytest.raises(ProcessingError):
             raise ProcessingError("Processing issue")
 
 

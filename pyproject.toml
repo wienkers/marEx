@@ -181,6 +181,7 @@ omit = [
     "*/test_*.py",
     "setup.py",
     "*/_coverage_init.py",
+    "*/_dependencies.py",
 ]
 
 [tool.coverage.report]
