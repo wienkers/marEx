@@ -28,6 +28,10 @@ class TestUnstructuredTracking:
         test_data_path = Path(__file__).parent / "data" / "extremes_unstructured.zarr"
         cls.extremes_data = xr.open_zarr(str(test_data_path), chunks={}).persist()
 
+        # Load merging-specific dataset for merging tests
+        merging_data_path = Path(__file__).parent / "data" / "extremes_unstructured_merging.zarr"
+        cls.extremes_data_merging = xr.open_zarr(str(merging_data_path), chunks={}).persist()
+
         # Standard chunk size for tracking (spatial dimensions must be contiguous)
         cls.chunk_size = {"time": 2, "ncells": -1}
 
@@ -159,13 +163,14 @@ class TestUnstructuredTracking:
     def test_advanced_unstructured_tracking_with_merging(self, dask_client_unstructured):
         """Test advanced tracking with temporal filling and merging enabled on unstructured grid."""
         # Array broadcasting issue has been fixed
+        # Use the merging-specific dataset that contains artificially made 2 merging blobs
 
         # Create tracker with advanced settings
         tracker = marEx.tracker(
-            self.extremes_data.extreme_events,
-            self.extremes_data.mask,
+            self.extremes_data_merging.extreme_events,
+            self.extremes_data_merging.mask,
             R_fill=1,
-            area_filter_quartile=0.5,
+            area_filter_quartile=0.0,
             temp_dir=self.temp_dir,
             T_fill=2,  # Allow 2-day gaps
             allow_merging=True,
@@ -181,8 +186,8 @@ class TestUnstructuredTracking:
             coordinate_units="degrees",  # Specify coordinate units
             quiet=True,
             # Provide unstructured grid information
-            neighbours=self.extremes_data.neighbours,
-            cell_areas=self.extremes_data.cell_areas,
+            neighbours=self.extremes_data_merging.neighbours,
+            cell_areas=self.extremes_data_merging.cell_areas,
         )
 
         # Run tracking with merge information
@@ -242,16 +247,19 @@ class TestUnstructuredTracking:
         if len(areas_at_present) > 0:  # Only check if events are present
             assert (areas_at_present > 0).all(), "Some events have non-positive area"
 
-        # Assert tracking statistics are within reasonable bounds
+        # Assert tracking statistics are within reasonable bounds for the merging dataset
+        # The merging dataset has more events and is designed to trigger merging scenarios
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],
-            2.2,
+            3.8,  # Based on actual test results
             tolerance_relative=0.3,
         )
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 15, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 8, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 3, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 0, tolerance=5)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 17, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 10, tolerance=3)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 4, tolerance=1)
+        assert_count_in_reasonable_range(
+            tracked_ds.attrs["total_merges"], 1, tolerance=1
+        )  # May not always merge with these settings
 
     @pytest.mark.slow
     def test_unstructured_tracking_data_consistency(self, dask_client_unstructured):

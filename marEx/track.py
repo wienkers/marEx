@@ -1621,7 +1621,11 @@ class tracker:
             cluster_sizes, unique_cluster_IDs = results
 
             # Pre-filter tiny objects for performance
-            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
+            if self.area_filter_quartile < 0.05:
+                # No area filtering, just return the binary data
+                cluster_sizes_filtered_dask = cluster_sizes.data
+            else:
+                cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
             object_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
