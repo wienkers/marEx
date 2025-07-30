@@ -882,8 +882,8 @@ class TestUnstructuredPlotterCoverage:
 
         plotter.specify_grid(fpath_tgrid=tgrid_path, fpath_ckdtree=ckdtree_path)
 
-        assert str(plotter.fpath_tgrid) == tgrid_path
-        assert str(plotter.fpath_ckdtree) == ckdtree_path
+        assert str(plotter.fpath_tgrid).replace("\\", "/") == tgrid_path
+        assert str(plotter.fpath_ckdtree).replace("\\", "/") == ckdtree_path
 
     def test_specify_grid_with_path_objects(self):
         """Test specify_grid method with Path objects."""
@@ -908,7 +908,7 @@ class TestUnstructuredPlotterCoverage:
         tgrid_path = "/path/to/triangulation.nc"
         plotter.specify_grid(fpath_tgrid=tgrid_path)
 
-        assert str(plotter.fpath_tgrid) == tgrid_path
+        assert str(plotter.fpath_tgrid).replace("\\", "/") == tgrid_path
         assert plotter.fpath_ckdtree is None
 
     def test_specify_grid_none_values(self):
