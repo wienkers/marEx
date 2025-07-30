@@ -1621,9 +1621,8 @@ class tracker:
             cluster_sizes, unique_cluster_IDs = results
 
             # Pre-filter tiny objects for performance
-            if self.area_filter_quartile < 0.05:
-                # No area filtering, just return the binary data
-                cluster_sizes_filtered_dask = cluster_sizes.data
+            if self.area_filter_quartile == 0.0:
+                cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 5).data
             else:
                 cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
             cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
@@ -3224,7 +3223,10 @@ class tracker:
             chunk_data_m1 = chunk_data_m1_full.squeeze()[0].astype(np.int32).copy()
             chunk_data = chunk_data_m1_full.squeeze()[1].astype(np.int32).copy()
             del chunk_data_m1_full  # Free memory immediately
-            chunk_data_p1 = chunk_data_p1_full.squeeze().astype(np.int32).copy()
+            chunk_data_p1 = chunk_data_p1_full.astype(np.int32).copy()
+            # Remove any singleton dimensions except time and space
+            while chunk_data_p1.ndim > 2:
+                chunk_data_p1 = chunk_data_p1.squeeze(axis=-1)
             del chunk_data_p1_full
 
             # Extract and prepare input arrays
@@ -3267,18 +3269,18 @@ class tracker:
             final_merge_count = 0
 
             # Process each timestep
+            data_p1 = []
             for t in range(n_time):
                 next_new_id = next_id_start[t]  # Use the offset for this timestep
 
                 # Get current time slice data
-                data_p1 = []
                 if t == 0:
                     data_m1 = chunk_data_m1
                     data_t = chunk_data
                     del chunk_data_m1, chunk_data  # Free memory
                 else:
-                    data_m1 = data_t
-                    data_t = data_p1
+                    data_m1 = data_t  # Previous data_t becomes data_m1
+                    data_t = data_p1  # Previous data_p1 becomes data_t
                 data_p1 = chunk_data_p1[t]
 
                 # Process each merging object at this timestep
@@ -3920,6 +3922,7 @@ class tracker:
 
             if update_on_disk:
                 object_id_field_unique = update_object_id_field_zarr(
+                    self,
                     object_id_field_unique,
                     id_lookup,
                     updates_array,
@@ -4665,7 +4668,7 @@ def partition_nn_unstructured_optimised(
             a = np.sin(dlat / 2) ** 2 + np.cos(np.deg2rad(lat[point])) * cos_parent_lat * np.sin(dlon / 2) ** 2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
-            parent_frontiers_working[point] = np.argmin(dist).astype(np.int32)
+            parent_frontiers_working[point] = np.int32(np.argmin(dist))
 
     # Extract result for child points only
     result = parent_frontiers_working[child_mask_working].copy()
