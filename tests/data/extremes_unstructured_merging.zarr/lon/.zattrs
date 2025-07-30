@@ -1,0 +1,9 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "ncells"
+    ],
+    "bounds": "clon_vertices",
+    "long_name": "center longitude",
+    "standard_name": "grid_longitude",
+    "units": "radian"
+}

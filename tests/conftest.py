@@ -1,5 +1,10 @@
 """Test configuration and fixtures for marEx package."""
 
+# Configure coverage environment BEFORE any other imports
+from .coverage_config import setup_coverage_environment
+
+setup_coverage_environment()
+
 import gc
 import logging
 import time
@@ -66,44 +71,54 @@ def dask_client():
     # Detect if running under coverage
     is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
 
-    # Configure Dask for testing
-    dask.config.set(
-        {
-            "distributed.worker.daemon": False,
-            "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
-            "distributed.worker.memory.target": 0.8,
-            "distributed.worker.memory.spill": 0.9,
-            "distributed.worker.memory.pause": 0.95,
-            "distributed.worker.memory.terminate": 0.98,
-            # Add more aggressive memory management
-            "distributed.worker.memory.recent-to-old-time": "3s",
-            "distributed.worker.memory.rebalance.measure": "managed_in_memory",
-            # Optimise task scheduling for memory-intensive workflows
-            "distributed.scheduler.allowed-failures": 20,  # Increased from 10
-            "distributed.comm.timeouts.connect": "120s",  # Increased from 60s
-            "distributed.comm.timeouts.tcp": "120s",  # Increased from 60s
-            # Add additional robustness for coverage runs
-            "distributed.worker.multiprocessing.initializer": None,
-            "distributed.worker.multiprocessing.initialize": None,
-            "distributed.comm.retry.count": 5,
-            "distributed.comm.retry.delay.min": "1s",
-            "distributed.comm.retry.delay.max": "10s",
-            "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
-        }
-    )
-
     if is_coverage:
-        # Use threads instead of processes for coverage
+        # For coverage: use threads scheduler with a single-threaded LocalCluster
+        # This ensures all code executes in the main process where coverage is active
+        # but still provides a distributed client for operations like wait()
         cluster = LocalCluster(
             n_workers=1,
             threads_per_worker=1,
-            processes=False,  # Use threads for coverage
+            processes=False,  # Use threads, not processes
             memory_limit="8GB",
             dashboard_address=None,
             silence_logs=True,
         )
+        client = Client(cluster)
+        yield client
+
+        # Cleanup
+        client.close()
+        cluster.close()
     else:
-        # Use processes for normal testing
+        # Normal testing: use distributed client
+        dask.config.set(scheduler="distributed")
+
+        # Configure Dask for testing
+        dask.config.set(
+            {
+                "distributed.worker.daemon": False,
+                "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
+                "distributed.worker.memory.target": 0.8,
+                "distributed.worker.memory.spill": 0.9,
+                "distributed.worker.memory.pause": 0.95,
+                "distributed.worker.memory.terminate": 0.98,
+                # Add more aggressive memory management
+                "distributed.worker.memory.recent-to-old-time": "3s",
+                "distributed.worker.memory.rebalance.measure": "managed_in_memory",
+                # Optimise task scheduling for memory-intensive workflows
+                "distributed.scheduler.allowed-failures": 20,  # Increased from 10
+                "distributed.comm.timeouts.connect": "120s",  # Increased from 60s
+                "distributed.comm.timeouts.tcp": "120s",  # Increased from 60s
+                # Add additional robustness for coverage runs
+                "distributed.worker.multiprocessing.initializer": None,
+                "distributed.worker.multiprocessing.initialize": None,
+                "distributed.comm.retry.count": 5,
+                "distributed.comm.retry.delay.min": "1s",
+                "distributed.comm.retry.delay.max": "10s",
+                "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
+            }
+        )
+
         cluster = LocalCluster(
             n_workers=2,  # Reduced from 4 for better stability
             threads_per_worker=1,
@@ -115,13 +130,13 @@ def dask_client():
             protocol="tcp",
         )
 
-    client = Client(cluster)
+        client = Client(cluster)
 
-    yield client
+        yield client
 
-    # Cleanup
-    client.close()
-    cluster.close()
+        # Cleanup
+        client.close()
+        cluster.close()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -333,25 +348,26 @@ def dask_client_per_module():
     # Detect if running under coverage
     is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
 
-    client = None
-    try:
-        if is_coverage:
-            # Use threads instead of processes for coverage
-            client = Client(
-                n_workers=1,
-                threads_per_worker=1,
-                processes=False,  # Use threads for coverage
-                memory_limit="8GB",
-                silence_logs=logging.WARNING,
-                dashboard_address=None,
-                # Add more conservative settings for parallel execution
-                timeout="300s",
-                heartbeat_interval="30s",
-            )
-            # Let client fully initialise
-            client.wait_for_workers(1, timeout=60)
-        else:
-            # Use processes for normal testing
+    if is_coverage:
+        # For coverage: use threads scheduler with a single-threaded LocalCluster
+        cluster = LocalCluster(
+            n_workers=1,
+            threads_per_worker=1,
+            processes=False,  # Use threads, not processes
+            memory_limit="8GB",
+            dashboard_address=None,
+            silence_logs=True,
+        )
+        client = Client(cluster)
+        yield client
+
+        # Cleanup
+        client.close()
+        cluster.close()
+    else:
+        # Normal testing
+        client = None
+        try:
             client = Client(
                 n_workers=2,
                 threads_per_worker=1,
@@ -364,20 +380,20 @@ def dask_client_per_module():
             )
             # Let client fully initialise
             client.wait_for_workers(2, timeout=60)
-        yield client
-    finally:
-        if client:
-            try:
-                # Ensure all computations are finished before closing
-                client.cancel(client.list_datasets(), force=True)
-                client.restart()  # Clean restart before close
-                time.sleep(1)  # Brief pause
-                client.close(timeout=10)
-                client.cluster.close(timeout=10)
-            except Exception as e:
-                print(f"Warning: Error during Dask client cleanup: {e}")
-        gc.collect()
-        time.sleep(0.5)
+            yield client
+        finally:
+            if client:
+                try:
+                    # Ensure all computations are finished before closing
+                    client.cancel(client.list_datasets(), force=True)
+                    client.restart()  # Clean restart before close
+                    time.sleep(1)  # Brief pause
+                    client.close(timeout=10)
+                    client.cluster.close(timeout=10)
+                except Exception as e:
+                    print(f"Warning: Error during Dask client cleanup: {e}")
+            gc.collect()
+            time.sleep(0.5)
 
 
 # Create module-specific fixtures

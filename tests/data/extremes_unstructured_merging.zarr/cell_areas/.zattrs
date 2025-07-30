@@ -1,0 +1,11 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "ncells"
+    ],
+    "coordinates": "lat lon",
+    "grid_type": "unstructured",
+    "long_name": "area of grid cell",
+    "number_of_grid_in_reference": 1,
+    "standard_name": "area",
+    "units": "m2"
+}

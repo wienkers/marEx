@@ -168,14 +168,19 @@ markers = [
     "integration: marks tests as integration tests",
     "benchmark: marks tests as benchmark tests",
     "nocov: marks tests to be excluded from coverage reporting",
+    "numba_issue: marks tests that have Numba compatibility issues with coverage",
 ]
 
 [tool.coverage.run]
 source = ["marEx"]
+parallel = true  # Enable parallel coverage collection
+concurrency = ["thread", "multiprocessing"]  # Handle both threads and processes
+sigterm = true  # Handle SIGTERM gracefully
 omit = [
     "*/tests/*",
     "*/test_*.py",
     "setup.py",
+    "*/_coverage_init.py",
 ]
 
 [tool.coverage.report]
@@ -183,6 +188,10 @@ exclude_lines = [
     "pragma: no cover",
     "@jit",
     "@njit",
+    "@numba\\.jit",  # Add comprehensive Numba exclusions
+    "@numba\\.njit",
+    "@numba\\.vectorize",
+    "@numba\\.guvectorize",
     "def __repr__",
     "if self.debug:",
     "if settings.DEBUG",

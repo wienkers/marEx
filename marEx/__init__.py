@@ -23,6 +23,12 @@ Example
 ...                         R_fill=8, area_filter_quartile=0.5).run()
 """
 
+# Initialize coverage for subprocesses if needed - MUST BE FIRST
+try:
+    from . import _coverage_init
+except ImportError:
+    pass
+
 # Import dependency management
 from ._dependencies import get_installation_profile, has_dependency, print_dependency_status
 
