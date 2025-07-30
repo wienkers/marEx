@@ -501,3 +501,38 @@ class TestGriddedPreprocessing:
         assert "T" in extremes_ds_shifting.coords
         assert "latitude" in extremes_ds_shifting.coords
         assert "longitude" in extremes_ds_shifting.coords
+
+    def test_hobday_extreme_exact_percentile(self):
+        """Test Hobday extreme method with exact percentile."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="detrended_baseline",
+            method_extreme="hobday_extreme",
+            method_percentile="exact",
+            threshold_percentile=95,
+            window_days_hobday=11,
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks,
+        )
+
+        # Verify output structure
+        assert isinstance(extremes_ds, xr.Dataset)
+        assert "extreme_events" in extremes_ds.data_vars
+        assert "thresholds" in extremes_ds.data_vars
+        assert extremes_ds.extreme_events.dtype == bool
+
+        # Verify thresholds have correct dimensions (day-of-year specific)
+        assert "dayofyear" in extremes_ds.thresholds.dims
+        assert extremes_ds.thresholds.dims == ("dayofyear", "lat", "lon")
+
+        # Verify some extremes were identified
+        assert extremes_ds.extreme_events.sum() > 0
+
+        # Verify threshold values are reasonable
+        threshold_values = extremes_ds.thresholds.values
+        finite_mask = np.isfinite(threshold_values)
+        assert finite_mask.sum() > 0  # Should have some finite values
+        assert np.all(threshold_values[finite_mask] > 0)  # Finite values should be positive
+
+        # Verify attributes
+        assert extremes_ds.attrs["method_percentile"] == "exact"

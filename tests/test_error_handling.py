@@ -583,3 +583,534 @@ class TestHelpfulErrorMessages:
         error_message = str(exc_info.value)
         assert "coordinate" in error_message.lower()
         assert "range" in error_message.lower()
+
+
+class TestIdentifyExtremesConfigurationErrors:
+    """Test all ConfigurationError cases in identify_extremes."""
+
+    @pytest.fixture(scope="class")
+    def anomaly_data(self):
+        """Create anomaly data for testing identify_extremes directly."""
+        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
+        ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
+        sst_da = ds.to  # Extract the DataArray named 'to'
+
+        # Create anomaly data for testing identify_extremes directly
+        dimensions = {"time": "time", "x": "lon", "y": "lat"}
+        anomalies_ds = marEx.compute_normalised_anomaly(sst_da, dimensions=dimensions)
+        return anomalies_ds.dat_anomaly
+
+    @pytest.fixture(scope="class")
+    def dimensions_coords(self):
+        """Standard dimensions and coordinates for testing."""
+        return {"dimensions": {"time": "time", "x": "lon", "y": "lat"}, "coordinates": {"time": "time", "x": "lon", "y": "lat"}}
+
+    def test_invalid_method_percentile(self, anomaly_data):
+        """Test ConfigurationError for invalid method_percentile."""
+        with pytest.raises(ConfigurationError, match="Unknown method_percentile 'invalid_method'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_percentile="invalid_method",
+            )
+
+    def test_precision_with_exact_percentile(self, anomaly_data):
+        """Test ConfigurationError when precision is used with exact percentile method."""
+        with pytest.raises(ConfigurationError, match="Parameter 'precision' cannot be used with method_percentile='exact'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_percentile="exact",
+                precision=0.02,  # Non-default precision
+            )
+
+    def test_max_anomaly_with_exact_percentile(self, anomaly_data):
+        """Test ConfigurationError when max_anomaly is used with exact percentile method."""
+        with pytest.raises(ConfigurationError, match="Parameter 'max_anomaly' cannot be used with method_percentile='exact'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_percentile="exact",
+                max_anomaly=10.0,  # Non-default max_anomaly
+            )
+
+    def test_low_percentile_with_approximate_method(self, anomaly_data):
+        """Test ConfigurationError for low percentile with approximate method."""
+        with pytest.raises(
+            ConfigurationError, match="Percentile threshold 50% is not supported with method_percentile='approximate'"
+        ):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_percentile="approximate",
+                threshold_percentile=50,  # Below 60% threshold
+            )
+
+    def test_window_spatial_hobday_with_global_extreme(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError when window_spatial_hobday is used with global_extreme."""
+        with pytest.raises(ConfigurationError, match="window_spatial_hobday can only be used with method_extreme='hobday_extreme'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_extreme="global_extreme",
+                window_spatial_hobday=3,  # This should trigger error with global_extreme
+                dimensions=dimensions_coords["dimensions"],
+                coordinates=dimensions_coords["coordinates"],
+            )
+
+    def test_window_spatial_hobday_with_exact_percentile(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError when window_spatial_hobday is used with exact percentile."""
+        with pytest.raises(ConfigurationError, match="window_spatial_hobday is not supported with method_percentile='exact'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_extreme="hobday_extreme",
+                method_percentile="exact",
+                window_spatial_hobday=3,  # This should trigger error with exact percentile
+                dimensions=dimensions_coords["dimensions"],
+                coordinates=dimensions_coords["coordinates"],
+            )
+
+    def test_even_window_days_hobday(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError for even window_days_hobday."""
+        with pytest.raises(ConfigurationError, match="window_days_hobday must be an odd number"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_extreme="hobday_extreme",
+                window_days_hobday=10,  # Even number
+                dimensions=dimensions_coords["dimensions"],
+                coordinates=dimensions_coords["coordinates"],
+            )
+
+    def test_even_window_spatial_hobday(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError for even window_spatial_hobday."""
+        with pytest.raises(ConfigurationError, match="window_spatial_hobday must be an odd number"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_extreme="hobday_extreme",
+                method_percentile="approximate",
+                window_spatial_hobday=4,  # Even number
+                dimensions=dimensions_coords["dimensions"],
+                coordinates=dimensions_coords["coordinates"],
+            )
+
+    def test_invalid_method_extreme(self, anomaly_data):
+        """Test ConfigurationError for invalid method_extreme."""
+        with pytest.raises(ConfigurationError, match="Unknown extreme method 'invalid_extreme'"):
+            marEx.identify_extremes(
+                anomaly_data,
+                method_extreme="invalid_extreme",
+            )
+
+
+class TestTrackerDataValidationErrors:
+    """Test all create_data_validation_error cases in track.py."""
+
+    @pytest.fixture(scope="function")
+    def valid_binary_data(self):
+        """Create valid binary data and mask for testing."""
+        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
+        ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
+        sst_da = ds.to
+
+        # Create global coordinate data to avoid regional coordinate issues
+        global_data = sst_da.assign_coords(lon=np.linspace(-180, 180, len(sst_da.lon)), lat=np.linspace(-90, 90, len(sst_da.lat)))
+
+        dimensions = {"time": "time", "x": "lon", "y": "lat"}
+        extremes_ds = marEx.preprocess_data(global_data, dimensions=dimensions, dask_chunks={"time": 25})
+        return extremes_ds.extreme_events, extremes_ds.mask
+
+    def test_data_bin_not_chunked(self):
+        """Test error for non-chunked data_bin."""
+        # Create non-chunked data
+        data = xr.DataArray(
+            np.random.random((10, 5, 4)),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": range(10),
+                "lat": np.linspace(-20, 20, 5),
+                "lon": np.linspace(-10, 10, 4),
+            },
+        )
+        binary_data = (data > data.mean()).astype(bool).load()  # Load to remove chunks
+        mask = ~np.isnan(data.isel(time=0))
+
+        with pytest.raises(DataValidationError, match="Data must be chunked"):
+            marEx.tracker(binary_data, mask, R_fill=8, area_filter_quartile=0.5, regional_mode=True, coordinate_units="degrees")
+
+    def test_unstructured_grid_missing_temp_dir(self):
+        """Test error when temp_dir is missing for unstructured grids."""
+        # Create 2D unstructured data with proper coordinate range
+        data = xr.DataArray(
+            np.random.random((10, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        ).chunk({"time": 5})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        with pytest.raises(DataValidationError, match="temp_dir is required for unstructured grids"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                unstructured_grid=True,
+                temp_dir=None,  # Missing temp_dir
+                coordinate_units="degrees",  # Explicitly specify units
+                dimensions={"time": "time", "x": "cell"},  # Match the data dimensions
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+            )
+
+    def test_unstructured_grid_missing_neighbours(self):
+        """Test error when neighbours array is missing for unstructured grids."""
+        # Create 2D unstructured data with proper coordinate range
+        data = xr.DataArray(
+            np.random.random((10, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        ).chunk({"time": 5})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        with pytest.raises(DataValidationError, match="neighbours array is required for unstructured grids"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                unstructured_grid=True,
+                temp_dir="/tmp",
+                neighbours=None,  # Missing neighbours
+                coordinate_units="degrees",  # Explicitly specify units
+                dimensions={"time": "time", "x": "cell"},  # Match the data dimensions
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+            )
+
+    def test_unstructured_grid_missing_cell_areas(self):
+        """Test error when cell_areas array is missing for unstructured grids."""
+        # Create 2D unstructured data with proper coordinate range
+        data = xr.DataArray(
+            np.random.random((10, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        ).chunk({"time": 5})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        with pytest.raises(DataValidationError, match="cell_areas array is required for unstructured grids"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                unstructured_grid=True,
+                temp_dir="/tmp",
+                neighbours=np.ones((3, 100)),  # Dummy neighbours
+                cell_areas=None,  # Missing cell_areas
+                coordinate_units="degrees",  # Explicitly specify units
+                dimensions={"time": "time", "x": "cell"},  # Match the data dimensions
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+            )
+
+    def test_invalid_dimensions_unstructured_data(self):
+        """Test error for invalid dimensions in unstructured data."""
+        # Create 2D unstructured data
+        data = xr.DataArray(
+            np.random.random((10, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                "lat": ("cell", np.random.uniform(-90, 90, 100)),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+            },
+        ).chunk({"time": 5})
+
+        binary_data = (data > data.mean()).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        # Use invalid dimensions that don't match the data structure
+        invalid_dimensions = {"time": "time", "x": "invalid_dim"}
+        invalid_coordinates = {"time": "time", "x": "lon", "y": "lat"}
+
+        with pytest.raises(DataValidationError, match="Invalid dimensions for unstructured data"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                dimensions=invalid_dimensions,
+                coordinates=invalid_coordinates,
+                unstructured_grid=True,  # Explicitly set to trigger unstructured validation
+                coordinate_units="degrees",  # Explicitly specify units
+            )
+
+    def test_invalid_dimensions_gridded_data(self, valid_binary_data):
+        """Test error for invalid dimensions in gridded data."""
+        binary_data, mask = valid_binary_data
+
+        # Use dimensions that exist but aren't in the right order/format
+        invalid_dimensions = {"time": "time", "x": "invalid_x", "y": "invalid_y"}
+        invalid_coordinates = {"time": "time", "x": "lon", "y": "lat"}
+
+        with pytest.raises(DataValidationError, match="Invalid dimensions for gridded data"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                dimensions=invalid_dimensions,
+                coordinates=invalid_coordinates,
+            )
+
+    def test_missing_coordinates_unstructured_data(self):
+        """Test error for missing coordinates in unstructured data."""
+        # Create 2D unstructured data without required coordinates
+        data = xr.DataArray(
+            np.random.random((10, 100)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                # Missing lat/lon coordinates
+            },
+        ).chunk({"time": 5})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        dimensions = {"time": "time", "x": "cell"}
+        coordinates = {"time": "time", "x": "missing_lon", "y": "missing_lat"}
+
+        with pytest.raises(KeyError, match="missing_lat"):
+            marEx.tracker(binary_data, mask, R_fill=8, area_filter_quartile=0.5, dimensions=dimensions, coordinates=coordinates)
+
+    def test_non_boolean_data_bin(self, valid_binary_data):
+        """Test error for non-boolean data_bin."""
+        binary_data, mask = valid_binary_data
+
+        # Convert to float data
+        float_data = binary_data.astype(float)
+
+        with pytest.raises(DataValidationError, match="Input DataArray must be binary \\(boolean type\\)"):
+            marEx.tracker(float_data, mask, R_fill=8, area_filter_quartile=0.5)
+
+    def test_non_dask_data_bin(self, valid_binary_data):
+        """Test error for non-Dask data_bin."""
+        binary_data, mask = valid_binary_data
+
+        # Load data to remove Dask backing
+        loaded_data = binary_data.load()
+
+        with pytest.raises(DataValidationError, match="Data must be chunked"):
+            marEx.tracker(loaded_data, mask, R_fill=8, area_filter_quartile=0.5)
+
+    def test_non_boolean_mask(self, valid_binary_data):
+        """Test error for non-boolean mask."""
+        binary_data, mask = valid_binary_data
+
+        # Convert mask to float and ensure it's chunked (mask from fixture is not chunked)
+        float_mask = mask.astype(float).chunk({"lat": -1, "lon": -1})
+
+        with pytest.raises(DataValidationError, match="Mask must be binary \\(boolean type\\)"):
+            marEx.tracker(binary_data, float_mask, R_fill=8, area_filter_quartile=0.5)
+
+    def test_all_false_mask(self, valid_binary_data):
+        """Test error for mask with only False values."""
+        binary_data, mask = valid_binary_data
+
+        # Create all-False mask and ensure it's chunked (mask from fixture is not chunked)
+        all_false_mask = xr.zeros_like(mask, dtype=bool).chunk({"lat": -1, "lon": -1})
+
+        with pytest.raises(DataValidationError, match="Mask contains only False values"):
+            marEx.tracker(binary_data, all_false_mask, R_fill=8, area_filter_quartile=0.5)
+
+    def test_invalid_neighbour_array_shape(self):
+        """Test error for invalid neighbour array shape in unstructured grid setup."""
+        # Create minimal unstructured data
+        data = xr.DataArray(
+            np.random.random((5, 50)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 50)),
+                "lon": ("cell", np.random.uniform(-180, 180, 50)),
+            },
+        ).chunk({"time": 3})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        # Create invalid neighbours array (wrong first dimension)
+        invalid_neighbours = xr.DataArray(
+            np.ones((4, 50)),  # Should be (3, 50) for triangular grid
+            dims=["nv", "cell"],
+            coords={
+                "cell": range(50),
+                "nv": range(4),
+                "lat": ("cell", np.random.uniform(-90, 90, 50)),
+                "lon": ("cell", np.random.uniform(-180, 180, 50)),
+            },
+        )
+
+        with pytest.raises(DataValidationError, match="Invalid neighbour array for triangular grid"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                unstructured_grid=True,
+                temp_dir="/tmp",
+                neighbours=invalid_neighbours,
+                cell_areas=xr.DataArray(
+                    np.ones(50),
+                    dims=["cell"],
+                    coords={
+                        "cell": range(50),
+                        "lat": ("cell", np.random.uniform(-90, 90, 50)),
+                        "lon": ("cell", np.random.uniform(-180, 180, 50)),
+                    },
+                ),
+                coordinate_units="degrees",  # Explicitly specify units
+                dimensions={"time": "time", "x": "cell"},  # Match the data dimensions
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+            )
+
+    def test_invalid_neighbour_array_dimensions(self):
+        """Test error for invalid neighbour array dimensions in unstructured grid setup."""
+        # Create minimal unstructured data
+        data = xr.DataArray(
+            np.random.random((5, 50)),
+            dims=["time", "cell"],
+            coords={
+                "time": range(5),
+                "lat": ("cell", np.random.uniform(-90, 90, 50)),
+                "lon": ("cell", np.random.uniform(-180, 180, 50)),
+            },
+        ).chunk({"time": 3})
+
+        binary_data = (data > 0.5).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+
+        # Create neighbours array with wrong dimension names
+        invalid_neighbours = xr.DataArray(
+            np.ones((3, 50)),
+            dims=["wrong_nv", "wrong_cell"],  # Wrong dimension names
+            coords={
+                "wrong_cell": range(50),
+                "wrong_nv": range(3),
+                "lat": ("wrong_cell", np.random.uniform(-90, 90, 50)),
+                "lon": ("wrong_cell", np.random.uniform(-180, 180, 50)),
+                "nv": ("wrong_nv", range(3)),  # Add this coordinate that will be dropped
+            },
+        )
+
+        with pytest.raises(DataValidationError, match="Invalid neighbour array dimensions"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                unstructured_grid=True,
+                temp_dir="/tmp",
+                neighbours=invalid_neighbours,
+                cell_areas=xr.DataArray(
+                    np.ones(50),
+                    dims=["cell"],
+                    coords={
+                        "cell": range(50),
+                        "lat": ("cell", np.random.uniform(-90, 90, 50)),
+                        "lon": ("cell", np.random.uniform(-180, 180, 50)),
+                    },
+                ),
+                coordinate_units="degrees",  # Explicitly specify units
+                dimensions={"time": "time", "x": "cell"},  # Match the data dimensions
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+            )
+
+
+class TestTrackerCoordinateErrors:
+    """Test all create_coordinate_error cases in track.py."""
+
+    @pytest.fixture(scope="function")
+    def valid_binary_data_for_coords(self):
+        """Create valid binary data for coordinate testing."""
+        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
+        ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
+        sst_da = ds.to
+
+        # Create binary data
+        binary_data = (sst_da > sst_da.quantile(0.95)).astype(bool)
+        mask = ~np.isnan(sst_da.isel(time=0))
+
+        return binary_data, mask
+
+    def test_regional_mode_missing_coordinate_units(self, valid_binary_data_for_coords):
+        """Test error when coordinate_units is None in regional mode."""
+        binary_data, mask = valid_binary_data_for_coords
+
+        with pytest.raises(CoordinateError, match="coordinate_units must be specified when regional_mode=True"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                regional_mode=True,
+                coordinate_units=None,  # Missing coordinate_units
+            )
+
+    def test_regional_mode_invalid_coordinate_units(self, valid_binary_data_for_coords):
+        """Test error for invalid coordinate_units in regional mode."""
+        binary_data, mask = valid_binary_data_for_coords
+
+        with pytest.raises(CoordinateError, match="Invalid coordinate_units 'invalid_units'"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                regional_mode=True,
+                coordinate_units="invalid_units",  # Invalid coordinate_units
+            )
+
+    def test_global_mode_invalid_coordinate_units(self, valid_binary_data_for_coords):
+        """Test error for invalid coordinate_units in global mode."""
+        binary_data, mask = valid_binary_data_for_coords
+
+        with pytest.raises(CoordinateError, match="Invalid coordinate_units 'invalid_units'"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                regional_mode=False,
+                coordinate_units="invalid_units",  # Invalid coordinate_units
+            )
+
+    def test_global_mode_coordinate_autodetection_failure(self, valid_binary_data_for_coords):
+        """Test error when coordinate auto-detection fails in global mode."""
+        binary_data, mask = valid_binary_data_for_coords
+
+        # Create data with coordinates that can't be auto-detected (small range)
+        small_range_data = binary_data.assign_coords(
+            lon=np.linspace(0, 10, len(binary_data.lon)),  # Only 10 degree range
+            lat=np.linspace(0, 5, len(binary_data.lat)),  # Only 5 degree range
+        )
+
+        with pytest.raises(CoordinateError, match="Cannot auto-detect coordinate units from range"):
+            marEx.tracker(
+                small_range_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                regional_mode=False,
+                coordinate_units=None,  # Auto-detection should fail
+            )

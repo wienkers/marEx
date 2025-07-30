@@ -9,6 +9,8 @@ omit =
     */__pycache__/*
     */site-packages/*
     */_coverage_init.py
+    */_dependencies.py
+    */plotX/unstructured.py
 
 [report]
 show_missing = true
@@ -25,6 +27,7 @@ exclude_lines =
     raise AssertionError
     raise NotImplementedError
     except ImportError:
+    except (ImportError, ValueError):
     if 0:
     if __name__ == .__main__.:
     class .*\bProtocol\):

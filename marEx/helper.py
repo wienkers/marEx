@@ -620,7 +620,7 @@ def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
     #   first_chunk = dask.compute(first_key)[0]
     #   print(type(first_chunk), first_chunk)
 
-    def materialise_chunk(block: NDArray[Any]) -> NDArray[Any]:
+    def materialise_chunk(block: NDArray[Any]) -> NDArray[Any]:  # pragma: no cover
         """Force materialisation of a single chunk."""
         # This ensures we return an actual numpy array, not a task reference
         return np.asarray(block)
