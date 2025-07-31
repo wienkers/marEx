@@ -1,5 +1,4 @@
-
-![Logo](media/logo.png)
+<img width="4913" height="1784" alt="logo" src="https://github.com/user-attachments/assets/17868fac-d112-4ada-805b-d2bd079c60f0" />
 
 [![Continuous Integration](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
 [![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
