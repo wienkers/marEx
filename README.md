@@ -21,12 +21,22 @@ Marine Extremes Python Package
 - **🔬 Advanced Analytics**: Multiple statistical methodologies for robust extreme event detection
 - **📈 Complex Event Tracking**: Seamlessly handles coherent object splitting, merging, and evolution
 - **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
-- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to a supercomputer using to 1024+ cores
+- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to a supercomputer using up to 1024+ cores
 - **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
 
 ---
+<details>
+<summary>View 20 Years of <strong>marEx</strong> Tracking (Click to expand)</summary>
 
-## Features (v3.0)
+https://github.com/user-attachments/assets/36ee3150-c869-4cba-be68-628dc37e4775
+
+</details>
+
+![marEx_front](https://github.com/user-attachments/assets/939fceee-8990-46fb-b3f8-30e803b6c802)
+
+---
+
+## Features
 
 ### Data Pre-processing Pipeline
 
