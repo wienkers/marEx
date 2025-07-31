@@ -292,6 +292,7 @@ jobs:
         twine check dist/*
 
     - name: Test package installation
+      shell: bash
       run: |
         pip install dist/*.whl
         python -c "import marEx; print(f'marEx version: {marEx.__version__}')"

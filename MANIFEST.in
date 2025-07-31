@@ -1,0 +1,35 @@
+include README.md
+include LICENSE
+include CITATION.cff
+include CONTRIBUTING.md
+include pyproject.toml
+
+# Include source code
+recursive-include marEx *.py
+
+# Include examples but exclude large data files
+recursive-include examples *.ipynb
+
+# Exclude test data (too large for PyPI)
+prune tests/data/
+
+# Exclude media files (videos and large assets)
+prune media/
+
+# Exclude development files
+prune docs/
+exclude *.egg-info
+exclude .coverage*
+exclude coverage.xml
+exclude htmlcov/
+exclude .pytest_cache/
+exclude __pycache__/
+recursive-exclude . __pycache__
+recursive-exclude . *.py[co]
+recursive-exclude . *.orig
+recursive-exclude . *.rej
+recursive-exclude . *~
+exclude .git*
+exclude .pre-commit-config.yaml
+exclude run_*.py
+exclude run_*.sh
