@@ -1,11 +1,10 @@
 ![logo](https://github.com/user-attachments/assets/df99a84b-c88f-447d-a362-ac538d9b924b)
 
-[![Continuous Integration](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
-[![Tests](https://github.com/wienkers/marEx/workflows/Tests/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/tests.yml)
+[![CI](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
 [![PyPI version](https://badge.fury.io/py/marEx.svg)](https://badge.fury.io/py/marEx)
 [![Documentation Status](https://readthedocs.org/projects/marex/badge/?version=latest)](https://marex.readthedocs.io/en/latest/)
-[![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex) \
+[![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 [![DOI](https://zenodo.org/badge/945834123.svg)](https://doi.org/10.5281/zenodo.16922881)
 
 Marine Extremes Python Package

@@ -91,6 +91,7 @@ class PlotConfig:
     extend: str = "both"
     verbose: Optional[bool] = None
     quiet: Optional[bool] = None
+    projection: Optional[Any] = None
 
     def __post_init__(self) -> None:
         """Initialise default values and configure logging."""
@@ -102,6 +103,8 @@ class PlotConfig:
             self.coordinates = {"time": "time", "y": "lat", "x": "lon"}
         if self.plot_IDs:
             self.show_colorbar = False
+        if self.projection is None:
+            self.projection = ccrs.Robinson()
 
         # Configure logging if verbose/quiet parameters are provided
         if self.verbose is not None or self.quiet is not None:
@@ -234,11 +237,13 @@ class PlotterBase:
 
         return cmap, norm, clim, var_units, extend
 
-    def _setup_axes(self, ax: Optional[Axes] = None) -> Tuple[Figure, Axes]:
+    def _setup_axes(self, ax: Optional[Axes] = None, projection: Optional[Any] = None) -> Tuple[Figure, Axes]:
         """Create or use existing axes with projection"""
         if ax is None:
+            # Use provided projection or default to Robinson
+            proj = projection if projection is not None else ccrs.Robinson()
             fig = plt.figure(figsize=(7, 5))
-            ax = plt.axes(projection=ccrs.Robinson())
+            ax = plt.axes(projection=proj)
         else:
             fig = ax.get_figure()
         return fig, ax
@@ -298,7 +303,7 @@ class PlotterBase:
         """Make a single plot with given configuration"""
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
-        fig, ax = self._setup_axes(ax)
+        fig, ax = self._setup_axes(ax, config.projection)
 
         # Call implementation-specific plot function
         ax, im = self.plot(ax=ax, cmap=cmap, clim=clim, norm=norm)
@@ -322,7 +327,7 @@ class PlotterBase:
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
         fig = plt.figure(figsize=(6 * ncols, 3 * nrows))
-        axes = fig.subplots(nrows, ncols, subplot_kw={"projection": ccrs.Robinson()}).flatten()
+        axes = fig.subplots(nrows, ncols, subplot_kw={"projection": config.projection}).flatten()
 
         # Create a single plotter instance to be reused
         base_plotter = type(self)(self.da)
@@ -346,6 +351,7 @@ class PlotterBase:
                     extend=extend,
                     dimensions=config.dimensions,
                     coordinates=config.coordinates,
+                    projection=config.projection,
                 )
 
                 # Update data in base plotter instead of creating new instance

@@ -51,29 +51,9 @@ This directory contains comprehensive GitHub Actions workflows for the marEx pac
 6. `create-github-release`: GitHub release creation with changelog
 7. `announce-release`: Post-release notifications (for stable releases)
 
-### 3. Performance Testing (`performance.yml`)
-
-**Triggers:**
-- Push/PR to `main` branch (when performance-related files change)
-- Weekly schedule (Sundays at 2 AM UTC)
-- Manual workflow dispatch
-
-**Features:**
-- **Quick performance tests**: Run on all PRs and pushes
-- **Full performance suite**: Comprehensive benchmarking (main branch only)
-- **Performance regression detection**: Automated performance monitoring
-- **Multiple Python versions**: Testing across supported Python versions
-- **Artifact storage**: Performance results stored for historical analysis
-
-**Jobs:**
-1. `performance-tests`: Quick performance tests for PRs
-2. `full-performance-tests`: Comprehensive benchmarking suite
-
 ## Setup Instructions
 
 ### Required Secrets
-
-For the workflows to function properly, you need to configure the following secrets in your GitHub repository:
 
 #### 1. CodeCov Integration (Optional)
 - `CODECOV_TOKEN`: Token for uploading coverage reports to Codecov
@@ -137,29 +117,6 @@ strategy:
     python-version: ['3.10', '3.11', '3.12']
 ```
 
-### Performance Regression Thresholds
-
-Customize performance regression detection by modifying the performance workflow:
-
-```yaml
-- name: Performance regression check
-  run: |
-    # Add custom logic to compare with baseline performance
-    python scripts/check_performance_regression.py
-```
-
-### Notification Customization
-
-Add custom notifications in the release workflow:
-
-```yaml
-- name: Notify Slack
-  run: |
-    curl -X POST -H 'Content-type: application/json' \
-    --data '{"text":"marEx v${{ needs.validate-tag.outputs.version }} released!"}' \
-    ${{ secrets.SLACK_WEBHOOK_URL }}
-```
-
 ## Workflow Dependencies
 
 The workflows require these system dependencies:
@@ -202,4 +159,3 @@ When contributing to marEx, please ensure that:
 3. Documentation is updated if needed
 4. Performance-critical changes include performance tests
 
-The workflows will automatically run on your pull requests and provide feedback on code quality, test coverage, and performance impact.
