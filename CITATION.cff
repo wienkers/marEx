@@ -10,6 +10,11 @@ authors:
     orcid: "https://orcid.org/0000-0002-8464-3139"
 repository-code: "https://github.com/wienkers/marEx"
 url: "https://github.com/wienkers/marEx"
+doi: "10.5281/zenodo.16922881"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.16922881"
+    description: "DOI for this software"
 keywords:
   - "marine heatwaves"
   - "extreme events"
@@ -17,5 +22,31 @@ keywords:
   - "extremes tracking"
   - "ocean extremes"
   - "marine extremes"
-version: "3.0.3"
-date-released: "2025-08-21"
+  - "climate data"
+  - "distributed computing"
+  - "dask"
+  - "python"
+version: "3.1"
+date-released: "2025-08-22"
+preferred-citation:
+  type: software
+  title: "MarEx: Marine Extremes Detection and Tracking"
+  authors:
+    - family-names: "Wienkers"
+      given-names: "Aaron"
+      email: "aaron@wienkers.com"
+      orcid: "https://orcid.org/0000-0002-8464-3139"
+  doi: "10.5281/zenodo.16922881"
+  url: "https://github.com/wienkers/marEx"
+  version: "3.1"
+  year: 2025
+funding:
+  - agency: "European Commission"
+    program: "Horizon Europe"
+    grant-id: "101081383"
+    title: "EERIE (European Eddy-Rich ESMs) Project"
+  - agency: "Swiss State Secretariat for Education, Research and Innovation (SERI)"
+    grant-id: "22.00366"
+contact:
+  - email: "aaron@wienkers.com"
+    name: "Aaron Wienkers"

@@ -346,11 +346,11 @@ class TestUnstructuredTracking:
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],
             2.2,
-            tolerance_relative=0.3,
+            tolerance_relative=0.2,
         )
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 15, tolerance=10)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 8, tolerance=5)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 3, tolerance=3)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 15, tolerance=5)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 8, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 3, tolerance=1)
 
     @pytest.mark.slow
     def test_unstructured_different_filtering_parameters(self, dask_client_unstructured):
@@ -439,13 +439,13 @@ class TestUnstructuredTracking:
         # Assert tracking statistics are within reasonable bounds for low filter case
         assert_reasonable_bounds(
             tracked_low_filter.attrs["preprocessed_area_fraction"],
-            2.2,
-            tolerance_relative=0.4,
+            1.4,
+            tolerance_relative=0.2,
         )
         # Expected ranges for full dataset (732 timesteps × 1000 cells)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_prefiltered"], 15, tolerance=10)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_filtered"], 15, tolerance=10)
-        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_events_final"], 3, tolerance=3)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_prefiltered"], 15, tolerance=5)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_objects_filtered"], 15, tolerance=2)
+        assert_count_in_reasonable_range(tracked_low_filter.attrs["N_events_final"], 3, tolerance=1)
 
     @pytest.mark.slow
     def test_unstructured_temporal_gap_filling(self, dask_client_unstructured):
@@ -539,12 +539,12 @@ class TestUnstructuredTracking:
         assert_reasonable_bounds(
             tracked_no_gaps.attrs["preprocessed_area_fraction"],
             2.2,
-            tolerance_relative=0.4,
+            tolerance_relative=0.2,
         )
         # Expected ranges for full dataset (732 timesteps × 1000 cells)
-        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_prefiltered"], 15, tolerance=10)
-        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_filtered"], 10, tolerance=5)
-        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 5, tolerance=5)
+        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_prefiltered"], 15, tolerance=5)
+        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_objects_filtered"], 7, tolerance=2)
+        assert_count_in_reasonable_range(tracked_no_gaps.attrs["N_events_final"], 2, tolerance=1)
 
     @pytest.mark.slow
     def test_unstructured_grid_requirements(self, dask_client_unstructured):
@@ -715,28 +715,23 @@ class TestUnstructuredTracking:
             cell_areas=renamed_data.cell_areas,
         )
 
-        # Attempt to run tracking with custom dimensions (may fail due to internal dimension handling issues)
-        try:
-            tracked_ds_no_merge = tracker_no_merge.run()
+        tracked_ds_no_merge = tracker_no_merge.run()
 
-            # If successful, verify output structure for no merge case
-            assert isinstance(tracked_ds_no_merge, xr.Dataset)
-            assert "ID_field" in tracked_ds_no_merge.data_vars
+        # If successful, verify output structure for no merge case
+        assert isinstance(tracked_ds_no_merge, xr.Dataset)
+        assert "ID_field" in tracked_ds_no_merge.data_vars
 
-            # Verify custom dimensions are preserved
-            assert "t" in tracked_ds_no_merge.ID_field.dims
-            assert "cell" in tracked_ds_no_merge.ID_field.dims
+        # Verify custom dimensions are preserved
+        assert "t" in tracked_ds_no_merge.ID_field.dims
+        assert "cell" in tracked_ds_no_merge.ID_field.dims
 
-            # Verify attributes are set
-            assert "N_events_final" in tracked_ds_no_merge.attrs
-            assert "allow_merging" in tracked_ds_no_merge.attrs
-            assert tracked_ds_no_merge.attrs["allow_merging"] == 0
+        # Verify attributes are set
+        assert "N_events_final" in tracked_ds_no_merge.attrs
+        assert "allow_merging" in tracked_ds_no_merge.attrs
+        assert tracked_ds_no_merge.attrs["allow_merging"] == 0
 
-            # Verify ID_field is int
-            assert np.issubdtype(tracked_ds_no_merge.ID_field.dtype, np.integer), "ID_field should be integer type"
-        except (marEx.exceptions.TrackingError, KeyError):
-            # This is expected if custom dimension handling has issues or insufficient data
-            pass
+        # Verify ID_field is int
+        assert np.issubdtype(tracked_ds_no_merge.ID_field.dtype, np.integer), "ID_field should be integer type"
 
         # Verify tracker was created successfully with custom dimension and coordinate names (no merging)
         assert tracker_no_merge is not None
@@ -763,35 +758,30 @@ class TestUnstructuredTracking:
             cell_areas=renamed_data.cell_areas,
         )
 
-        # Attempt to run tracking with custom dimensions and merging (may fail due to internal dimension handling issues)
-        try:
-            tracked_ds_with_merge = tracker_with_merge.run()
+        tracked_ds_with_merge = tracker_with_merge.run()
 
-            # If successful, verify output structure for merge case
-            assert isinstance(tracked_ds_with_merge, xr.Dataset)
-            assert "ID_field" in tracked_ds_with_merge.data_vars
-            assert "global_ID" in tracked_ds_with_merge.data_vars
-            assert "area" in tracked_ds_with_merge.data_vars
-            assert "centroid" in tracked_ds_with_merge.data_vars
-            assert "presence" in tracked_ds_with_merge.data_vars
-            assert "time_start" in tracked_ds_with_merge.data_vars
-            assert "time_end" in tracked_ds_with_merge.data_vars
-            assert "merge_ledger" in tracked_ds_with_merge.data_vars
+        # If successful, verify output structure for merge case
+        assert isinstance(tracked_ds_with_merge, xr.Dataset)
+        assert "ID_field" in tracked_ds_with_merge.data_vars
+        assert "global_ID" in tracked_ds_with_merge.data_vars
+        assert "area" in tracked_ds_with_merge.data_vars
+        assert "centroid" in tracked_ds_with_merge.data_vars
+        assert "presence" in tracked_ds_with_merge.data_vars
+        assert "time_start" in tracked_ds_with_merge.data_vars
+        assert "time_end" in tracked_ds_with_merge.data_vars
+        assert "merge_ledger" in tracked_ds_with_merge.data_vars
 
-            # Verify custom dimensions are preserved
-            assert "t" in tracked_ds_with_merge.ID_field.dims
-            assert "cell" in tracked_ds_with_merge.ID_field.dims
+        # Verify custom dimensions are preserved
+        assert "t" in tracked_ds_with_merge.ID_field.dims
+        assert "cell" in tracked_ds_with_merge.ID_field.dims
 
-            # Verify advanced tracking attributes
-            assert tracked_ds_with_merge.attrs["allow_merging"] == 1
-            assert tracked_ds_with_merge.attrs["T_fill"] == 2
-            assert "total_merges" in tracked_ds_with_merge.attrs
+        # Verify advanced tracking attributes
+        assert tracked_ds_with_merge.attrs["allow_merging"] == 1
+        assert tracked_ds_with_merge.attrs["T_fill"] == 2
+        assert "total_merges" in tracked_ds_with_merge.attrs
 
-            # Verify ID_field is int
-            assert np.issubdtype(tracked_ds_with_merge.ID_field.dtype, np.integer), "ID_field should be integer type"
-        except (marEx.exceptions.TrackingError, KeyError):
-            # This is expected if custom dimension handling has issues or insufficient data
-            pass
+        # Verify ID_field is int
+        assert np.issubdtype(tracked_ds_with_merge.ID_field.dtype, np.integer), "ID_field should be integer type"
 
         # Verify tracker was created successfully with custom dimension and coordinate names (with merging)
         assert tracker_with_merge is not None
@@ -851,36 +841,31 @@ class TestUnstructuredTracking:
             cell_areas=renamed_data.cell_areas,
         )
 
-        # Attempt to run both trackers (may fail due to custom dimension handling issues)
-        try:
-            tracked_ds_original = tracker_original.run()
-            tracked_ds_custom = tracker_custom.run()
+        tracked_ds_original = tracker_original.run()
+        tracked_ds_custom = tracker_custom.run()
 
-            # If successful, verify output structure for both
-            assert isinstance(tracked_ds_original, xr.Dataset)
-            assert isinstance(tracked_ds_custom, xr.Dataset)
-            assert "ID_field" in tracked_ds_original.data_vars
-            assert "ID_field" in tracked_ds_custom.data_vars
+        # If successful, verify output structure for both
+        assert isinstance(tracked_ds_original, xr.Dataset)
+        assert isinstance(tracked_ds_custom, xr.Dataset)
+        assert "ID_field" in tracked_ds_original.data_vars
+        assert "ID_field" in tracked_ds_custom.data_vars
 
-            # Verify original dimensions
-            assert "time" in tracked_ds_original.ID_field.dims
-            assert "ncells" in tracked_ds_original.ID_field.dims
+        # Verify original dimensions
+        assert "time" in tracked_ds_original.ID_field.dims
+        assert "ncells" in tracked_ds_original.ID_field.dims
 
-            # Verify custom dimensions
-            assert "t" in tracked_ds_custom.ID_field.dims
-            assert "cell" in tracked_ds_custom.ID_field.dims
+        # Verify custom dimensions
+        assert "t" in tracked_ds_custom.ID_field.dims
+        assert "cell" in tracked_ds_custom.ID_field.dims
 
-            # Verify both have integer ID fields
-            assert np.issubdtype(tracked_ds_original.ID_field.dtype, np.integer), "Original ID_field should be integer type"
-            assert np.issubdtype(tracked_ds_custom.ID_field.dtype, np.integer), "Custom ID_field should be integer type"
+        # Verify both have integer ID fields
+        assert np.issubdtype(tracked_ds_original.ID_field.dtype, np.integer), "Original ID_field should be integer type"
+        assert np.issubdtype(tracked_ds_custom.ID_field.dtype, np.integer), "Custom ID_field should be integer type"
 
-            # Verify both have same number of events (should produce equivalent results)
-            assert (
-                tracked_ds_original.attrs["N_events_final"] == tracked_ds_custom.attrs["N_events_final"]
-            ), "Different event counts between original and custom dimensions"
-        except (marEx.exceptions.TrackingError, KeyError):
-            # This is expected if custom dimension handling has issues or insufficient data
-            pass
+        # Verify both have same number of events (should produce equivalent results)
+        assert (
+            tracked_ds_original.attrs["N_events_final"] == tracked_ds_custom.attrs["N_events_final"]
+        ), "Different event counts between original and custom dimensions"
 
         # Verify both trackers were created successfully
         assert tracker_original is not None
