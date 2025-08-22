@@ -404,8 +404,8 @@ class tracker:
         cell_areas: Optional[xr.DataArray] = None,
     ) -> None:
         """Validate input parameters and data."""
-        if self.regional_mode:
-            raise NotImplementedError("regional_mode is not yet implemented")
+        if self.regional_mode and self.unstructured_grid:
+            raise NotImplementedError("regional_mode is not yet implemented for unstructured grids")
 
         # For unstructured grids, adjust dimensions
         if self.unstructured_grid:
@@ -1427,6 +1427,7 @@ class tracker:
             r = x**2 + y**2
             diameter = 2 * R_fill
             se_kernel = r < (R_fill**2) + 1
+            mode = "wrap" if not self.regional_mode else "edge"
 
             if use_dask_morph:
                 # Skip all operations if R_fill is 0
@@ -1434,7 +1435,7 @@ class tracker:
                     pass  # No morphological operations needed
                 else:
                     # Pad data to avoid edge effects
-                    data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode="wrap")
+                    data_bin = data_bin.pad({self.ydim: diameter, self.xdim: diameter}, mode=mode)
                     data_coords = data_bin.coords
                     data_dims = data_bin.dims
 
@@ -1462,7 +1463,7 @@ class tracker:
                     bitmap_binary_padded = np.pad(
                         bitmap_binary,
                         ((diameter, diameter), (diameter, diameter)),
-                        mode="wrap",
+                        mode=mode,
                     )
                     s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
                     s2 = binary_opening(s1, se_kernel, iterations=1)
@@ -1822,11 +1823,18 @@ class tracker:
                 neighbours[1, :, :] = 1  # All 8 neighbours, but ignore time
 
             # Cluster & label binary data
-            object_id_field, N_objects = label(  # Apply dask-powered ndimage & persist in memory
-                data_bin,
-                structure=neighbours,
-                wrap_axes=(2,),  # Wrap in x-direction
-            )
+            # Apply dask-powered ndimage & persist in memory
+            if self.regional_mode:
+                object_id_field, N_objects = label(
+                    data_bin,
+                    structure=neighbours,
+                )
+            else:
+                object_id_field, N_objects = label(
+                    data_bin,
+                    structure=neighbours,
+                    wrap_axes=(2,),  # Wrap in x-direction !
+                )
             results = persist(object_id_field, N_objects)
             object_id_field, N_objects = results
 
@@ -1866,6 +1874,11 @@ class tracker:
         tuple
             (y_centroid, x_centroid)
         """
+
+        if self.regional_mode:
+            # We don't need to adjust centroids for periodic boundaries
+            return original_centroid
+
         # Check if object is near either edge of x dimension
         near_left_BC = np.any(binary_mask[:, :100])
         near_right_BC = np.any(binary_mask[:, -100:])
@@ -2124,7 +2137,7 @@ class tracker:
                 props_slice = regionprops_table(ids, properties=properties)
 
                 # Handle centroid calculation for objects that wrap around edges
-                if check_centroids and len(props_slice["label"]) > 0:
+                if check_centroids and not self.regional_mode and len(props_slice["label"]) > 0:
                     # Get original centroids
                     centroids = list(zip(props_slice["centroid-0"], props_slice["centroid-1"]))
                     centroids_wrapped = []
@@ -2981,6 +2994,7 @@ class tracker:
                             parent_centroids,
                             Nx,
                             max_distance=max(max_distance, 40),  # Set minimum threshold, in cells
+                            wrap=not self.regional_mode,  # Turn longitude periodic wrapping off when in regional mode
                         )
 
                 else:
@@ -2996,7 +3010,9 @@ class tracker:
                         )
                     else:
                         # Calculate distances to each parent centroid
-                        distances = wrapped_euclidian_distance_mask_parallel(child_mask_2d, parent_centroids, Nx)
+                        distances = wrapped_euclidian_distance_mask_parallel(
+                            child_mask_2d, parent_centroids, Nx, not self.regional_mode
+                        )
 
                         # Assign based on closest parent
                         new_labels = child_ids[np.argmin(distances, axis=1).astype(np.int32)]
@@ -4166,6 +4182,7 @@ def wrapped_euclidian_distance_mask_parallel(
     mask_values: NDArray[np.bool_],
     parent_centroids_values: NDArray[np.float64],
     Nx: int,
+    wrap: bool,
 ) -> NDArray[np.float64]:  # pragma: no cover
     """
     Optimised function for computing wrapped Euclidean distances.
@@ -4181,6 +4198,8 @@ def wrapped_euclidian_distance_mask_parallel(
         Array of shape (n_parents, 2) containing (y, x) coordinates of parent centroids
     Nx : int
         Size of the x-dimension for periodic boundary wrapping
+    wrap : bool
+        Whether to treat x-dimension as periodic and wrap
 
     Returns
     -------
@@ -4210,8 +4229,9 @@ def wrapped_euclidian_distance_mask_parallel(
         dx = x - parent_x
 
         # Wrapping correction
-        dx = np.where(dx > half_Nx, dx - Nx, dx)
-        dx = np.where(dx < -half_Nx, dx + Nx, dx)
+        if wrap:
+            dx = np.where(dx > half_Nx, dx - Nx, dx)
+            dx = np.where(dx < -half_Nx, dx + Nx, dx)
 
         distances[idx] = np.sqrt(dy * dy + dx * dx)
 
@@ -4268,7 +4288,7 @@ def create_grid_index_arrays(
 
 @jit(nopython=True, fastmath=True)
 def wrapped_euclidian_distance_points(
-    y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float
+    y1: float, x1: float, y2: float, x2: float, nx: int, half_nx: float, wrap: bool
 ) -> float:  # pragma: no cover
     """
     Calculate distance with periodic boundary conditions in x dimension.
@@ -4283,19 +4303,22 @@ def wrapped_euclidian_distance_points(
         Size of x dimension
     half_nx : float
         Half the size of x dimension
+    wrap : bool
+        Whether to apply periodic boundary conditions in x
 
     Returns
     -------
     float
-        Euclidean distance accounting for periodic boundary in x
+        Euclidean distance accounting for periodic boundary in x (or not)
     """
     dy = y1 - y2
     dx = x1 - x2
 
-    if dx > half_nx:
-        dx -= nx
-    elif dx < -half_nx:
-        dx += nx
+    if wrap:
+        if dx > half_nx:
+            dx -= nx
+        elif dx < -half_nx:
+            dx += nx
 
     return np.sqrt(dy * dy + dx * dx)
 
@@ -4308,6 +4331,7 @@ def partition_nn_grid(
     parent_centroids: NDArray[np.float64],
     Nx: int,
     max_distance: int = 20,
+    wrap: bool = True,
 ) -> NDArray[np.int32]:  # pragma: no cover
     """
     Partition a child object based on nearest parent object points.
@@ -4330,6 +4354,8 @@ def partition_nn_grid(
         Size of x dimension for periodic boundaries
     max_distance : int, default=20
         Maximum search distance
+    wrap : bool, default=True
+        Whether to apply periodic boundary conditions in the x dimension
 
     Returns
     -------
@@ -4385,7 +4411,7 @@ def partition_nn_grid(
                         if point_idx == -1:
                             break
 
-                        dist = wrapped_euclidian_distance_points(child_y, child_x, py[point_idx], px[point_idx], Nx, half_Nx)
+                        dist = wrapped_euclidian_distance_points(child_y, child_x, py[point_idx], px[point_idx], Nx, half_Nx, wrap)
 
                         if dist > max_distance:
                             continue
@@ -4426,6 +4452,7 @@ def partition_nn_grid(
                     parent_centroids[parent_idx, 1],
                     Nx,
                     half_Nx,
+                    wrap,
                 )
 
                 if dist < min_dist:

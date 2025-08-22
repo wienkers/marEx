@@ -22,7 +22,7 @@ class TestWrappedEuclidianParallel:
         # One centroid at (3, 3)
         centroids = np.array([[3.0, 3.0]])
 
-        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10)
+        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10, wrap=True)
 
         # Distance should be sqrt((5-3)^2 + (5-3)^2) = sqrt(8) ≈ 2.828
         expected = np.sqrt(8)
@@ -38,7 +38,7 @@ class TestWrappedEuclidianParallel:
         # Centroid at left edge (5, 1)
         centroids = np.array([[5.0, 1.0]])
 
-        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10)
+        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10, wrap=True)
 
         # Without wrapping: distance would be sqrt((5-5)^2 + (9-1)^2) = 8
         # With wrapping: distance should be sqrt((5-5)^2 + (1-9+10)^2) = sqrt(4) = 2
@@ -55,7 +55,7 @@ class TestWrappedEuclidianParallel:
         # Multiple centroids
         centroids = np.array([[1.0, 1.0], [7.0, 7.0]])
 
-        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10)
+        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=10, wrap=True)
 
         assert result.shape == (2, 2)  # 2 points, 2 centroids
 
@@ -71,7 +71,7 @@ class TestWrappedEuclidianParallel:
         mask = np.zeros((5, 5), dtype=bool)
         centroids = np.array([[2.0, 2.0]])
 
-        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=5)
+        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=5, wrap=True)
         assert result.shape == (0, 1)
 
         # Test with point at same location as centroid
@@ -79,7 +79,7 @@ class TestWrappedEuclidianParallel:
         mask[2, 2] = True
         centroids = np.array([[2.0, 2.0]])
 
-        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=5)
+        result = track.wrapped_euclidian_distance_mask_parallel(mask, centroids, Nx=5, wrap=True)
         assert result.shape == (1, 1)
         assert np.isclose(result[0, 0], 0.0, atol=1e-6)
 
@@ -89,7 +89,7 @@ class TestCalculateWrappedDistance:
 
     def test_wrapped_euclidian_distance_points_basic(self):
         """Test basic distance calculation without wrapping."""
-        distance = track.wrapped_euclidian_distance_points(3.0, 4.0, 0.0, 0.0, nx=10, half_nx=5.0)
+        distance = track.wrapped_euclidian_distance_points(3.0, 4.0, 0.0, 0.0, nx=10, half_nx=5.0, wrap=False)
 
         # Distance should be sqrt((3-0)^2 + (4-0)^2) = 5.0
         expected = 5.0
@@ -99,7 +99,7 @@ class TestCalculateWrappedDistance:
         """Test distance calculation with x-axis wrapping."""
         # Point at x=9, centroid at x=1, in 10-wide grid
         # Normal distance would be 8, wrapped should be 2
-        distance = track.wrapped_euclidian_distance_points(0.0, 9.0, 0.0, 1.0, nx=10, half_nx=5.0)
+        distance = track.wrapped_euclidian_distance_points(0.0, 9.0, 0.0, 1.0, nx=10, half_nx=5.0, wrap=True)
 
         expected = 2.0  # Wrapped distance
         assert np.isclose(distance, expected, atol=1e-6)
@@ -107,7 +107,7 @@ class TestCalculateWrappedDistance:
     def test_wrapped_euclidian_distance_points_negative_wrapping(self):
         """Test distance calculation with negative x wrapping."""
         # Point at x=1, centroid at x=9, in 10-wide grid
-        distance = track.wrapped_euclidian_distance_points(0.0, 1.0, 0.0, 9.0, nx=10, half_nx=5.0)
+        distance = track.wrapped_euclidian_distance_points(0.0, 1.0, 0.0, 9.0, nx=10, half_nx=5.0, wrap=True)
 
         expected = 2.0  # Wrapped distance (same as above, symmetric)
         assert np.isclose(distance, expected, atol=1e-6)
@@ -115,7 +115,7 @@ class TestCalculateWrappedDistance:
     def test_wrapped_euclidian_distance_points_no_y_wrapping(self):
         """Test that y-axis doesn't wrap (only x-axis should wrap)."""
         # Large y difference should not wrap
-        distance = track.wrapped_euclidian_distance_points(0.0, 0.0, 9.0, 0.0, nx=10, half_nx=5.0)
+        distance = track.wrapped_euclidian_distance_points(0.0, 0.0, 9.0, 0.0, nx=10, half_nx=5.0, wrap=True)
 
         expected = 9.0  # No wrapping in y direction
         assert np.isclose(distance, expected, atol=1e-6)
@@ -123,7 +123,7 @@ class TestCalculateWrappedDistance:
     def test_wrapped_euclidian_distance_points_exact_half(self):
         """Test distance calculation at exactly half the grid width."""
         # At exactly half the grid width, should not wrap
-        distance = track.wrapped_euclidian_distance_points(0.0, 0.0, 0.0, 5.0, nx=10, half_nx=5.0)
+        distance = track.wrapped_euclidian_distance_points(0.0, 0.0, 0.0, 5.0, nx=10, half_nx=5.0, wrap=True)
 
         expected = 5.0  # Should not wrap at exactly half
         assert np.isclose(distance, expected, atol=1e-6)
@@ -377,8 +377,8 @@ class TestDistanceCalculationValidation:
         ]
 
         for y1, x1, y2, x2 in test_cases:
-            dist1 = track.wrapped_euclidian_distance_points(y1, x1, y2, x2, nx=10, half_nx=5.0)
-            dist2 = track.wrapped_euclidian_distance_points(y2, x2, y1, x1, nx=10, half_nx=5.0)
+            dist1 = track.wrapped_euclidian_distance_points(y1, x1, y2, x2, nx=10, half_nx=5.0, wrap=True)
+            dist2 = track.wrapped_euclidian_distance_points(y2, x2, y1, x1, nx=10, half_nx=5.0, wrap=True)
 
             assert np.isclose(dist1, dist2, atol=1e-10), f"Distance not symmetric for ({y1},{x1}) and ({y2},{x2})"
 
@@ -391,9 +391,9 @@ class TestDistanceCalculationValidation:
             for j, (y2, x2) in enumerate(points):
                 for k, (y3, x3) in enumerate(points):
                     if i != j and j != k and i != k:
-                        d12 = track.wrapped_euclidian_distance_points(y1, x1, y2, x2, nx=10, half_nx=5.0)
-                        d23 = track.wrapped_euclidian_distance_points(y2, x2, y3, x3, nx=10, half_nx=5.0)
-                        d13 = track.wrapped_euclidian_distance_points(y1, x1, y3, x3, nx=10, half_nx=5.0)
+                        d12 = track.wrapped_euclidian_distance_points(y1, x1, y2, x2, nx=10, half_nx=5.0, wrap=True)
+                        d23 = track.wrapped_euclidian_distance_points(y2, x2, y3, x3, nx=10, half_nx=5.0, wrap=True)
+                        d13 = track.wrapped_euclidian_distance_points(y1, x1, y3, x3, nx=10, half_nx=5.0, wrap=True)
 
                         # Triangle inequality: d13 <= d12 + d23
                         assert d13 <= d12 + d23 + 1e-10, f"Triangle inequality violated for points {i},{j},{k}"
@@ -401,13 +401,13 @@ class TestDistanceCalculationValidation:
     def test_wrapped_distance_minimum_value(self):
         """Test that wrapped distance gives minimum possible distance."""
         # Point at (0, 9) should be distance 1 from (0, 0) in a 10-wide grid
-        dist = track.wrapped_euclidian_distance_points(0, 9, 0, 0, nx=10, half_nx=5.0)
+        dist = track.wrapped_euclidian_distance_points(0, 9, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 1.0, atol=1e-10)
 
         # Point at (0, 6) should be distance 4 from (0, 0) (not wrapped)
-        dist = track.wrapped_euclidian_distance_points(0, 6, 0, 0, nx=10, half_nx=5.0)
+        dist = track.wrapped_euclidian_distance_points(0, 6, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 4.0, atol=1e-10)
 
         # Point at (0, 4) should be distance 4 from (0, 0) (not wrapped)
-        dist = track.wrapped_euclidian_distance_points(0, 4, 0, 0, nx=10, half_nx=5.0)
+        dist = track.wrapped_euclidian_distance_points(0, 4, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 4.0, atol=1e-10)

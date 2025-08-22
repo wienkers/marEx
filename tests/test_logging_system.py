@@ -402,7 +402,7 @@ class TestTimingContext:
             with log_timing(logger, "Test operation"):
                 import time
 
-                time.sleep(0.01)  # Small delay
+                time.sleep(0.1)  # Small delay
 
         # Check for start and completion messages
         start_msgs = [r for r in caplog.records if "Starting Test operation" in r.message]
