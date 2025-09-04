@@ -2133,23 +2133,38 @@ class tracker:
                 ids: NDArray[np.int32],
             ) -> Dict[str, List[Union[int, float]]]:
                 """Calculate object properties for a chunk of data."""
-                # Use regionprops_table for standard properties
-                props_slice = regionprops_table(ids, properties=properties)
+                # Use regionprops_table for standard properties (excluding centroid to avoid disjoint object issues)
+                props_for_regionprops = [prop for prop in properties if prop != "centroid"]
+                props_slice = regionprops_table(ids, properties=props_for_regionprops)
 
-                # Handle centroid calculation for objects that wrap around edges
-                if check_centroids and not self.regional_mode and len(props_slice["label"]) > 0:
-                    # Get original centroids
-                    centroids = list(zip(props_slice["centroid-0"], props_slice["centroid-1"]))
-                    centroids_wrapped = []
+                # Handle centroid calculation manually for all objects (including disjoint ones)
+                if check_centroids and len(props_slice["label"]) > 0:
+                    centroids_y = []
+                    centroids_x = []
 
-                    # Process each object
-                    for ID_idx, ID in enumerate(props_slice["label"]):
+                    # Process each object ID
+                    for ID in props_slice["label"]:
                         binary_mask = ids == ID
-                        centroids_wrapped.append(self.calculate_centroid(binary_mask, centroids[ID_idx]))
 
-                    # Update centroid values
-                    props_slice["centroid-0"] = [c[0] for c in centroids_wrapped]
-                    props_slice["centroid-1"] = [c[1] for c in centroids_wrapped]
+                        # Calculate centroid directly from all pixels belonging to this ID
+                        # This handles disjoint objects correctly by considering ALL pixels with this ID
+                        y_indices, x_indices = np.nonzero(binary_mask)
+                        if len(y_indices) > 0:
+                            raw_centroid_y = np.mean(y_indices)
+                            raw_centroid_x = np.mean(x_indices)
+
+                            # Apply boundary wrapping correction if needed
+                            corrected_centroid = self.calculate_centroid(binary_mask, (raw_centroid_y, raw_centroid_x))
+                            centroids_y.append(corrected_centroid[0])
+                            centroids_x.append(corrected_centroid[1])
+                        else:
+                            # Handle edge case where no pixels found (shouldn't happen normally)
+                            centroids_y.append(0.0)
+                            centroids_x.append(0.0)
+
+                    # Add centroid properties to props_slice
+                    props_slice["centroid-0"] = centroids_y
+                    props_slice["centroid-1"] = centroids_x
 
                 return props_slice
 
