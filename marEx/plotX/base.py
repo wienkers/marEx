@@ -381,8 +381,16 @@ class PlotterBase:
         config: PlotConfig,
         plot_dir: Union[str, Path] = "./",
         file_name: Optional[str] = None,
+        centroids: Optional[xr.DataArray] = None,
     ) -> Optional[str]:  # pragma: no cover
-        """Create an animation from time series data"""
+        """Create an animation from time series data
+
+        Args:
+            config: Plot configuration
+            plot_dir: Directory to save animation files
+            file_name: Name for the output animation file
+            centroids: Optional DataArray containing centroid data with dimensions (component, time, ID)
+        """
         # Check if PIL is available for image processing
         from .._dependencies import require_dependencies
 
@@ -438,9 +446,23 @@ class PlotterBase:
         time_dim = config.dimensions["time"] if config.dimensions else "time"
         time_coord = config.coordinates.get("time", time_dim) if config.coordinates else time_dim
 
+        # Use provided centroids or None if not provided
+        centroid_data = centroids
+
         for time_ind in range(len(self.da[time_dim])):
             data_slice = self.da.isel({time_dim: time_ind})
             plot_params["time_str"] = str(self.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
+
+            # Extract centroids for this time step if available
+            if centroid_data is not None:
+                try:
+                    centroids_time = centroid_data.isel({time_dim: time_ind})
+                    plot_params["centroids"] = centroids_time
+                except Exception:
+                    plot_params["centroids"] = None
+            else:
+                plot_params["centroids"] = None
+
             delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info))
 
         filenames = dask.compute(*delayed_tasks)
@@ -592,6 +614,55 @@ def make_frame(
 
     time_str = plot_params.get("time_str", f"Frame {time_ind}")
     ax.set_title(time_str, size=12)
+
+    # Plot centroids if available
+    centroids = plot_params.get("centroids")
+    if centroids is not None:
+        try:
+            # Get unique object IDs present in this frame
+            unique_ids = np.unique(data_slice_np)
+            unique_ids = unique_ids[unique_ids > 0]  # Remove background (0)
+
+            if len(unique_ids) > 0:
+                # Extract centroid coordinates for present objects
+                # centroids shape: (component, ID) where component 0=lat, 1=lon
+                centroids_np = centroids.values
+
+                # Find which IDs have valid centroids
+                valid_centroids = []
+                for obj_id in unique_ids:
+                    try:
+                        # Find ID index in centroids
+                        id_idx = np.where(centroids.ID.values == obj_id)[0]
+                        if len(id_idx) > 0:
+                            idx = id_idx[0]
+                            lat_centroid = centroids_np[0, idx]  # component 0 = latitude
+                            lon_centroid = centroids_np[1, idx]  # component 1 = longitude
+
+                            # Check if centroid is valid (not NaN)
+                            if not (np.isnan(lat_centroid) or np.isnan(lon_centroid)):
+                                valid_centroids.append((lon_centroid, lat_centroid))
+                    except (IndexError, KeyError):
+                        continue
+
+                # Plot centroids as scatter points
+                if valid_centroids:
+                    centroid_lons, centroid_lats = zip(*valid_centroids)
+                    ax.scatter(
+                        centroid_lons,
+                        centroid_lats,
+                        c="black",
+                        s=20,
+                        marker="o",
+                        edgecolors="white",
+                        linewidth=1.5,
+                        transform=ccrs.PlateCarree(),
+                        zorder=5,  # Plot above data but below grid lines
+                        alpha=0.8,
+                    )
+        except Exception:
+            # Silently skip centroid plotting if any error occurs
+            pass
 
     if plot_params.get("show_colorbar"):
         cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both"))
