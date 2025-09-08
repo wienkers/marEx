@@ -2133,38 +2133,23 @@ class tracker:
                 ids: NDArray[np.int32],
             ) -> Dict[str, List[Union[int, float]]]:
                 """Calculate object properties for a chunk of data."""
-                # Use regionprops_table for standard properties (excluding centroid to avoid disjoint object issues)
-                props_for_regionprops = [prop for prop in properties if prop != "centroid"]
-                props_slice = regionprops_table(ids, properties=props_for_regionprops)
+                # Use regionprops_table for standard properties
+                props_slice = regionprops_table(ids, properties=properties)
 
-                # Handle centroid calculation manually for all objects (including disjoint ones)
-                if check_centroids and len(props_slice["label"]) > 0:
-                    centroids_y = []
-                    centroids_x = []
+                # Handle centroid calculation for objects that wrap around edges
+                if check_centroids and not self.regional_mode and len(props_slice["label"]) > 0:
+                    # Get original centroids
+                    centroids = list(zip(props_slice["centroid-0"], props_slice["centroid-1"]))
+                    centroids_wrapped = []
 
-                    # Process each object ID
-                    for ID in props_slice["label"]:
+                    # Process each object
+                    for ID_idx, ID in enumerate(props_slice["label"]):
                         binary_mask = ids == ID
+                        centroids_wrapped.append(self.calculate_centroid(binary_mask, centroids[ID_idx]))
 
-                        # Calculate centroid directly from all pixels belonging to this ID
-                        # This handles disjoint objects correctly by considering ALL pixels with this ID
-                        y_indices, x_indices = np.nonzero(binary_mask)
-                        if len(y_indices) > 0:
-                            raw_centroid_y = np.mean(y_indices)
-                            raw_centroid_x = np.mean(x_indices)
-
-                            # Apply boundary wrapping correction if needed
-                            corrected_centroid = self.calculate_centroid(binary_mask, (raw_centroid_y, raw_centroid_x))
-                            centroids_y.append(corrected_centroid[0])
-                            centroids_x.append(corrected_centroid[1])
-                        else:
-                            # Handle edge case where no pixels found (shouldn't happen normally)
-                            centroids_y.append(0.0)
-                            centroids_x.append(0.0)
-
-                    # Add centroid properties to props_slice
-                    props_slice["centroid-0"] = centroids_y
-                    props_slice["centroid-1"] = centroids_x
+                    # Update centroid values
+                    props_slice["centroid-0"] = [c[0] for c in centroids_wrapped]
+                    props_slice["centroid-1"] = [c[1] for c in centroids_wrapped]
 
                 return props_slice
 
@@ -2688,6 +2673,71 @@ class tracker:
                 temp = temp.astype(np.float32)
 
             object_props_extended[var_name] = temp
+
+        # Recalculate centroids time-slice by time-slice to handle disjoint parts correctly
+        if "centroid" in object_props_extended.data_vars:
+                        
+            if self.unstructured_grid:
+                dims = [self.xdim]
+                coords = {self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]}
+            else:
+                dims = [self.ydim, self.xdim]
+                coords = {
+                    self.ydim: split_merged_relabeled_object_id_field.coords[self.ydim],
+                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]
+                }
+            
+            def calculate_centroids_for_slice(slice_data):
+                """Calculate centroids for a single 2D spatial slice in parallel"""
+                
+                # Create DataArray for this slice
+                time_slice = xr.DataArray(slice_data, coords=coords, dims=dims)
+                
+                # Initialise result array with NaN (shape: ID, component)
+                all_event_ids = object_props_extended.ID.values
+                result = np.full((len(all_event_ids), 2), np.nan, dtype=np.float32)
+                
+                # Calculate properties for this slice (IDs are unique within this slice)
+                props = self.calculate_object_properties(time_slice, properties=["centroid"])
+                
+                # Fill results for IDs present in this slice
+                valid_mask = np.isin(all_event_ids, props.ID.values)
+                if np.any(valid_mask):
+                    valid_ids = all_event_ids[valid_mask]
+                    # Select centroids for valid IDs - this returns shape (component, n_valid_ids)
+                    centroid_values = props["centroid"].sel(ID=valid_ids).values
+                    # Transpose to get shape (n_valid_ids, component) to match result array structure
+                    result[valid_mask] = centroid_values.T
+                
+                return result
+            
+            spatial_dims = [self.ydim, self.xdim] if not self.unstructured_grid else [self.xdim]
+                        
+            centroids_parallel = xr.apply_ufunc(
+                calculate_centroids_for_slice,
+                split_merged_relabeled_object_id_field,
+                input_core_dims=[spatial_dims],
+                output_core_dims=[["ID", "component"]],
+                vectorize=True,  # Apply to each individual time slice
+                dask="parallelized",
+                output_dtypes=[np.float32],
+                output_sizes={
+                    "ID": len(object_props_extended.ID),
+                    "component": 2
+                }
+            )
+            
+            # Assign coordinates to match object_props_extended structure
+            centroids_parallel = centroids_parallel.assign_coords({
+                "ID": object_props_extended.ID,
+                "component": object_props_extended["centroid"].coords["component"]
+            })
+            
+            # Transpose to match object_props_extended["centroid"] structure: (component, time, ID)
+            centroids_parallel = centroids_parallel.transpose("component", self.timedim, "ID")
+            
+            # Update object_props_extended with parallel-computed centroids
+            object_props_extended["centroid"] = centroids_parallel
 
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
