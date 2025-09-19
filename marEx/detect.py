@@ -1244,8 +1244,8 @@ def identify_extremes(
                 },
             )
 
-    # Validate that window parameters are odd numbers
-    if window_days_hobday % 2 == 0:
+    # Validate that window parameters are odd numbers (only for hobday_extreme method)
+    if method_extreme == "hobday_extreme" and window_days_hobday is not None and window_days_hobday % 2 == 0:
         logger.error(f"window_days_hobday={window_days_hobday} is not an odd number")
         raise ConfigurationError(
             "window_days_hobday must be an odd number",
@@ -1263,11 +1263,11 @@ def identify_extremes(
             },
         )
 
-    # Set default spatial window
-    if window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in da.dims:
+    # Set default spatial window (only for hobday_extreme method)
+    if method_extreme == "hobday_extreme" and window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in da.dims:
         window_spatial_hobday = 5  # Default to 5x5 spatial window for structured grids
 
-    if window_spatial_hobday is not None and window_spatial_hobday % 2 == 0:
+    if method_extreme == "hobday_extreme" and window_spatial_hobday is not None and window_spatial_hobday % 2 == 0:
         logger.error(f"window_spatial_hobday={window_spatial_hobday} is not an odd number")
         raise ConfigurationError(
             "window_spatial_hobday must be an odd number",
@@ -1827,6 +1827,31 @@ def _compute_anomaly_detrended(
     # Default detrend_orders to linear if not specified
     if detrend_orders is None:
         detrend_orders = [1]
+    
+    # Validate detrend_orders is not empty and contains valid values
+    if not detrend_orders:
+        raise ConfigurationError(
+            "detrend_orders cannot be empty",
+            details="At least one polynomial order must be specified for detrending",
+            suggestions=[
+                "Use detrend_orders=[1] for linear detrending",
+                "Use detrend_orders=[1, 2] for linear + quadratic detrending",
+                "Remove detrend_orders optional parameter to use default [1]"
+            ]
+        )
+    
+    # Validate all orders are positive integers
+    if any(order < 1 for order in detrend_orders):
+        invalid_orders = [order for order in detrend_orders if order < 1]
+        raise ConfigurationError(
+            f"Invalid polynomial orders: {invalid_orders}",
+            details="Polynomial orders must be positive integers (≥ 1)",
+            suggestions=[
+                "Use only positive integers for polynomial orders",
+                "Common values: [1] for linear, [1,2] for linear+quadratic",
+                f"Remove invalid orders: {invalid_orders}"
+            ]
+        )
 
     da = da.astype(np.float32)
 
@@ -1895,14 +1920,15 @@ def _compute_anomaly_detrended(
     dims = ["coeff"]
     coords = {"coeff": np.arange(1, n_coeffs + 1)}
 
-    # Handle both 2D (unstructured) and 3D (gridded) data
+    # Handle 1D (time series), 2D (unstructured) and 3D (gridded) data
     if "y" in dimensions:  # 3D gridded case
         dims.extend([dimensions["y"], dimensions["x"]])
         coords[dimensions["y"]] = da[coordinates["y"]].values
         coords[dimensions["x"]] = da[coordinates["x"]].values
-    else:  # 2D unstructured case
+    elif "x" in dimensions:  # 2D unstructured case
         dims.append(dimensions["x"])
         coords.update(da[coordinates["x"]].coords)
+    # else: 1D time series case - no spatial dimensions to add
 
     # Fit model to data - use the actual dimensions of the result
     dot_result = pmodel_da.dot(da)
@@ -1926,17 +1952,29 @@ def _compute_anomaly_detrended(
         da_detrend = da_detrend - da_detrend.mean(dim=dimensions["time"])
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
-    # Drop time-related coordinates to create spatial mask
-    vars_to_drop = []
-    if "decimal_year" in mask_temp.coords:
-        vars_to_drop.append("decimal_year")
-    if dimensions["time"] in mask_temp.coords:
-        vars_to_drop.append(dimensions["time"])
-    if coordinates["time"] in mask_temp.coords:
-        vars_to_drop.append(coordinates["time"])
-    mask = mask_temp.drop_vars(vars_to_drop) if vars_to_drop else mask_temp
+    # Handle both spatial (3D) and time-series (1D) data
+    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
+    if spatial_dims:
+        # Spatial data - create 2D/3D mask
+        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
+        # Drop time-related coordinates to create spatial mask
+        vars_to_drop = []
+        if "decimal_year" in mask_temp.coords:
+            vars_to_drop.append("decimal_year")
+        if dimensions["time"] in mask_temp.coords:
+            vars_to_drop.append(dimensions["time"])
+        if coordinates["time"] in mask_temp.coords:
+            vars_to_drop.append(coordinates["time"])
+        mask = mask_temp.drop_vars(vars_to_drop) if vars_to_drop else mask_temp
+    else:
+        # 1D time series - create scalar mask indicating if any finite values exist
+        chunk_dict_mask = {}  # Empty for 1D case
+        mask = xr.DataArray(
+            np.any(np.isfinite(da.values)),
+            dims=[],
+            attrs={"description": "Time series validity mask"}
+        )
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
@@ -2030,8 +2068,19 @@ def _compute_anomaly_fixed_baseline(
     anomalies = anomalies.astype(np.float32)
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
+    # Handle both spatial (3D) and time-series (1D) data
+    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
+    if spatial_dims:
+        # Spatial data - create 2D/3D mask
+        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
+    else:
+        # 1D time series - create scalar mask indicating if any finite values exist
+        mask = xr.DataArray(
+            np.any(np.isfinite(da.values)),
+            dims=[],
+            attrs={"description": "Time series validity mask"}
+        )
 
     # Build output dataset
     return xr.Dataset({"dat_anomaly": anomalies, "mask": mask})
