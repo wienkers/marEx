@@ -4,7 +4,7 @@
     ],
     "exact_percentile": false,
     "force_zero_mean": true,
-    "method_anomaly": "detrended_baseline",
+    "method_anomaly": "detrend_harmonic",
     "method_extreme": "global_extreme",
     "preprocessing_steps": [
         "Removed polynomial trend orders=[1] & seasonal cycle",

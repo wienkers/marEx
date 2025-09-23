@@ -209,15 +209,15 @@ def _infer_dims_coords(
 def preprocess_data(
     da: xr.DataArray,
     method_anomaly: Literal[
-        "detrended_baseline", "shifting_baseline", "fixed_baseline", "fixed_detrended_baseline"
-    ] = "detrended_baseline",
-    method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
+        "detrend_harmonic", "shifting_baseline", "fixed_baseline", "detrend_fixed_baseline"
+    ] = "shifting_baseline",
+    method_extreme: Literal["global_extreme", "hobday_extreme"] = "hobday_extreme",
     threshold_percentile: float = 95,
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
     window_days_hobday: int = 11,  # for hobday_extreme
     window_spatial_hobday: Optional[int] = None,  # "
-    std_normalise: bool = False,  # for detrended_baseline
+    std_normalise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     method_percentile: Literal["exact", "approximate"] = "approximate",
@@ -238,11 +238,11 @@ def preprocess_data(
 
     Anomaly Methods:
 
-    * 'detrended_baseline': Detrending with harmonics and polynomials -- more efficient, but biases statistics
+    * 'detrend_harmonic': Detrending with harmonics and polynomials -- more efficient, but biases statistics
     * 'shifting_baseline': Rolling climatology using previous window_year_baseline years -- more "correct",
       but shortens time series by window_year_baseline years
     * 'fixed_baseline': Daily climatology using full time series -- does _not_ remove climate trends !
-    * 'fixed_detrended_baseline': Polynomial detrending followed by fixed daily climatology -- keeps full time-series
+    * 'detrend_fixed_baseline': Polynomial detrending followed by fixed daily climatology -- keeps full time-series
       of data, but does not account for trends in the timing of seasonal transitions (which may appear as extremes)
 
     Extreme Methods:
@@ -254,9 +254,9 @@ def preprocess_data(
     ----------
     da : xarray.DataArray
         Raw input data
-    method_anomaly : str, default='detrended_baseline'
-        Anomaly computation method ('detrended_baseline', 'shifting_baseline', 'fixed_baseline', or 'fixed_detrended_baseline').
-    method_extreme : str, default='global_extreme'
+    method_anomaly : str, default='shifting_baseline'
+        Anomaly computation method ('detrend_harmonic', 'shifting_baseline', 'fixed_baseline', or 'detrend_fixed_baseline').
+    method_extreme : str, default='hobday_extreme'
         Extreme identification method ('global_extreme' or 'hobday_extreme').
     threshold_percentile : float, default=95
         Percentile threshold for extreme event detection.
@@ -269,12 +269,12 @@ def preprocess_data(
     window_spatial_hobday : int, default=None
         Spatial window size (2D centred window) for the day-of-year threshold calculation (hobday_extreme method only).
     std_normalise : bool, default=False
-        Whether to standardise anomalies by rolling standard deviation (detrended_baseline only).
+        Whether to standardise anomalies by rolling standard deviation (detrend_harmonic only).
     detrend_orders : list, default=[1]
-        Polynomial orders for detrending (detrended_baseline method only).
+        Polynomial orders for detrending (detrend_harmonic method only).
         Default is 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
     force_zero_mean : bool, default=True
-        Whether to enforce zero mean in detrended anomalies (detrended_baseline method only).
+        Whether to enforce zero mean in detrended anomalies (detrend_harmonic method only).
     method_percentile : str, default='approximate'
         Method for percentile calculation ('exact' or 'approximate') for both global_extreme & hobday_extreme methods.
         N.B.: Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory,
@@ -316,7 +316,7 @@ def preprocess_data(
     >>> # Load and chunk SST data
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
-    >>> # Basic preprocessing with default detrended baseline method
+    >>> # Basic preprocessing with default shifting baseline method
     >>> result = marEx.preprocess_data(sst, threshold_percentile=90)
     >>> print(result)
     <xarray.Dataset>
@@ -357,7 +357,7 @@ def preprocess_data(
 
     >>> result_advanced = marEx.preprocess_data(
     ...     sst,
-    ...     method_anomaly="detrended_baseline",
+    ...     method_anomaly="detrend_harmonic",
     ...     detrend_orders=[1, 2],  # Linear and quadratic trends
     ...     std_normalise=True,     # Standardise by rolling std
     ...     force_zero_mean=True,
@@ -429,7 +429,7 @@ def preprocess_data(
     >>> # Remove long-term trends then compute daily climatology
     >>> result_combined = marEx.preprocess_data(
     ...     sst,
-    ...     method_anomaly="fixed_detrended_baseline",
+    ...     method_anomaly="detrend_fixed_baseline",
     ...     detrend_orders=[1],  # Linear trend
     ...     threshold_percentile=95,
     ...     force_zero_mean=True
@@ -518,7 +518,7 @@ def preprocess_data(
                 suggestions=[
                     "Use more years of data to meet minimum requirement",
                     f"Reduce window_year_baseline parameter (currently {window_year_baseline})",
-                    "Consider using detrended_baseline method instead",
+                    "Consider using detrend_fixed_baseline or detrend_harmonic method instead",
                 ],
                 data_info={
                     "available_years": int(total_years),
@@ -562,8 +562,8 @@ def preprocess_data(
     ds["extreme_events"] = extremes
     ds["thresholds"] = thresholds
 
-    # Handle standardised anomalies if requested (only for detrended_baseline)
-    if std_normalise and method_anomaly == "detrended_baseline":
+    # Handle standardised anomalies if requested (only for detrend_harmonic)
+    if std_normalise and method_anomaly == "detrend_harmonic":
         logger.info("Processing standardised anomalies for extreme identification")
         with log_timing(
             logger,
@@ -619,7 +619,7 @@ def preprocess_data(
     )
 
     # Add method-specific parameters
-    if method_anomaly == "detrended_baseline":
+    if method_anomaly == "detrend_harmonic":
         ds.attrs.update(
             {
                 "detrend_orders": detrend_orders,
@@ -636,7 +636,7 @@ def preprocess_data(
         )
     elif method_anomaly == "fixed_baseline":
         ds.attrs.update({})  # No method-specific parameters
-    elif method_anomaly == "fixed_detrended_baseline":
+    elif method_anomaly == "detrend_fixed_baseline":
         ds.attrs.update(
             {
                 "detrend_orders": detrend_orders,
@@ -713,7 +713,7 @@ def _get_preprocessing_steps(
     """Generate preprocessing steps description based on selected methods."""
     steps = []
 
-    if method_anomaly == "detrended_baseline":
+    if method_anomaly == "detrend_harmonic":
         steps.append(f"Removed polynomial trend orders={detrend_orders} & seasonal cycle")
         if std_normalise:
             steps.append("Normalised by 30-day rolling STD")
@@ -722,7 +722,7 @@ def _get_preprocessing_steps(
         steps.append(f"Smoothed with {smooth_days_baseline}-day window")
     elif method_anomaly == "fixed_baseline":
         steps.append("Daily climatology computed from full time series")
-    elif method_anomaly == "fixed_detrended_baseline":
+    elif method_anomaly == "detrend_fixed_baseline":
         steps.append(f"Removed polynomial trend orders={detrend_orders}")
         steps.append("Daily climatology computed from detrended data")
 
@@ -743,13 +743,13 @@ def _get_preprocessing_steps(
 def compute_normalised_anomaly(
     da: xr.DataArray,
     method_anomaly: Literal[
-        "detrended_baseline", "shifting_baseline", "fixed_baseline", "fixed_detrended_baseline"
-    ] = "detrended_baseline",
+        "detrend_harmonic", "shifting_baseline", "fixed_baseline", "detrend_fixed_baseline"
+    ] = "shifting_baseline",
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     window_year_baseline: int = 15,  # for shifting_baseline
     smooth_days_baseline: int = 21,  # "
-    std_normalise: bool = False,  # for detrended_baseline
+    std_normalise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     verbose: Optional[bool] = None,
@@ -762,12 +762,13 @@ def compute_normalised_anomaly(
     ----------
     da : xarray.DataArray
         Input data with dimensions matching the 'dimensions' parameter
-    method_anomaly : str, default='detrended_baseline'
+    method_anomaly : str, default='shifting_baseline'
         Anomaly computation method. Options:
-        - 'detrended_baseline': Detrending with harmonics and polynomials (efficient, biased)
+        - 'detrend_harmonic': Detrending with harmonics and polynomials (efficient, biased)
         - 'shifting_baseline': Rolling climatology (accurate, shortens time series)
         - 'fixed_baseline': Daily climatology using full time series (keeps long-term trends in the anomaly)
-        - 'fixed_detrended_baseline': Polynomial detrending + fixed climatology (does not shorten time series, keeps trends in seasonal timing in the anomaly)
+        - 'detrend_fixed_baseline': Polynomial detrending + fixed climatology (does not shorten time series,
+          keeps trends in seasonal timing in the anomaly)
     dimensions : dict, optional
         Mapping of conceptual dimensions to actual dimension names in the data
     coordinates : dict, optional
@@ -777,11 +778,11 @@ def compute_normalised_anomaly(
     smooth_days_baseline : int, default=21
         Days for smoothing rolling climatology (shifting_baseline only)
     std_normalise : bool, default=False
-        Whether to normalise by 30-day rolling standard deviation (detrended_baseline only)
+        Whether to normalise by 30-day rolling standard deviation (detrend_harmonic only)
     detrend_orders : list, default=[1]
-        Polynomial orders for trend removal (detrended_baseline and fixed_detrended_baseline only)
+        Polynomial orders for trend removal (detrend_harmonic and detrend_fixed_baseline only)
     force_zero_mean : bool, default=True
-        Explicitly enforce zero mean in final anomalies (detrended_baseline and fixed_detrended_baseline only)
+        Explicitly enforce zero mean in final anomalies (detrend_harmonic and detrend_fixed_baseline only)
 
 
     Returns
@@ -799,7 +800,7 @@ def compute_normalised_anomaly(
     >>> # Load chunked SST data
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
-    >>> # Compute anomalies using detrended baseline (default)
+    >>> # Compute anomalies using shifting baseline (default)
     >>> result = marEx.compute_normalised_anomaly(sst)
     >>> print(result.data_vars)
     Data variables:
@@ -810,11 +811,12 @@ def compute_normalised_anomaly(
     >>> print(f"Mean anomaly: {result.dat_anomaly.mean().compute():.6f}")
     Mean anomaly: 0.000023
 
-    Previous configuration (marEx v2.0 default) of detrended baseline with higher-order polynomials and standardisation:
+    Previous configuration (marEx v2.0 default) of detrended baseline with higher-order polynomials and standardisation.
+    Note: marEx v3.0+ uses shifting_baseline as the default method:
 
     >>> result_advanced = marEx.compute_normalised_anomaly(
     ...     sst,
-    ...     method_anomaly="detrended_baseline",
+    ...     method_anomaly="detrend_harmonic",
     ...     detrend_orders=[1, 2, 3],  # Linear, quadratic, cubic trends
     ...     std_normalise=True,        # Add standardised anomalies
     ...     force_zero_mean=True
@@ -855,7 +857,7 @@ def compute_normalised_anomaly(
 
     >>> # Detrended baseline - faster, slight bias
     >>> detrended = marEx.compute_normalised_anomaly(
-    ...     sst, method_anomaly="detrended_baseline"
+    ...     sst, method_anomaly="detrend_harmonic"
     ... )
     >>>
     >>> # Shifting baseline - slower, more accurate
@@ -879,10 +881,10 @@ def compute_normalised_anomaly(
 
     Fixed detrended baseline:
 
-    >>> # Remove trends then compute fixed climatology
+    >>> # Remove long-term trends then compute fixed climatology
     >>> result_fixed_detrended = marEx.compute_normalised_anomaly(
     ...     sst,
-    ...     method_anomaly="fixed_detrended_baseline",
+    ...     method_anomaly="detrend_fixed_baseline",
     ...     detrend_orders=[1],  # Remove linear trend
     ...     force_zero_mean=True
     ... )
@@ -901,7 +903,7 @@ def compute_normalised_anomaly(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
-    if method_anomaly == "detrended_baseline":
+    if method_anomaly == "detrend_harmonic":
         logger.debug(
             f"Detrended baseline parameters: std_normalise={std_normalise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
         )
@@ -912,30 +914,31 @@ def compute_normalised_anomaly(
     elif method_anomaly == "fixed_baseline":
         logger.debug("Fixed baseline parameters: using full time series for daily climatology")
         return _compute_anomaly_fixed_baseline(da, dimensions, coordinates)
-    elif method_anomaly == "fixed_detrended_baseline":
+    elif method_anomaly == "detrend_fixed_baseline":
         logger.debug(f"Fixed detrended baseline parameters: orders={detrend_orders}, zero_mean={force_zero_mean}")
-        return _compute_anomaly_fixed_detrended_baseline(da, detrend_orders, dimensions, coordinates, force_zero_mean)
+        return _compute_anomaly_detrend_fixed_baseline(da, detrend_orders, dimensions, coordinates, force_zero_mean)
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")
         raise ConfigurationError(
             f"Unknown anomaly method '{method_anomaly}'",
             details="Invalid method_anomaly parameter",
             suggestions=[
-                "Use 'detrended_baseline' for efficient processing with trend and harmonic removal",
+                "Use 'detrend_harmonic' for efficient processing with trend and harmonic removal",
                 "Use 'shifting_baseline' for accurate climatology (requires more data)",
-                "Use 'fixed_baseline' to remove a single daily climatology across all years (keeps any long-term trend in the anomaly)",
-                "Use 'fixed_detrended_baseline' for trend removal followed by fixed climatology",
+                "Use 'fixed_baseline' to remove a single daily climatology across all years "
+                "(keeps any long-term trend in the anomaly)",
+                "Use 'detrend_fixed_baseline' for trend removal followed by fixed climatology",
             ],
             context={
                 "provided_method": method_anomaly,
-                "valid_methods": ["detrended_baseline", "shifting_baseline", "fixed_baseline", "fixed_detrended_baseline"],
+                "valid_methods": ["detrend_harmonic", "shifting_baseline", "fixed_baseline", "detrend_fixed_baseline"],
             },
         )
 
 
 def identify_extremes(
     da: xr.DataArray,
-    method_extreme: Literal["global_extreme", "hobday_extreme"] = "global_extreme",
+    method_extreme: Literal["global_extreme", "hobday_extreme"] = "hobday_extreme",
     threshold_percentile: float = 95,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
@@ -954,7 +957,7 @@ def identify_extremes(
     ----------
     da : xarray.DataArray
         DataArray containing anomalies
-    method_extreme : str, default='global_extreme'
+    method_extreme : str, default='hobday_extreme'
         Method for threshold calculation ('global_extreme' or 'hobday_extreme')
     threshold_percentile : float, default=95
         Percentile threshold (e.g., 95 for 95th percentile)
@@ -1827,7 +1830,7 @@ def _compute_anomaly_detrended(
     # Default detrend_orders to linear if not specified
     if detrend_orders is None:
         detrend_orders = [1]
-    
+
     # Validate detrend_orders is not empty and contains valid values
     if not detrend_orders:
         raise ConfigurationError(
@@ -1836,10 +1839,10 @@ def _compute_anomaly_detrended(
             suggestions=[
                 "Use detrend_orders=[1] for linear detrending",
                 "Use detrend_orders=[1, 2] for linear + quadratic detrending",
-                "Remove detrend_orders optional parameter to use default [1]"
-            ]
+                "Remove detrend_orders optional parameter to use default [1]",
+            ],
         )
-    
+
     # Validate all orders are positive integers
     if any(order < 1 for order in detrend_orders):
         invalid_orders = [order for order in detrend_orders if order < 1]
@@ -1849,8 +1852,8 @@ def _compute_anomaly_detrended(
             suggestions=[
                 "Use only positive integers for polynomial orders",
                 "Common values: [1] for linear, [1,2] for linear+quadratic",
-                f"Remove invalid orders: {invalid_orders}"
-            ]
+                f"Remove invalid orders: {invalid_orders}",
+            ],
         )
 
     da = da.astype(np.float32)
@@ -1970,11 +1973,7 @@ def _compute_anomaly_detrended(
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
         chunk_dict_mask = {}  # Empty for 1D case
-        mask = xr.DataArray(
-            np.any(np.isfinite(da.values)),
-            dims=[],
-            attrs={"description": "Time series validity mask"}
-        )
+        mask = xr.DataArray(np.any(np.isfinite(da.values)), dims=[], attrs={"description": "Time series validity mask"})
 
     # Initialise output dataset
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
@@ -2076,17 +2075,13 @@ def _compute_anomaly_fixed_baseline(
         mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
-        mask = xr.DataArray(
-            np.any(np.isfinite(da.values)),
-            dims=[],
-            attrs={"description": "Time series validity mask"}
-        )
+        mask = xr.DataArray(np.any(np.isfinite(da.values)), dims=[], attrs={"description": "Time series validity mask"})
 
     # Build output dataset
     return xr.Dataset({"dat_anomaly": anomalies, "mask": mask})
 
 
-def _compute_anomaly_fixed_detrended_baseline(
+def _compute_anomaly_detrend_fixed_baseline(
     da: xr.DataArray,
     detrend_orders: Optional[List[int]] = None,
     dimensions: Optional[Dict[str, str]] = None,
@@ -2133,7 +2128,6 @@ def _compute_anomaly_fixed_detrended_baseline(
         force_zero_mean=force_zero_mean,
         remove_harmonics=False,  # Only remove trends, not harmonics
     )["dat_anomaly"].persist()
-    
 
     # Step 2: Compute daily climatology and anomalies using _compute_anomaly_fixed_baseline
     logger.debug("Computing daily climatology and anomalies from detrended data")
