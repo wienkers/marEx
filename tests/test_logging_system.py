@@ -165,7 +165,7 @@ class TestFunctionLevelVerbosity:
 
     def test_compute_normalised_anomaly_verbose(self, sample_data):
         """Test verbose mode in compute_normalised_anomaly."""
-        result = marEx.compute_normalised_anomaly(sample_data, method_anomaly="detrended_baseline", verbose=True)
+        result = marEx.compute_normalised_anomaly(sample_data, method_anomaly="detrend_harmonic", verbose=True)
 
         # Verify the function runs successfully and returns expected structure
         assert isinstance(result, xr.Dataset)
@@ -398,7 +398,7 @@ class TestTimingContext:
         """Test basic timing functionality."""
         logger = get_logger("test_timing")
 
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             with log_timing(logger, "Test operation"):
                 import time
 

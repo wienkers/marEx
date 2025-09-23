@@ -42,7 +42,7 @@ class TestFullPipelineGridded:
         # Step 1: Preprocessing
         extremes_ds = marEx.preprocess_data(
             sst_subset,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=80,  # Lower threshold for more events
             detrend_orders=[1],  # Simple detrending only
@@ -187,7 +187,7 @@ class TestFullPipelineGridded:
             # Run preprocessing with current chunking strategy
             extremes_ds = marEx.preprocess_data(
                 self.sst_data,
-                method_anomaly="detrended_baseline",
+                method_anomaly="detrend_harmonic",
                 method_extreme="global_extreme",
                 threshold_percentile=95,
                 dimensions=self.dimensions,
@@ -264,7 +264,7 @@ class TestFullPipelineUnstructured:
         # Step 1: Preprocessing unstructured data
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=90,
             dimensions=self.dimensions,
@@ -322,8 +322,8 @@ class TestPipelineIntegration:
     def test_method_combinations_consistency(self, dask_client_integration):
         """Test that different method combinations produce reasonable and consistent results."""
         method_combinations = [
-            ("detrended_baseline", "global_extreme"),
-            ("detrended_baseline", "hobday_extreme"),
+            ("detrend_harmonic", "global_extreme"),
+            ("detrend_harmonic", "hobday_extreme"),
             ("shifting_baseline", "global_extreme"),
             # Note: shifting_baseline + hobday_extreme is tested separately due to complexity
         ]
@@ -422,7 +422,7 @@ class TestPipelineIntegration:
         for i in range(3):  # Run 3 iterations
             extremes_ds = marEx.preprocess_data(
                 self.gridded_data,
-                method_anomaly="detrended_baseline",
+                method_anomaly="detrend_harmonic",
                 method_extreme="global_extreme",
                 threshold_percentile=95,
                 dask_chunks={"time": 15},
@@ -454,7 +454,7 @@ class TestPipelineIntegration:
         # Should still work with limited data
         extremes_ds = marEx.preprocess_data(
             subset_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=95,
             dask_chunks={"time": 10},

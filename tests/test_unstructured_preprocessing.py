@@ -103,11 +103,11 @@ class TestUnstructuredPreprocessing:
             description="shifting_baseline + hobday_extreme (unstructured)",
         )
 
-    def test_detrended_baseline_global_extreme_unstructured(self):
-        """Test preprocessing with detrended_baseline + global_extreme for unstructured grid."""
+    def test_detrend_harmonic_global_extreme_unstructured(self):
+        """Test preprocessing with detrend_harmonic + global_extreme for unstructured grid."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
@@ -130,7 +130,7 @@ class TestUnstructuredPreprocessing:
         assert "cell_areas" in extremes_ds.data_vars
 
         # Verify attributes
-        assert extremes_ds.attrs["method_anomaly"] == "detrended_baseline"
+        assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
         assert extremes_ds.attrs["method_extreme"] == "global_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
@@ -149,12 +149,105 @@ class TestUnstructuredPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrended_baseline + global_extreme (unstructured): {extreme_frequency}")
+        print(f"Exact extreme_frequency for detrend_harmonic + global_extreme (unstructured): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
-            description="detrended_baseline + global_extreme (unstructured)",
+            description="detrend_harmonic + global_extreme (unstructured)",
         )
+        
+    def test_fixed_baseline_unstructured(self):
+        """Test fixed_baseline method with unstructured grid."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="fixed_baseline",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+            dimensions=self.dimensions,
+            coordinates=self.coordinates,
+            dask_chunks=self.dask_chunks,
+            neighbours=self.mock_neighbours,
+            cell_areas=self.mock_cell_areas,
+        )
+
+        # Verify unstructured-specific structure
+        assert "neighbours" in extremes_ds.data_vars
+        assert "cell_areas" in extremes_ds.data_vars
+        
+        # Verify time preservation
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"] 
+        assert output_time_size == input_time_size
+
+        # Verify cell dimension structure
+        cell_dim = "ncells" if "ncells" in extremes_ds.dims else "cell"
+        assert cell_dim in extremes_ds.extreme_events.dims
+        assert len(extremes_ds.extreme_events.dims) == 2  # time + cell only
+
+    def test_detrend_fixed_baseline_unstructured(self):
+        """Test detrend_fixed_baseline method with unstructured grid.""" 
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="detrend_fixed_baseline",
+            method_extreme="hobday_extreme", 
+            threshold_percentile=95,
+            detrend_orders=[1, 2],
+            window_days_hobday=5,
+            dimensions=self.dimensions,
+            coordinates=self.coordinates,
+            dask_chunks=self.dask_chunks,
+            neighbours=self.mock_neighbours,
+            cell_areas=self.mock_cell_areas,
+        )
+
+        # Verify structure and time preservation
+        assert "neighbours" in extremes_ds.data_vars
+        input_time_size = self.sst_data.sizes["time"]
+        assert extremes_ds.sizes["time"] == input_time_size
+        
+        # Verify hobday thresholds have dayofyear dimension
+        assert "dayofyear" in extremes_ds.thresholds.dims
+        cell_dim = "ncells" if "ncells" in extremes_ds.dims else "cell"
+        assert cell_dim in extremes_ds.thresholds.dims
+
+    def test_with_all_extreme_methods_unstructured(self):
+        """Test that anomaly methods work with both extreme detection methods for unstructured data."""
+        # Test all combinations
+        combinations = [
+            ("fixed_baseline", "global_extreme"),
+            ("fixed_baseline", "hobday_extreme"), 
+            ("detrend_fixed_baseline", "global_extreme"),
+            ("detrend_fixed_baseline", "hobday_extreme"),
+            ("shifting_baseline", "global_extreme"),
+            ("shifting_baseline", "hobday_extreme"), 
+            ("detrend_harmonic", "global_extreme"),
+            ("detrend_harmonic", "hobday_extreme"),
+        ]
+        
+        for method_anomaly, method_extreme in combinations:
+            result = marEx.preprocess_data(
+                self.sst_data,
+                method_anomaly=method_anomaly,
+                method_extreme=method_extreme, 
+                threshold_percentile=95,
+                detrend_orders=[1] if "detrended" in method_anomaly else None,
+                window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
+                dimensions=self.dimensions,
+                coordinates=self.coordinates,
+                dask_chunks=self.dask_chunks,
+                neighbours=self.mock_neighbours,
+                cell_areas=self.mock_cell_areas,
+            )
+            
+            assert isinstance(result, xr.Dataset)
+            assert "extreme_events" in result.data_vars
+            assert result.attrs["method_anomaly"] == method_anomaly
+            assert result.attrs["method_extreme"] == method_extreme
+            
+            # Verify reasonable extreme frequency
+            extreme_frequency = float(result.extreme_events.mean())
+            assert 0.025 < extreme_frequency < 0.075, \
+                f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
 
     def test_unstructured_grid_detection(self):
         """Test that the function correctly detects unstructured vs gridded data."""
@@ -163,7 +256,7 @@ class TestUnstructuredPreprocessing:
 
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=95,
             dimensions=unstructured_dims,
@@ -202,7 +295,7 @@ class TestUnstructuredPreprocessing:
 
         detrended_ds = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
@@ -251,10 +344,10 @@ class TestUnstructuredPreprocessing:
         custom_dimensions = {"time": "t", "x": "cell"}
         custom_coordinates = {"time": "t", "x": "longitude", "y": "latitude"}
 
-        # Test 1: detrended_baseline + global_extreme
+        # Test 1: detrend_harmonic + global_extreme
         extremes_ds_detrended = marEx.preprocess_data(
             renamed_data,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
@@ -265,7 +358,7 @@ class TestUnstructuredPreprocessing:
             cell_areas=mock_cell_areas_renamed,
         )
 
-        # Verify output structure for detrended_baseline method
+        # Verify output structure for detrend_harmonic method
         assert isinstance(extremes_ds_detrended, xr.Dataset)
         assert "extreme_events" in extremes_ds_detrended.data_vars
         assert "dat_anomaly" in extremes_ds_detrended.data_vars
@@ -288,8 +381,8 @@ class TestUnstructuredPreprocessing:
         assert extremes_ds_detrended.latitude.dims == ("cell",)
         assert extremes_ds_detrended.longitude.dims == ("cell",)
 
-        # Verify attributes for detrended_baseline
-        assert extremes_ds_detrended.attrs["method_anomaly"] == "detrended_baseline"
+        # Verify attributes for detrend_harmonic
+        assert extremes_ds_detrended.attrs["method_anomaly"] == "detrend_harmonic"
         assert extremes_ds_detrended.attrs["method_extreme"] == "global_extreme"
 
         # For global_extreme, thresholds should be 1D (cells) not 2D with dayofyear
@@ -301,7 +394,7 @@ class TestUnstructuredPreprocessing:
         assert_percentile_frequency(
             extreme_frequency_detrended,
             95,
-            description="Custom dimensions (unstructured): detrended_baseline + global_extreme",
+            description="Custom dimensions (unstructured): detrend_harmonic + global_extreme",
         )
 
         # Test 2: shifting_baseline + hobday_extreme

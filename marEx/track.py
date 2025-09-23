@@ -862,7 +862,9 @@ class tracker:
         self._validate_unstructured_chunking(neighbours, cell_areas)
 
         # Store cell areas (in square metres)
-        self.cell_area = cell_areas.astype(np.float32).drop_vars({self.ycoord, self.xcoord}.intersection(set(cell_areas.coords))).persist()
+        self.cell_area = (
+            cell_areas.astype(np.float32).drop_vars({self.ycoord, self.xcoord}.intersection(set(cell_areas.coords))).persist()
+        )
         self.mean_cell_area = float(cell_areas.mean().compute().item())
 
         # Initialise dilation array for unstructured grid
@@ -1954,14 +1956,14 @@ class tracker:
 
             # Calculate buffer size for IDs in chunks
             max_ID = int(object_id_field.max().compute().item()) + 1
-            
+
             # Handle case where object_id_field may not have time dimension (e.g., single time slice)
             if self.timedim in object_id_field.dims:
                 time_steps = object_id_field.sizes[self.timedim]
             else:
                 # For single time slice, use 1 as time steps
                 time_steps = 1
-            
+
             ID_buffer_size = max(int(max_ID / time_steps) * 4 + 2, max_ID)
 
             def object_properties_chunk(
@@ -2684,9 +2686,9 @@ class tracker:
 
         # Recalculate centroids time-slice by time-slice to handle disjoint parts correctly
         if "centroid" in object_props_extended.data_vars:
-            
+
             event_ids = object_props_extended.ID.values.copy()
-            
+
             if self.unstructured_grid:
                 spatial_dims = [self.xdim]
                 coords = {self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]}
@@ -2694,9 +2696,9 @@ class tracker:
                 spatial_dims = [self.ydim, self.xdim]
                 coords = {
                     self.ydim: split_merged_relabeled_object_id_field.coords[self.ydim],
-                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]
+                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim],
                 }
-            
+
             def calculate_centroids_for_slice(
                 slice_data: NDArray[np.int32],
                 event_ids: NDArray[np.int32],
@@ -2704,40 +2706,33 @@ class tracker:
                 spatial_dims: List[str],
             ) -> NDArray[np.float32]:
                 """Calculate centroids for a single 2D spatial slice in parallel"""
-                
+
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
-                
+
                 # Create DataArray for this slice
-                time_slice = xr.DataArray(
-                    slice_data, 
-                    coords=coords, 
-                    dims=spatial_dims
-                )
-                
+                time_slice = xr.DataArray(slice_data, coords=coords, dims=spatial_dims)
+
                 # Calculate properties only for present IDs
-                props = self.calculate_object_properties(
-                    time_slice, 
-                    properties=["centroid"]
-                )
-                
+                props = self.calculate_object_properties(time_slice, properties=["centroid"])
+
                 centroids = props["centroid"].values.T  # Shape: (n_objects, 2)
-                
+
                 # Initialise result array with NaN (shape: ID, component)
                 result = np.full((len(event_ids), 2), np.nan, dtype=np.float32)
-                
+
                 # Map results back to full ID space
                 if len(centroids) > 0:
                     # Create a mapping from present_ids to their indices in props
                     id_to_idx = {present_id: idx for idx, present_id in enumerate(present_ids)}
-                    
+
                     # Vectorised mapping
                     valid_mask = np.isin(event_ids, present_ids)
                     result[valid_mask] = centroids[[id_to_idx[event_id] for event_id in event_ids[valid_mask]]]
-                
+
                 return result
-            
+
             centroids_parallel = xr.apply_ufunc(
                 calculate_centroids_for_slice,
                 split_merged_relabeled_object_id_field,
@@ -2751,29 +2746,24 @@ class tracker:
                 vectorize=True,
                 dask="parallelized",
                 output_dtypes=[np.float32],
-                dask_gufunc_kwargs={
-                    "output_sizes": {
-                        "ID": len(event_ids),
-                        "component": 2
-                    }
-                }
+                dask_gufunc_kwargs={"output_sizes": {"ID": len(event_ids), "component": 2}},
             )
-            
+
             # Assign coordinates to match object_props_extended structure
-            centroids_parallel = centroids_parallel.assign_coords({
-                "ID": object_props_extended.ID,
-                "component": object_props_extended["centroid"].coords["component"]
-            })
-            
+            centroids_parallel = centroids_parallel.assign_coords(
+                {"ID": object_props_extended.ID, "component": object_props_extended["centroid"].coords["component"]}
+            )
+
             # Transpose to match object_props_extended["centroid"] structure: (component, time, ID)
             centroids_parallel = centroids_parallel.transpose("component", self.timedim, "ID")
-            
+
             # Update object_props_extended with parallel-computed centroids
             object_props_extended["centroid"] = centroids_parallel
-            
+
             # Explicit cleanup
             del centroids_parallel, event_ids, coords
             import gc
+
             gc.collect()
 
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
@@ -2920,7 +2910,7 @@ class tracker:
         Parameters
         ----------
         object_id_field_unique : xarray.DataArray
-            Field of unique object IDs
+            Field of unique object IDs. IDs are required to be monotonically increasing with time.
         object_props : xarray.Dataset
             Properties of each object
 

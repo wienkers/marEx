@@ -61,7 +61,7 @@ class TestNonDaskInputValidation:
         with pytest.raises(TypeError, match=r"'NoneType' object is not subscriptable"):
             marEx.compute_normalised_anomaly(
                 test_data_numpy,  # Non-Dask array
-                method_anomaly="detrended_baseline",
+                method_anomaly="detrend_harmonic",
                 dimensions=dimensions_gridded,
             )
 
@@ -103,16 +103,16 @@ class TestMethodValidation:
 
     def test_valid_method_combinations(self, test_data_dask, dimensions_gridded, dask_chunks):
         """Test that valid method combinations work correctly."""
-        # Test detrended_baseline + global_extreme (default combination)
+        # Test detrend_harmonic + global_extreme (previous default combination)
         result1 = marEx.preprocess_data(
             test_data_dask,
-            method_anomaly="detrended_baseline",
+            method_anomaly="detrend_harmonic",
             method_extreme="global_extreme",
             dimensions=dimensions_gridded,
             dask_chunks=dask_chunks,
         )
         assert isinstance(result1, xr.Dataset)
-        assert result1.attrs["method_anomaly"] == "detrended_baseline"
+        assert result1.attrs["method_anomaly"] == "detrend_harmonic"
         assert result1.attrs["method_extreme"] == "global_extreme"
 
         # Test shifting_baseline + hobday_extreme
@@ -190,6 +190,29 @@ class TestParameterValidation:
         # This should raise an error when trying to access non-existent dimensions
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.preprocess_data(test_data_dask, dimensions=wrong_dimensions, dask_chunks=dask_chunks)
+    
+    def test_detrend_fixed_baseline_parameter_validation(self, test_data_dask, dimensions_gridded, dask_chunks):
+        """Test parameter validation for detrend_fixed_baseline method."""
+        # Test with empty detrend_orders
+        with pytest.raises((ValueError, ConfigurationError)):
+            marEx.preprocess_data(
+                test_data_dask,
+                method_anomaly="detrend_fixed_baseline",
+                detrend_orders=[],  # Empty list should cause error
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+            )
+            
+        # Test with invalid detrend_orders (negative)
+        with pytest.raises((ValueError, ConfigurationError)):
+            marEx.preprocess_data(
+                test_data_dask,
+                method_anomaly="detrend_fixed_baseline", 
+                detrend_orders=[-1],  # Negative order invalid
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+            )
+
 
 
 class TestCoordinateDimensionValidation:
@@ -312,7 +335,7 @@ class TestCoordinateDimensionValidation:
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.compute_normalised_anomaly(
                 test_data_dask,
-                method_anomaly="detrended_baseline",
+                method_anomaly="detrend_harmonic",
                 dimensions=invalid_dimensions,
             )
 
@@ -324,7 +347,7 @@ class TestCoordinateDimensionValidation:
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
             marEx.compute_normalised_anomaly(
                 test_data_dask,
-                method_anomaly="detrended_baseline",
+                method_anomaly="detrend_harmonic",
                 dimensions=valid_dimensions,
                 coordinates=invalid_coordinates,
             )
