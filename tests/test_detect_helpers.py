@@ -379,6 +379,40 @@ class TestGetPreprocessingSteps:
                 assert "Global percentile" in steps_text
             else:
                 assert "Day-of-year" in steps_text
+    
+    def test_get_preprocessing_steps_new_methods(self):
+        """Test _get_preprocessing_steps includes new method descriptions."""
+        # Test fixed_baseline
+        steps_fixed = detect._get_preprocessing_steps(
+            method_anomaly="fixed_baseline",
+            method_extreme="global_extreme", 
+            std_normalise=False,
+            detrend_orders=[1],
+            window_year_baseline=15,
+            smooth_days_baseline=21,
+            window_days_hobday=11,
+            window_spatial_hobday=None,
+        )
+        
+        # Should contain description of fixed baseline
+        assert any("Daily climatology computed from full time series" in step for step in steps_fixed)
+        
+        # Test fixed_detrended_baseline
+        steps_fixed_detrended = detect._get_preprocessing_steps(
+            method_anomaly="fixed_detrended_baseline",
+            method_extreme="hobday_extreme",
+            std_normalise=False, 
+            detrend_orders=[1, 2],
+            window_year_baseline=15,
+            smooth_days_baseline=21,
+            window_days_hobday=11,
+            window_spatial_hobday=None,
+        )
+        
+        # Should contain descriptions for both detrending and climatology
+        steps_text = " ".join(steps_fixed_detrended)
+        assert "polynomial trend orders=[1, 2]" in steps_text
+        assert "Daily climatology computed from detrended data" in steps_text
 
 
 class TestValidationFunctions:

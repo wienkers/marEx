@@ -190,6 +190,29 @@ class TestParameterValidation:
         # This should raise an error when trying to access non-existent dimensions
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
             marEx.preprocess_data(test_data_dask, dimensions=wrong_dimensions, dask_chunks=dask_chunks)
+    
+    def test_fixed_detrended_baseline_parameter_validation(self, test_data_dask, dimensions_gridded, dask_chunks):
+        """Test parameter validation for fixed_detrended_baseline method."""
+        # Test with empty detrend_orders
+        with pytest.raises((ValueError, ConfigurationError)):
+            marEx.preprocess_data(
+                test_data_dask,
+                method_anomaly="fixed_detrended_baseline",
+                detrend_orders=[],  # Empty list should cause error
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+            )
+            
+        # Test with invalid detrend_orders (negative)
+        with pytest.raises((ValueError, ConfigurationError)):
+            marEx.preprocess_data(
+                test_data_dask,
+                method_anomaly="fixed_detrended_baseline", 
+                detrend_orders=[-1],  # Negative order invalid
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+            )
+
 
 
 class TestCoordinateDimensionValidation:

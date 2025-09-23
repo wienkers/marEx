@@ -398,7 +398,7 @@ class TestTimingContext:
         """Test basic timing functionality."""
         logger = get_logger("test_timing")
 
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             with log_timing(logger, "Test operation"):
                 import time
 

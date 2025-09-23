@@ -155,6 +155,99 @@ class TestUnstructuredPreprocessing:
             95,
             description="detrended_baseline + global_extreme (unstructured)",
         )
+        
+    def test_fixed_baseline_unstructured(self):
+        """Test fixed_baseline method with unstructured grid."""
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="fixed_baseline",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+            dimensions=self.dimensions,
+            coordinates=self.coordinates,
+            dask_chunks=self.dask_chunks,
+            neighbours=self.mock_neighbours,
+            cell_areas=self.mock_cell_areas,
+        )
+
+        # Verify unstructured-specific structure
+        assert "neighbours" in extremes_ds.data_vars
+        assert "cell_areas" in extremes_ds.data_vars
+        
+        # Verify time preservation
+        input_time_size = self.sst_data.sizes["time"]
+        output_time_size = extremes_ds.sizes["time"] 
+        assert output_time_size == input_time_size
+
+        # Verify cell dimension structure
+        cell_dim = "ncells" if "ncells" in extremes_ds.dims else "cell"
+        assert cell_dim in extremes_ds.extreme_events.dims
+        assert len(extremes_ds.extreme_events.dims) == 2  # time + cell only
+
+    def test_fixed_detrended_baseline_unstructured(self):
+        """Test fixed_detrended_baseline method with unstructured grid.""" 
+        extremes_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="fixed_detrended_baseline",
+            method_extreme="hobday_extreme", 
+            threshold_percentile=95,
+            detrend_orders=[1, 2],
+            window_days_hobday=5,
+            dimensions=self.dimensions,
+            coordinates=self.coordinates,
+            dask_chunks=self.dask_chunks,
+            neighbours=self.mock_neighbours,
+            cell_areas=self.mock_cell_areas,
+        )
+
+        # Verify structure and time preservation
+        assert "neighbours" in extremes_ds.data_vars
+        input_time_size = self.sst_data.sizes["time"]
+        assert extremes_ds.sizes["time"] == input_time_size
+        
+        # Verify hobday thresholds have dayofyear dimension
+        assert "dayofyear" in extremes_ds.thresholds.dims
+        cell_dim = "ncells" if "ncells" in extremes_ds.dims else "cell"
+        assert cell_dim in extremes_ds.thresholds.dims
+
+    def test_with_all_extreme_methods_unstructured(self):
+        """Test that anomaly methods work with both extreme detection methods for unstructured data."""
+        # Test all combinations
+        combinations = [
+            ("fixed_baseline", "global_extreme"),
+            ("fixed_baseline", "hobday_extreme"), 
+            ("fixed_detrended_baseline", "global_extreme"),
+            ("fixed_detrended_baseline", "hobday_extreme"),
+            ("shifting_baseline", "global_extreme"),
+            ("shifting_baseline", "hobday_extreme"), 
+            ("detrended_baseline", "global_extreme"),
+            ("detrended_baseline", "hobday_extreme"),
+        ]
+        
+        for method_anomaly, method_extreme in combinations:
+            result = marEx.preprocess_data(
+                self.sst_data,
+                method_anomaly=method_anomaly,
+                method_extreme=method_extreme, 
+                threshold_percentile=95,
+                detrend_orders=[1] if "detrended" in method_anomaly else None,
+                window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
+                dimensions=self.dimensions,
+                coordinates=self.coordinates,
+                dask_chunks=self.dask_chunks,
+                neighbours=self.mock_neighbours,
+                cell_areas=self.mock_cell_areas,
+            )
+            
+            assert isinstance(result, xr.Dataset)
+            assert "extreme_events" in result.data_vars
+            assert result.attrs["method_anomaly"] == method_anomaly
+            assert result.attrs["method_extreme"] == method_extreme
+            
+            # Verify reasonable extreme frequency
+            extreme_frequency = float(result.extreme_events.mean())
+            assert 0.025 < extreme_frequency < 0.075, \
+                f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
 
     def test_unstructured_grid_detection(self):
         """Test that the function correctly detects unstructured vs gridded data."""
