@@ -2818,7 +2818,7 @@ class tracker:
         Parameters
         ----------
         object_id_field_unique : xarray.DataArray
-            Field of unique object IDs. IDs are required to be monotonically increasing with time.
+            Field of unique object IDs
         object_props : xarray.Dataset
             Properties of each object
 
