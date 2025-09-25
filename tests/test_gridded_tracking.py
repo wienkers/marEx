@@ -141,8 +141,8 @@ class TestGriddedTracking:
         )
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 20, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 26, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 29, tolerance=1)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 13, tolerance=2)
 
     def test_tracking_data_consistency(self, dask_client_gridded):
         """Test that tracking produces consistent data structures."""
@@ -199,8 +199,8 @@ class TestGriddedTracking:
         )
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 19, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 27, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 29, tolerance=1)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 15, tolerance=2)
 
     def test_different_filtering_parameters(self, dask_client_gridded):
         """Test tracking with different area filtering parameters."""

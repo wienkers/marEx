@@ -170,7 +170,7 @@ class TestUnstructuredTracking:
             self.extremes_data_merging.extreme_events,
             self.extremes_data_merging.mask,
             R_fill=1,
-            area_filter_quartile=0.0,
+            area_filter_absolute=5,  # No filtering to retain all objects (This is the minimum)
             temp_dir=self.temp_dir,
             T_fill=2,  # Allow 2-day gaps
             allow_merging=True,

@@ -170,8 +170,10 @@ Scientific Methods
 Anomaly Detection Methods
 -------------------------
 
-* **Detrended Baseline** (``detrended_baseline``): Efficient method using long-term polynomial trends & harmonics
-* **Shifting Baseline** (``shifting_baseline``): More accurate method using rolling climatologies
+* **Harmonic Detrending** (``detrend_harmonic``): Efficient method using long-term polynomial trends & harmonics
+* **Fixed Baseline** (``fixed_baseline``): Removes the daily climatology of the full time series without detrending
+* **Detrend Fixed Baseline** (``detrend_fixed_baseline``): Polynomial detrending followed by removing the fixed daily climatology
+* **Shifting Baseline** (``shifting_baseline``): Most accurate method using rolling climatologies
 
 Extreme Event Identification
 ----------------------------

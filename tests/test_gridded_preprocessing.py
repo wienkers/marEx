@@ -136,8 +136,8 @@ class TestGriddedPreprocessing:
         assert_percentile_frequency(extreme_frequency, 95, description="detrend_harmonic + global_extreme")
 
     def test_output_consistency(self):
-        """Test that both preprocessing methods produce consistent output structures."""
-        # Run both methods
+        """Test that all preprocessing methods produce consistent output structures."""
+        # Run all methods
         shifting_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
@@ -159,24 +159,43 @@ class TestGriddedPreprocessing:
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
+        
+        fixed_detrended_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="detrend_fixed_baseline",
+            method_extreme="hobday_extreme",
+            threshold_percentile=95,
+            detrend_orders=[1],
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks,
+        )
+        
+        fixed_ds = marEx.preprocess_data(
+            self.sst_data,
+            method_anomaly="fixed_baseline",
+            method_extreme="hobday_extreme",
+            threshold_percentile=95,
+            detrend_orders=[1],
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks,
+        )
 
-        # Both should have the same core data variables
+        # All should have the same core data variables
         core_vars = ["extreme_events", "dat_anomaly", "mask"]
         for var in core_vars:
             assert var in shifting_ds.data_vars
             assert var in detrended_ds.data_vars
+            assert var in fixed_detrended_ds.data_vars
+            assert var in fixed_ds.data_vars
 
-        # Both should have mask with same spatial shape
-        assert shifting_ds.mask.shape == detrended_ds.mask.shape
+        # All should have mask with same spatial shape
+        datasets = [shifting_ds, detrended_ds, fixed_detrended_ds, fixed_ds]
+        mask_shapes = [ds.mask.shape for ds in datasets]
+        assert all(shape == mask_shapes[0] for shape in mask_shapes)
 
         # Extreme events should have consistent spatial dimensions
-        assert shifting_ds.extreme_events.dims[-2:] == detrended_ds.extreme_events.dims[-2:]
-
-        # Both should have consistent coordinate structure (lat, lon)
-        assert "lat" in shifting_ds.coords
-        assert "lon" in shifting_ds.coords
-        assert "lat" in detrended_ds.coords
-        assert "lon" in detrended_ds.coords
+        spatial_dims = [ds.extreme_events.dims[-2:] for ds in datasets]
+        assert all(dims == spatial_dims[0] for dims in spatial_dims)
 
     def test_std_normalise_detrend_harmonic(self):
         """Test preprocessing with std_normalise=True for detrend_harmonic method."""
