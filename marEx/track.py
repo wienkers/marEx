@@ -2336,14 +2336,27 @@ class tracker:
         if len(overlap_objects_list) == 0:
             return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
 
+        # Filter out overlaps where either ID doesn't exist in object_props
+        existing_ids = set(object_props.ID.values)
+        valid_mask = np.array([
+            (overlap[0] in existing_ids) and (overlap[1] in existing_ids)
+            for overlap in overlap_objects_list
+        ])
+
+        if not np.any(valid_mask):
+            return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
+
+        valid_overlaps = overlap_objects_list[valid_mask]
+
         # Calculate overlap fractions
-        areas_0 = object_props["area"].sel(ID=overlap_objects_list[:, 0]).values
-        areas_1 = object_props["area"].sel(ID=overlap_objects_list[:, 1]).values
+        areas_0 = object_props["area"].sel(ID=valid_overlaps[:, 0]).values
+        areas_1 = object_props["area"].sel(ID=valid_overlaps[:, 1]).values
         min_areas = np.minimum(areas_0, areas_1)
-        overlap_fractions = overlap_objects_list[:, 2].astype(float) / min_areas
+        overlap_fractions = valid_overlaps[:, 2].astype(float) / min_areas
 
         # Filter by threshold
-        overlap_objects_list_filtered = overlap_objects_list[overlap_fractions >= self.overlap_threshold]
+        threshold_mask = overlap_fractions >= self.overlap_threshold
+        overlap_objects_list_filtered = valid_overlaps[threshold_mask]
 
         return overlap_objects_list_filtered
 
@@ -2533,18 +2546,25 @@ class tracker:
         IDs = np.arange(max_ID, dtype=np.int32)
 
         # Convert overlap pairs to indices
-        overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_objects_list])
+        if len(overlap_objects_list) > 0:
+            overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_objects_list])
 
-        # Create a sparse matrix representation of the graph
-        n = max_ID
-        row_indices, col_indices = overlap_pairs_indices.T
-        data = np.ones(len(overlap_pairs_indices), dtype=np.bool_)
-        graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n), dtype=np.bool_)
+            # Create a sparse matrix representation of the graph
+            n = max_ID
+            row_indices, col_indices = overlap_pairs_indices.T
+            data = np.ones(len(overlap_pairs_indices), dtype=np.bool_)
+            graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n), dtype=np.bool_)
+        else:
+            # No overlaps - create empty graph
+            n = max_ID
+            graph = csr_matrix((n, n), dtype=np.bool_)
+            overlap_pairs_indices = np.empty((0, 2), dtype=np.int32)
 
-        # Clean up temporary arrays
-        del row_indices
-        del col_indices
-        del data
+        # Clean up temporary arrays (if they exist)
+        if len(overlap_objects_list) > 0:
+            del row_indices
+            del col_indices
+            del data
 
         # Solve the graph to determine connected components
         num_components, component_IDs = connected_components(csgraph=graph, directed=False, return_labels=True)
@@ -2673,9 +2693,20 @@ class tracker:
         object_props = xr.concat([dummy.assign_coords(ID=0), object_props], dim="ID")
 
         for var_name in object_props.data_vars:
-            temp = (
-                object_props[var_name].sel(ID=global_id_mapping.rename({"ID": "new_id"})).drop_vars("ID").rename({"new_id": "ID"})
-            )
+            # Filter global_id_mapping to only include IDs that exist in object_props
+            existing_ids = set(object_props.ID.values)
+            valid_mapping_mask = global_id_mapping.isin(existing_ids)
+
+            # Only select existing IDs
+            valid_global_mapping = global_id_mapping.where(valid_mapping_mask, drop=True)
+
+            if len(valid_global_mapping.ID) == 0:
+                # No valid IDs - create empty result
+                temp = object_props[var_name].isel(ID=slice(0, 0))
+            else:
+                temp = (
+                    object_props[var_name].sel(ID=valid_global_mapping.rename({"ID": "new_id"})).drop_vars("ID").rename({"new_id": "ID"})
+                )
 
             if var_name == "ID":
                 temp = temp.astype(np.int32)
@@ -2933,268 +2964,236 @@ class tracker:
         merge_areas = []  # Areas of overlap
         next_new_id = int(object_props.ID.max().item()) + 1  # Start new IDs after highest existing ID
 
-        # Find children (t+1 / RHS) that appear multiple times (merging objects) --> Indicates there are 2+ Parent Objects...
-        unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)
-        merging_objects = unique_children[children_counts > 1]
-
-        # Pre-compute time indices for each child object
-        time_index_map = self.compute_id_time_dict(object_id_field_unique, merging_objects, next_new_id)
         Nx = object_id_field_unique[self.xdim].size
-
-        # Group objects by time-chunk for efficient processing
-        # Pre-condition: Object IDs should be monotonically increasing in time...
-        chunk_boundaries = np.cumsum([0] + list(object_id_field_unique.chunks[0]))
-        objects_by_chunk = {}
-        # Ensure that objects_by_chunk has entry for every key
-        for chunk_idx in range(len(object_id_field_unique.chunks[0])):
-            objects_by_chunk.setdefault(chunk_idx, [])
-
         object_id_field_unique = object_id_field_unique.persist()
-
-        # Assign objects to chunks
-        for object_id in merging_objects:
-            chunk_idx = (np.searchsorted(chunk_boundaries, time_index_map[object_id], side="right") - 1).astype(np.int32)
-            objects_by_chunk.setdefault(chunk_idx, []).append(object_id)
-
-        future_chunk_merges = []
         updated_chunks = []
 
-        # Process each time chunk
-        for chunk_idx, chunk_objects in objects_by_chunk.items():
-            # We do this to avoid repetetively re-computing and injecting tiny changes
-            # into the full dask-backed DataArray object_id_field_unique
+        # Process each time chunk with timestep-first approach
+        chunk_boundaries = np.cumsum([0] + list(object_id_field_unique.chunks[0]))
 
+        for chunk_idx in range(len(object_id_field_unique.chunks[0])):
             # Extract and load an entire chunk into memory
-            chunk_start = sum(object_id_field_unique.chunks[0][:chunk_idx])
-            chunk_end = (
-                chunk_start + object_id_field_unique.chunks[0][chunk_idx] + 1
-            )  # We also want access to the object_id_time_p1...  But need to remember to remove the last time later
+            chunk_start = chunk_boundaries[chunk_idx]
+            chunk_end = chunk_boundaries[chunk_idx + 1] + 1 if chunk_idx < len(chunk_boundaries) - 1 else chunk_boundaries[chunk_idx + 1]
+            # Ensure we don't exceed array bounds
+            chunk_end = min(chunk_end, object_id_field_unique.sizes[self.timedim])
 
             chunk_data = object_id_field_unique.isel({self.timedim: slice(chunk_start, chunk_end)}).compute()
 
-            # Create a working queue of objects to process
-            objects_to_process = chunk_objects.copy()
-            # Combine only the future_chunk_merges that don't already appear in objects_to_process
-            objects_to_process = objects_to_process + [
-                object_id for object_id in future_chunk_merges if object_id not in objects_to_process
-            ]  # First, assess the new objects from the end of the previous chunk...
-            future_chunk_merges = []
+            # Process each timestep within chunk sequentially
+            for relative_t in range(chunk_data.sizes[self.timedim] - 1):
+                absolute_t = chunk_start + relative_t
 
-            # Process each object in this chunk
-            while objects_to_process:  # Process until queue is empty
-                child_id = objects_to_process.pop(0)
+                # Get data slices for current and next timestep
+                data_t = chunk_data.isel({self.timedim: relative_t})
+                data_t_plus_1 = chunk_data.isel({self.timedim: relative_t + 1})
 
-                # Get time index and data slices
-                child_time_idx = time_index_map[child_id]
-                relative_time_idx = child_time_idx - chunk_start
-
-                object_id_time = chunk_data.isel({self.timedim: relative_time_idx})
-                try:
-                    object_id_time_p1 = chunk_data.isel({self.timedim: relative_time_idx + 1})
-                except Exception:
-                    # Last chunk
-                    object_id_time_p1 = xr.full_like(object_id_time, 0)
-
-                # Get previous timestep
-                if relative_time_idx - 1 >= 0:
-                    object_id_time_m1 = chunk_data.isel({self.timedim: relative_time_idx - 1})
+                # Get previous timestep for partitioning
+                if relative_t > 0:
+                    data_t_minus_1 = chunk_data.isel({self.timedim: relative_t - 1})
                 elif updated_chunks:
-                    # Get the last time slice from the previous chunk (stored in updated_chunks)
+                    # Get the last time slice from the previous chunk
                     _, _, last_chunk_data = updated_chunks[-1]
-                    object_id_time_m1 = last_chunk_data[-1]
+                    data_t_minus_1 = last_chunk_data[-1]
                 else:
-                    object_id_time_m1 = xr.full_like(object_id_time, 0)
+                    data_t_minus_1 = xr.full_like(data_t, 0)
 
-                # Get mask of child object
-                child_mask_2d = (object_id_time == child_id).values
+                # Calculate overlaps for this timestep
+                #   Here, parents are at previous time=t-1 (LHS), children are at current time=t (RHS)
+                timestep_overlaps = self.check_overlap_slice(data_t_minus_1.values, data_t.values)
+                timestep_overlaps = self.enforce_overlap_threshold(timestep_overlaps, object_props)
 
-                # Find all pairs involving this child
-                child_mask = overlap_objects_list[:, 1] == child_id
-                child_where = np.where(overlap_objects_list[:, 1] == child_id)[0].astype(np.int32)
-                merge_group = overlap_objects_list[child_mask]
+                # Iterative processing within timestep=t until convergence
+                #  Only modifies data_t, which contains the children to be partitioned/relabelled
+                timestep_converged = False
+                iteration = 0
 
-                # Get parent objects (LHS) that overlap with this child object
-                parent_ids = merge_group[:, 0]
-                num_parents = len(parent_ids)
+                while not timestep_converged and iteration < 10:  # Prevent infinite loops
+                    # Find merging objects for current timestep
+                    unique_children, children_counts = np.unique(timestep_overlaps[:, 1], return_counts=True)
+                    merging_children = unique_children[children_counts > 1]
 
-                # Create new IDs for the other half of the child object & record in the merge ledger
-                new_object_id = np.arange(next_new_id, next_new_id + (num_parents - 1), dtype=np.int32)
-                next_new_id += num_parents - 1
+                    if len(merging_children) == 0:
+                        timestep_converged = True
+                        continue
 
-                # Replace the 2nd+ child in the overlap objects list with the new child ID
-                overlap_objects_list[child_where[1:], 1] = new_object_id
-                child_ids = np.concatenate((np.array([child_id]), new_object_id))
+                    # Process all merging objects in this timestep
+                    #   Parents exist in this timestep, but 
+                    for child_id in merging_children:
 
-                # Record merge event - extract time value using dimension name
-                time_slice = chunk_data.isel({self.timedim: relative_time_idx})
-                merge_times.append(time_slice.coords[self.timedim].values)
-                merge_child_ids.append(child_ids)
-                merge_parent_ids.append(parent_ids)
-                merge_areas.append(overlap_objects_list[child_mask, 2])
+                        # Get mask of child object
+                        child_mask_2d = (data_t == child_id).values
 
-                # Relabel the Original Child Object ID Field to account for the New ID:
-                # Get parent centroids for partitioning
-                parent_centroids = object_props.sel(ID=parent_ids).centroid.values.T
+                        # Find all pairs involving this child
+                        child_mask = timestep_overlaps[:, 1] == child_id
+                        child_where = np.where(timestep_overlaps[:, 1] == child_id)[0].astype(np.int32)
+                        merge_group = timestep_overlaps[child_mask]
 
-                # Partition the child object based on parent associations
-                if self.nn_partitioning:
-                    # Nearest-neighbor partitioning
-                    # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
-                    if self.unstructured_grid:
-                        # Prepare parent masks
-                        parent_masks = np.zeros((len(parent_ids), object_id_time.shape[0]), dtype=bool)
-                        for idx, parent_id in enumerate(parent_ids):
-                            parent_masks[idx] = (object_id_time_m1 == parent_id).values
+                        # Get parent objects (LHS) that overlap with this child object
+                        parent_ids = merge_group[:, 0]
+                        num_parents = len(parent_ids)
 
-                        # Calculate maximum search distance
-                        max_area = np.max(object_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
-                        max_distance = int(np.sqrt(max_area) * 2.0)
+                        # Create new IDs for the other half of the child object & record in the merge ledger
+                        new_object_id = np.arange(next_new_id, next_new_id + (num_parents - 1), dtype=np.int32)
+                        next_new_id += num_parents - 1
 
-                        # Use optimised unstructured partitioning
-                        new_labels = partition_nn_unstructured(
-                            child_mask_2d,
-                            parent_masks,
-                            child_ids,
-                            parent_centroids,
-                            self.neighbours_int.values,
-                            self.lat.values,  # Need to pass these as NumPy arrays for JIT compatibility
-                            self.lon.values,
-                            max_distance=max(max_distance, 20) * 2,  # Set minimum threshold, in cells
+                        # Replace the 2nd+ child in the overlap objects list with the new child ID
+                        timestep_overlaps[child_where[1:], 1] = new_object_id
+                        child_ids = np.concatenate((np.array([child_id]), new_object_id))
+
+                        # Record merge event - extract time value using dimension name
+                        merge_times.append(data_t.coords[self.timedim].values)
+                        merge_child_ids.append(child_ids)
+                        merge_parent_ids.append(parent_ids)
+                        merge_areas.append(timestep_overlaps[child_mask, 2])
+
+                        # Relabel the Original Child Object ID Field to account for the New ID:
+                        # Get parent centroids for partitioning
+                        parent_centroids = object_props.sel(ID=parent_ids).centroid.values.T
+
+                        # Partition the child object based on parent associations
+                        if self.nn_partitioning:
+                            # Nearest-neighbor partitioning
+                            # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
+                            if self.unstructured_grid:
+                                # Prepare parent masks
+                                parent_masks = np.zeros((len(parent_ids), data_t_minus_1.shape[0]), dtype=bool)
+                                for idx, parent_id in enumerate(parent_ids):
+                                    parent_masks[idx] = (data_t_minus_1 == parent_id).values
+
+                                # Calculate maximum search distance
+                                max_area = np.max(object_props.sel(ID=parent_ids).area.values) / self.mean_cell_area
+                                max_distance = int(np.sqrt(max_area) * 2.0)
+
+                                # Use optimised unstructured partitioning
+                                new_labels = partition_nn_unstructured(
+                                    child_mask_2d,
+                                    parent_masks,
+                                    child_ids,
+                                    parent_centroids,
+                                    self.neighbours_int.values,
+                                    self.lat.values,  # Need to pass these as NumPy arrays for JIT compatibility
+                                    self.lon.values,
+                                    max_distance=max(max_distance, 20) * 2,  # Set minimum threshold, in cells
+                                )
+                            else:
+                                # Prepare parent masks for structured grid
+                                parent_masks = np.zeros(
+                                    (
+                                        len(parent_ids),
+                                        data_t_minus_1.shape[0],
+                                        data_t_minus_1.shape[1],
+                                    ),
+                                    dtype=bool,
+                                )
+                                for idx, parent_id in enumerate(parent_ids):
+                                    parent_masks[idx] = (data_t_minus_1 == parent_id).values
+
+                                # Calculate maximum search distance
+                                max_area = np.max(object_props.sel(ID=parent_ids).area.values)
+                                max_distance = int(np.sqrt(max_area) * 3.0)  # Use 3x the max blob radius
+
+                                # Use optimised structured grid partitioning
+                                new_labels = partition_nn_grid(
+                                    child_mask_2d,
+                                    parent_masks,
+                                    child_ids,
+                                    parent_centroids,
+                                    Nx,
+                                    max_distance=max(max_distance, 40),  # Set minimum threshold, in cells
+                                    wrap=not self.regional_mode,  # Turn longitude periodic wrapping off when in regional mode
+                                )
+
+                        else:
+                            # Centroid-based partitioning
+                            # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Centroid_
+                            if self.unstructured_grid:
+                                new_labels = partition_centroid_unstructured(
+                                    child_mask_2d,
+                                    parent_centroids,
+                                    child_ids,
+                                    self.lat.values,
+                                    self.lon.values,
+                                )
+                            else:
+                                # Calculate distances to each parent centroid
+                                distances = wrapped_euclidian_distance_mask_parallel(
+                                    child_mask_2d, parent_centroids, Nx, not self.regional_mode
+                                )
+
+                                # Assign based on closest parent
+                                new_labels = child_ids[np.argmin(distances, axis=1).astype(np.int32)]
+
+                        # Update values in data_t and assign the updated slice back to the chunk
+                        temp = np.zeros_like(data_t)
+                        temp[child_mask_2d] = new_labels
+                        data_t = data_t.where(~child_mask_2d, temp)
+                        chunk_data[{self.timedim: relative_t}] = data_t
+
+                        # Update the Properties of the N Children Objects
+                        new_child_props = self.calculate_object_properties(data_t, properties=["area", "centroid"])
+
+                        # Update the object_props DataArray:  (but first, check if the original children still exists)
+                        if child_id in new_child_props.ID:
+                            # Update existing entry
+                            object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
+                        else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
+                            object_props = object_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
+                            logger.info(f"Deleted child_id {child_id} because parents have split/morphed")
+
+                        # Add the properties for the N-1 other new child ID
+                        new_object_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_object_id), drop=True).ID
+                        object_props = xr.concat(
+                            [object_props, new_child_props.sel(ID=new_object_ids_still)],
+                            dim="ID",
                         )
-                    else:
-                        # Prepare parent masks for structured grid
-                        parent_masks = np.zeros(
-                            (
-                                len(parent_ids),
-                                object_id_time.shape[0],
-                                object_id_time.shape[1],
-                            ),
-                            dtype=bool,
-                        )
-                        for idx, parent_id in enumerate(parent_ids):
-                            parent_masks[idx] = (object_id_time_m1 == parent_id).values
 
-                        # Calculate maximum search distance
-                        max_area = np.max(object_props.sel(ID=parent_ids).area.values)
-                        max_distance = int(np.sqrt(max_area) * 3.0)  # Use 3x the max blob radius
+                        missing_ids = set(new_object_id) - set(new_object_ids_still.values)
+                        if len(missing_ids) > 0:
+                            logger.warning(
+                                f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
+                            )
 
-                        # Use optimised structured grid partitioning
-                        new_labels = partition_nn_grid(
-                            child_mask_2d,
-                            parent_masks,
-                            child_ids,
-                            parent_centroids,
-                            Nx,
-                            max_distance=max(max_distance, 40),  # Set minimum threshold, in cells
-                            wrap=not self.regional_mode,  # Turn longitude periodic wrapping off when in regional mode
-                        )
 
-                else:
-                    # Centroid-based partitioning
-                    # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Centroid_
-                    if self.unstructured_grid:
-                        new_labels = partition_centroid_unstructured(
-                            child_mask_2d,
-                            parent_centroids,
-                            child_ids,
-                            self.lat.values,
-                            self.lon.values,
-                        )
-                    else:
-                        # Calculate distances to each parent centroid
-                        distances = wrapped_euclidian_distance_mask_parallel(
-                            child_mask_2d, parent_centroids, Nx, not self.regional_mode
-                        )
+                    # After processing all merging objects in this iteration
+                    # Recalculate overlaps to check for newly viable merges
+                    timestep_overlaps = self.check_overlap_slice(data_t_minus_1.values, data_t.values)
+                    timestep_overlaps = self.enforce_overlap_threshold(timestep_overlaps, object_props)
+                    iteration += 1
 
-                        # Assign based on closest parent
-                        new_labels = child_ids[np.argmin(distances, axis=1).astype(np.int32)]
-
-                # Update values in child_time_idx and assign the updated slice back to the original DataArray
-                temp = np.zeros_like(object_id_time)
-                temp[child_mask_2d] = new_labels
-                object_id_time = object_id_time.where(~child_mask_2d, temp)
-                chunk_data[{self.timedim: relative_time_idx}] = object_id_time
-
-                # Add new entries to time_index_map for each of new_object_id corresponding to the current time index
-                time_index_map.update({new_id: child_time_idx for new_id in new_object_id})
-
-                # Update the Properties of the N Children Objects
-                new_child_props = self.calculate_object_properties(object_id_time, properties=["area", "centroid"])
-
-                # Update the object_props DataArray:  (but first, check if the original children still exists)
-                if child_id in new_child_props.ID:
-                    # Update existing entry
-                    object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
-                else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
-                    object_props = object_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
-                    logger.info(f"Deleted child_id {child_id} because parents have split/morphed")
-
-                # Add the properties for the N-1 other new child ID
-                new_object_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_object_id), drop=True).ID
-                object_props = xr.concat(
-                    [object_props, new_child_props.sel(ID=new_object_ids_still)],
-                    dim="ID",
-                )
-
-                missing_ids = set(new_object_id) - set(new_object_ids_still.values)
-                if len(missing_ids) > 0:
-                    logger.warning(
-                        f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
-                    )
-
-                # Finally, Re-assess all of the Parent IDs (LHS) equal to the (original) child_id
-
-                # Look at the overlap IDs between the original child_id and the next time-step,
-                #   and also the new_object_id and the next time-step
-                new_overlaps = self.check_overlap_slice(object_id_time.values, object_id_time_p1.values)
-                new_child_overlaps_list = new_overlaps[
-                    (new_overlaps[:, 0] == child_id) | np.isin(new_overlaps[:, 0], new_object_id)
-                ]
-                new_child_overlaps_list = self.enforce_overlap_threshold(new_child_overlaps_list, object_props)
-
-                # Replace the lines in the overlap_objects_list where (original) child_id is on the LHS
-                #   putting in these new pairs in new_child_overlaps_list
-                child_mask_LHS = overlap_objects_list[:, 0] == child_id
-                overlap_objects_list = np.concatenate([overlap_objects_list[~child_mask_LHS], new_child_overlaps_list])
-
-                # Finally, _FINALLY_, we need to ensure that of the new children objects we made,
-                #  they only overlap with their respective parent...
-                new_unique_children, new_children_counts = np.unique(new_child_overlaps_list[:, 1], return_counts=True)
-                new_merging_objects = new_unique_children[new_children_counts > 1]
-
-                if new_merging_objects.size > 0:
-                    if relative_time_idx + 1 < chunk_data.sizes[self.timedim] - 1:  # If there is a next time-step in this chunk
-                        # Add to current queue if in this chunk
-                        for new_child_id in new_merging_objects:
-                            if new_child_id not in objects_to_process:  # We aren't already going to assess this object
-                                objects_to_process.insert(0, new_child_id)
-                    else:  # This is out of our current jurisdiction: Defer this reassessment to the beginning of the next chunk
-                        # Add to next chunk's queue
-                        future_chunk_merges.extend(new_merging_objects)
 
             # Store the processed chunk
+            # Account for the fact that we added +1 to chunk_end for next timestep access
+            actual_chunk_end = min(chunk_boundaries[chunk_idx + 1], object_id_field_unique.sizes[self.timedim]) if chunk_idx < len(chunk_boundaries) - 1 else object_id_field_unique.sizes[self.timedim]
             updated_chunks.append(
                 (
                     chunk_start,
-                    chunk_end - 1,
-                    chunk_data[: (chunk_end - 1 - chunk_start)],
+                    actual_chunk_end,
+                    chunk_data[: (actual_chunk_end - chunk_start)],
                 )
             )
 
             if chunk_idx % 10 == 0:
-                logger.info(f"Processing splitting and merging in chunk {chunk_idx} of {len(objects_by_chunk)}")
+                logger.info(f"Processing splitting and merging in chunk {chunk_idx} of {len(object_id_field_unique.chunks[0])}")
 
                 # Periodically update main array to manage memory
-                if len(updated_chunks) > 1:  # Keep the last chunk for potential object_id_time_m1 reference
-                    for start, end, chunk_data in updated_chunks[:-1]:
-                        object_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+                if len(updated_chunks) > 1:  # Keep the last chunk for potential reference
+                    for start, end, processed_chunk_data in updated_chunks[:-1]:
+                        object_id_field_unique[{self.timedim: slice(start, end)}] = processed_chunk_data
                     updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
                     object_id_field_unique = object_id_field_unique.persist()
 
         # Apply final chunk updates
-        for start, end, chunk_data in updated_chunks:
-            object_id_field_unique[{self.timedim: slice(start, end)}] = chunk_data
+        for start, end, processed_chunk_data in updated_chunks:
+            object_id_field_unique[{self.timedim: slice(start, end)}] = processed_chunk_data
         object_id_field_unique = object_id_field_unique.persist()
+
+        # Recompute final overlapping objects
+        overlap_objects_list = self.find_overlapping_objects(
+            object_id_field_unique
+        )  # List object pairs that overlap by at least overlap_threshold percent
+        overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
+        logger.info("Finished final overlapping objects search")
 
         # Process merge events into a dataset
         # Handle case where there are no merge events
@@ -3243,7 +3242,7 @@ class tracker:
         return (
             object_id_field_unique,
             object_props,
-            overlap_objects_list[:, :2],
+            overlap_objects_list[:, :2],  # Only return first 2 columns (ID pairs)
             merge_events,
         )
 
