@@ -89,9 +89,13 @@ class tracker:
     R_fill : int
         The radius of the kernel used in morphological opening & closing, relating to the largest hole/gap that can be filled.
         In units of grid cells.
-    area_filter_quartile : float
+    area_filter_quartile : float, optional
         The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
-        Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%)
+        Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%). Mutually exclusive with area_filter_absolute.
+        Default is 0.5 if neither parameter is provided.
+    area_filter_absolute : int, optional
+        The minimum area (in grid cells) for an object to be retained. Mutually exclusive with area_filter_quartile.
+        Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     T_fill : int, default=2
@@ -250,6 +254,18 @@ class tracker:
     >>> print(f"Conservative: {conservative_events.ID.max().compute()} events")
     >>> print(f"Aggressive: {aggressive_events.ID.max().compute()} events")
 
+    Using absolute area filtering instead of percentile-based:
+
+    >>> # Filter objects smaller than 25 grid cells
+    >>> absolute_tracker = marEx.tracker(
+    ...     extreme_events, mask, R_fill=8, area_filter_absolute=25
+    ... )
+    >>> absolute_events = absolute_tracker.run()
+    >>>
+    >>> # Default behavior (area_filter_quartile=0.5) when no parameters provided
+    >>> default_tracker = marEx.tracker(extreme_events, mask, R_fill=8)
+    >>> default_events = default_tracker.run()  # Uses quartile=0.5 filtering
+
     Integration with full marEx workflow:
 
     >>> # Complete workflow from raw data to tracked events
@@ -273,7 +289,8 @@ class tracker:
         data_bin: xr.DataArray,
         mask: xr.DataArray,
         R_fill: Union[int, float],
-        area_filter_quartile: float,
+        area_filter_quartile: Optional[float] = None,
+        area_filter_absolute: Optional[int] = None,
         temp_dir: Optional[str] = None,
         T_fill: int = 2,
         allow_merging: bool = True,
@@ -304,7 +321,7 @@ class tracker:
         # Log tracker initialisation
         logger.info("Initialising MarEx tracker")
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
-        logger.info(f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}")
+        logger.info(f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}")
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
             f"overlap_threshold={overlap_threshold}"
@@ -343,7 +360,9 @@ class tracker:
         self.mask = mask
         self.R_fill = int(R_fill)
         self.T_fill = T_fill
-        self.area_filter_quartile = area_filter_quartile
+
+        # Resolve area filtering parameters
+        self._resolve_area_filtering_parameters(area_filter_quartile, area_filter_absolute)
         self.allow_merging = allow_merging
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
@@ -529,20 +548,36 @@ class tracker:
         # Check chunking for spatial dimensions
         self._validate_spatial_chunking()
 
-        if (self.area_filter_quartile < 0) or (self.area_filter_quartile > 1):
-            raise ConfigurationError(
-                "Invalid area_filter_quartile value",
-                details=f"Value {self.area_filter_quartile} is outside valid range [0, 1]",
-                suggestions=[
-                    "Use 0.0 to keep all events",
-                    "Use 0.25 to filter smallest 25% of events",
-                    "Use 0.5 to keep only larger events",
-                ],
-                context={
-                    "provided_value": self.area_filter_quartile,
-                    "valid_range": [0, 1],
-                },
-            )
+        # Validate resolved area filtering parameters
+        if not self._use_absolute_filtering:
+            # Quartile-based filtering validation
+            if (self.area_filter_quartile < 0) or (self.area_filter_quartile > 1):
+                raise ConfigurationError(
+                    "Invalid area_filter_quartile value",
+                    details=f"Value {self.area_filter_quartile} is outside valid range [0, 1]",
+                    suggestions=[
+                        "Use values between 0.0 and 1.0",
+                        "Use 0.25 to filter smallest 25% of events",
+                        "Use 0.5 to keep only larger events",
+                    ],
+                    context={
+                        "provided_value": self.area_filter_quartile,
+                        "valid_range": [0, 1],
+                    },
+                )
+        else:
+            # Absolute filtering validation
+            if self.area_filter_absolute <= 0:
+                raise ConfigurationError(
+                    "Invalid area_filter_absolute value",
+                    details=f"area_filter_absolute={self.area_filter_absolute} must be positive",
+                    suggestions=[
+                        "Set area_filter_absolute to a positive integer (e.g., 5, 10, 50)",
+                    ],
+                    context={
+                        "area_filter_absolute": self.area_filter_absolute,
+                    },
+                )
 
         if self.T_fill % 2 != 0:
             raise ConfigurationError(
@@ -550,6 +585,42 @@ class tracker:
                 details=f"Provided T_fill={self.T_fill} is odd",
                 suggestions=["Use even values: 2, 4, 6, 8, etc."],
                 context={"provided_value": self.T_fill, "requirement": "even number"},
+            )
+
+    def _resolve_area_filtering_parameters(self, area_filter_quartile: Optional[float], area_filter_absolute: Optional[int]) -> None:
+        """Resolve area filtering parameters and set internal state."""
+        # Count non-None parameters
+        provided_params = sum(x is not None for x in [area_filter_quartile, area_filter_absolute])
+
+        if provided_params == 0:
+            # Default case: use quartile-based filtering
+            self.area_filter_quartile = 0.5
+            self.area_filter_absolute = 0
+            self._use_absolute_filtering = False
+        elif provided_params == 1:
+            # Single parameter provided - use it
+            if area_filter_quartile is not None:
+                self.area_filter_quartile = area_filter_quartile
+                self.area_filter_absolute = 0
+                self._use_absolute_filtering = False
+            else:  # area_filter_absolute is not None
+                self.area_filter_quartile = 0.0  # Set for compatibility
+                self.area_filter_absolute = area_filter_absolute
+                self._use_absolute_filtering = True
+        else:
+            # Both provided - error
+            raise ConfigurationError(
+                "Cannot specify both area filtering parameters",
+                details="area_filter_quartile and area_filter_absolute are mutually exclusive",
+                suggestions=[
+                    "Use area_filter_quartile for percentile-based filtering (e.g., 0.25 for smallest 25%)",
+                    "Use area_filter_absolute for fixed minimum area (e.g., 10 for minimum 10 cells)",
+                    "Omit both parameters to use default quartile filtering (0.5)",
+                ],
+                context={
+                    "area_filter_quartile": area_filter_quartile,
+                    "area_filter_absolute": area_filter_absolute,
+                },
             )
 
     def _validate_spatial_chunking(self) -> None:
@@ -1047,7 +1118,7 @@ class tracker:
         Preprocess binary data to prepare for tracking.
 
         This performs morphological operations to fill holes/gaps in both space and time,
-        then filters small objects according to the area_filter_quartile.
+        then filters small objects according to the area_filter_quartile or area_filter_absolute.
 
         Parameters
         ----------
@@ -1110,7 +1181,7 @@ class tracker:
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
         # Remove small objects
-        logger.info(f"Filtering small objects using {self.area_filter_quartile} quartile threshold")
+        logger.info(f"Filtering small objects")
         with log_timing(logger, "Small object filtering"):
             (
                 data_bin_filtered,
@@ -1280,7 +1351,7 @@ class tracker:
         print(f"   Total Object Area IDed (cells): {total_area_IDed}")
         print(f"   Number of Initial Pre-Filtered Objects: {N_objects_prefiltered}")
         print(f"   Number of Final Filtered Objects: {N_objects_filtered}")
-        print(f"   Area Cutoff Threshold (cells): {area_threshold.astype(np.int32)}")
+        print(f"   Area Cutoff Threshold (cells): {int(area_threshold)}")
         print(f"   Accepted Area Fraction: {accepted_area_fraction}")
         print(f"   Total Events Tracked: {N_events_final}")
 
@@ -1623,8 +1694,8 @@ class tracker:
             results = persist(cluster_sizes, unique_cluster_IDs)
             cluster_sizes, unique_cluster_IDs = results
 
-            # Pre-filter tiny objects for performance
-            if self.area_filter_quartile == 0.0:
+            # Pre-filter tiny objects for performance (greatly reduces the size for the percentile calculation)
+            if self._use_absolute_filtering:
                 cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 5).data
             else:
                 cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
@@ -1647,7 +1718,10 @@ class tracker:
                         "Consider lowering the extreme threshold percentile",
                     ],
                 )
-            area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100)
+            if self._use_absolute_filtering:
+                area_threshold = self.area_filter_absolute
+            else:
+                area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100)
             N_objects_filtered = np.sum(object_areas > area_threshold)
 
             def filter_area_binary(cluster_IDs_0: NDArray[np.int32], keep_IDs_0: NDArray[np.int32]) -> NDArray[np.bool_]:
@@ -1694,7 +1768,10 @@ class tracker:
                         "Consider lowering the extreme threshold percentile",
                     ],
                 )
-            area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100.0)
+            if self._use_absolute_filtering:
+                area_threshold = self.area_filter_absolute
+            else:
+                area_threshold = np.percentile(object_areas, self.area_filter_quartile * 100.0)
 
             # Keep only objects above threshold
             object_ids_keep = xr.where(object_areas >= area_threshold, object_ids, -1)
@@ -3161,6 +3238,8 @@ class tracker:
                     timestep_overlaps = self.enforce_overlap_threshold(timestep_overlaps, object_props)
                     iteration += 1
 
+                if iteration == 10:
+                    logger.warning(f"Resolving mergers at timestep {absolute_t} did not converge after 10 iterations")
 
             # Store the processed chunk
             # Account for the fact that we added +1 to chunk_end for next timestep access
@@ -4918,7 +4997,8 @@ def regional_tracker(
     mask: xr.DataArray,
     coordinate_units: Literal["degrees", "radians"],
     R_fill: Union[int, float],
-    area_filter_quartile: float,
+    area_filter_quartile: Optional[float] = None,
+    area_filter_absolute: Optional[int] = None,
     **kwargs,
 ) -> "tracker":
     """
@@ -4938,8 +5018,11 @@ def regional_tracker(
         Units of the coordinate system. Must be specified for regional data.
     R_fill : int or float
         Radius for filling holes/gaps in spatial domain (in grid cells)
-    area_filter_quartile : float
-        Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%)
+    area_filter_quartile : float, optional
+        Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%).
+        Mutually exclusive with area_filter_absolute. Default is 0.5 if neither parameter is provided.
+    area_filter_absolute : int, optional
+        The minimum area (in grid cells) for an object to be retained. Mutually exclusive with area_filter_quartile.
     **kwargs
         Additional parameters passed to the tracker class
 
@@ -4974,12 +5057,25 @@ def regional_tracker(
     ...     area_filter_quartile=0.5
     ... )
     >>> events = regional_tracker.run()
+
+    Using absolute area filtering in regional mode:
+
+    >>> # Keep only features larger than 15 grid cells
+    >>> absolute_regional = marEx.regional_tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     coordinate_units='degrees',
+    ...     R_fill=5,
+    ...     area_filter_absolute=15
+    ... )
+    >>> events = absolute_regional.run()
     """
     return tracker(
         data_bin=data_bin,
         mask=mask,
         R_fill=R_fill,
         area_filter_quartile=area_filter_quartile,
+        area_filter_absolute=area_filter_absolute,
         regional_mode=True,
         coordinate_units=coordinate_units,
         **kwargs,
