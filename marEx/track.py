@@ -3180,7 +3180,7 @@ class tracker:
                                     child_ids,
                                     parent_centroids,
                                     Nx,
-                                    max_distance=max(max_distance, 4000),  # Set minimum threshold, in cells
+                                    max_distance=max(max_distance, 40),  # Set minimum threshold, in cells
                                     wrap=not self.regional_mode,  # Turn longitude periodic wrapping off when in regional mode
                                 )
 
@@ -3273,7 +3273,7 @@ class tracker:
         overlap_objects_list = self.enforce_overlap_threshold(overlap_objects_list, object_props)
         logger.info("Finished final overlapping objects search")
 
-        # VALIDATION: Check for duplicate children (multiple parents per child)
+        # Check for duplicate children (multiple parents per child)
         if len(overlap_objects_list) > 0:
             child_ids = overlap_objects_list[:, 1]  # RHS column (children)
             unique_children, child_counts = np.unique(child_ids, return_counts=True)
@@ -3289,155 +3289,7 @@ class tracker:
                 
                 # Get time information for diagnostics
                 time_coords = object_id_field_unique[self.timecoord].values
-                
-                for i, child_id in enumerate(duplicate_children[:3]):  # Analyze first 3 in detail
-                    parent_mask = child_ids == child_id
-                    parents = overlap_objects_list[parent_mask, 0]
-                    overlaps = overlap_objects_list[parent_mask, 2] if overlap_objects_list.shape[1] > 2 else None
-                    
-                    logger.error(f"\n{'='*60}")
-                    logger.error(f"CHILD {child_id} ANALYSIS (#{i+1}/{min(3, len(duplicate_children))})")
-                    logger.error(f"{'='*60}")
-                    logger.error(f"Number of parents: {len(parents)}")
-                    logger.error(f"Parent IDs: {parents}")
-                    if overlaps is not None:
-                        logger.error(f"Overlap areas: {overlaps}")
-                    
-                    # === CHILD DETAILED INFO ===
-                    logger.error(f"\n--- CHILD {child_id} DETAILS ---")
-                    try:
-                        child_props = object_props.sel(ID=child_id)
-                        child_area = float(child_props.area.values)
-                        logger.error(f"Child area: {child_area:.2f}")
-                        
-                        if 'centroid' in child_props:
-                            child_centroid = child_props.centroid.values
-                            logger.error(f"Child centroid (lat, lon): ({child_centroid[0]:.4f}, {child_centroid[1]:.4f})")
-                        
-                        # Find when this child appears in the time series
-                        child_locations = np.where(object_id_field_unique.values == child_id)
-                        if len(child_locations[0]) > 0:
-                            unique_times = np.unique(child_locations[0])
-                            first_time = unique_times[0]
-                            last_time = unique_times[-1]
-                            logger.error(f"Child time range: {time_coords[first_time]} to {time_coords[last_time]}")
-                            logger.error(f"Child appears in {len(unique_times)} timesteps")
-                            logger.error(f"Child total cells across all times: {len(child_locations[0])}")
-                        else:
-                            logger.error(f"Child {child_id} not found in object_id_field_unique!")
-                            
-                    except KeyError:
-                        logger.error(f"Child {child_id} not found in object_props!")
-                        
-                    # === PARENT DETAILED INFO ===
-                    logger.error(f"\n--- PARENT ANALYSIS ---")
-                    for j, parent_id in enumerate(parents):
-                        overlap_area = overlaps[j] if overlaps is not None else "unknown"
-                        logger.error(f"\nParent #{j+1}: ID {parent_id}")
-                        logger.error(f"  Overlap area: {overlap_area}")
-                        
-                        try:
-                            parent_props = object_props.sel(ID=parent_id)
-                            parent_area = float(parent_props.area.values)
-                            logger.error(f"  Parent area: {parent_area:.2f}")
-                            
-                            # Calculate overlap fraction
-                            if overlaps is not None:
-                                min_area = min(child_area, parent_area)
-                                overlap_fraction = float(overlaps[j]) / min_area
-                                logger.error(f"  Min area (child, parent): {min_area:.2f}")
-                                logger.error(f"  Overlap fraction: {overlap_fraction:.4f}")
-                                logger.error(f"  Meets threshold ({self.overlap_threshold}): {overlap_fraction >= self.overlap_threshold}")
-                            
-                            if 'centroid' in parent_props:
-                                parent_centroid = parent_props.centroid.values
-                                logger.error(f"  Parent centroid (lat, lon): ({parent_centroid[0]:.4f}, {parent_centroid[1]:.4f})")
-                                
-                                # Calculate distance between child and parent centroids
-                                if 'centroid' in child_props:
-                                    # Great circle distance calculation
-                                    lat1, lon1 = np.radians(child_centroid)
-                                    lat2, lon2 = np.radians(parent_centroid)
-                                    dlat = lat2 - lat1
-                                    dlon = lon2 - lon1
-                                    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
-                                    distance_km = 2 * 6371 * np.arcsin(np.sqrt(a))  # Earth radius = 6371 km
-                                    logger.error(f"  Distance from child: {distance_km:.2f} km")
-                            
-                            # Find when this parent appears
-                            parent_locations = np.where(object_id_field_unique.values == parent_id)
-                            if len(parent_locations[0]) > 0:
-                                unique_times = np.unique(parent_locations[0])
-                                first_time = unique_times[0]
-                                last_time = unique_times[-1]
-                                logger.error(f"  Parent time range: {time_coords[first_time]} to {time_coords[last_time]}")
-                                logger.error(f"  Parent appears in {len(unique_times)} timesteps")
-                                logger.error(f"  Parent total cells: {len(parent_locations[0])}")
-                            else:
-                                logger.error(f"  Parent {parent_id} not found in object_id_field_unique!")
-                                
-                        except KeyError:
-                            logger.error(f"  Parent {parent_id} not found in object_props!")
-                    
-                    # === TEMPORAL OVERLAP ANALYSIS ===
-                    logger.error(f"\n--- TEMPORAL OVERLAP ANALYSIS ---")
-                    try:
-                        # Find actual spatial overlap between child and each parent
-                        child_mask = object_id_field_unique == child_id
-                        
-                        for j, parent_id in enumerate(parents):
-                            parent_mask = object_id_field_unique == parent_id
-                            spatial_overlap = child_mask & parent_mask
-                            
-                            if spatial_overlap.any():
-                                # Get the non-time dimensions for spatial overlap check
-                                spatial_dims = [dim for dim in spatial_overlap.dims if dim != self.timedim]
-                                overlap_times = np.where(spatial_overlap.any(dim=spatial_dims))[0]
-                                if len(overlap_times) > 0:
-                                    logger.error(f"  Parent {parent_id} spatially overlaps child at {len(overlap_times)} timesteps:")
-                                    for t_idx in overlap_times[:5]:  # Show first 5 timesteps
-                                        overlap_count = spatial_overlap.isel({self.timedim: t_idx}).sum().values
-                                        logger.error(f"    Time {time_coords[t_idx]}: {overlap_count} overlapping cells")
-                                else:
-                                    logger.error(f"  Parent {parent_id}: No actual spatial overlap found!")
-                            else:
-                                logger.error(f"  Parent {parent_id}: No spatial overlap detected")
-                    except Exception as e:
-                        logger.error(f"  Error in temporal overlap analysis: {e}")
-                    
-                    # === SUMMARY FOR THIS CHILD ===
-                    logger.error(f"\n--- SUMMARY FOR CHILD {child_id} ---")
-                    if overlaps is not None and len(parents) > 0:
-                        total_overlap = sum(overlaps)
-                        max_overlap = max(overlaps)
-                        logger.error(f"Total overlap area across all parents: {total_overlap:.2f}")
-                        logger.error(f"Maximum single parent overlap: {max_overlap:.2f}")
-                        logger.error(f"Overlap area ratios: {[f'{ov:.2f}' for ov in overlaps/sum(overlaps)]}")
-                
-                # === GLOBAL STATISTICS ===
-                logger.error(f"\n{'='*60}")
-                logger.error(f"GLOBAL DIAGNOSTICS")
-                logger.error(f"{'='*60}")
-                logger.error(f"Total unique child objects: {len(unique_children)}")
-                logger.error(f"Children with multiple parents: {len(duplicate_children)} ({100*len(duplicate_children)/len(unique_children):.1f}%)")
-                logger.error(f"Maximum parents per child: {child_counts.max()}")
-                logger.error(f"Distribution of parent counts: {dict(zip(*np.unique(child_counts, return_counts=True)))}")
-                
-                if len(overlap_objects_list) > 0 and overlap_objects_list.shape[1] > 2:
-                    logger.error(f"Overlap area statistics:")
-                    logger.error(f"  Min: {overlap_objects_list[:, 2].min():.2f}")
-                    logger.error(f"  Max: {overlap_objects_list[:, 2].max():.2f}")
-                    logger.error(f"  Mean: {overlap_objects_list[:, 2].mean():.2f}")
-                    logger.error(f"  Median: {np.median(overlap_objects_list[:, 2]):.2f}")
-                
-                # Check for any obvious patterns
-                parent_ids_all = overlap_objects_list[:, 0]
-                child_ids_all = overlap_objects_list[:, 1]
-                logger.error(f"Parent ID range: {parent_ids_all.min()} to {parent_ids_all.max()}")
-                logger.error(f"Child ID range: {child_ids_all.min()} to {child_ids_all.max()}")
-                logger.error(f"ID gap between min child and max parent: {child_ids_all.min() - parent_ids_all.max()}")
-                
-                # Optional: Raise an exception or set a flag
+                logger.error(f"Time coordinates of problematic children: {time_coords[duplicate_children]}")
                 raise TrackingError(
                     "Multiple parents detected after splitting/merging",
                     details=f"{len(duplicate_children)} children have multiple parents",
