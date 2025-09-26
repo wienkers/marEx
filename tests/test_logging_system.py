@@ -144,7 +144,7 @@ class TestFunctionLevelVerbosity:
 
     def test_preprocess_data_verbose(self, sample_data):
         """Test verbose mode in preprocess_data."""
-        result = marEx.preprocess_data(sample_data, threshold_percentile=90, verbose=True)
+        result = marEx.preprocess_data(sample_data, method_anomaly="detrend_harmonic", threshold_percentile=90, verbose=True)
 
         # Verify the function runs successfully and returns expected structure
         assert isinstance(result, xr.Dataset)
@@ -156,7 +156,7 @@ class TestFunctionLevelVerbosity:
     def test_preprocess_data_quiet(self, sample_data, caplog):
         """Test quiet mode in preprocess_data."""
         with caplog.at_level(logging.WARNING, logger="marEx"):
-            result = marEx.preprocess_data(sample_data, threshold_percentile=90, quiet=True)
+            result = marEx.preprocess_data(sample_data, method_anomaly="detrend_harmonic", threshold_percentile=90, quiet=True)
 
             # Should have fewer log messages in quiet mode
             info_messages = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -298,7 +298,7 @@ class TestIntegration:
 
         try:
             # Test that preprocessing works with verbose mode
-            result = marEx.preprocess_data(sample_data, threshold_percentile=90)
+            result = marEx.preprocess_data(sample_data, method_anomaly="detrend_fixed_baseline", threshold_percentile=90)
 
             # Test tracker initialisation with verbose mode
             tracker = marEx.tracker(
@@ -327,7 +327,7 @@ class TestIntegration:
 
         try:
             # Test that preprocessing works with quiet mode
-            result = marEx.preprocess_data(sample_data, threshold_percentile=90)
+            result = marEx.preprocess_data(sample_data, method_anomaly="detrend_fixed_baseline", threshold_percentile=90)
 
             # Test tracker initialisation with quiet mode
             tracker = marEx.tracker(
