@@ -63,7 +63,7 @@ Simple Event Tracking
        extremes_ds.extreme_events,  # Binary extreme events field
        extremes_ds.mask,            # Land-sea mask
        R_fill=8,                    # Fill holes with radius < 8 cells
-       area_filter_quartile=0.5     # Remove smallest 50% of events
+       area_filter_absolute=100     # Remove objects smaller than 100 grid cells
    )
 
    # Run tracking algorithm
@@ -79,11 +79,12 @@ Advanced Tracking Configuration
        extremes_ds.extreme_events,
        extremes_ds.mask,
        R_fill=8,                    # Fill holes with radius < 8 cells
-       area_filter_quartile=0.5,    # Remove smallest 50% of events
+       area_filter_quartile=0.5,    # Remove smallest 50% of events (alternative to area_filter_absolute)
        T_fill=2,                    # Allow 2-day gaps in tracking
        allow_merging=True,          # Enable merge/split tracking
        overlap_threshold=0.5,       # 50% overlap required for continuity
-       nn_partitioning=True         # Use nearest-neighbor partitioning
+       nn_partitioning=True,        # Use nearest-neighbor partitioning
+       cell_areas=grid_areas        # Optional: physical cell areas (m²)
    )
 
    # Run tracking and get merge information
@@ -130,6 +131,12 @@ Required Parameters
 **area_filter_quartile** : float
   Quantile (0-1) for filtering smallest objects.
   For example, 0.25 removes smallest 25% of objects, 0.5 removes smallest 50%.
+  Mutually exclusive with area_filter_absolute.
+
+**area_filter_absolute** : int
+  Minimum area (in grid cells) for an object to be retained.
+  For example, 25 keeps only events with 25 or more grid cells.
+  Mutually exclusive with area_filter_quartile.
 
 Core Tracking Parameters
 -------------------------
@@ -197,7 +204,7 @@ Main Tracking Dataset
 
 * **ID_field**: Binary field with tracked event IDs
 * **global_ID**: Unique ID mapping for each event at each time
-* **area**: Spatial area of each event through time
+* **area**: Spatial area of each event through time (in units of cell counts, or physical units if cell_areas/grid_resolution provided)
 * **centroid**: (x,y) centroid coordinates of each event
 * **presence**: Boolean indicating event presence at each time
 * **time_start/time_end**: Temporal bounds of each event

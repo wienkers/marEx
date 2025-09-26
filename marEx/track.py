@@ -125,7 +125,14 @@ class tracker:
     neighbours : xarray.DataArray, optional
         For unstructured grid, indicates connectivity between cells
     cell_areas : xarray.DataArray, optional
-        For unstructured grid, area of each cell
+        For unstructured grid, area of each cell (required).
+        For structured grid, area of each cell (optional). If not provided,
+        defaults to 1.0 for each cell (resulting in cell counts as areas).
+        Note: Overridden by grid_resolution if provided for structured grids.
+    grid_resolution : float, optional
+        Grid resolution in degrees for structured grids only (ignored for unstructured grids).
+        When provided, automatically calculates cell areas using spherical geometry.
+        Overrides any provided cell_areas parameter.
     max_iteration : int, default=40
         Maximum number of iterations for merging/splitting algorithm
     checkpoint : str, default='None'
@@ -172,6 +179,19 @@ class tracker:
     >>> events = tracker.run()
     >>> print(f"Identified {events.ID.max().compute()} distinct events")
     Identified 1247 distinct events
+
+    Using automatic grid area calculation from resolution:
+
+    >>> # For regular lat/lon grids, automatically calculate physical areas
+    >>> grid_tracker = marEx.tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     R_fill=8,
+    ...     area_filter_quartile=0.5,
+    ...     grid_resolution=0.25  # Grid resolution in degrees
+    ... )
+    >>> # Cell areas are calculated automatically using spherical geometry
+    >>> grid_events = grid_tracker.run()
 
     Advanced tracking with merging and splitting enabled:
 
@@ -266,6 +286,22 @@ class tracker:
     >>> default_tracker = marEx.tracker(extreme_events, mask, R_fill=8)
     >>> default_events = default_tracker.run()  # Uses quartile=0.5 filtering
 
+    Using physical cell areas for structured grids:
+
+    >>> # Load data with irregular grid cell areas
+    >>> grid_areas = xr.open_dataset('grid_areas.nc').cell_area  # (lat, lon) in m²
+    >>>
+    >>> # Track events using physical areas instead of cell counts
+    >>> physical_tracker = marEx.tracker(
+    ...     extreme_events,
+    ...     mask,
+    ...     R_fill=8,
+    ...     area_filter_quartile=0.5,
+    ...     cell_areas=grid_areas  # Physical areas in m²
+    ... )
+    >>> events = physical_tracker.run()
+    >>> # Now events.area contains physical areas in m² instead of cell counts
+
     Integration with full marEx workflow:
 
     >>> # Complete workflow from raw data to tracked events
@@ -301,6 +337,7 @@ class tracker:
         coordinates: Optional[Dict[str, str]] = None,
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
+        grid_resolution: Optional[float] = None,
         max_iteration: int = 40,
         checkpoint: Optional[Literal["save", "load", "None"]] = None,
         debug: int = 0,
@@ -379,7 +416,6 @@ class tracker:
                 suggestions=["Use data_bin.chunk({'time': 10}) to chunk the data"],
             )
         self.unstructured_grid = unstructured_grid
-        self.mean_cell_area = 1.0  # For structured grids, units are pixels
         self.checkpoint = checkpoint
         self.debug = debug
 
@@ -393,7 +429,62 @@ class tracker:
             self.data_attrs = {}
 
         # Input validation and preparation
-        self._validate_inputs(neighbours, cell_areas)
+        self._validate_inputs(neighbours, cell_areas, grid_resolution)
+
+        # Handle cell_areas for both structured and unstructured grids
+        if self.unstructured_grid:
+            # Validation already done in _validate_inputs
+            pass
+        else:
+            # Handle structured grids
+            if grid_resolution is not None:
+                # Calculate cell areas from grid resolution using spherical geometry
+                logger.info(f"Calculating cell areas from grid resolution: {grid_resolution} degrees")
+
+                # Earth radius in km
+                R_earth = 6378.
+
+                # Get coordinate arrays (should be in degrees)
+                lat_coords = data_bin[self.ycoord]
+
+                # Convert to radians
+                lat_r = np.radians(lat_coords)
+                dlat = np.radians(grid_resolution)
+                dlon = np.radians(grid_resolution)
+
+                # Calculate grid areas using spherical geometry
+                # Area = R² * |sin(lat + dlat/2) - sin(lat - dlat/2)| * dlon
+                grid_area = (
+                    R_earth**2 *
+                    np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) *
+                    dlon
+                ).astype(np.float32)
+
+                # Check if cell_areas was originally provided (and warn about override)
+                if cell_areas is not None:
+                    logger.warning("grid_resolution parameter overrides provided cell_areas for structured grid")
+
+                cell_areas = grid_area
+
+            elif cell_areas is None:
+                # Create unit cell areas (resulting in cell counts)
+                if self.ydim is None:
+                    raise ValueError("ydim should not be None for structured grids")
+                cell_areas = xr.ones_like(data_bin.isel({self.timedim: 0}), dtype=np.float32)
+                logger.info("No cell_areas provided for structured grid - using unit areas (cell counts)")
+            else:
+                # Validation already done in _validate_inputs
+                logger.info("Using provided cell_areas for structured grid")
+
+        # Store cell_areas for both grid types
+        self.cell_area = cell_areas.astype(np.float32).persist()
+        if self.unstructured_grid:
+            # Remove coordinate variables for unstructured
+            self.cell_area = self.cell_area.drop_vars({self.ycoord, self.xcoord}.intersection(set(cell_areas.coords)))
+            self.mean_cell_area = float(cell_areas.mean().compute().item())
+        else:
+            # For structured grids, calculate mean cell area
+            self.mean_cell_area = float(cell_areas.mean().compute().item())
 
         # Special setup for unstructured grids
         if unstructured_grid:
@@ -409,12 +500,6 @@ class tracker:
                     details="Unstructured grid processing requires cell connectivity information",
                     suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
                 )
-            if cell_areas is None:
-                raise create_data_validation_error(
-                    "cell_areas array is required for unstructured grids",
-                    details="Unstructured grid processing requires cell area information",
-                    suggestions=["Provide a cell_areas parameter when using unstructured_grid=True"],
-                )
             self._setup_unstructured_grid(temp_dir, neighbours, cell_areas, max_iteration)
 
         self._configure_warnings()
@@ -423,6 +508,7 @@ class tracker:
         self,
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
+        grid_resolution: Optional[float] = None,
     ) -> None:
         """Validate input parameters and data."""
         if self.regional_mode and self.unstructured_grid:
@@ -516,6 +602,41 @@ class tracker:
                     "expected_dtype": "bool",
                 },
             )
+
+        # Validate cell_areas parameter for both grid types
+        if self.unstructured_grid:
+            if cell_areas is None:
+                raise create_data_validation_error(
+                    "cell_areas array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell area information",
+                    suggestions=["Provide a cell_areas parameter when using unstructured_grid=True"],
+                )
+        else:
+            # For structured grids, cell_areas is optional
+            if cell_areas is not None:
+                # Validate dimensions if provided
+                expected_spatial_dims = {self.ydim, self.xdim}
+                if set(cell_areas.dims) != expected_spatial_dims:
+                    raise create_data_validation_error(
+                        "Invalid cell_areas dimensions for structured grid",
+                        details=f"Expected spatial dimensions {expected_spatial_dims}, got {set(cell_areas.dims)}",
+                        suggestions=["Ensure cell_areas matches the spatial dimensions of your data"],
+                    )
+
+        # Validate grid_resolution parameter
+        if grid_resolution is not None:
+            if self.unstructured_grid:
+                raise create_data_validation_error(
+                    "grid_resolution parameter is not supported for unstructured grids",
+                    details="Grid resolution calculation requires structured (lat/lon) coordinates",
+                    suggestions=["Use cell_areas parameter directly for unstructured grids"],
+                )
+            if not isinstance(grid_resolution, (int, float)) or grid_resolution <= 0:
+                raise create_data_validation_error(
+                    "grid_resolution must be a positive number",
+                    details=f"Received grid_resolution={grid_resolution}",
+                    suggestions=["Provide a positive float value representing grid resolution in degrees"],
+                )
 
         if not is_dask_collection(self.data_bin.data):
             raise create_data_validation_error(
@@ -935,12 +1056,6 @@ class tracker:
 
         # Validate spatial chunking for unstructured grid data
         self._validate_unstructured_chunking(neighbours, cell_areas)
-
-        # Store cell areas (in square metres)
-        self.cell_area = (
-            cell_areas.astype(np.float32).drop_vars({self.ycoord, self.xcoord}.intersection(set(cell_areas.coords))).persist()
-        )
-        self.mean_cell_area = float(cell_areas.mean().compute().item())
 
         # Initialise dilation array for unstructured grid
         self.neighbours_int = neighbours.astype(np.int32) - 1  # Convert to 0-based indexing
@@ -3022,47 +3137,45 @@ class tracker:
 
             def calculate_areas_for_slice(
                 slice_data: NDArray[np.int32],
+                cell_areas: NDArray[np.float32],
                 event_ids: NDArray[np.int32],
-                coords: Dict[str, NDArray],
-                spatial_dims: List[str],
             ) -> NDArray[np.float32]:
-                """Calculate areas for a single 2D spatial slice in parallel"""
+                """Calculate physical areas for a single spatial slice in parallel"""
 
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
 
-                # Create DataArray for this slice
-                time_slice = xr.DataArray(slice_data, coords=coords, dims=spatial_dims)
-
-                # Calculate properties only for present IDs
-                props = self.calculate_object_properties(time_slice, properties=["area"])
-
-                areas = props["area"].values  # Shape: (n_objects,)
-
                 # Initialise result array with NaN
                 result = np.full(len(event_ids), np.nan, dtype=np.float32)
 
-                # Map results back to full ID space
-                if len(areas) > 0:
-                    # Create a mapping from present_ids to their indices in props
-                    id_to_idx = {present_id: idx for idx, present_id in enumerate(present_ids)}
+                if len(present_ids) == 0:
+                    return result
 
-                    # Vectorised mapping
-                    valid_mask = np.isin(event_ids, present_ids)
-                    result[valid_mask] = areas[[id_to_idx[event_id] for event_id in event_ids[valid_mask]]]
+                # For each present ID, calculate total area
+                for present_id in present_ids:
+                    # Find this ID in the event_ids array
+                    event_idx = np.where(event_ids == present_id)[0]
+                    if len(event_idx) > 0:
+                        # Calculate area by summing cell_areas where slice_data == present_id
+                        mask = slice_data == present_id
+                        total_area = np.sum(cell_areas[mask])
+                        result[event_idx[0]] = total_area
 
                 return result
+
+            # Prepare cell_area for broadcasting
+            if self.unstructured_grid:
+                cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
+            else:
+                cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
 
             areas_parallel = xr.apply_ufunc(
                 calculate_areas_for_slice,
                 split_merged_relabeled_object_id_field,
-                kwargs={
-                    "event_ids": event_ids,
-                    "coords": coords,
-                    "spatial_dims": spatial_dims,
-                },
-                input_core_dims=[spatial_dims],
+                cell_area_broadcast,
+                kwargs={"event_ids": event_ids},
+                input_core_dims=[spatial_dims, spatial_dims],
                 output_core_dims=[["ID"]],
                 vectorize=True,
                 dask="parallelized",
@@ -3082,7 +3195,7 @@ class tracker:
             object_props_extended["area"] = areas_parallel
 
             # Explicit cleanup
-            del areas_parallel, event_ids, coords
+            del areas_parallel, event_ids, coords, cell_area_broadcast
             import gc
             gc.collect()
         

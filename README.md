@@ -57,7 +57,9 @@ MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for
   - Implements efficient algorithms for object detection in 2D geographical data.
   - Fully-parallelised workflow built on `dask` for extremely fast & larger-than-memory computation.
   - Uses morphological opening & closing to fill small holes and gaps in binary features.
-  - Filters out small objects based on area thresholds.
+  - Filters out small objects using flexible area thresholds:
+    - **Percentile-based filtering**: Remove smallest fraction of events (e.g., `area_filter_quartile=0.5` removes smallest 50%)
+    - **Absolute filtering**: Set minimum area threshold (e.g., `area_filter_absolute=100` keeps only events ≥100 grid cells)
   - Identifies and labels connected regions in binary data representing arbitrary events (e.g. SST or SSS extrema, tracer presence, eddies, etc...).
   - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
     - Takes ~5 wall-minutes per _century_
@@ -135,7 +137,7 @@ events_ds = marEx.tracker(
     extreme_events_ds.extreme_events,
     extreme_events_ds.mask,
     R_fill=8,
-    area_filter_quartile=0.5,
+    area_filter_absolute=100     # Remove objects smaller than 100 grid cells
     allow_merging=True
 ).run()
 

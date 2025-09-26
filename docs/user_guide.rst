@@ -224,7 +224,7 @@ The tracking step identifies coherent extreme events and follows them through ti
    tracked_events = marEx.tracker(
        extremes.extreme_events,
        extremes.mask,
-       area_filter_quartile=0.5,  # Filter small events
+       area_filter_absolute=100   # Remove objects smaller than 100 grid cells
        R_fill=8,                  # Radius for filling gaps (in grid cells)
    ).run()
 
@@ -242,7 +242,8 @@ The tracking step identifies coherent extreme events and follows them through ti
 
        # Spatial criteria
        R_fill=8,                    # Fill small holes with radius up to 8 grid cells
-       area_filter_quartile=0.5,    # Size filtering
+       area_filter_quartile=0.5,    # Remove smallest 50% of events (alternative to area_filter_absolute)
+       cell_areas=grid_areas,       # Optional: physical cell areas for structured grids (m²)
 
        # Merging criteria
        allow_merging=True,          # Allow merging of events (and keep track of merged IDs & events)
@@ -275,7 +276,7 @@ where:
 
 * ``ID_field``: Field containing the IDs of tracked events (0=background)
 * ``global_ID``: Unique global ID of each object; ``global_ID.sel(ID=10)`` maps event ID 10 to its original ID at each time
-* ``area``: Area of each event as a function of time
+* ``area``: Area of each event as a function of time (in units of cell counts, or physical units if cell_areas/grid_resolution provided)
 * ``centroid``: (x, y) centroid coordinates of each event as a function of time
 * ``presence``: Presence (boolean) of each event at each time (anywhere in space)
 * ``time_start``: Start time of each event
