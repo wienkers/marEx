@@ -321,7 +321,9 @@ class tracker:
         # Log tracker initialisation
         logger.info("Initialising MarEx tracker")
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
-        logger.info(f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}")
+        logger.info(
+            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
+        )
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
             f"overlap_threshold={overlap_threshold}"
@@ -587,7 +589,9 @@ class tracker:
                 context={"provided_value": self.T_fill, "requirement": "even number"},
             )
 
-    def _resolve_area_filtering_parameters(self, area_filter_quartile: Optional[float], area_filter_absolute: Optional[int]) -> None:
+    def _resolve_area_filtering_parameters(
+        self, area_filter_quartile: Optional[float], area_filter_absolute: Optional[int]
+    ) -> None:
         """Resolve area filtering parameters and set internal state."""
         # Count non-None parameters
         provided_params = sum(x is not None for x in [area_filter_quartile, area_filter_absolute])
@@ -2415,10 +2419,7 @@ class tracker:
 
         # Filter out overlaps where either ID doesn't exist in object_props
         existing_ids = set(object_props.ID.values)
-        valid_mask = np.array([
-            (overlap[0] in existing_ids) and (overlap[1] in existing_ids)
-            for overlap in overlap_objects_list
-        ])
+        valid_mask = np.array([(overlap[0] in existing_ids) and (overlap[1] in existing_ids) for overlap in overlap_objects_list])
 
         if not np.any(valid_mask):
             return np.empty((0, 3), dtype=np.float32 if self.unstructured_grid else np.int32)
@@ -2430,7 +2431,7 @@ class tracker:
         areas_1 = object_props["area"].sel(ID=valid_overlaps[:, 1]).values
         min_areas = np.minimum(areas_0, areas_1)
         overlap_fractions = valid_overlaps[:, 2].astype(float) / min_areas
-        
+
         if np.any(overlap_fractions > 1.0):
             logger.warning(f"Found {np.sum(overlap_fractions > 1.0)} overlap fractions > 1.0")
             logger.warning(f"Max overlap fraction: {overlap_fractions.max()}")
@@ -2440,6 +2441,128 @@ class tracker:
         overlap_objects_list_filtered = valid_overlaps[threshold_mask]
 
         return overlap_objects_list_filtered
+
+    def consolidate_object_ids(
+        self, data_t_minus_2: xr.DataArray, data_t_minus_1: xr.DataArray, object_props: xr.Dataset, timestep: int
+    ) -> Tuple[xr.DataArray, xr.Dataset]:
+        """
+        Consolidate object IDs between t-2 and t-1 to ensure consistent tracking.
+
+        This identifies objects at t-1 that are actually continuations of objects
+        from t-2 (but got different IDs due to partitioning) and renames them
+        to maintain consistent IDs across timesteps.
+
+        Parameters
+        ----------
+        data_t_minus_2 : xr.DataArray
+            Object field at timestep t-2
+        data_t_minus_1 : xr.DataArray
+            Object field at timestep t-1 (will be modified)
+        object_props : xr.Dataset
+            Object properties dataset (will be modified)
+        timestep : int
+            Current timestep number for logging purposes
+
+        Returns
+        -------
+        data_t_minus_1_consolidated : xr.DataArray
+            Updated t-1 field with consolidated IDs
+        object_props_updated : xr.Dataset
+            Updated object properties with merged/deleted objects
+
+        Notes
+        -----
+        - Uses self.overlap_threshold for determining consolidation eligibility
+        - Updates object properties by recalculating for consolidated objects
+        - Removes redundant child objects from object_props
+        """
+
+        # Find overlaps between t-2 and t-1
+        backward_overlaps = self.check_overlap_slice(data_t_minus_2.values, data_t_minus_1.values)
+        if len(backward_overlaps) == 0:
+            return data_t_minus_1, object_props
+
+        backward_overlaps = self.enforce_overlap_threshold(backward_overlaps, object_props)
+        if len(backward_overlaps) == 0:
+            return data_t_minus_1, object_props
+
+        logger.debug(f"Found {len(backward_overlaps)} backward overlaps for timestep {timestep}")
+
+        # Find parent IDs that connect to multiple children (partition boundary jumps)
+        parent_ids, parent_counts = np.unique(backward_overlaps[:, 0], return_counts=True)
+        splitting_parents = parent_ids[parent_counts > 1]
+
+        if len(splitting_parents) == 0:
+            logger.debug(f"No splitting parents found for timestep {timestep}")
+            return data_t_minus_1, object_props
+
+        logger.debug(f"Found {len(splitting_parents)} splitting parents for timestep {timestep}: {splitting_parents[:5]}")
+
+        # Track ID mappings for logging
+        id_mappings = {}  # child_id -> parent_id
+
+        for parent_id in splitting_parents:
+            # Skip if parent doesn't exist in properties
+            if parent_id not in object_props.ID.values:
+                continue
+
+            # Get all children for this parent
+            child_mask = backward_overlaps[:, 0] == parent_id
+            children_for_parent = backward_overlaps[child_mask, 1].astype(int)
+
+            logger.debug(f"Parent {parent_id} has {len(children_for_parent)} children: {children_for_parent}")
+
+            # Consolidate all children to use first child_id
+            if len(children_for_parent) > 1:
+                first_child_id = int(children_for_parent[0])
+
+                # Skip if first child doesn't exist in properties
+                if first_child_id not in object_props.ID.values:
+                    continue
+
+                logger.debug(f"Consolidating {len(children_for_parent)} children to first_child_id {first_child_id}")
+
+                # Rename all other children to first_child_id
+                for child_id in children_for_parent[1:]:
+                    child_id = int(child_id)
+                    # Skip if child doesn't exist in properties
+                    if child_id not in object_props.ID.values:
+                        continue
+
+                    logger.debug(f"Consolidating child_id {child_id} -> first_child_id {first_child_id} at timestep {timestep}")
+
+                    # Rename child_id to first_child_id in data_t_minus_1
+                    data_t_minus_1 = data_t_minus_1.where(data_t_minus_1 != child_id, first_child_id)
+
+                    # Remove redundant child_id from object_props
+                    if child_id in object_props.ID:
+                        object_props = object_props.drop_sel(ID=child_id)
+                        logger.debug(f"Deleted redundant child_id {child_id} from object_props")
+
+                    # Track the mapping
+                    id_mappings[child_id] = first_child_id
+
+                # Recalculate properties for the consolidated object
+                consolidated_mask = data_t_minus_1 == first_child_id
+                if consolidated_mask.any():
+                    # Create temporary field with only this object for property calculation
+                    temp_field = xr.where(consolidated_mask, first_child_id, 0)
+                    consolidated_props = self.calculate_object_properties(temp_field, properties=["area", "centroid"])
+
+                    if first_child_id in consolidated_props.ID:
+                        # Update first child properties with consolidated values
+                        for var_name in ["area", "centroid"]:
+                            if var_name in consolidated_props:
+                                object_props[var_name].loc[{"ID": first_child_id}] = consolidated_props[var_name].sel(
+                                    ID=first_child_id
+                                )
+
+        if id_mappings:
+            sample_mappings = dict(list(id_mappings.items())[:5])
+            suffix = "..." if len(id_mappings) > 5 else ""
+            logger.info(f"Consolidated {len(id_mappings)} object IDs at timestep {timestep}: {sample_mappings}{suffix}")
+
+        return data_t_minus_1, object_props
 
     def compute_id_time_dict(
         self,
@@ -2786,7 +2909,10 @@ class tracker:
                 temp = object_props[var_name].isel(ID=slice(0, 0))
             else:
                 temp = (
-                    object_props[var_name].sel(ID=valid_global_mapping.rename({"ID": "new_id"})).drop_vars("ID").rename({"new_id": "ID"})
+                    object_props[var_name]
+                    .sel(ID=valid_global_mapping.rename({"ID": "new_id"}))
+                    .drop_vars("ID")
+                    .rename({"new_id": "ID"})
                 )
 
             if var_name == "ID":
@@ -3068,15 +3194,43 @@ class tracker:
                 # Get data slices for current timestep
                 data_t = chunk_data.isel({self.timedim: relative_t})
 
-                # Get previous timestep for partitioning
-                if relative_t > 0:
+                # Get previous timesteps for consolidation and partitioning
+                if relative_t > 1:  # Need both t-1 and t-2 for consolidation
+                    data_t_minus_2 = chunk_data.isel({self.timedim: relative_t - 2})
                     data_t_minus_1 = chunk_data.isel({self.timedim: relative_t - 1})
-                elif updated_chunks:
-                    # Get the last time slice from the previous chunk
-                    _, _, last_chunk_data = updated_chunks[-1]
-                    data_t_minus_1 = last_chunk_data[-1]
-                else:
-                    data_t_minus_1 = xr.full_like(data_t, 0)
+                elif relative_t == 1:  # t-1 is in current chunk, t-2 might be in previous chunk
+                    data_t_minus_1 = chunk_data.isel({self.timedim: 0})  # relative_t - 1 = 0
+                    if updated_chunks:
+                        _, _, last_chunk_data = updated_chunks[-1]
+                        data_t_minus_2 = last_chunk_data[-1]  # Last timestep from previous chunk
+                    else:
+                        data_t_minus_2 = xr.full_like(data_t, 0)
+                else:  # relative_t == 0, get both from previous chunk if available
+                    if updated_chunks:
+                        _, _, last_chunk_data = updated_chunks[-1]
+                        if len(last_chunk_data) >= 2:
+                            data_t_minus_2 = last_chunk_data[-2]
+                            data_t_minus_1 = last_chunk_data[-1]
+                        elif len(last_chunk_data) == 1:
+                            data_t_minus_2 = xr.full_like(data_t, 0)
+                            data_t_minus_1 = last_chunk_data[-1]
+                        else:
+                            data_t_minus_2 = xr.full_like(data_t, 0)
+                            data_t_minus_1 = xr.full_like(data_t, 0)
+                    else:
+                        data_t_minus_2 = xr.full_like(data_t, 0)
+                        data_t_minus_1 = xr.full_like(data_t, 0)
+
+                # ID Consolidation
+                if relative_t > 0:  # Only consolidate if we have meaningful t-1 and t-2
+                    data_t_minus_1, object_props = self.consolidate_object_ids(
+                        data_t_minus_2, data_t_minus_1, object_props, absolute_t - 1
+                    )
+
+                    # Update the chunk with consolidated data whenever t-1 is in current chunk
+                    chunk_data[{self.timedim: relative_t - 1}] = data_t_minus_1
+
+                # Normal overlap detection and partitioning (now with consolidated IDs)
 
                 # Calculate overlaps for this timestep
                 #   Here, parents are at previous time=t-1 (LHS), children are at current time=t (RHS)
@@ -3098,7 +3252,7 @@ class tracker:
                         continue
 
                     # Process all merging objects in this timestep
-                    #   Parents exist in this timestep, but 
+                    #   Parents exist in this timestep, but
                     for child_id in merging_children:
 
                         # Get mask of child object
@@ -3218,7 +3372,9 @@ class tracker:
                             # Update existing entry
                             object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
                         else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
-                            object_props = object_props.drop_sel(ID=child_id)  # N.B.: This means that the IDs are no longer continuous...
+                            object_props = object_props.drop_sel(
+                                ID=child_id
+                            )  # N.B.: This means that the IDs are no longer continuous...
                             logger.info(f"Deleted child_id {child_id} because parents have split/morphed")
 
                         # Add the properties for the N-1 other new child ID
@@ -3234,7 +3390,6 @@ class tracker:
                                 f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
                             )
 
-
                     # After processing all merging objects in this iteration
                     # Recalculate overlaps to check for newly viable merges
                     timestep_overlaps = self.check_overlap_slice(data_t_minus_1.values, data_t.values)
@@ -3243,6 +3398,22 @@ class tracker:
 
                 if iteration == 10:
                     logger.warning(f"Resolving mergers at timestep {absolute_t} did not converge after 10 iterations")
+
+            # End-of-chunk consolidation: consolidate the last timestep if chunk has multiple timesteps
+            if chunk_data.sizes[self.timedim] >= 2:
+                logger.debug(f"Performing end-of-chunk consolidation for timestep {chunk_end - 1}")
+
+                # Get last and second-to-last timesteps
+                last_t_data = chunk_data.isel({self.timedim: -1})
+                second_last_t_data = chunk_data.isel({self.timedim: -2})
+
+                # Consolidate last timestep using second-to-last as reference
+                consolidated_last, object_props = self.consolidate_object_ids(
+                    second_last_t_data, last_t_data, object_props, chunk_end - 1
+                )
+
+                # Update the last timestep in chunk
+                chunk_data[{self.timedim: -1}] = consolidated_last
 
             # Store the processed chunk
             updated_chunks.append(
@@ -3277,16 +3448,16 @@ class tracker:
         if len(overlap_objects_list) > 0:
             child_ids = overlap_objects_list[:, 1]  # RHS column (children)
             unique_children, child_counts = np.unique(child_ids, return_counts=True)
-            
+
             # Find children with multiple parents
             duplicate_children = unique_children[child_counts > 1]
-            
+
             # Enhanced validation with comprehensive spatial and temporal information
             if len(duplicate_children) > 0:
                 logger.error(f"COMPREHENSIVE ANALYSIS of {len(duplicate_children)} problematic children:")
                 logger.error(f"Total overlaps in list: {len(overlap_objects_list)}")
                 logger.error(f"Overlap threshold: {self.overlap_threshold}")
-                
+
                 # Get time information for diagnostics
                 time_coords = object_id_field_unique[self.timecoord].values
                 logger.error(f"Time coordinates of problematic children: {time_coords[duplicate_children]}")
@@ -3295,22 +3466,21 @@ class tracker:
                     details=f"{len(duplicate_children)} children have multiple parents",
                     suggestions=[
                         "Check splitting/merging algorithm for edge cases",
-                        "Verify object properties are calculated correctly", 
+                        "Verify object properties are calculated correctly",
                         "Check for numerical precision issues in overlap calculations",
-                        "Look for issues in find_overlapping_objects or enforce_overlap_threshold"
+                        "Look for issues in find_overlapping_objects or enforce_overlap_threshold",
                     ],
                     context={
                         "n_duplicate_children": len(duplicate_children),
                         "max_parent_count": child_counts.max(),
                         "total_overlaps": len(overlap_objects_list),
-                        "overlap_threshold": self.overlap_threshold
-                    }
+                        "overlap_threshold": self.overlap_threshold,
+                    },
                 )
             else:
                 logger.info(f"Validation passed: All {len(unique_children)} children have unique parents")
         else:
             logger.info("No overlaps found - validation skipped")
-        
 
         # Process merge events into a dataset
         # Handle case where there are no merge events
