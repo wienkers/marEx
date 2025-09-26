@@ -2601,17 +2601,12 @@ class tracker:
         if len(backward_overlaps) == 0:
             return data_t_minus_1, object_props
 
-        logger.debug(f"Found {len(backward_overlaps)} backward overlaps for timestep {timestep}")
-
         # Find parent IDs that connect to multiple children (partition boundary jumps)
         parent_ids, parent_counts = np.unique(backward_overlaps[:, 0], return_counts=True)
         splitting_parents = parent_ids[parent_counts > 1]
 
         if len(splitting_parents) == 0:
-            logger.debug(f"No splitting parents found for timestep {timestep}")
             return data_t_minus_1, object_props
-
-        logger.debug(f"Found {len(splitting_parents)} splitting parents for timestep {timestep}: {splitting_parents[:5]}")
 
         # Track ID mappings for logging
         id_mappings = {}  # child_id -> parent_id
@@ -2625,8 +2620,6 @@ class tracker:
             child_mask = backward_overlaps[:, 0] == parent_id
             children_for_parent = backward_overlaps[child_mask, 1].astype(int)
 
-            logger.debug(f"Parent {parent_id} has {len(children_for_parent)} children: {children_for_parent}")
-
             # Consolidate all children to use first child_id
             if len(children_for_parent) > 1:
                 first_child_id = int(children_for_parent[0])
@@ -2635,8 +2628,6 @@ class tracker:
                 if first_child_id not in object_props.ID.values:
                     continue
 
-                logger.debug(f"Consolidating {len(children_for_parent)} children to first_child_id {first_child_id}")
-
                 # Rename all other children to first_child_id
                 for child_id in children_for_parent[1:]:
                     child_id = int(child_id)
@@ -2644,15 +2635,12 @@ class tracker:
                     if child_id not in object_props.ID.values:
                         continue
 
-                    logger.debug(f"Consolidating child_id {child_id} -> first_child_id {first_child_id} at timestep {timestep}")
-
                     # Rename child_id to first_child_id in data_t_minus_1
                     data_t_minus_1 = data_t_minus_1.where(data_t_minus_1 != child_id, first_child_id)
 
                     # Remove redundant child_id from object_props
                     if child_id in object_props.ID:
                         object_props = object_props.drop_sel(ID=child_id)
-                        logger.debug(f"Deleted redundant child_id {child_id} from object_props")
 
                     # Track the mapping
                     id_mappings[child_id] = first_child_id
@@ -2675,7 +2663,6 @@ class tracker:
         if id_mappings:
             sample_mappings = dict(list(id_mappings.items())[:5])
             suffix = "..." if len(id_mappings) > 5 else ""
-            logger.info(f"Consolidated {len(id_mappings)} object IDs at timestep {timestep}: {sample_mappings}{suffix}")
 
         return data_t_minus_1, object_props
 
@@ -3597,7 +3584,6 @@ class tracker:
 
             # End-of-chunk consolidation: consolidate the last timestep if chunk has multiple timesteps
             if chunk_data.sizes[self.timedim] >= 2:
-                logger.debug(f"Performing end-of-chunk consolidation for timestep {chunk_end - 1}")
 
                 # Get last and second-to-last timesteps
                 last_t_data = chunk_data.isel({self.timedim: -1})
