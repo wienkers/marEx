@@ -158,4 +158,3 @@ When contributing to marEx, please ensure that:
 2. New features include appropriate tests
 3. Documentation is updated if needed
 4. Performance-critical changes include performance tests
-

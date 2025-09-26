@@ -382,6 +382,7 @@ class PlotterBase:
         plot_dir: Union[str, Path] = "./",
         file_name: Optional[str] = None,
         centroids: Optional[xr.DataArray] = None,
+        object_ids: Optional[xr.DataArray] = None,
     ) -> Optional[str]:  # pragma: no cover
         """Create an animation from time series data
 
@@ -390,6 +391,7 @@ class PlotterBase:
             plot_dir: Directory to save animation files
             file_name: Name for the output animation file
             centroids: Optional DataArray containing centroid data with dimensions (component, time, ID)
+            object_ids: Optional DataArray containing object ID field with integers > 0 for drawing contour outlines
         """
         # Check if PIL is available for image processing
         from .._dependencies import require_dependencies
@@ -429,6 +431,7 @@ class PlotterBase:
             "var_units": var_units,
             "extend": extend,
             "show_colorbar": config.show_colorbar,
+            "grid_labels": config.grid_labels,
         }
 
         # Set up grid information if needed
@@ -462,6 +465,16 @@ class PlotterBase:
                     plot_params["centroids"] = None
             else:
                 plot_params["centroids"] = None
+
+            # Extract object IDs for this time step if available
+            if object_ids is not None:
+                try:
+                    object_ids_time = object_ids.isel({time_dim: time_ind})
+                    plot_params["object_ids"] = object_ids_time
+                except Exception:
+                    plot_params["object_ids"] = None
+            else:
+                plot_params["object_ids"] = None
 
             delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info))
 
@@ -573,9 +586,9 @@ def make_frame(
         "shading": "auto",
     }
 
-    if plot_params.get("norm"):
+    if plot_params.get("norm") is not None:
         plot_kwargs["norm"] = plot_params["norm"]
-    elif plot_params.get("clim"):
+    elif plot_params.get("clim") is not None:
         plot_kwargs["vmin"] = plot_params["clim"][0]
         plot_kwargs["vmax"] = plot_params["clim"][1]
 
@@ -614,6 +627,40 @@ def make_frame(
 
     time_str = plot_params.get("time_str", f"Frame {time_ind}")
     ax.set_title(time_str, size=12)
+
+    # Plot object ID contours if available
+    object_ids_data = plot_params.get("object_ids")
+    if object_ids_data is not None:
+        try:
+            object_ids_np = object_ids_data.values
+            # Create binary mask where object IDs > 0
+            object_mask = object_ids_np > 0
+
+            if np.any(object_mask):
+                # Handle different grid types for contouring
+                if grid_info and grid_info.get("type") == "unstructured":
+                    # For unstructured grids, we need to handle contouring differently
+                    # This is more complex and may require interpolation to regular grid
+                    pass
+                else:
+                    # Regular grid plotting - use lat/lon coordinates
+                    lat = data_slice.lat.values
+                    lon = data_slice.lon.values
+
+                    # Draw contours around object boundaries (treating all IDs > 0 the same)
+                    ax.contour(
+                        lon,
+                        lat,
+                        object_mask.astype(float),
+                        levels=[0.5],
+                        colors=["white"],
+                        linewidths=1.5,
+                        transform=ccrs.PlateCarree(),
+                        zorder=6,
+                    )
+        except Exception:
+            # Silently skip object ID contouring if any error occurs
+            pass
 
     # Plot centroids if available
     centroids = plot_params.get("centroids")
@@ -676,7 +723,7 @@ def make_frame(
     ax.add_feature(coastlines, linewidth=0.5, zorder=3)
     ax.gridlines(
         crs=ccrs.PlateCarree(),
-        draw_labels=True,
+        draw_labels=plot_params.get("grid_labels", False),
         linewidth=1,
         color="gray",
         alpha=0.5,

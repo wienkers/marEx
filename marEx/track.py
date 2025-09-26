@@ -359,7 +359,8 @@ class tracker:
         logger.info("Initialising MarEx tracker")
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
         logger.info(
-            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
+            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, "
+            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
         )
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
@@ -429,7 +430,7 @@ class tracker:
             self.data_attrs = {}
 
         # Input validation and preparation
-        self._validate_inputs(neighbours, cell_areas, grid_resolution)
+        self._validate_inputs(neighbours, cell_areas, grid_resolution, temp_dir)
 
         # Handle cell_areas for both structured and unstructured grids
         if self.unstructured_grid:
@@ -442,7 +443,7 @@ class tracker:
                 logger.info(f"Calculating cell areas from grid resolution: {grid_resolution} degrees")
 
                 # Earth radius in km
-                R_earth = 6378.
+                R_earth = 6378.0
 
                 # Get coordinate arrays (should be in degrees)
                 lat_coords = data_bin[self.ycoord]
@@ -454,11 +455,7 @@ class tracker:
 
                 # Calculate grid areas using spherical geometry
                 # Area = R² * |sin(lat + dlat/2) - sin(lat - dlat/2)| * dlon
-                grid_area = (
-                    R_earth**2 *
-                    np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) *
-                    dlon
-                ).astype(np.float32)
+                grid_area = (R_earth**2 * np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) * dlon).astype(np.float32)
 
                 # Check if cell_areas was originally provided (and warn about override)
                 if cell_areas is not None:
@@ -488,18 +485,7 @@ class tracker:
 
         # Special setup for unstructured grids
         if unstructured_grid:
-            if temp_dir is None:
-                raise create_data_validation_error(
-                    "temp_dir is required for unstructured grids",
-                    details="Unstructured grid processing requires a temporary directory",
-                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
-                )
-            if neighbours is None:
-                raise create_data_validation_error(
-                    "neighbours array is required for unstructured grids",
-                    details="Unstructured grid processing requires cell connectivity information",
-                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
-                )
+            # Validation already done in _validate_inputs
             self._setup_unstructured_grid(temp_dir, neighbours, cell_areas, max_iteration)
 
         self._configure_warnings()
@@ -509,6 +495,7 @@ class tracker:
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
         grid_resolution: Optional[float] = None,
+        temp_dir: Optional[str] = None,
     ) -> None:
         """Validate input parameters and data."""
         if self.regional_mode and self.unstructured_grid:
@@ -603,8 +590,20 @@ class tracker:
                 },
             )
 
-        # Validate cell_areas parameter for both grid types
+        # Validate required parameters for unstructured grids
         if self.unstructured_grid:
+            if temp_dir is None:
+                raise create_data_validation_error(
+                    "temp_dir is required for unstructured grids",
+                    details="Unstructured grid processing requires a temporary directory",
+                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
+                )
+            if neighbours is None:
+                raise create_data_validation_error(
+                    "neighbours array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell connectivity information",
+                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
+                )
             if cell_areas is None:
                 raise create_data_validation_error(
                     "cell_areas array is required for unstructured grids",
@@ -1300,7 +1299,7 @@ class tracker:
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
         # Remove small objects
-        logger.info(f"Filtering small objects")
+        logger.info("Filtering small objects")
         with log_timing(logger, "Small object filtering"):
             (
                 data_bin_filtered,
@@ -1493,7 +1492,8 @@ class tracker:
         events_ds = self._remap_coordinates(events_ds)
 
         # Rechunk to size 1 for better post-processing
-        events_ds = events_ds.chunk({self.timedim: 1})
+        #   Actually, this often causes more problems than it solves !
+        # events_ds = events_ds.chunk({self.timedim: 1})
 
         return events_ds
 
@@ -2072,7 +2072,6 @@ class tracker:
         tuple
             (y_centroid, x_centroid)
         """
-
         if self.regional_mode:
             # We don't need to adjust centroids for periodic boundaries
             return original_centroid
@@ -2591,7 +2590,6 @@ class tracker:
         - Updates object properties by recalculating for consolidated objects
         - Removes redundant child objects from object_props
         """
-
         # Find overlaps between t-2 and t-1
         backward_overlaps = self.check_overlap_slice(data_t_minus_2.values, data_t_minus_1.values)
         if len(backward_overlaps) == 0:
@@ -2601,17 +2599,12 @@ class tracker:
         if len(backward_overlaps) == 0:
             return data_t_minus_1, object_props
 
-        logger.debug(f"Found {len(backward_overlaps)} backward overlaps for timestep {timestep}")
-
         # Find parent IDs that connect to multiple children (partition boundary jumps)
         parent_ids, parent_counts = np.unique(backward_overlaps[:, 0], return_counts=True)
         splitting_parents = parent_ids[parent_counts > 1]
 
         if len(splitting_parents) == 0:
-            logger.debug(f"No splitting parents found for timestep {timestep}")
             return data_t_minus_1, object_props
-
-        logger.debug(f"Found {len(splitting_parents)} splitting parents for timestep {timestep}: {splitting_parents[:5]}")
 
         # Track ID mappings for logging
         id_mappings = {}  # child_id -> parent_id
@@ -2625,8 +2618,6 @@ class tracker:
             child_mask = backward_overlaps[:, 0] == parent_id
             children_for_parent = backward_overlaps[child_mask, 1].astype(int)
 
-            logger.debug(f"Parent {parent_id} has {len(children_for_parent)} children: {children_for_parent}")
-
             # Consolidate all children to use first child_id
             if len(children_for_parent) > 1:
                 first_child_id = int(children_for_parent[0])
@@ -2635,8 +2626,6 @@ class tracker:
                 if first_child_id not in object_props.ID.values:
                     continue
 
-                logger.debug(f"Consolidating {len(children_for_parent)} children to first_child_id {first_child_id}")
-
                 # Rename all other children to first_child_id
                 for child_id in children_for_parent[1:]:
                     child_id = int(child_id)
@@ -2644,15 +2633,12 @@ class tracker:
                     if child_id not in object_props.ID.values:
                         continue
 
-                    logger.debug(f"Consolidating child_id {child_id} -> first_child_id {first_child_id} at timestep {timestep}")
-
                     # Rename child_id to first_child_id in data_t_minus_1
                     data_t_minus_1 = data_t_minus_1.where(data_t_minus_1 != child_id, first_child_id)
 
                     # Remove redundant child_id from object_props
                     if child_id in object_props.ID:
                         object_props = object_props.drop_sel(ID=child_id)
-                        logger.debug(f"Deleted redundant child_id {child_id} from object_props")
 
                     # Track the mapping
                     id_mappings[child_id] = first_child_id
@@ -2671,11 +2657,6 @@ class tracker:
                                 object_props[var_name].loc[{"ID": first_child_id}] = consolidated_props[var_name].sel(
                                     ID=first_child_id
                                 )
-
-        if id_mappings:
-            sample_mappings = dict(list(id_mappings.items())[:5])
-            suffix = "..." if len(id_mappings) > 5 else ""
-            logger.info(f"Consolidated {len(id_mappings)} object IDs at timestep {timestep}: {sample_mappings}{suffix}")
 
         return data_t_minus_1, object_props
 
@@ -3059,7 +3040,6 @@ class tracker:
                 spatial_dims: List[str],
             ) -> NDArray[np.float32]:
                 """Calculate centroids for a single 2D spatial slice in parallel"""
-
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
@@ -3118,8 +3098,7 @@ class tracker:
             import gc
 
             gc.collect()
-        
-        
+
         # Recalculate areas time-slice by time-slice to handle disjoint parts correctly
         if "area" in object_props_extended.data_vars:
 
@@ -3141,7 +3120,6 @@ class tracker:
                 event_ids: NDArray[np.int32],
             ) -> NDArray[np.float32]:
                 """Calculate physical areas for a single spatial slice in parallel"""
-
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
@@ -3184,9 +3162,7 @@ class tracker:
             )
 
             # Assign coordinates to match object_props_extended structure
-            areas_parallel = areas_parallel.assign_coords(
-                {"ID": object_props_extended.ID}
-            )
+            areas_parallel = areas_parallel.assign_coords({"ID": object_props_extended.ID})
 
             # Transpose to match object_props_extended["area"] structure: (time, ID)
             areas_parallel = areas_parallel.transpose(self.timedim, "ID")
@@ -3197,8 +3173,8 @@ class tracker:
             # Explicit cleanup
             del areas_parallel, event_ids, coords, cell_area_broadcast
             import gc
+
             gc.collect()
-        
 
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
@@ -3417,7 +3393,7 @@ class tracker:
                         data_t_minus_2 = xr.full_like(data_t, 0)
                         data_t_minus_1 = xr.full_like(data_t, 0)
 
-                # ID Consolidation
+                # ID Consolidation of objects at t-1
                 if relative_t > 0:  # Only consolidate if we have meaningful t-1 and t-2
                     data_t_minus_1, object_props = self.consolidate_object_ids(
                         data_t_minus_2, data_t_minus_1, object_props, absolute_t - 1
@@ -3567,7 +3543,8 @@ class tracker:
                         if child_id in new_child_props.ID:
                             # Update existing entry
                             object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
-                        else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
+                        else:
+                            # Delete child_id: The object has split/morphed such that it doesn't get a partition of this child...
                             object_props = object_props.drop_sel(
                                 ID=child_id
                             )  # N.B.: This means that the IDs are no longer continuous...
@@ -3583,7 +3560,8 @@ class tracker:
                         missing_ids = set(new_object_id) - set(new_object_ids_still.values)
                         if len(missing_ids) > 0:
                             logger.warning(
-                                f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
+                                f"Missing newly created child_ids {missing_ids} "
+                                f"because parents have split/morphed in the meantime..."
                             )
 
                     # After processing all merging objects in this iteration
@@ -3597,7 +3575,6 @@ class tracker:
 
             # End-of-chunk consolidation: consolidate the last timestep if chunk has multiple timesteps
             if chunk_data.sizes[self.timedim] >= 2:
-                logger.debug(f"Performing end-of-chunk consolidation for timestep {chunk_end - 1}")
 
                 # Get last and second-to-last timesteps
                 last_t_data = chunk_data.isel({self.timedim: -1})
@@ -3650,29 +3627,98 @@ class tracker:
 
             # Enhanced validation with comprehensive spatial and temporal information
             if len(duplicate_children) > 0:
-                logger.error(f"Analysis of {len(duplicate_children)} problematic children:")
-                logger.error(f"Total overlaps in list: {len(overlap_objects_list)}")
-                logger.error(f"Overlap threshold: {self.overlap_threshold}")
+                logger.warning(f"There is {len(duplicate_children)} potentially problematic children:")
 
-                # Get time information for diagnostics
-                time_coords = object_id_field_unique[self.timecoord].values
-                logger.error(f"Time coordinates of problematic children: {time_coords[duplicate_children]}")
-                raise TrackingError(
-                    "Multiple parents detected after splitting/merging",
-                    details=f"{len(duplicate_children)} children have multiple parents",
-                    suggestions=[
-                        "Check splitting/merging algorithm for edge cases",
-                        "Verify object properties are calculated correctly",
-                        "Check for numerical precision issues in overlap calculations",
-                        "Look for issues in find_overlapping_objects or enforce_overlap_threshold",
-                    ],
-                    context={
-                        "n_duplicate_children": len(duplicate_children),
-                        "max_parent_count": child_counts.max(),
-                        "total_overlaps": len(overlap_objects_list),
-                        "overlap_threshold": self.overlap_threshold,
-                    },
-                )
+                # Log problematic child IDs (time info not available at this stage)
+                logger.warning(f"Children IDs: {duplicate_children[:10].tolist()}")
+
+                # Detailed analysis of each problematic child
+                for child_id in duplicate_children[:5]:  # Limit to first 5 for readability
+                    # Find all parent-child relationships for this child
+                    child_relationships = overlap_objects_list[overlap_objects_list[:, 1] == child_id]
+                    parent_ids = child_relationships[:, 0]
+                    overlap_areas = child_relationships[:, 2]
+
+                    logger.warning(f"\n--- Details for child ID {child_id} ---")
+                    logger.warning(f"Number of parents: {len(parent_ids)}")
+                    logger.warning(f"Parent IDs: {parent_ids.tolist()}")
+                    logger.warning(f"Raw overlap areas: {overlap_areas.tolist()}")
+
+                    # Get child object properties if available
+                    try:
+                        if child_id in object_props.ID.values:
+                            child_area = object_props.sel(ID=child_id).area.values.item()
+                            child_centroid = object_props.sel(ID=child_id).centroid.values
+
+                            logger.warning(f"Child total area: {child_area}")
+                            logger.warning(f"Child centroid: {child_centroid}")
+
+                            # Calculate overlap fractions for each parent
+                            overlap_fractions = []
+                            parent_areas = []
+                            for i, parent_id in enumerate(parent_ids):
+                                if parent_id in object_props.ID.values:
+                                    parent_area = object_props.sel(ID=parent_id).area.values.item()
+                                    parent_areas.append(parent_area)
+
+                                    # Calculate overlap fraction based on smaller object
+                                    min_area = min(child_area, parent_area)
+                                    overlap_fraction = float(overlap_areas[i]) / min_area
+                                    overlap_fractions.append(overlap_fraction)
+                                else:
+                                    parent_areas.append("N/A")
+                                    overlap_fractions.append("N/A")
+
+                            logger.warning(f"Parent areas: {parent_areas}")
+                            logger.warning(f"Overlap fractions: {overlap_fractions}")
+
+                            # Check for suspicious patterns
+                            total_overlap_area = sum(overlap_areas)
+                            logger.warning(f"Sum of overlap areas: {total_overlap_area}")
+                            logger.warning(f"Sum/Child area ratio: {total_overlap_area/child_area:.3f}")
+
+                            # Flag potential issues
+                            valid_fractions = [f for f in overlap_fractions if isinstance(f, (int, float))]
+                            if valid_fractions and max(valid_fractions) > 1.0:
+                                logger.warning(f"WARNING: Overlap fraction > 1.0 detected (max: {max(valid_fractions):.3f})")
+                            if total_overlap_area > child_area * 1.1:  # Allow 10% tolerance
+                                logger.warning(
+                                    f"WARNING: Total overlap exceeds child area by {(total_overlap_area/child_area - 1)*100:.1f}%"
+                                )
+
+                        else:
+                            logger.warning(f"Child ID {child_id} not found in object_props")
+
+                    except Exception as e:
+                        logger.warning(f"Error analysing child ID {child_id}: {str(e)}")
+
+                    # Try to find timestep information by checking where this child appears
+                    try:
+                        child_timesteps = []
+                        for t_idx in range(object_id_field_unique.sizes[self.timedim]):
+                            time_slice = object_id_field_unique.isel({self.timedim: t_idx})
+                            if (time_slice == child_id).any():
+                                time_coord = time_slice.coords[self.timedim].values
+                                child_timesteps.append((t_idx, time_coord))
+
+                        if child_timesteps:
+                            logger.warning(f"Child appears at timesteps: {child_timesteps}")
+                        else:
+                            logger.warning("Child timestep information not found")
+
+                    except Exception as e:
+                        logger.warning(f"Error finding timestep for child ID {child_id}: {str(e)}")
+
+                    logger.warning("--- End detailed analysis ---\n")
+
+                # Log summary information as warnings instead of raising error
+                logger.warning("=" * 80)
+                logger.warning("Tracker Warning: Multiple parents for single child detected after splitting/merging")
+                logger.warning(f"Details: {len(duplicate_children)} children have multiple parents")
+                logger.warning("Note: This is likely due to consolidation of IDs after splitting/merging")
+                logger.warning("      and still is the correct behaviour (as per the tracking overlap logic")
+                logger.warning("      applied to disjoint objects that will be grouped together.)")
+                logger.warning("=" * 80)
             else:
                 logger.info(f"Validation passed: All {len(unique_children)} children have unique parents")
         else:

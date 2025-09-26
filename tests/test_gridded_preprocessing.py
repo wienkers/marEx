@@ -159,7 +159,7 @@ class TestGriddedPreprocessing:
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
-        
+
         fixed_detrended_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
@@ -169,7 +169,7 @@ class TestGriddedPreprocessing:
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
-        
+
         fixed_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="fixed_baseline",
@@ -556,7 +556,6 @@ class TestGriddedPreprocessing:
         # Verify attributes
         assert extremes_ds.attrs["method_percentile"] == "exact"
 
-
     def test_fixed_baseline_global_extreme(self):
         """Test preprocessing with fixed_baseline + global_extreme combination."""
         extremes_ds = marEx.preprocess_data(
@@ -587,8 +586,9 @@ class TestGriddedPreprocessing:
         # Fixed_baseline should preserve all time steps (unlike shifting_baseline)
         input_time_size = self.sst_data.sizes["time"]
         output_time_size = extremes_ds.sizes["time"]
-        assert output_time_size == input_time_size, \
-            f"fixed_baseline should preserve all time steps: {output_time_size} == {input_time_size}"
+        assert (
+            output_time_size == input_time_size
+        ), f"fixed_baseline should preserve all time steps: {output_time_size} == {input_time_size}"
 
         # Verify global extreme thresholds are 2D (lat, lon)
         assert "dayofyear" not in extremes_ds.thresholds.dims
@@ -597,8 +597,7 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95, 
-                                  description="fixed_baseline + global_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + global_extreme")
 
     def test_fixed_baseline_hobday_extreme(self):
         """Test preprocessing with fixed_baseline + hobday_extreme combination."""
@@ -629,8 +628,7 @@ class TestGriddedPreprocessing:
 
         # Verify extreme frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95,
-                                  description="fixed_baseline + hobday_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + hobday_extreme")
 
     def test_detrend_fixed_baseline_global_extreme(self):
         """Test preprocessing with fixed_detrend_harmonic + global_extreme combination."""
@@ -667,29 +665,28 @@ class TestGriddedPreprocessing:
 
         # Verify extreme frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95,
-                                  description="fixed_detrend_harmonic + global_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_detrend_harmonic + global_extreme")
 
     def test_detrend_fixed_baseline_different_orders(self):
         """Test detrend_fixed_baseline with different polynomial orders."""
         # Test linear only
         result_linear = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrend_fixed_baseline", 
+            method_anomaly="detrend_fixed_baseline",
             detrend_orders=[1],  # Linear only
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
-        
-        # Test quadratic only  
+
+        # Test quadratic only
         result_quadratic = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
             detrend_orders=[2],  # Quadratic only
-            dimensions=self.dimensions, 
+            dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
-        
+
         # Test cubic
         result_cubic = marEx.preprocess_data(
             self.sst_data,
@@ -715,11 +712,11 @@ class TestGriddedPreprocessing:
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
-        
+
         # Test with force_zero_mean=False
         result_false = marEx.preprocess_data(
             self.sst_data,
-            method_anomaly="detrend_fixed_baseline", 
+            method_anomaly="detrend_fixed_baseline",
             force_zero_mean=False,
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
@@ -728,45 +725,45 @@ class TestGriddedPreprocessing:
         # force_zero_mean=True should have very small mean
         mean_true = float(result_true.dat_anomaly.mean())
         assert abs(mean_true) < 0.01, f"force_zero_mean=True should give near-zero mean, got {mean_true}"
-        
-        # force_zero_mean=False may have non-zero mean 
+
+        # force_zero_mean=False may have non-zero mean
         mean_false = float(result_false.dat_anomaly.mean())
         # We can't assert much about this, but at least check it's a valid number
         assert isinstance(mean_false, float)  # Just check it's a valid number
-    
+
     def test_with_all_extreme_methods(self):
         """Test that new anomaly methods work with both extreme detection methods."""
         # Test all combinations
         combinations = [
             ("fixed_baseline", "global_extreme"),
-            ("fixed_baseline", "hobday_extreme"), 
+            ("fixed_baseline", "hobday_extreme"),
             ("detrend_fixed_baseline", "global_extreme"),
             ("detrend_fixed_baseline", "hobday_extreme"),
             ("shifting_baseline", "global_extreme"),
-            ("shifting_baseline", "hobday_extreme"), 
+            ("shifting_baseline", "hobday_extreme"),
             ("detrend_harmonic", "global_extreme"),
             ("detrend_harmonic", "hobday_extreme"),
         ]
-        
+
         for method_anomaly, method_extreme in combinations:
             result = marEx.preprocess_data(
                 self.sst_data,
                 method_anomaly=method_anomaly,
-                method_extreme=method_extreme, 
+                method_extreme=method_extreme,
                 threshold_percentile=95,
                 detrend_orders=[1] if "detrended" in method_anomaly else None,
                 window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
                 dimensions=self.dimensions,
                 dask_chunks=self.dask_chunks,
             )
-            
+
             assert isinstance(result, xr.Dataset)
             assert "extreme_events" in result.data_vars
             assert result.attrs["method_anomaly"] == method_anomaly
             assert result.attrs["method_extreme"] == method_extreme
-            
+
             # Verify reasonable extreme frequency
             extreme_frequency = float(result.extreme_events.mean())
-            assert 0.025 < extreme_frequency < 0.075, \
-                f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
-
+            assert (
+                0.025 < extreme_frequency < 0.075
+            ), f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"

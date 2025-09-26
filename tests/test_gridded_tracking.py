@@ -752,16 +752,16 @@ class TestGriddedTracking:
         lon_values = self.extremes_data.lon.values
 
         # Create realistic cell areas that vary with latitude (smaller near poles)
-        lat_mesh, lon_mesh = np.meshgrid(lat_values, lon_values, indexing='ij')
+        lat_mesh, lon_mesh = np.meshgrid(lat_values, lon_values, indexing="ij")
         # Physical area proportional to cos(latitude) for a sphere
         cell_areas_values = 111320 * 111320 * np.cos(np.radians(lat_mesh))  # Approximate km² per degree
 
         # Create xarray DataArray for cell areas
         cell_areas = xr.DataArray(
             cell_areas_values.astype(np.float32),
-            coords={'lat': lat_values, 'lon': lon_values},
-            dims=['lat', 'lon'],
-            name='cell_areas'
+            coords={"lat": lat_values, "lon": lon_values},
+            dims=["lat", "lon"],
+            name="cell_areas",
         )
 
         # Test tracking with physical areas
@@ -811,59 +811,57 @@ class TestGriddedTracking:
 
         if len(valid_physical) > 0 and len(valid_counts) > 0:
             # Physical areas should generally be much larger than cell counts
-            assert np.mean(valid_physical) > np.mean(valid_counts), \
-                "Physical areas should be larger than cell counts"
+            assert np.mean(valid_physical) > np.mean(valid_counts), "Physical areas should be larger than cell counts"
 
         # Verify that the mean cell area was calculated correctly for physical tracker
         expected_mean = float(cell_areas.mean().compute())
-        assert abs(tracker_physical.mean_cell_area - expected_mean) < 1e-6, \
-            f"Mean cell area mismatch: {tracker_physical.mean_cell_area} vs {expected_mean}"
+        assert (
+            abs(tracker_physical.mean_cell_area - expected_mean) < 1e-6
+        ), f"Mean cell area mismatch: {tracker_physical.mean_cell_area} vs {expected_mean}"
 
         # Verify that the default tracker uses unit areas (mean=1.0)
-        assert tracker_counts.mean_cell_area == 1.0, \
-            f"Default tracker should have mean_cell_area=1.0, got {tracker_counts.mean_cell_area}"
+        assert (
+            tracker_counts.mean_cell_area == 1.0
+        ), f"Default tracker should have mean_cell_area=1.0, got {tracker_counts.mean_cell_area}"
 
     def test_invalid_cell_areas_dimensions(self, dask_client_gridded):
         """Test that invalid cell_areas dimensions raise appropriate errors."""
         # Create cell_areas with wrong dimensions (missing lat)
         wrong_cell_areas = xr.DataArray(
-            np.ones(len(self.extremes_data.lon)),
-            coords={'lon': self.extremes_data.lon},
-            dims=['lon'],
-            name='cell_areas'
+            np.ones(len(self.extremes_data.lon)), coords={"lon": self.extremes_data.lon}, dims=["lon"], name="cell_areas"
         )
 
         # Should raise validation error
         try:
-            tracker = marEx.tracker(
+            marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
                 R_fill=4,
                 cell_areas=wrong_cell_areas,
                 quiet=True,
             )
-            assert False, "Expected DataValidationError for invalid cell_areas dimensions"
+            raise AssertionError("Expected DataValidationError for invalid cell_areas dimensions")
         except marEx.exceptions.DataValidationError as e:
             assert "Invalid cell_areas dimensions" in str(e)
 
         # Create cell_areas with extra dimension
         wrong_cell_areas_3d = xr.DataArray(
             np.ones((len(self.extremes_data.lat), len(self.extremes_data.lon), 2)),
-            coords={'lat': self.extremes_data.lat, 'lon': self.extremes_data.lon, 'extra': [0, 1]},
-            dims=['lat', 'lon', 'extra'],
-            name='cell_areas'
+            coords={"lat": self.extremes_data.lat, "lon": self.extremes_data.lon, "extra": [0, 1]},
+            dims=["lat", "lon", "extra"],
+            name="cell_areas",
         )
 
         # Should also raise validation error
         try:
-            tracker = marEx.tracker(
+            marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
                 R_fill=4,
                 cell_areas=wrong_cell_areas_3d,
                 quiet=True,
             )
-            assert False, "Expected DataValidationError for invalid cell_areas dimensions"
+            raise AssertionError("Expected DataValidationError for invalid cell_areas dimensions")
         except marEx.exceptions.DataValidationError as e:
             assert "Invalid cell_areas dimensions" in str(e)
 
@@ -871,7 +869,6 @@ class TestGriddedTracking:
         """Test tracking with automatic grid area calculation from resolution."""
         # Get the actual grid resolution from the test data
         lat_res = abs(float(self.extremes_data.lat[1] - self.extremes_data.lat[0]))
-        lon_res = abs(float(self.extremes_data.lon[1] - self.extremes_data.lon[0]))
 
         # Assuming uniform grid spacing
         grid_resolution = lat_res  # Use latitude resolution (should match longitude)
@@ -894,7 +891,7 @@ class TestGriddedTracking:
         # Test tracking with manual cell_areas calculation
         lat_values = self.extremes_data.lat.values
         lon_values = self.extremes_data.lon.values
-        lat_mesh, lon_mesh = np.meshgrid(lat_values, lon_values, indexing='ij')
+        lat_mesh, lon_mesh = np.meshgrid(lat_values, lon_values, indexing="ij")
 
         # Calculate areas manually using same formula as in track.py
         R_earth = 6378.0  # km
@@ -902,17 +899,10 @@ class TestGriddedTracking:
         dlat = np.radians(grid_resolution)
         dlon = np.radians(grid_resolution)
 
-        manual_areas = (
-            R_earth**2 *
-            np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) *
-            dlon
-        ).astype(np.float32)
+        manual_areas = (R_earth**2 * np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) * dlon).astype(np.float32)
 
         cell_areas_manual = xr.DataArray(
-            manual_areas,
-            coords={'lat': lat_values, 'lon': lon_values},
-            dims=['lat', 'lon'],
-            name='cell_areas'
+            manual_areas, coords={"lat": lat_values, "lon": lon_values}, dims=["lat", "lon"], name="cell_areas"
         )
 
         tracker_manual = marEx.tracker(
@@ -935,8 +925,9 @@ class TestGriddedTracking:
 
         # Allow small numerical differences due to floating point precision and grid sampling
         relative_error = abs(actual_mean - expected_mean) / expected_mean
-        assert relative_error < 0.01, \
-            f"Grid resolution area calculation mismatch: {actual_mean} vs {expected_mean} (rel error: {relative_error})"
+        assert (
+            relative_error < 0.01
+        ), f"Grid resolution area calculation mismatch: {actual_mean} vs {expected_mean} (rel error: {relative_error})"
 
         # Run both trackers and verify they produce similar results
         tracked_grid_res = tracker_grid_res.run()
@@ -956,34 +947,33 @@ class TestGriddedTracking:
         if len(valid_grid_res) > 0 and len(valid_manual) > 0:
             # Calculate relative difference in mean areas
             mean_diff = abs(np.mean(valid_grid_res) - np.mean(valid_manual)) / np.mean(valid_manual)
-            assert mean_diff < 0.01, \
-                f"Area calculations should be nearly identical: {mean_diff:.4f} relative difference"
+            assert mean_diff < 0.01, f"Area calculations should be nearly identical: {mean_diff:.4f} relative difference"
 
     def test_grid_resolution_validation(self, dask_client_gridded):
         """Test validation of grid_resolution parameter."""
         # Test 1: Negative grid_resolution should fail
         try:
-            tracker = marEx.tracker(
+            marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
                 R_fill=4,
                 grid_resolution=-0.5,
                 quiet=True,
             )
-            assert False, "Expected DataValidationError for negative grid_resolution"
+            raise AssertionError("Expected DataValidationError for negative grid_resolution")
         except marEx.exceptions.DataValidationError as e:
             assert "grid_resolution must be a positive number" in str(e)
 
         # Test 2: Zero grid_resolution should fail
         try:
-            tracker = marEx.tracker(
+            marEx.tracker(
                 self.extremes_data.extreme_events,
                 self.extremes_data.mask,
                 R_fill=4,
                 grid_resolution=0.0,
                 quiet=True,
             )
-            assert False, "Expected DataValidationError for zero grid_resolution"
+            raise AssertionError("Expected DataValidationError for zero grid_resolution")
         except marEx.exceptions.DataValidationError as e:
             assert "grid_resolution must be a positive number" in str(e)
 
@@ -1010,14 +1000,15 @@ class TestGriddedTracking:
         # Create some cell_areas
         cell_areas = xr.DataArray(
             np.ones((len(self.extremes_data.lat), len(self.extremes_data.lon)), dtype=np.float32),
-            coords={'lat': self.extremes_data.lat, 'lon': self.extremes_data.lon},
-            dims=['lat', 'lon'],
-            name='cell_areas'
+            coords={"lat": self.extremes_data.lat, "lon": self.extremes_data.lon},
+            dims=["lat", "lon"],
+            name="cell_areas",
         )
 
         # Test with both parameters - should use grid_resolution and warn
         import warnings
-        with warnings.catch_warnings(record=True) as w:
+
+        with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
 
             tracker = marEx.tracker(
@@ -1265,125 +1256,3 @@ class TestGriddedTracking:
 
             # Verify ID_field is int
             assert np.issubdtype(tracked_ds.ID_field.dtype, np.integer), "ID_field should be integer type"
-
-    def test_physical_area_functionality(self, dask_client_gridded):
-        """Test tracking with physical cell areas for structured grids."""
-        # Create mock physical cell areas (lat-dependent for realistic test)
-        lat_values = self.extremes_data.lat.values
-        lon_values = self.extremes_data.lon.values
-
-        # Create realistic cell areas that vary with latitude (smaller near poles)
-        lat_mesh, lon_mesh = np.meshgrid(lat_values, lon_values, indexing='ij')
-        # Physical area proportional to cos(latitude) for a sphere
-        cell_areas_values = 111320 * 111320 * np.cos(np.radians(lat_mesh))  # Approximate km² per degree
-
-        # Create xarray DataArray for cell areas
-        cell_areas = xr.DataArray(
-            cell_areas_values.astype(np.float32),
-            coords={'lat': lat_values, 'lon': lon_values},
-            dims=['lat', 'lon'],
-            name='cell_areas'
-        )
-
-        # Test tracking with physical areas
-        tracker_physical = marEx.tracker(
-            self.extremes_data.extreme_events,
-            self.extremes_data.mask.where(
-                (self.extremes_data.lat < 85) & (self.extremes_data.lat > -90),
-                other=False,
-            ),
-            area_filter_quartile=0.5,
-            R_fill=4,
-            T_fill=2,
-            allow_merging=True,  # Enable merging to get area calculations
-            cell_areas=cell_areas,  # Provide physical areas
-            quiet=True,
-        )
-
-        # Test tracking with default cell counts (no cell_areas)
-        tracker_counts = marEx.tracker(
-            self.extremes_data.extreme_events,
-            self.extremes_data.mask.where(
-                (self.extremes_data.lat < 85) & (self.extremes_data.lat > -90),
-                other=False,
-            ),
-            area_filter_quartile=0.5,
-            R_fill=4,
-            T_fill=2,
-            allow_merging=True,  # Enable merging to get area calculations
-            quiet=True,
-        )
-
-        # Run both trackers
-        tracked_physical = tracker_physical.run()
-        tracked_counts = tracker_counts.run()
-
-        # Verify both produce valid outputs
-        assert isinstance(tracked_physical, xr.Dataset)
-        assert isinstance(tracked_counts, xr.Dataset)
-
-        # Verify that physical areas are larger than cell counts (since we're using km²)
-        physical_areas = tracked_physical.area.values
-        count_areas = tracked_counts.area.values
-
-        # Remove NaN values for comparison
-        valid_physical = physical_areas[~np.isnan(physical_areas)]
-        valid_counts = count_areas[~np.isnan(count_areas)]
-
-        if len(valid_physical) > 0 and len(valid_counts) > 0:
-            # Physical areas should generally be much larger than cell counts
-            assert np.mean(valid_physical) > np.mean(valid_counts), \
-                "Physical areas should be larger than cell counts"
-
-        # Verify that the mean cell area was calculated correctly for physical tracker
-        expected_mean = float(cell_areas.mean().compute())
-        assert abs(tracker_physical.mean_cell_area - expected_mean) < 1e-6, \
-            f"Mean cell area mismatch: {tracker_physical.mean_cell_area} vs {expected_mean}"
-
-        # Verify that the default tracker uses unit areas (mean=1.0)
-        assert tracker_counts.mean_cell_area == 1.0, \
-            f"Default tracker should have mean_cell_area=1.0, got {tracker_counts.mean_cell_area}"
-
-    def test_invalid_cell_areas_dimensions(self, dask_client_gridded):
-        """Test that invalid cell_areas dimensions raise appropriate errors."""
-        # Create cell_areas with wrong dimensions (missing lat)
-        wrong_cell_areas = xr.DataArray(
-            np.ones(len(self.extremes_data.lon)),
-            coords={'lon': self.extremes_data.lon},
-            dims=['lon'],
-            name='cell_areas'
-        )
-
-        # Should raise validation error
-        try:
-            tracker = marEx.tracker(
-                self.extremes_data.extreme_events,
-                self.extremes_data.mask,
-                R_fill=4,
-                cell_areas=wrong_cell_areas,
-                quiet=True,
-            )
-            assert False, "Expected DataValidationError for invalid cell_areas dimensions"
-        except marEx.exceptions.DataValidationError as e:
-            assert "Invalid cell_areas dimensions" in str(e)
-
-        # Create cell_areas with extra dimension
-        wrong_cell_areas_3d = xr.DataArray(
-            np.ones((len(self.extremes_data.lat), len(self.extremes_data.lon), 2)),
-            coords={'lat': self.extremes_data.lat, 'lon': self.extremes_data.lon, 'extra': [0, 1]},
-            dims=['lat', 'lon', 'extra'],
-            name='cell_areas'
-        )
-
-        # Should also raise validation error
-        try:
-            tracker = marEx.tracker(
-                self.extremes_data.extreme_events,
-                self.extremes_data.mask,
-                R_fill=4,
-                cell_areas=wrong_cell_areas_3d,
-                quiet=True,
-            )
-            assert False, "Expected DataValidationError for invalid cell_areas dimensions"
-        except marEx.exceptions.DataValidationError as e:
-            assert "Invalid cell_areas dimensions" in str(e)
