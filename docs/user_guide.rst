@@ -164,8 +164,8 @@ The preprocessing step transforms raw oceanographic data into anomalies and dete
    extremes = marEx.preprocess_data(
        sst,
        threshold_percentile=95,
-       method_anomaly='detrended_baseline',
-       method_extreme='global_extreme'
+       method_anomaly='shifting_baseline',
+       method_extreme='hobday_extreme'
    )
 
 **Advanced configuration:**
@@ -176,8 +176,8 @@ The preprocessing step transforms raw oceanographic data into anomalies and dete
    extremes = marEx.preprocess_data(
        sst,
        # Anomaly computation method
-       method_anomaly='shifting_baseline',  # or 'detrended_baseline'
-       window_year_baseline=15,             # For shifting baseline
+       method_anomaly='detrend_fixed_baseline',  # or 'detrend_harmonic', 'fixed_baseline', 'shifting_baseline'
+       detrend_order=[1 2],
        smooth_days_baseline=21,             # Smoothing for climatology
 
        # Extreme identification method
@@ -361,13 +361,29 @@ Method Selection Guide
 Anomaly Methods
 ---------------
 
-**Detrended Baseline** (``detrended_baseline``):
+**Harmonic Detrending** (``detrend_harmonic``):
 
 * Detrends with an OLS 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends)
 * **Best for**: Datasets with linear trends, operational monitoring
 * **Pros**: Fast & memory efficient
 * **Cons**: Does not capture phenological shifts and non-harmonic seasonal variability. Strongly biases certain statistics.
 * **Use when**: Real-time processing
+
+**Fixed Baseline** (``fixed_baseline``):
+
+* Daily climatology using full time series -- does not remove climate trends
+* **Best for**: Simple anomaly calculation without detrending
+* **Pros**: Straightforward interpretation, preserves long-term trends
+* **Cons**: Does not account for climate change trends, seasonal timing shifts
+* **Use when**: Baseline comparison studies, trend-inclusive analysis, public outreach
+
+**Detrend Fixed Baseline** (``detrend_fixed_baseline``):
+
+* Polynomial detrending followed by fixed daily climatology -- keeps full time-series of data, but does not account for trends in the timing of seasonal transitions
+* **Best for**: Studies requiring detrending but maintaining full temporal data coverage
+* **Pros**: Removes long-term trends while preserving seasonal cycles, maintains full time series
+* **Cons**: Does not account for changes in seasonal timing or seasonality
+* **Use when**: Climate variability studies with trend removal
 
 **Shifting Baseline** (``shifting_baseline``):
 
@@ -529,7 +545,7 @@ For marine heatwave studies following Hobday et al. (2016):
 
    # Standard MHW definition
    mhw_config = {
-       'method_anomaly': 'detrended_baseline',
+       'method_anomaly': 'shifting_baseline',
        'method_extreme': 'hobday_extreme',
        'threshold_percentile': 90,
        'window_days_hobday': 11,

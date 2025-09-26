@@ -351,6 +351,10 @@ class TestGetPreprocessingSteps:
             ("detrend_harmonic", "hobday_extreme"),
             ("shifting_baseline", "global_extreme"),
             ("shifting_baseline", "hobday_extreme"),
+            ("detrend_fixed_baseline", "global_extreme"),
+            ("detrend_fixed_baseline", "hobday_extreme"),
+            ("fixed_baseline", "global_extreme"),
+            ("fixed_baseline", "hobday_extreme"),
         ]
 
         for method_anomaly, method_extreme in combinations:
@@ -370,9 +374,10 @@ class TestGetPreprocessingSteps:
 
             # Should contain method-specific keywords
             steps_text = " ".join(steps)
-            if method_anomaly == "detrend_harmonic":
+            if "detrend" in method_anomaly:
                 assert "polynomial trend" in steps_text
-            else:
+            
+            if "baseline" in method_anomaly:
                 assert "climatology" in steps_text
 
             if method_extreme == "global_extreme":

@@ -3003,6 +3003,89 @@ class tracker:
             import gc
 
             gc.collect()
+        
+        
+        # Recalculate areas time-slice by time-slice to handle disjoint parts correctly
+        if "area" in object_props_extended.data_vars:
+
+            event_ids = object_props_extended.ID.values.copy()
+
+            if self.unstructured_grid:
+                spatial_dims = [self.xdim]
+                coords = {self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]}
+            else:
+                spatial_dims = [self.ydim, self.xdim]
+                coords = {
+                    self.ydim: split_merged_relabeled_object_id_field.coords[self.ydim],
+                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim],
+                }
+
+            def calculate_areas_for_slice(
+                slice_data: NDArray[np.int32],
+                event_ids: NDArray[np.int32],
+                coords: Dict[str, NDArray],
+                spatial_dims: List[str],
+            ) -> NDArray[np.float32]:
+                """Calculate areas for a single 2D spatial slice in parallel"""
+
+                # Get unique IDs in this slice
+                present_ids = np.unique(slice_data)
+                present_ids = present_ids[present_ids > 0]  # Exclude background
+
+                # Create DataArray for this slice
+                time_slice = xr.DataArray(slice_data, coords=coords, dims=spatial_dims)
+
+                # Calculate properties only for present IDs
+                props = self.calculate_object_properties(time_slice, properties=["area"])
+
+                areas = props["area"].values  # Shape: (n_objects,)
+
+                # Initialise result array with NaN
+                result = np.full(len(event_ids), np.nan, dtype=np.float32)
+
+                # Map results back to full ID space
+                if len(areas) > 0:
+                    # Create a mapping from present_ids to their indices in props
+                    id_to_idx = {present_id: idx for idx, present_id in enumerate(present_ids)}
+
+                    # Vectorised mapping
+                    valid_mask = np.isin(event_ids, present_ids)
+                    result[valid_mask] = areas[[id_to_idx[event_id] for event_id in event_ids[valid_mask]]]
+
+                return result
+
+            areas_parallel = xr.apply_ufunc(
+                calculate_areas_for_slice,
+                split_merged_relabeled_object_id_field,
+                kwargs={
+                    "event_ids": event_ids,
+                    "coords": coords,
+                    "spatial_dims": spatial_dims,
+                },
+                input_core_dims=[spatial_dims],
+                output_core_dims=[["ID"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[np.float32],
+                dask_gufunc_kwargs={"output_sizes": {"ID": len(event_ids)}},
+            )
+
+            # Assign coordinates to match object_props_extended structure
+            areas_parallel = areas_parallel.assign_coords(
+                {"ID": object_props_extended.ID}
+            )
+
+            # Transpose to match object_props_extended["area"] structure: (time, ID)
+            areas_parallel = areas_parallel.transpose(self.timedim, "ID")
+
+            # Update object_props_extended with parallel-computed areas
+            object_props_extended["area"] = areas_parallel
+
+            # Explicit cleanup
+            del areas_parallel, event_ids, coords
+            import gc
+            gc.collect()
+        
 
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
@@ -3454,7 +3537,7 @@ class tracker:
 
             # Enhanced validation with comprehensive spatial and temporal information
             if len(duplicate_children) > 0:
-                logger.error(f"COMPREHENSIVE ANALYSIS of {len(duplicate_children)} problematic children:")
+                logger.error(f"Analysis of {len(duplicate_children)} problematic children:")
                 logger.error(f"Total overlaps in list: {len(overlap_objects_list)}")
                 logger.error(f"Overlap threshold: {self.overlap_threshold}")
 

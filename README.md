@@ -39,11 +39,13 @@ https://github.com/user-attachments/assets/36ee3150-c869-4cba-be68-628dc37e4775
 
 ### Data Pre-processing Pipeline
 
-MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets. Included are two complementary methods for calculating anomalies and detecting extremes:
+MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets. Included are four complementary methods for calculating anomalies and two methods for detecting extremes:
 
 **Anomaly Calculation**:
   1. *Shifting Baseline* — Scientifically-rigorous definition of anomalies relative to a backwards-looking rolling smoothed climatology.
-  2. *Detrended Baseline* — Efficiently removes trend & season cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). (Highly efficient, but this approximation may lead to biases in certain statistics.)
+  2. *Fixed Baseline* — Daily climatology using the full time series without detrending. Preserves long-term trends and maintains a simple interpretation. (Best for baseline comparison studies, trend-inclusive analysis, or for public outreach.)
+  3. *Detrend Fixed Baseline* — Polynomial detrending followed by fixed daily climatology. Removes long-term trends and maintains the full time series of data. (Does not account for changes in seasonal timing, ideal for climate variability studies.)
+  4. *Harmonic Detrending* — Efficiently removes trend & season cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). (Highly efficient, but this approximation may lead to biases in certain statistics.)
 
 **Extreme Detection**:
   1. *Hobday Extreme* — Implements a similar methodology to Hobday et al. (2016) with local day-of-year specific thresholds determined based on the quantile within a rolling window.

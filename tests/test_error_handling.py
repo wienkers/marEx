@@ -103,7 +103,7 @@ class TestMethodValidation:
 
     def test_valid_method_combinations(self, test_data_dask, dimensions_gridded, dask_chunks):
         """Test that valid method combinations work correctly."""
-        # Test detrend_harmonic + global_extreme (previous default combination)
+        # Test detrend_harmonic + global_extreme
         result1 = marEx.preprocess_data(
             test_data_dask,
             method_anomaly="detrend_harmonic",
@@ -115,7 +115,7 @@ class TestMethodValidation:
         assert result1.attrs["method_anomaly"] == "detrend_harmonic"
         assert result1.attrs["method_extreme"] == "global_extreme"
 
-        # Test shifting_baseline + hobday_extreme
+        # Test shifting_baseline + hobday_extreme (default combination)
         result2 = marEx.preprocess_data(
             test_data_dask,
             method_anomaly="shifting_baseline",

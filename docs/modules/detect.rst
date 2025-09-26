@@ -93,6 +93,7 @@ Advanced Preprocessing
        window_year_baseline=20,                 # 20-year rolling baseline
        smooth_days_baseline=31,                 # 31-day smoothing
        window_days_hobday=11,                   # 11-day window for thresholds
+       window_spatial_hobday=5,                 # 5-cell spatial clustering
        dask_chunks={'time': 25}
    )
 
@@ -146,14 +147,14 @@ Method Comparison
 Anomaly Detection Methods
 -------------------------
 
-**Detrended Baseline** (``method_anomaly='detrended_baseline'``):
+**Harmonic Detrending** (``method_anomaly='detrend_harmonic'``):
 
 .. code-block:: python
 
    # Fast polynomial detrending with harmonic components
    extremes_ds = marEx.preprocess_data(
        sst,
-       method_anomaly='detrended_baseline',
+       method_anomaly='detrend_harmonic',
        threshold_percentile=95,
        # Additional parameters:
        std_normalise=False,          # Optional STD normalisation
@@ -166,6 +167,46 @@ Anomaly Detection Methods
   * Uses harmonic components (annual, semi-annual cycles)
   * May introduce biases in variability statistics
   * Best for: Quick analysis
+
+**Fixed Baseline** (``method_anomaly='fixed_baseline'``):
+
+.. code-block:: python
+
+   # Daily climatology using full time series without detrending
+   extremes_ds = marEx.preprocess_data(
+       sst,
+       method_anomaly='fixed_baseline',
+       threshold_percentile=95,
+       # Additional parameters:
+       smooth_days_baseline=11       # Smoothing window for climatology
+   )
+
+**Characteristics:**
+  * Anomaly relative to the daily climatology using full time series
+  * Preserves long-term / climate trends
+  * Simple interpretation and fast computation
+  * Best for: Baseline comparison studies, trend-inclusive analysis, public outreach
+
+**Detrend Fixed Baseline** (``method_anomaly='detrend_fixed_baseline'``):
+
+.. code-block:: python
+
+   # Polynomial detrending followed by fixed daily climatology
+   extremes_ds = marEx.preprocess_data(
+       sst,
+       method_anomaly='detrend_fixed_baseline',
+       threshold_percentile=95,
+       # Additional parameters:
+       detrend_orders=[1],           # Linear detrending (default)
+       smooth_days_baseline=11,      # Smoothing window for climatology
+       force_zero_mean=True          # Enforce zero mean
+   )
+
+**Characteristics:**
+  * Polynomial detrending followed by removing the fixed daily climatology
+  * Preserves the full time-series of data, but does not account for trends in the timing of seasonal transitions
+  * Removes long-term trends
+  * Best for: Climate variability studies with trend removal
 
 **Shifting Baseline** (``method_anomaly='shifting_baseline'``):
 
@@ -235,10 +276,10 @@ Core Parameters
 **threshold_percentile** : float, default=95
   Percentile threshold for extreme event identification (e.g., 95 for 95th percentile)
 
-**method_anomaly** : {'detrended_baseline', 'shifting_baseline'}, default='detrended_baseline'
+**method_anomaly** : {'detrend_harmonic', 'fixed_baseline', 'detrend_fixed_baseline', 'shifting_baseline'}, default='shifting_baseline'
   Method for anomaly computation
 
-**method_extreme** : {'global_extreme', 'hobday_extreme'}, default='global_extreme'
+**method_extreme** : {'global_extreme', 'hobday_extreme'}, default='hobday_extreme'
   Method for extreme identification
 
 **dask_chunks** : dict, default={'time': 25}
@@ -247,13 +288,29 @@ Core Parameters
 Anomaly Method Parameters
 -------------------------
 
-**Detrended Baseline Parameters:**
+**Harmonic Detrending Parameters:**
 
 **std_normalise** : bool, default=False
   Whether to normalise anomalies using 30-day rolling standard deviation
 
 **detrend_orders** : list of int, default=[1]
   Polynomial orders for detrending (e.g., [1, 2] for linear + quadratic)
+
+**force_zero_mean** : bool, default=True
+  Whether to explicitly enforce zero mean in final anomalies
+
+**Fixed Baseline Parameters:**
+
+**smooth_days_baseline** : int, default=11
+  Number of days for smoothing the daily climatology
+
+**Detrend Fixed Baseline Parameters:**
+
+**detrend_orders** : list of int, default=[1]
+  Polynomial orders for detrending (e.g., [1, 2] for linear + quadratic)
+
+**smooth_days_baseline** : int, default=11
+  Number of days for smoothing the daily climatology after detrending
 
 **force_zero_mean** : bool, default=True
   Whether to explicitly enforce zero mean in final anomalies
@@ -329,7 +386,7 @@ Method Combinations
    # Fastest combination (less rigorous)
    extremes_ds = marEx.preprocess_data(
        sst,
-       method_anomaly='detrended_baseline',
+       method_anomaly='detrend_harmonic',
        method_extreme='global_extreme',
        threshold_percentile=95,
        std_normalise=False
@@ -484,7 +541,7 @@ Common Issues and Solutions
    extremes_ds = marEx.preprocess_data(
        sst,
        threshold_percentile=95,
-       method_anomaly='detrended_baseline',
+       method_anomaly='detrend_harmonic',
        method_extreme='global_extreme',
        std_normalise=False
    )
@@ -524,12 +581,12 @@ Method Performance Comparison
 
    # Relative performance for global 0.25° daily data:
 
-   # Fastest: detrended_baseline + global_extreme
+   # Fastest: detrend_harmonic + global_extreme
    # - Processing time: ~2 minutes per decade
    # - Memory usage: ~4 GB
-   # - Accuracy: Good for trend analysis
+   # - Accuracy: Good for first analysis
 
-   # Balanced: shifting_baseline + global_extreme
+   # Balanced: detrend_fixed_baseline + hobday_extreme
    # - Processing time: ~8 minutes per decade
    # - Memory usage: ~8 GB
    # - Accuracy: Better climatology
@@ -556,8 +613,9 @@ Best Practices
 Method Selection Guidelines
 ---------------------------
 
-1. **Exploratory Analysis**: Use ``detrended_baseline`` + ``global_extreme``
+1. **Quick Exploratory Analysis**: Use ``detrend_harmonic`` + ``global_extreme``
 2. **Climate Change Research Studies**: Use ``shifting_baseline`` + ``hobday_extreme``
+3. **Limited Timeseries**: Use ``detrend_fixed_baseline`` + ``hobday_extreme``
 
 Chunking Guidelines
 -------------------
