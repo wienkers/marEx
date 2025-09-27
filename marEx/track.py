@@ -442,7 +442,7 @@ class tracker:
                 logger.info(f"Calculating cell areas from grid resolution: {grid_resolution} degrees")
 
                 # Earth radius in km
-                R_earth = 6378.
+                R_earth = 6378.0
 
                 # Get coordinate arrays (should be in degrees)
                 lat_coords = data_bin[self.ycoord]
@@ -454,11 +454,7 @@ class tracker:
 
                 # Calculate grid areas using spherical geometry
                 # Area = R² * |sin(lat + dlat/2) - sin(lat - dlat/2)| * dlon
-                grid_area = (
-                    R_earth**2 *
-                    np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) *
-                    dlon
-                ).astype(np.float32)
+                grid_area = (R_earth**2 * np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) * dlon).astype(np.float32)
 
                 # Check if cell_areas was originally provided (and warn about override)
                 if cell_areas is not None:
@@ -3105,8 +3101,7 @@ class tracker:
             import gc
 
             gc.collect()
-        
-        
+
         # Recalculate areas time-slice by time-slice to handle disjoint parts correctly
         if "area" in object_props_extended.data_vars:
 
@@ -3171,9 +3166,7 @@ class tracker:
             )
 
             # Assign coordinates to match object_props_extended structure
-            areas_parallel = areas_parallel.assign_coords(
-                {"ID": object_props_extended.ID}
-            )
+            areas_parallel = areas_parallel.assign_coords({"ID": object_props_extended.ID})
 
             # Transpose to match object_props_extended["area"] structure: (time, ID)
             areas_parallel = areas_parallel.transpose(self.timedim, "ID")
@@ -3184,8 +3177,8 @@ class tracker:
             # Explicit cleanup
             del areas_parallel, event_ids, coords, cell_area_broadcast
             import gc
+
             gc.collect()
-        
 
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
@@ -3640,9 +3633,9 @@ class tracker:
                 logger.error(f"Total overlaps in list: {len(overlap_objects_list)}")
                 logger.error(f"Overlap threshold: {self.overlap_threshold}")
 
-                # Get time information for diagnostics
-                time_coords = object_id_field_unique[self.timecoord].values
-                logger.error(f"Time coordinates of problematic children: {time_coords[duplicate_children]}")
+                # Log problematic child IDs (time info not available at this stage)
+                logger.error(f"Problematic children IDs: {duplicate_children[:10].tolist()}")
+
                 raise TrackingError(
                     "Multiple parents detected after splitting/merging",
                     details=f"{len(duplicate_children)} children have multiple parents",
@@ -3657,6 +3650,7 @@ class tracker:
                         "max_parent_count": child_counts.max(),
                         "total_overlaps": len(overlap_objects_list),
                         "overlap_threshold": self.overlap_threshold,
+                        "sample_duplicate_ids": duplicate_children[:10].tolist(),
                     },
                 )
             else:

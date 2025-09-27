@@ -200,6 +200,7 @@ def _infer_dims_coords(
 
     return dimensions, coordinates
 
+
 def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     """
     Validate that all unmasked data contains only finite values (no NaN or inf).
@@ -218,7 +219,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     """
     # Create a mask for valid (finite) data
     finite_mask = np.isfinite(da)
-    
+
     # Check if there's any data at all
     if not finite_mask.any():
         raise create_data_validation_error(
@@ -236,25 +237,25 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
                 "inf_values": int((~np.isfinite(da) & da.notnull()).sum().compute()),
             },
         )
-    
+
     # Create ocean/land mask from first time step to identify valid spatial locations
     spatial_mask = np.isfinite(da.isel({dimensions["time"]: 0}))
-    
+
     # For each spatial location that should have data, check if all time points are finite
     if spatial_mask.any():
         # Check for locations that have valid data in first timestep but invalid data elsewhere
         temporal_validity = finite_mask.where(spatial_mask, True).all(dim=dimensions["time"])
-        
+
         if not temporal_validity.all():
             # Count problematic locations and values
             invalid_locations = (~temporal_validity).sum().compute()
             total_locations = spatial_mask.sum().compute()
-            
+
             # Count different types of invalid values
             nan_count = da.isnull().sum().compute()
             inf_count = (np.isinf(da)).sum().compute()
             total_invalid = nan_count + inf_count
-            
+
             raise create_data_validation_error(
                 f"Dataset contains invalid values in {invalid_locations} of {total_locations} valid locations",
                 details=f"Found {total_invalid} invalid values: {nan_count} NaN, {inf_count} infinite",
