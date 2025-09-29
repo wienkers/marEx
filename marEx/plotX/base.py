@@ -586,9 +586,9 @@ def make_frame(
         "shading": "auto",
     }
 
-    if plot_params.get("norm"):
+    if plot_params.get("norm") is not None:
         plot_kwargs["norm"] = plot_params["norm"]
-    elif plot_params.get("clim"):
+    elif plot_params.get("clim") is not None:
         plot_kwargs["vmin"] = plot_params["clim"][0]
         plot_kwargs["vmax"] = plot_params["clim"][1]
 
@@ -653,7 +653,7 @@ def make_frame(
                         lat,
                         object_mask.astype(float),
                         levels=[0.5],
-                        colors=["black"],
+                        colors=["white"],
                         linewidths=1.5,
                         transform=ccrs.PlateCarree(),
                         zorder=6,
