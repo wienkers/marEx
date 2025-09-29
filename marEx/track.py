@@ -1492,8 +1492,7 @@ class tracker:
         events_ds = self._remap_coordinates(events_ds)
 
         # Rechunk to size 1 for better post-processing
-        #   Actually, this often causes more problems than it solves !
-        # events_ds = events_ds.chunk({self.timedim: 1})
+        events_ds = events_ds.chunk({self.timedim: 1})
 
         return events_ds
 
@@ -2840,56 +2839,69 @@ class tracker:
         """
         # Cluster the overlap_pairs into groups of IDs that are actually the same object
         # Get IDs from overlap pairs
-        max_ID = int(object_id_field_unique.max().compute().values.item()) + 1
-        if max_ID >= np.iinfo(np.int32).max:
-            raise ValueError(f"Maximum object ID {max_ID} exceeds int32 limit. Consider using a larger data type.")
-        IDs = np.arange(max_ID, dtype=np.int32)
-
-        # Convert overlap pairs to indices
+        # Step 1: Find all IDs that actually exist in the data
+        max_ID = int(object_id_field_unique.max().compute().values.item())
+        
+        # Get unique IDs from overlap list
         if len(overlap_objects_list) > 0:
-            overlap_pairs_indices = np.array([(pair[0], pair[1]) for pair in overlap_objects_list])
-
-            # Create a sparse matrix representation of the graph
-            n = max_ID
-            row_indices, col_indices = overlap_pairs_indices.T
-            data = np.ones(len(overlap_pairs_indices), dtype=np.bool_)
-            graph = csr_matrix((data, (row_indices, col_indices)), shape=(n, n), dtype=np.bool_)
+            overlap_ids = np.unique(overlap_objects_list[:, :2].flatten())
+            overlap_ids = overlap_ids[overlap_ids > 0]  # Remove 0 (background)
         else:
-            # No overlaps - create empty graph
-            n = max_ID
-            graph = csr_matrix((n, n), dtype=np.bool_)
-            overlap_pairs_indices = np.empty((0, 2), dtype=np.int32)
-
-        # Clean up temporary arrays (if they exist)
+            overlap_ids = np.array([], dtype=np.int32)
+        
+        # Get unique IDs from object_id_field (more comprehensive)
+        field_ids = np.unique(object_id_field_unique.compute().values)
+        field_ids = field_ids[field_ids > 0]  # Remove 0 (background)
+        
+        # Combine and get all valid IDs
+        all_valid_ids = np.unique(np.concatenate([overlap_ids, field_ids]))
+        
+        logger.info(f"Found {len(all_valid_ids)} valid object IDs (out of max ID {max_ID})")
+        
+        # Step 2: Create dense mapping: original_ID -> dense_index
+        # This ensures continuous indices for connected_components
+        original_to_dense = {int(original_id): dense_idx 
+                            for dense_idx, original_id in enumerate(all_valid_ids)}
+        dense_to_original = {dense_idx: int(original_id) 
+                            for original_id, dense_idx in original_to_dense.items()}
+        
+        n_valid = len(all_valid_ids)
+        
+        # Step 3: Convert overlap pairs to dense indices
         if len(overlap_objects_list) > 0:
-            del row_indices
-            del col_indices
-            del data
-
-        # Solve the graph to determine connected components
-        num_components, component_IDs = connected_components(csgraph=graph, directed=False, return_labels=True)
-
-        del graph
-
-        # Group IDs by their component
-        ID_clusters = [[] for _ in range(num_components)]
-        for ID, component_ID in zip(IDs, component_IDs):
-            ID_clusters[component_ID].append(ID)
-
-        # ID_clusters now is a list of lists of equivalent object IDs that have been tracked across time
-        # We now need to replace all IDs in object_id_field_unique that match the equivalent_IDs with the list index:
-        #   This is the new/final ID field.
-
-        # Create mapping from original IDs to cluster indices
-        min_int32 = np.iinfo(np.int32).min
-        max_old_ID = object_id_field_unique.max().compute().data
-        ID_to_cluster_index_array = np.full(max_old_ID + 1, min_int32, dtype=np.int32)
-
-        # Fill the lookup array
-        for index, cluster in enumerate(ID_clusters):
-            for ID in cluster:
-                ID_to_cluster_index_array[ID] = np.int32(index)  # Because these are the connected IDs, there are many fewer!
-                #  ID = 0 is still invalid/no object
+            # Map to dense indices
+            overlap_pairs_dense = np.array([
+                [original_to_dense[int(pair[0])], original_to_dense[int(pair[1])]]
+                for pair in overlap_objects_list
+                if int(pair[0]) in original_to_dense and int(pair[1]) in original_to_dense
+            ])
+            
+            # Create sparse graph with dense indices
+            row_indices, col_indices = overlap_pairs_dense.T
+            data = np.ones(len(overlap_pairs_dense), dtype=np.bool_)
+            graph = csr_matrix((data, (row_indices, col_indices)), 
+                            shape=(n_valid, n_valid), dtype=np.bool_)
+        else:
+            graph = csr_matrix((n_valid, n_valid), dtype=np.bool_)
+        
+        # Step 4: Solve for connected components (now on dense graph)
+        num_components, component_IDs_dense = connected_components(
+            csgraph=graph, directed=False, return_labels=True
+        )
+        
+        logger.info(f"Identified {num_components} connected components (events)")
+        
+        # Step 5: Create lookup from original IDs to event IDs
+        # Event IDs will be continuous: 1, 2, 3, ... num_components
+        original_to_event = {}
+        for dense_idx, event_id in enumerate(component_IDs_dense):
+            original_id = dense_to_original[dense_idx]
+            original_to_event[original_id] = event_id + 1  # +1 so events start at 1, not 0
+        
+        # Step 6: Create full lookup array for fast remapping
+        ID_to_cluster_index_array = np.full(max_ID + 1, 0, dtype=np.int32)  # 0 = background
+        for original_id, event_id in original_to_event.items():
+            ID_to_cluster_index_array[original_id] = np.int32(event_id)
 
         # Convert to DataArray for apply_ufunc
         #  N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly
@@ -2897,7 +2909,7 @@ class tracker:
         ID_to_cluster_index_da = xr.DataArray(
             ID_to_cluster_index_array,
             dims="ID",
-            coords={"ID": np.arange(max_old_ID + 1, dtype=np.int32)},
+            coords={"ID": np.arange(max_ID + 1, dtype=np.int32)},
         )
 
         def map_IDs_to_indices(block: NDArray[np.int32], ID_to_cluster_index_array: NDArray[np.int32]) -> NDArray[np.int32]:
@@ -3086,7 +3098,7 @@ class tracker:
             centroids_parallel = centroids_parallel.assign_coords(
                 {"ID": object_props_extended.ID, "component": object_props_extended["centroid"].coords["component"]}
             )
-
+                        
             # Transpose to match object_props_extended["centroid"] structure: (component, time, ID)
             centroids_parallel = centroids_parallel.transpose("component", self.timedim, "ID")
 
@@ -3145,7 +3157,7 @@ class tracker:
             # Prepare cell_area for broadcasting
             if self.unstructured_grid:
                 cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
-            else:
+                            else:
                 cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
 
             areas_parallel = xr.apply_ufunc(
@@ -3163,7 +3175,7 @@ class tracker:
 
             # Assign coordinates to match object_props_extended structure
             areas_parallel = areas_parallel.assign_coords({"ID": object_props_extended.ID})
-
+                
             # Transpose to match object_props_extended["area"] structure: (time, ID)
             areas_parallel = areas_parallel.transpose(self.timedim, "ID")
 
