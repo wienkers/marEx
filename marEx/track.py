@@ -359,7 +359,8 @@ class tracker:
         logger.info("Initialising MarEx tracker")
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
         logger.info(
-            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
+            f"Parameters: R_fill={R_fill}, T_fill={T_fill}, "
+            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
         )
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
@@ -429,7 +430,7 @@ class tracker:
             self.data_attrs = {}
 
         # Input validation and preparation
-        self._validate_inputs(neighbours, cell_areas, grid_resolution)
+        self._validate_inputs(neighbours, cell_areas, grid_resolution, temp_dir)
 
         # Handle cell_areas for both structured and unstructured grids
         if self.unstructured_grid:
@@ -484,18 +485,7 @@ class tracker:
 
         # Special setup for unstructured grids
         if unstructured_grid:
-            if temp_dir is None:
-                raise create_data_validation_error(
-                    "temp_dir is required for unstructured grids",
-                    details="Unstructured grid processing requires a temporary directory",
-                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
-                )
-            if neighbours is None:
-                raise create_data_validation_error(
-                    "neighbours array is required for unstructured grids",
-                    details="Unstructured grid processing requires cell connectivity information",
-                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
-                )
+            # Validation already done in _validate_inputs
             self._setup_unstructured_grid(temp_dir, neighbours, cell_areas, max_iteration)
 
         self._configure_warnings()
@@ -505,6 +495,7 @@ class tracker:
         neighbours: Optional[xr.DataArray] = None,
         cell_areas: Optional[xr.DataArray] = None,
         grid_resolution: Optional[float] = None,
+        temp_dir: Optional[str] = None,
     ) -> None:
         """Validate input parameters and data."""
         if self.regional_mode and self.unstructured_grid:
@@ -599,8 +590,20 @@ class tracker:
                 },
             )
 
-        # Validate cell_areas parameter for both grid types
+        # Validate required parameters for unstructured grids
         if self.unstructured_grid:
+            if temp_dir is None:
+                raise create_data_validation_error(
+                    "temp_dir is required for unstructured grids",
+                    details="Unstructured grid processing requires a temporary directory",
+                    suggestions=["Provide a temp_dir parameter when using unstructured_grid=True"],
+                )
+            if neighbours is None:
+                raise create_data_validation_error(
+                    "neighbours array is required for unstructured grids",
+                    details="Unstructured grid processing requires cell connectivity information",
+                    suggestions=["Provide a neighbours parameter when using unstructured_grid=True"],
+                )
             if cell_areas is None:
                 raise create_data_validation_error(
                     "cell_areas array is required for unstructured grids",
@@ -1296,7 +1299,7 @@ class tracker:
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
         # Remove small objects
-        logger.info(f"Filtering small objects")
+        logger.info("Filtering small objects")
         with log_timing(logger, "Small object filtering"):
             (
                 data_bin_filtered,
@@ -1489,7 +1492,8 @@ class tracker:
         events_ds = self._remap_coordinates(events_ds)
 
         # Rechunk to size 1 for better post-processing
-        events_ds = events_ds.chunk({self.timedim: 1})
+        #   Actually, this often causes more problems than it solves !
+        # events_ds = events_ds.chunk({self.timedim: 1})
 
         return events_ds
 
@@ -2068,7 +2072,6 @@ class tracker:
         tuple
             (y_centroid, x_centroid)
         """
-
         if self.regional_mode:
             # We don't need to adjust centroids for periodic boundaries
             return original_centroid
@@ -2587,7 +2590,6 @@ class tracker:
         - Updates object properties by recalculating for consolidated objects
         - Removes redundant child objects from object_props
         """
-
         # Find overlaps between t-2 and t-1
         backward_overlaps = self.check_overlap_slice(data_t_minus_2.values, data_t_minus_1.values)
         if len(backward_overlaps) == 0:
@@ -3038,7 +3040,6 @@ class tracker:
                 spatial_dims: List[str],
             ) -> NDArray[np.float32]:
                 """Calculate centroids for a single 2D spatial slice in parallel"""
-
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
@@ -3119,7 +3120,6 @@ class tracker:
                 event_ids: NDArray[np.int32],
             ) -> NDArray[np.float32]:
                 """Calculate physical areas for a single spatial slice in parallel"""
-
                 # Get unique IDs in this slice
                 present_ids = np.unique(slice_data)
                 present_ids = present_ids[present_ids > 0]  # Exclude background
@@ -3543,7 +3543,8 @@ class tracker:
                         if child_id in new_child_props.ID:
                             # Update existing entry
                             object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
-                        else:  # Delete child_id:  The object has split/morphed such that it doesn't get a partition of this child...
+                        else:
+                            # Delete child_id: The object has split/morphed such that it doesn't get a partition of this child...
                             object_props = object_props.drop_sel(
                                 ID=child_id
                             )  # N.B.: This means that the IDs are no longer continuous...
@@ -3559,7 +3560,8 @@ class tracker:
                         missing_ids = set(new_object_id) - set(new_object_ids_still.values)
                         if len(missing_ids) > 0:
                             logger.warning(
-                                f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
+                                f"Missing newly created child_ids {missing_ids} "
+                                f"because parents have split/morphed in the meantime..."
                             )
 
                     # After processing all merging objects in this iteration
@@ -3680,7 +3682,9 @@ class tracker:
                             if valid_fractions and max(valid_fractions) > 1.0:
                                 logger.warning(f"WARNING: Overlap fraction > 1.0 detected (max: {max(valid_fractions):.3f})")
                             if total_overlap_area > child_area * 1.1:  # Allow 10% tolerance
-                                logger.warning(f"WARNING: Total overlap exceeds child area by {(total_overlap_area/child_area - 1)*100:.1f}%")
+                                logger.warning(
+                                    f"WARNING: Total overlap exceeds child area by {(total_overlap_area/child_area - 1)*100:.1f}%"
+                                )
 
                         else:
                             logger.warning(f"Child ID {child_id} not found in object_props")

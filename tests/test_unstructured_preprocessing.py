@@ -155,7 +155,7 @@ class TestUnstructuredPreprocessing:
             95,
             description="detrend_harmonic + global_extreme (unstructured)",
         )
-        
+
     def test_fixed_baseline_unstructured(self):
         """Test fixed_baseline method with unstructured grid."""
         extremes_ds = marEx.preprocess_data(
@@ -173,10 +173,10 @@ class TestUnstructuredPreprocessing:
         # Verify unstructured-specific structure
         assert "neighbours" in extremes_ds.data_vars
         assert "cell_areas" in extremes_ds.data_vars
-        
+
         # Verify time preservation
         input_time_size = self.sst_data.sizes["time"]
-        output_time_size = extremes_ds.sizes["time"] 
+        output_time_size = extremes_ds.sizes["time"]
         assert output_time_size == input_time_size
 
         # Verify cell dimension structure
@@ -185,11 +185,11 @@ class TestUnstructuredPreprocessing:
         assert len(extremes_ds.extreme_events.dims) == 2  # time + cell only
 
     def test_detrend_fixed_baseline_unstructured(self):
-        """Test detrend_fixed_baseline method with unstructured grid.""" 
+        """Test detrend_fixed_baseline method with unstructured grid."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
-            method_extreme="hobday_extreme", 
+            method_extreme="hobday_extreme",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             window_days_hobday=5,
@@ -204,7 +204,7 @@ class TestUnstructuredPreprocessing:
         assert "neighbours" in extremes_ds.data_vars
         input_time_size = self.sst_data.sizes["time"]
         assert extremes_ds.sizes["time"] == input_time_size
-        
+
         # Verify hobday thresholds have dayofyear dimension
         assert "dayofyear" in extremes_ds.thresholds.dims
         cell_dim = "ncells" if "ncells" in extremes_ds.dims else "cell"
@@ -215,20 +215,20 @@ class TestUnstructuredPreprocessing:
         # Test all combinations
         combinations = [
             ("fixed_baseline", "global_extreme"),
-            ("fixed_baseline", "hobday_extreme"), 
+            ("fixed_baseline", "hobday_extreme"),
             ("detrend_fixed_baseline", "global_extreme"),
             ("detrend_fixed_baseline", "hobday_extreme"),
             ("shifting_baseline", "global_extreme"),
-            ("shifting_baseline", "hobday_extreme"), 
+            ("shifting_baseline", "hobday_extreme"),
             ("detrend_harmonic", "global_extreme"),
             ("detrend_harmonic", "hobday_extreme"),
         ]
-        
+
         for method_anomaly, method_extreme in combinations:
             result = marEx.preprocess_data(
                 self.sst_data,
                 method_anomaly=method_anomaly,
-                method_extreme=method_extreme, 
+                method_extreme=method_extreme,
                 threshold_percentile=95,
                 detrend_orders=[1] if "detrended" in method_anomaly else None,
                 window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
@@ -238,16 +238,17 @@ class TestUnstructuredPreprocessing:
                 neighbours=self.mock_neighbours,
                 cell_areas=self.mock_cell_areas,
             )
-            
+
             assert isinstance(result, xr.Dataset)
             assert "extreme_events" in result.data_vars
             assert result.attrs["method_anomaly"] == method_anomaly
             assert result.attrs["method_extreme"] == method_extreme
-            
+
             # Verify reasonable extreme frequency
             extreme_frequency = float(result.extreme_events.mean())
-            assert 0.025 < extreme_frequency < 0.075, \
-                f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
+            assert (
+                0.025 < extreme_frequency < 0.075
+            ), f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
 
     def test_unstructured_grid_detection(self):
         """Test that the function correctly detects unstructured vs gridded data."""
