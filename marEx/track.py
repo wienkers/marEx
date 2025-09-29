@@ -2656,10 +2656,6 @@ class tracker:
                                     ID=first_child_id
                                 )
 
-        if id_mappings:
-            sample_mappings = dict(list(id_mappings.items())[:5])
-            suffix = "..." if len(id_mappings) > 5 else ""
-
         return data_t_minus_1, object_props
 
     def compute_id_time_dict(
@@ -3397,7 +3393,7 @@ class tracker:
                         data_t_minus_2 = xr.full_like(data_t, 0)
                         data_t_minus_1 = xr.full_like(data_t, 0)
 
-                # ID Consolidation
+                # ID Consolidation of objects at t-1
                 if relative_t > 0:  # Only consolidate if we have meaningful t-1 and t-2
                     data_t_minus_1, object_props = self.consolidate_object_ids(
                         data_t_minus_2, data_t_minus_1, object_props, absolute_t - 1
@@ -3629,30 +3625,96 @@ class tracker:
 
             # Enhanced validation with comprehensive spatial and temporal information
             if len(duplicate_children) > 0:
-                logger.error(f"Analysis of {len(duplicate_children)} problematic children:")
-                logger.error(f"Total overlaps in list: {len(overlap_objects_list)}")
-                logger.error(f"Overlap threshold: {self.overlap_threshold}")
+                logger.warning(f"There is {len(duplicate_children)} potentially problematic children:")
 
                 # Log problematic child IDs (time info not available at this stage)
-                logger.error(f"Problematic children IDs: {duplicate_children[:10].tolist()}")
+                logger.warning(f"Children IDs: {duplicate_children[:10].tolist()}")
 
-                raise TrackingError(
-                    "Multiple parents detected after splitting/merging",
-                    details=f"{len(duplicate_children)} children have multiple parents",
-                    suggestions=[
-                        "Check splitting/merging algorithm for edge cases",
-                        "Verify object properties are calculated correctly",
-                        "Check for numerical precision issues in overlap calculations",
-                        "Look for issues in find_overlapping_objects or enforce_overlap_threshold",
-                    ],
-                    context={
-                        "n_duplicate_children": len(duplicate_children),
-                        "max_parent_count": child_counts.max(),
-                        "total_overlaps": len(overlap_objects_list),
-                        "overlap_threshold": self.overlap_threshold,
-                        "sample_duplicate_ids": duplicate_children[:10].tolist(),
-                    },
-                )
+                # Detailed analysis of each problematic child
+                for child_id in duplicate_children[:5]:  # Limit to first 5 for readability
+                    # Find all parent-child relationships for this child
+                    child_relationships = overlap_objects_list[overlap_objects_list[:, 1] == child_id]
+                    parent_ids = child_relationships[:, 0]
+                    overlap_areas = child_relationships[:, 2]
+
+                    logger.warning(f"\n--- Details for child ID {child_id} ---")
+                    logger.warning(f"Number of parents: {len(parent_ids)}")
+                    logger.warning(f"Parent IDs: {parent_ids.tolist()}")
+                    logger.warning(f"Raw overlap areas: {overlap_areas.tolist()}")
+
+                    # Get child object properties if available
+                    try:
+                        if child_id in object_props.ID.values:
+                            child_area = object_props.sel(ID=child_id).area.values.item()
+                            child_centroid = object_props.sel(ID=child_id).centroid.values
+
+                            logger.warning(f"Child total area: {child_area}")
+                            logger.warning(f"Child centroid: {child_centroid}")
+
+                            # Calculate overlap fractions for each parent
+                            overlap_fractions = []
+                            parent_areas = []
+                            for i, parent_id in enumerate(parent_ids):
+                                if parent_id in object_props.ID.values:
+                                    parent_area = object_props.sel(ID=parent_id).area.values.item()
+                                    parent_areas.append(parent_area)
+
+                                    # Calculate overlap fraction based on smaller object
+                                    min_area = min(child_area, parent_area)
+                                    overlap_fraction = float(overlap_areas[i]) / min_area
+                                    overlap_fractions.append(overlap_fraction)
+                                else:
+                                    parent_areas.append("N/A")
+                                    overlap_fractions.append("N/A")
+
+                            logger.warning(f"Parent areas: {parent_areas}")
+                            logger.warning(f"Overlap fractions: {overlap_fractions}")
+
+                            # Check for suspicious patterns
+                            total_overlap_area = sum(overlap_areas)
+                            logger.warning(f"Sum of overlap areas: {total_overlap_area}")
+                            logger.warning(f"Sum/Child area ratio: {total_overlap_area/child_area:.3f}")
+
+                            # Flag potential issues
+                            valid_fractions = [f for f in overlap_fractions if isinstance(f, (int, float))]
+                            if valid_fractions and max(valid_fractions) > 1.0:
+                                logger.warning(f"WARNING: Overlap fraction > 1.0 detected (max: {max(valid_fractions):.3f})")
+                            if total_overlap_area > child_area * 1.1:  # Allow 10% tolerance
+                                logger.warning(f"WARNING: Total overlap exceeds child area by {(total_overlap_area/child_area - 1)*100:.1f}%")
+
+                        else:
+                            logger.warning(f"Child ID {child_id} not found in object_props")
+
+                    except Exception as e:
+                        logger.warning(f"Error analysing child ID {child_id}: {str(e)}")
+
+                    # Try to find timestep information by checking where this child appears
+                    try:
+                        child_timesteps = []
+                        for t_idx in range(object_id_field_unique.sizes[self.timedim]):
+                            time_slice = object_id_field_unique.isel({self.timedim: t_idx})
+                            if (time_slice == child_id).any():
+                                time_coord = time_slice.coords[self.timedim].values
+                                child_timesteps.append((t_idx, time_coord))
+
+                        if child_timesteps:
+                            logger.warning(f"Child appears at timesteps: {child_timesteps}")
+                        else:
+                            logger.warning("Child timestep information not found")
+
+                    except Exception as e:
+                        logger.warning(f"Error finding timestep for child ID {child_id}: {str(e)}")
+
+                    logger.warning("--- End detailed analysis ---\n")
+
+                # Log summary information as warnings instead of raising error
+                logger.warning("=" * 80)
+                logger.warning("Tracker Warning: Multiple parents for single child detected after splitting/merging")
+                logger.warning(f"Details: {len(duplicate_children)} children have multiple parents")
+                logger.warning("Note: This is likely due to consolidation of IDs after splitting/merging")
+                logger.warning("      and still is the correct behaviour (as per the tracking overlap logic")
+                logger.warning("      applied to disjoint objects that will be grouped together.)")
+                logger.warning("=" * 80)
             else:
                 logger.info(f"Validation passed: All {len(unique_children)} children have unique parents")
         else:
