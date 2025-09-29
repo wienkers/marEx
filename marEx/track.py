@@ -3030,164 +3030,6 @@ class tracker:
 
             object_props_extended[var_name] = temp
 
-        # Recalculate centroids time-slice by time-slice to handle disjoint parts correctly
-        if "centroid" in object_props_extended.data_vars:
-
-            event_ids = object_props_extended.ID.values.copy()
-
-            if self.unstructured_grid:
-                spatial_dims = [self.xdim]
-                coords = {self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]}
-            else:
-                spatial_dims = [self.ydim, self.xdim]
-                coords = {
-                    self.ydim: split_merged_relabeled_object_id_field.coords[self.ydim],
-                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim],
-                }
-
-            def calculate_centroids_for_slice(
-                slice_data: NDArray[np.int32],
-                event_ids: NDArray[np.int32],
-                coords: Dict[str, NDArray],
-                spatial_dims: List[str],
-            ) -> NDArray[np.float32]:
-                """Calculate centroids for a single 2D spatial slice in parallel"""
-                # Get unique IDs in this slice
-                present_ids = np.unique(slice_data)
-                present_ids = present_ids[present_ids > 0]  # Exclude background
-
-                # Create DataArray for this slice
-                time_slice = xr.DataArray(slice_data, coords=coords, dims=spatial_dims)
-
-                # Calculate properties only for present IDs
-                props = self.calculate_object_properties(time_slice, properties=["centroid"])
-
-                centroids = props["centroid"].values.T  # Shape: (n_objects, 2)
-
-                # Initialise result array with NaN (shape: ID, component)
-                result = np.full((len(event_ids), 2), np.nan, dtype=np.float32)
-
-                # Map results back to full ID space
-                if len(centroids) > 0:
-                    # Create a mapping from present_ids to their indices in props
-                    id_to_idx = {present_id: idx for idx, present_id in enumerate(present_ids)}
-
-                    # Vectorised mapping
-                    valid_mask = np.isin(event_ids, present_ids)
-                    result[valid_mask] = centroids[[id_to_idx[event_id] for event_id in event_ids[valid_mask]]]
-
-                return result
-
-            centroids_parallel = xr.apply_ufunc(
-                calculate_centroids_for_slice,
-                split_merged_relabeled_object_id_field,
-                kwargs={
-                    "event_ids": event_ids,
-                    "coords": coords,
-                    "spatial_dims": spatial_dims,
-                },
-                input_core_dims=[spatial_dims],
-                output_core_dims=[["ID", "component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[np.float32],
-                dask_gufunc_kwargs={"output_sizes": {"ID": len(event_ids), "component": 2}},
-            )
-
-            # Assign coordinates to match object_props_extended structure
-            centroids_parallel = centroids_parallel.assign_coords(
-                {"ID": object_props_extended.ID, "component": object_props_extended["centroid"].coords["component"]}
-            )
-                        
-            # Transpose to match object_props_extended["centroid"] structure: (component, time, ID)
-            centroids_parallel = centroids_parallel.transpose("component", self.timedim, "ID")
-
-            # Update object_props_extended with parallel-computed centroids
-            object_props_extended["centroid"] = centroids_parallel
-
-            # Explicit cleanup
-            del centroids_parallel, event_ids, coords
-            import gc
-
-            gc.collect()
-
-        # Recalculate areas time-slice by time-slice to handle disjoint parts correctly
-        if "area" in object_props_extended.data_vars:
-
-            event_ids = object_props_extended.ID.values.copy()
-
-            if self.unstructured_grid:
-                spatial_dims = [self.xdim]
-                coords = {self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim]}
-            else:
-                spatial_dims = [self.ydim, self.xdim]
-                coords = {
-                    self.ydim: split_merged_relabeled_object_id_field.coords[self.ydim],
-                    self.xdim: split_merged_relabeled_object_id_field.coords[self.xdim],
-                }
-
-            def calculate_areas_for_slice(
-                slice_data: NDArray[np.int32],
-                cell_areas: NDArray[np.float32],
-                event_ids: NDArray[np.int32],
-            ) -> NDArray[np.float32]:
-                """Calculate physical areas for a single spatial slice in parallel"""
-                # Get unique IDs in this slice
-                present_ids = np.unique(slice_data)
-                present_ids = present_ids[present_ids > 0]  # Exclude background
-
-                # Initialise result array with NaN
-                result = np.full(len(event_ids), np.nan, dtype=np.float32)
-
-                if len(present_ids) == 0:
-                    return result
-
-                # For each present ID, calculate total area
-                for present_id in present_ids:
-                    # Find this ID in the event_ids array
-                    event_idx = np.where(event_ids == present_id)[0]
-                    if len(event_idx) > 0:
-                        # Calculate area by summing cell_areas where slice_data == present_id
-                        mask = slice_data == present_id
-                        total_area = np.sum(cell_areas[mask])
-                        result[event_idx[0]] = total_area
-
-                return result
-
-            # Prepare cell_area for broadcasting
-            if self.unstructured_grid:
-                cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
-                            else:
-                cell_area_broadcast, _ = xr.broadcast(self.cell_area, split_merged_relabeled_object_id_field)
-
-            areas_parallel = xr.apply_ufunc(
-                calculate_areas_for_slice,
-                split_merged_relabeled_object_id_field,
-                cell_area_broadcast,
-                kwargs={"event_ids": event_ids},
-                input_core_dims=[spatial_dims, spatial_dims],
-                output_core_dims=[["ID"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[np.float32],
-                dask_gufunc_kwargs={"output_sizes": {"ID": len(event_ids)}},
-            )
-
-            # Assign coordinates to match object_props_extended structure
-            areas_parallel = areas_parallel.assign_coords({"ID": object_props_extended.ID})
-                
-            # Transpose to match object_props_extended["area"] structure: (time, ID)
-            areas_parallel = areas_parallel.transpose(self.timedim, "ID")
-
-            # Update object_props_extended with parallel-computed areas
-            object_props_extended["area"] = areas_parallel
-
-            # Explicit cleanup
-            del areas_parallel, event_ids, coords, cell_area_broadcast
-            import gc
-
-            gc.collect()
-
         # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
         #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
         # i.e. for each merge_ID --> merge_parent_IDs   gives the old IDs  --> map to new ID using ID_to_cluster_index_da
@@ -3270,29 +3112,6 @@ class tracker:
         # Format merge ledger
         merge_ledger = merge_ledger.rename("merge_ledger").transpose(self.timedim, "ID", "sibling_ID").persist()
 
-        # For structured grid, convert centroid from pixel to lat/lon
-        if not self.unstructured_grid:
-            y_values = xr.DataArray(
-                split_merged_relabeled_object_id_field[self.ydim].values,
-                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.ydim]), dtype=np.int32)],
-                dims=["pixels"],
-            )
-            x_values = xr.DataArray(
-                split_merged_relabeled_object_id_field[self.xdim].values,
-                coords=[np.arange(len(split_merged_relabeled_object_id_field[self.xdim]), dtype=np.int32)],
-                dims=["pixels"],
-            )
-
-            object_props_extended["centroid"] = xr.concat(
-                [
-                    y_values.interp(pixels=object_props_extended["centroid"].sel(component=0)),
-                    x_values.interp(pixels=object_props_extended["centroid"].sel(component=1)),
-                ],
-                dim="component",
-            )
-
-            object_props_extended = object_props_extended.drop_vars("pixels")
-
         # Add start and end time indices for each ID
         valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
@@ -3303,6 +3122,208 @@ class tracker:
         object_props_extended["time_end"] = valid_presence[self.timecoord][
             ((valid_presence.sizes[self.timedim] - 1) - (valid_presence[::-1]).argmax(dim=self.timedim)).astype(np.int32)
         ]
+        
+        # Recompute area & centroid (now that the IDs have been consolidated & merged & made continuous)
+        if "area" in object_props_extended.data_vars or "centroid" in object_props_extended.data_vars:
+            logger.info("Recalculating area and centroid properties for potentially disjoint events...")
+
+            def calculate_area_centroid_for_slice(
+                slice_data: NDArray[np.int32],
+                cell_areas_slice: NDArray[np.float32],
+                present_mask: NDArray[np.bool_],
+                all_event_ids: NDArray[np.int32],
+                lat_vals: NDArray[np.float32],
+                lon_vals: NDArray[np.float32],
+                is_unstructured: bool,
+                regional_mode: bool
+            ) -> Tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+                """
+                Calculate area and area-weighted centroid for IDs present at this timestep.
+                Returns three arrays with full ID dimension (NaN for absent IDs).
+                
+                Parameters
+                ----------
+                slice_data : array
+                    Spatial field of event IDs for this timestep
+                cell_areas_slice : array
+                    Spatial field of cell areas
+                present_mask : array
+                    1D boolean array indicating which IDs are present (length = n_IDs)
+                all_event_ids : array
+                    All event IDs (length = n_IDs)
+                """
+                n_ids = len(all_event_ids)
+                
+                # Initialise output arrays with NaN
+                areas = np.full(n_ids, np.nan, dtype=np.float32)
+                centroid_lats = np.full(n_ids, np.nan, dtype=np.float32)
+                centroid_lons = np.full(n_ids, np.nan, dtype=np.float32)
+                
+                # Get indices of IDs that are present at this timestep
+                present_indices = np.where(present_mask)[0]
+                
+                if len(present_indices) == 0:
+                    return areas, centroid_lats, centroid_lons
+                
+                if is_unstructured:
+                    # Unstructured grid: area-weighted centroid using spherical geometry
+                    
+                    # Convert to radians for Cartesian calculation
+                    lat_rad = np.radians(lat_vals)
+                    lon_rad = np.radians(lon_vals)
+                    
+                    # Process each present ID
+                    for id_idx in present_indices:
+                        event_id = all_event_ids[id_idx]
+                        mask = slice_data == event_id
+                        
+                        if not np.any(mask):
+                            continue
+                        
+                        # Calculate physical area
+                        areas_masked = cell_areas_slice[mask]
+                        total_area = np.sum(areas_masked)
+                        areas[id_idx] = total_area
+                        
+                        # Calculate area-weighted centroid using spherical geometry
+                        cos_lat = np.cos(lat_rad[mask])
+                        x = cos_lat * np.cos(lon_rad[mask])
+                        y = cos_lat * np.sin(lon_rad[mask])
+                        z = np.sin(lat_rad[mask])
+                        
+                        # Weighted average in Cartesian coordinates
+                        weighted_x = np.sum(areas_masked * x)
+                        weighted_y = np.sum(areas_masked * y)
+                        weighted_z = np.sum(areas_masked * z)
+                        
+                        # Normalize
+                        norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
+                        if norm > 0:
+                            weighted_x /= norm
+                            weighted_y /= norm
+                            weighted_z /= norm
+                        
+                        # Convert back to lat/lon
+                        centroid_lat = np.degrees(np.arcsin(np.clip(weighted_z, -1, 1)))
+                        centroid_lon = np.degrees(np.arctan2(weighted_y, weighted_x))
+                        
+                        # Fix longitude range to [-180, 180]
+                        if centroid_lon > 180:
+                            centroid_lon -= 360
+                        elif centroid_lon < -180:
+                            centroid_lon += 360
+                        
+                        centroid_lats[id_idx] = centroid_lat
+                        centroid_lons[id_idx] = centroid_lon
+                else:
+                    # Structured grid: area-weighted centroid with periodic boundary handling
+                    ny, nx = slice_data.shape
+                    
+                    # Process each present ID
+                    for id_idx in present_indices:
+                        event_id = all_event_ids[id_idx]
+                        
+                        # Get binary mask for this event
+                        binary_mask = (slice_data == event_id)
+                        
+                        if not np.any(binary_mask):
+                            continue
+                        
+                        # Get indices where object exists
+                        y_indices, x_indices = np.nonzero(binary_mask)
+                        
+                        # Get cell areas for these indices
+                        pixel_areas = cell_areas_slice[binary_mask]
+                        total_area = np.sum(pixel_areas)
+                        areas[id_idx] = total_area
+                        
+                        # Calculate area-weighted y centroid (latitude)
+                        centroid_y_pix = np.sum(y_indices * pixel_areas) / total_area
+                        
+                        # Calculate area-weighted x centroid (longitude) - handle wrapping if needed
+                        if not regional_mode:
+                            # Check if object is near both edges (wrapping around periodic boundary)
+                            near_left = np.any(x_indices < 100)
+                            near_right = np.any(x_indices >= nx - 100)
+                            
+                            if near_left and near_right:
+                                # Object wraps around - adjust coordinates
+                                x_adjusted = x_indices.copy().astype(np.float64)
+                                right_side = x_indices > nx / 2
+                                x_adjusted[right_side] -= nx
+                                
+                                # Area-weighted mean with adjusted coordinates
+                                centroid_x_pix = np.sum(x_adjusted * pixel_areas) / total_area
+                                
+                                # Ensure centroid is positive
+                                if centroid_x_pix < 0:
+                                    centroid_x_pix += nx
+                            else:
+                                # No wrapping - standard area-weighted calculation
+                                centroid_x_pix = np.sum(x_indices * pixel_areas) / total_area
+                        else:
+                            # Regional mode - no wrapping, area-weighted
+                            centroid_x_pix = np.sum(x_indices * pixel_areas) / total_area
+                        
+                        # Convert pixel indices to coordinate values
+                        centroid_lat = np.interp(centroid_y_pix, np.arange(len(lat_vals)), lat_vals)
+                        centroid_lon = np.interp(centroid_x_pix, np.arange(len(lon_vals)), lon_vals)
+
+                        centroid_lats[id_idx] = centroid_lat
+                        centroid_lons[id_idx] = centroid_lon
+                
+                return areas, centroid_lats, centroid_lons
+            
+            # Prepare spatial dimensions
+            spatial_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
+
+            # Ensure cell_area has correct dimensions for apply_ufunc
+            if not self.unstructured_grid and self.cell_area.ndim == 1:
+                # Broadcast 1D latitude-dependent cell areas to 2D (lat, lon)
+                template = split_merged_relabeled_object_id_field.isel({self.timedim: 0}, drop=True)
+                cell_area_broadcast, _ = xr.broadcast(self.cell_area, template)
+            else:
+                cell_area_broadcast = self.cell_area
+
+            # Apply calculation in parallel across time slices
+            logger.info("Computing area and centroid properties in parallel...")
+            areas_computed, centroid_lats_computed, centroid_lons_computed = xr.apply_ufunc(
+                calculate_area_centroid_for_slice,
+                split_merged_relabeled_object_id_field,
+                cell_area_broadcast,  # Broadcasted to match spatial dimensions
+                object_props_extended.presence,  # Boolean mask of which IDs are present at each time
+                object_props_extended.ID,
+                self.lat,  # Latitude coordinate values (5th parameter)
+                self.lon,  # Longitude coordinate values (6th parameter)
+                kwargs={
+                    'is_unstructured': self.unstructured_grid,
+                    'regional_mode': self.regional_mode
+                },
+                input_core_dims=[spatial_dims, spatial_dims, ['ID'], ['ID'], [self.ydim] if not self.unstructured_grid else [self.xdim], [self.xdim]],
+                output_core_dims=[['ID'], ['ID'], ['ID']],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[np.float32, np.float32, np.float32]
+            )
+            
+            results = persist(areas_computed, centroid_lats_computed, centroid_lons_computed)
+            areas_computed, centroid_lats_computed, centroid_lons_computed = results
+            
+            # Update area with proper dimension ordering (time, ID)
+            object_props_extended["area"] = areas_computed.transpose(self.timedim, "ID")
+
+            # Combine lat/lon centroids along component dimension
+            new_centroid = xr.concat(
+                [centroid_lats_computed, centroid_lons_computed],
+                dim='component'
+            )
+            new_centroid = new_centroid.assign_coords(component=[0, 1])
+            
+            # Update centroid with proper dimension ordering (component, time, ID)
+            object_props_extended["centroid"] = new_centroid.transpose("component", self.timedim, "ID")
+
+            logger.info("Property recalculation complete.")
+        
 
         # Combine all components into final dataset
         split_merged_relabeled_events_ds = xr.merge(
