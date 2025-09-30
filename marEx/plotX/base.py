@@ -5,9 +5,11 @@ supporting both structured and unstructured grids with comprehensive configurati
 and animation capabilities.
 """
 
+import gc
 import os
 import shutil
 import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,7 +75,28 @@ def _check_plotting_dependencies() -> None:
 
 @dataclass
 class PlotConfig:
-    """Configuration class for plot parameters"""
+    """Configuration class for plot parameters
+
+    Attributes:
+        title: Plot title
+        var_units: Variable units for colorbar label
+        issym: Whether data is symmetric (centers colormap at 0)
+        cmap: Colormap name or ListedColormap object
+        cperc: Percentile range for automatic color limits [min, max]
+        clim: Manual color limits (vmin, vmax)
+        show_colorbar: Whether to display colorbar
+        grid_lines: Whether to display grid lines
+        grid_labels: Whether to display grid labels
+        dimensions: Mapping of conceptual to actual dimension names
+        coordinates: Mapping of conceptual to actual coordinate names
+        norm: Custom normalization (BoundaryNorm or Normalize)
+        plot_IDs: Whether to plot object IDs with random colors
+        extend: Colorbar extension ('neither', 'both', 'min', 'max')
+        verbose: Enable verbose logging
+        quiet: Enable quiet logging
+        projection: Cartopy projection for map plots
+        framerate: Frames per second for animations (default 10)
+    """
 
     title: Optional[str] = None
     var_units: str = ""
@@ -92,6 +115,7 @@ class PlotConfig:
     verbose: Optional[bool] = None
     quiet: Optional[bool] = None
     projection: Optional[Any] = None
+    framerate: int = 10
 
     def __post_init__(self) -> None:
         """Initialise default values and configure logging."""
@@ -229,7 +253,13 @@ class PlotterBase:
                 cmap = config.cmap
             norm = config.norm
             if config.clim is None and norm is None:
-                clim = self.clim_robust(self.da.values, config.issym, config.cperc)
+                # Sample data to avoid loading entire time series into memory
+                time_dim = self.dimensions.get("time", "time")
+                if time_dim in self.da.dims:
+                    sampled_da = self.da.isel({time_dim: slice(None, None, 10)})
+                else:
+                    sampled_da = self.da
+                clim = self.clim_robust(sampled_da.values, config.issym, config.cperc)
             else:
                 clim = config.clim
             var_units = config.var_units
@@ -387,7 +417,7 @@ class PlotterBase:
         """Create an animation from time series data
 
         Args:
-            config: Plot configuration
+            config: Plot configuration (including framerate for animation, default 10 fps)
             plot_dir: Directory to save animation files
             file_name: Name for the output animation file
             centroids: Optional DataArray containing centroid data with dimensions (component, time, ID)
@@ -412,10 +442,13 @@ class PlotterBase:
 
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(exist_ok=True)
-        temp_dir = plot_dir / "blobs_seq"
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        temp_dir.mkdir(exist_ok=True)
+
+        # Use dask's scratch directory for temporary frames
+        dask_temp = dask.config.get("temporary-directory", default=None)
+        if dask_temp is None:
+            dask_temp = tempfile.gettempdir()
+        temp_dir = Path(tempfile.mkdtemp(prefix="marex_animate_", dir=dask_temp))
+
         if not file_name:
             file_name = f"movie_{self.da.name}.mp4"
 
@@ -454,31 +487,43 @@ class PlotterBase:
 
         for time_ind in range(len(self.da[time_dim])):
             data_slice = self.da.isel({time_dim: time_ind})
-            plot_params["time_str"] = str(self.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
+
+            # Create fresh copy of plot_params for this frame to avoid shared references
+            frame_params = plot_params.copy()
+            frame_params["time_str"] = str(self.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
 
             # Extract centroids for this time step if available
             if centroid_data is not None:
                 try:
                     centroids_time = centroid_data.isel({time_dim: time_ind})
-                    plot_params["centroids"] = centroids_time
+                    frame_params["centroids"] = centroids_time
                 except Exception:
-                    plot_params["centroids"] = None
+                    frame_params["centroids"] = None
             else:
-                plot_params["centroids"] = None
+                frame_params["centroids"] = None
 
             # Extract object IDs for this time step if available
             if object_ids is not None:
                 try:
                     object_ids_time = object_ids.isel({time_dim: time_ind})
-                    plot_params["object_ids"] = object_ids_time
+                    frame_params["object_ids"] = object_ids_time
                 except Exception:
-                    plot_params["object_ids"] = None
+                    frame_params["object_ids"] = None
             else:
-                plot_params["object_ids"] = None
+                frame_params["object_ids"] = None
 
-            delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info))
+            delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, frame_params, grid_info))
 
-        filenames = dask.compute(*delayed_tasks)
+        # Process frames in batches to manage memory efficiently
+        batch_size = 200
+        filenames = []
+        for i in range(0, len(delayed_tasks), batch_size):
+            batch = delayed_tasks[i : i + batch_size]
+            batch_results = dask.compute(*batch)
+            filenames.extend(batch_results)
+            # Force garbage collection between batches to release memory
+            gc.collect()
+
         filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
 
         # Create movie using ffmpeg
@@ -489,7 +534,7 @@ class PlotterBase:
                 "-threads",
                 "0",
                 "-framerate",
-                "10",
+                str(config.framerate),
                 "-i",
                 str(temp_dir / "time_%04d.jpg"),
                 "-c:v",
@@ -506,6 +551,9 @@ class PlotterBase:
             ],
             check=True,
         )
+
+        # Clean up temporary frames directory
+        shutil.rmtree(temp_dir)
 
         return str(output_file)
 
@@ -530,9 +578,9 @@ class PlotterBase:
 
     def setup_id_plot_params(self, cmap: Optional[Union[str, ListedColormap]] = None) -> Tuple[ListedColormap, BoundaryNorm, str]:
         """Set up parameters for plotting IDs"""
-        unique_values = np.unique(self.da.values[~np.isnan(self.da.values)])
-        unique_values = unique_values[unique_values > 0]
-        bounds = np.arange(unique_values.min(), unique_values.max() + 2) - 0.5
+        # Use min=1 and max from data without computing all unique values
+        max_id = int(self.da.max().values)
+        bounds = np.arange(1, max_id + 2) - 0.5
         n_bins = len(bounds) - 1
 
         if cmap is None:
