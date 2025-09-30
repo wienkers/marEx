@@ -24,12 +24,8 @@ Marine Extremes Python Package
 - **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
 
 ---
-<details>
-<summary>View 20 Years of <strong>marEx</strong> Tracking (Click to expand)</summary>
 
-https://github.com/user-attachments/assets/36ee3150-c869-4cba-be68-628dc37e4775
-
-</details>
+https://github.com/user-attachments/assets/501537ff-5adb-4e13-ba08-6a333bac2a02
 
 ![marEx_front](https://github.com/user-attachments/assets/939fceee-8990-46fb-b3f8-30e803b6c802)
 
@@ -89,7 +85,7 @@ MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for
 
 cf. Old (Basic) ID Method vs. New Tracking & Merging Algorithm:
 
-https://github.com/user-attachments/assets/5acf48eb-56bf-43e5-bfc4-4ef1a7a90eff
+https://github.com/user-attachments/assets/3e14a132-782c-45fe-8369-9b9fe2639ed3
 
 
 
