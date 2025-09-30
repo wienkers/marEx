@@ -3277,21 +3277,29 @@ class tracker:
             # Prepare spatial dimensions
             spatial_dims = [self.xdim] if self.unstructured_grid else [self.ydim, self.xdim]
 
+            # Ensure cell_area has correct dimensions for apply_ufunc
+            if not self.unstructured_grid and self.cell_area.ndim == 1:
+                # Broadcast 1D latitude-dependent cell areas to 2D (lat, lon)
+                template = split_merged_relabeled_object_id_field.isel({self.timedim: 0}, drop=True)
+                cell_area_broadcast, _ = xr.broadcast(self.cell_area, template)
+            else:
+                cell_area_broadcast = self.cell_area
+
             # Apply calculation in parallel across time slices
             logger.info("Computing area and centroid properties in parallel...")
             areas_computed, centroid_lats_computed, centroid_lons_computed = xr.apply_ufunc(
                 calculate_area_centroid_for_slice,
                 split_merged_relabeled_object_id_field,
-                self.cell_area,  # Pass cell_area directly, will be broadcast automatically
+                cell_area_broadcast,  # Broadcasted to match spatial dimensions
                 object_props_extended.presence,  # Boolean mask of which IDs are present at each time
-                object_props_extended.ID, 
-                split_merged_relabeled_object_id_field[self.xcoord],
-                split_merged_relabeled_object_id_field[self.ycoord],
+                object_props_extended.ID,
+                self.lat,  # Latitude coordinate values (5th parameter)
+                self.lon,  # Longitude coordinate values (6th parameter)
                 kwargs={
                     'is_unstructured': self.unstructured_grid,
                     'regional_mode': self.regional_mode
                 },
-                input_core_dims=[spatial_dims, spatial_dims, ['ID'], ['ID'], [self.xdim], [self.ydim] if not self.unstructured_grid else [self.xdim]],
+                input_core_dims=[spatial_dims, spatial_dims, ['ID'], ['ID'], [self.ydim] if not self.unstructured_grid else [self.xdim], [self.xdim]],
                 output_core_dims=[['ID'], ['ID'], ['ID']],
                 vectorize=True,
                 dask="parallelized",
