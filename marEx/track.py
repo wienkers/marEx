@@ -1397,10 +1397,6 @@ class tracker:
         # Set all filler IDs < 0 to 0
         events_ds["ID_field"] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
 
-        # Delete the last ID -- it is all 0s
-        if self.allow_merging or self.unstructured_grid:
-            events_ds = events_ds.isel(ID=slice(None, -1))  # At least for the gridded algorithm
-
         # Restore original coordinate name if needed
         if self.timecoord != self.timedim and self.timedim in events_ds.coords and self.timecoord not in events_ds.coords:
             # Get the time coordinate data
@@ -2849,7 +2845,7 @@ class tracker:
         else:
             overlap_ids = np.array([], dtype=np.int32)
         
-        # Get unique IDs from object_id_field (more comprehensive)
+        # Get unique IDs from object_id_field
         field_ids = np.unique(object_id_field_unique.compute().values)
         field_ids = field_ids[field_ids > 0]  # Remove 0 (background)
         
@@ -2884,7 +2880,7 @@ class tracker:
         else:
             graph = csr_matrix((n_valid, n_valid), dtype=np.bool_)
         
-        # Step 4: Solve for connected components (now on dense graph)
+        # Step 4: Solve for connected components (on dense graph)
         num_components, component_IDs_dense = connected_components(
             csgraph=graph, directed=False, return_labels=True
         )
@@ -3196,7 +3192,7 @@ class tracker:
                         weighted_y = np.sum(areas_masked * y)
                         weighted_z = np.sum(areas_masked * z)
                         
-                        # Normalize
+                        # Normalise
                         norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
                         if norm > 0:
                             weighted_x /= norm
@@ -3293,8 +3289,8 @@ class tracker:
                 cell_area_broadcast,  # Broadcasted to match spatial dimensions
                 object_props_extended.presence,  # Boolean mask of which IDs are present at each time
                 object_props_extended.ID,
-                self.lat,  # Latitude coordinate values (5th parameter)
-                self.lon,  # Longitude coordinate values (6th parameter)
+                self.lat,  # Latitude coordinate values
+                self.lon,  # Longitude coordinate values
                 kwargs={
                     'is_unstructured': self.unstructured_grid,
                     'regional_mode': self.regional_mode
@@ -3334,7 +3330,7 @@ class tracker:
             ]
         )
 
-        # Remove the last ID -- it is all 0s
+        # Remove the last ID -- it is all 0s (because we added an extra padding one above)
         return split_merged_relabeled_events_ds.isel(ID=slice(0, -1))
 
     # ============================
