@@ -1,11 +1,19 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 import marEx
 
 from .conftest import assert_percentile_frequency
+
+
+@pytest.fixture(scope="module")
+def extremes_unstructured():
+    """Load unstructured extremes data for testing."""
+    test_data_path = Path(__file__).parent / "data" / "extremes_unstructured.zarr"
+    return xr.open_zarr(str(test_data_path), chunks={}).persist()
 
 
 class TestUnstructuredPreprocessing:
@@ -477,3 +485,87 @@ class TestUnstructuredPreprocessing:
         assert "longitude" in extremes_ds_detrended.coords
         assert "latitude" in extremes_ds_shifting.coords
         assert "longitude" in extremes_ds_shifting.coords
+
+
+class TestUnstructuredGridEdgeCases:
+    """Test edge cases specific to unstructured grids."""
+
+    @classmethod
+    def setup_class(cls):
+        """Load unstructured test data."""
+        test_data_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
+        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        cls.sst_data = ds.to  # Extract the DataArray
+
+        # Add mock lat/lon coordinates
+        ncells = cls.sst_data.sizes.get("ncells", cls.sst_data.sizes.get("cell", 1000))
+        lat_coords = xr.DataArray(np.linspace(-90, 90, ncells), dims=["ncells"], name="lat")
+        lon_coords = xr.DataArray(np.linspace(-180, 180, ncells), dims=["ncells"], name="lon")
+        cls.sst_data = cls.sst_data.assign_coords(lat=lat_coords, lon=lon_coords)
+
+        cls.dimensions_unstructured = {"time": "time", "x": "ncells"}
+        cls.coordinates_unstructured = {"time": "time", "x": "lon", "y": "lat"}
+
+    def test_unstructured_rechunk_size_calculation(self):
+        """Test rechunk size calculation for unstructured grids."""
+        # This tests the rechunking logic that's specific to unstructured grids
+        # This path is triggered when method_percentile='approximate' and unstructured grid is used
+
+        # Process with approximate method
+        result = marEx.preprocess_data(
+            self.sst_data,
+            dimensions=self.dimensions_unstructured,
+            coordinates=self.coordinates_unstructured,
+            dask_chunks={"time": 50},
+            method_anomaly="detrend_harmonic",
+            method_extreme="global_extreme",
+            method_percentile="approximate",  # Triggers the rechunking path
+            threshold_percentile=95,
+        )
+
+        assert result is not None
+        assert "extreme_events" in result
+        assert "dat_anomaly" in result
+
+    def test_quantile_coordinate_cleanup(self):
+        """Test that quantile coordinate is properly cleaned up."""
+
+        # Process data
+        result = marEx.preprocess_data(
+            self.sst_data,
+            dimensions=self.dimensions_unstructured,
+            coordinates=self.coordinates_unstructured,
+            dask_chunks={"time": 50},
+            method_anomaly="detrend_harmonic",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+        )
+
+        # Verify no 'quantile' coordinate in final result
+        assert "quantile" not in result.extreme_events.coords
+        assert result.extreme_events.dtype == bool
+
+    def test_unstructured_grid_with_approximate_percentile(self):
+        """Test approximate percentile method with unstructured grid."""
+        # Test with both extreme methods to ensure rechunking works correctly
+        for method_extreme in ["global_extreme", "hobday_extreme"]:
+            if method_extreme == "hobday_extreme":
+                extra_kwargs = {"window_days_hobday": 5}
+            else:
+                extra_kwargs = {}
+
+            result = marEx.preprocess_data(
+                self.sst_data,
+                dimensions=self.dimensions_unstructured,
+                coordinates=self.coordinates_unstructured,
+                dask_chunks={"time": 50},
+                method_anomaly="detrend_harmonic",
+                method_extreme=method_extreme,
+                method_percentile="approximate",
+                threshold_percentile=90,
+                **extra_kwargs,
+            )
+
+            assert result is not None
+            assert "extreme_events" in result
+            assert result.extreme_events.dtype == bool

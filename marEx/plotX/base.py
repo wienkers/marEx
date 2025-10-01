@@ -6,7 +6,6 @@ and animation capabilities.
 """
 
 import gc
-import os
 import shutil
 import subprocess
 import tempfile

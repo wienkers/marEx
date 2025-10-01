@@ -1213,3 +1213,245 @@ class TestPlotXEdgeCases:
                 assert grid_lon.shape == expected_grid_shape
                 assert grid_lat.shape == expected_grid_shape
                 assert grid_data.shape == expected_grid_shape
+
+
+class TestPlotConfigurationEdgeCases:
+    """Test edge cases in plot configuration and customisation."""
+
+    def test_plot_ids_configuration(self):
+        """Test plotting with plot_IDs=True configuration."""
+        # Create data with tracked IDs
+        data = xr.DataArray(
+            np.array([[[0, 1, 2], [1, 2, 0], [2, 0, 1]]]),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 3),
+            },
+        )
+
+        config = PlotConfig(plot_IDs=True, show_colorbar=True)
+
+        plotter = GriddedPlotter(data)
+        fig, ax, im = plotter.single_plot(config)
+
+        # Verify plot was created
+        assert fig is not None
+        assert ax is not None
+        assert im is not None
+
+        # Verify show_colorbar was set to False by plot_IDs
+        assert config.show_colorbar is False
+
+    def test_custom_cmap_parameter(self):
+        """Test plotting with custom colormap."""
+        data = xr.DataArray(
+            np.random.randn(1, 3, 3),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 3),
+            },
+        )
+
+        config = PlotConfig(cmap="plasma")
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+    def test_custom_norm_parameter(self):
+        """Test plotting with custom norm."""
+        from matplotlib.colors import LogNorm
+
+        data = xr.DataArray(
+            np.abs(np.random.randn(1, 3, 3)) + 1,  # Positive values for LogNorm
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 3),
+            },
+        )
+
+        config = PlotConfig(norm=LogNorm(vmin=0.1, vmax=10), clim=(0.1, 10))
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+    def test_show_colorbar_false(self):
+        """Test plotting with show_colorbar=False."""
+        data = xr.DataArray(
+            np.random.randn(1, 3, 3),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 3),
+            },
+        )
+
+        config = PlotConfig(show_colorbar=False)
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+    def test_custom_var_units(self):
+        """Test plotting with custom var_units."""
+        data = xr.DataArray(
+            np.random.randn(1, 3, 3),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 3),
+            },
+        )
+
+        config = PlotConfig(var_units="Test Units [°C]", show_colorbar=True)
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+    def test_data_without_time_dimension(self):
+        """Test plotting data without a time dimension."""
+        # Create 2D data (no time dimension)
+        data = xr.DataArray(
+            np.random.randn(5, 8),
+            dims=["lat", "lon"],
+            coords={
+                "lat": np.linspace(-10, 10, 5),
+                "lon": np.linspace(0, 20, 8),
+            },
+        )
+
+        config = PlotConfig()
+        plotter = GriddedPlotter(data)
+
+        # Should handle data without time dimension
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+
+class TestTitleGeneration:
+    """Test title generation for different dimension types."""
+
+    def test_title_generation_time_dimension(self):
+        """Test title generation for time dimension."""
+        import pandas as pd
+
+        data = xr.DataArray(
+            np.random.randn(3, 4, 5),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=3),
+                "lat": np.linspace(-10, 10, 4),
+                "lon": np.linspace(0, 20, 5),
+            },
+        )
+
+        plotter = GriddedPlotter(data)
+        title = plotter._get_title(time_index=0, col_name="time")
+
+        # Should return formatted date string
+        assert "2020" in title
+
+    def test_title_generation_non_time_dimension(self):
+        """Test title generation for non-time dimensions."""
+        import pandas as pd
+
+        # Create data with time and depth dimensions
+        data = xr.DataArray(
+            np.random.randn(3, 2, 4, 5),
+            dims=["time", "depth", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=3),
+                "depth": [0, 10],
+                "lat": np.linspace(-10, 10, 4),
+                "lon": np.linspace(0, 20, 5),
+            },
+        )
+
+        plotter = GriddedPlotter(data)
+
+        # Test title for depth dimension (not the time dimension)
+        title = plotter._get_title(time_index=0, col_name="depth")
+
+        # Should return dimension=value format for non-time dimensions
+        assert "depth" in title
+        assert "=" in title
+
+    def test_title_generation_custom_dimension(self):
+        """Test title generation with a different value dimension."""
+        import pandas as pd
+
+        data = xr.DataArray(
+            np.random.randn(3, 2, 4, 5),
+            dims=["time", "level", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=3),
+                "level": [100, 200],
+                "lat": np.linspace(-10, 10, 4),
+                "lon": np.linspace(0, 20, 5),
+            },
+        )
+
+        plotter = GriddedPlotter(data)
+
+        # Test with level dimension
+        title = plotter._get_title(time_index=0, col_name="level")
+
+        assert "level" in title
+        assert "=" in title
+
+
+class TestGriddedPlotterEdgeCases:
+    """Test edge cases specific to gridded plotter."""
+
+    def test_gridded_plotter_with_minimal_data(self):
+        """Test gridded plotter with minimal 2x2 grid."""
+        data = xr.DataArray(
+            np.array([[[1, 2], [3, 4]]]),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": [0, 1],
+                "lon": [0, 1],
+            },
+        )
+
+        config = PlotConfig()
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None
+
+    def test_gridded_plotter_symmetric_colorscale(self):
+        """Test gridded plotter with symmetric colorscale (issym=True)."""
+        data = xr.DataArray(
+            np.array([[[-5, -2, 0], [2, 4, 6]]]),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": [0],
+                "lat": [0, 1],
+                "lon": [0, 1, 2],
+            },
+        )
+
+        config = PlotConfig(issym=True)
+        plotter = GriddedPlotter(data)
+
+        fig, ax, im = plotter.single_plot(config)
+
+        assert fig is not None

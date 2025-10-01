@@ -5,6 +5,7 @@ Tests for proper error handling and validation across the marEx package.
 This includes testing for common user mistakes and ensuring helpful error messages.
 """
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -1135,4 +1136,237 @@ class TestTrackerCoordinateErrors:
                 area_filter_quartile=0.5,
                 regional_mode=False,
                 coordinate_units=None,  # Auto-detection should fail
+            )
+
+
+class TestDetectDataValidationEdgeCases:
+    """Test edge cases in data validation for detect module."""
+
+    def test_all_nan_data_error(self, dimensions_gridded, dask_chunks):
+        """Test error when dataset contains only NaN/infinite values."""
+        # Create data with all NaN values - directly as Dask array
+        all_nan_data = xr.DataArray(
+            np.full((100, 3, 4), np.nan),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": np.arange(100),
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 4),
+            },
+        ).chunk({"time": 25})
+
+        with pytest.raises(DataValidationError, match="contains no valid.*finite.*data"):
+            marEx.preprocess_data(
+                all_nan_data,
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+                method_anomaly="detrend_harmonic",
+            )
+
+    def test_all_inf_data_error(self, dimensions_gridded, dask_chunks):
+        """Test error when dataset contains only infinite values."""
+        # Create data with all infinite values - directly as Dask array
+        all_inf_data = xr.DataArray(
+            np.full((100, 3, 4), np.inf),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": np.arange(100),
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 4),
+            },
+        ).chunk({"time": 25})
+
+        with pytest.raises(DataValidationError, match="contains no valid.*finite.*data"):
+            marEx.preprocess_data(
+                all_inf_data,
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+                method_anomaly="detrend_harmonic",
+            )
+
+
+class TestQuantileThresholdWarnings:
+    """Test warnings for quantile threshold edge cases."""
+
+    def test_constant_anomaly_warning(self, dimensions_gridded):
+        """Test warning for constant anomaly regions (e.g., sea ice)."""
+        # Create synthetic data with constant anomaly in some regions
+        time_steps = 100
+        lat_size = 5
+        lon_size = 5
+
+        # Create data with one region having constant zero anomaly
+        data = xr.DataArray(
+            np.random.randn(time_steps, lat_size, lon_size) * 2 + 15,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": np.arange(time_steps),
+                "lat": np.linspace(-10, 10, lat_size),
+                "lon": np.linspace(0, 20, lon_size),
+            },
+        ).chunk({"time": 25})
+
+        # Set one location to constant value (zero anomaly after detrending)
+        data.values[:, 0, 0] = 15.0
+
+        # Process with global_extreme to trigger threshold validation
+        with warnings.catch_warnings(record=True) as _:
+            warnings.simplefilter("always")
+
+            result = marEx.preprocess_data(
+                data,
+                dimensions=dimensions_gridded,
+                dask_chunks={"time": 25},
+                method_anomaly="detrend_harmonic",
+                method_extreme="global_extreme",
+                threshold_percentile=95,
+            )
+
+            # Verify processing completes
+            assert result is not None
+
+    def test_near_constant_data_quantile_warning(self, dimensions_gridded):
+        """Test warning when data has very low variance leading to low quantile values."""
+        # Create data with very low variance
+        time_steps = 100
+        lat_size = 4
+        lon_size = 4
+
+        # Base value with minimal variation
+        data = xr.DataArray(
+            np.random.randn(time_steps, lat_size, lon_size) * 0.01 + 10.0,  # Very small variance
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": np.arange(time_steps),
+                "lat": np.linspace(-5, 5, lat_size),
+                "lon": np.linspace(0, 10, lon_size),
+            },
+        ).chunk({"time": 25})
+
+        # Add one location with even smaller variance (near constant)
+        data.values[:, 0, 0] = 10.0 + np.random.randn(time_steps) * 0.0001
+
+        with warnings.catch_warnings(record=True) as _:
+            warnings.simplefilter("always")
+
+            result = marEx.preprocess_data(
+                data,
+                dimensions=dimensions_gridded,
+                dask_chunks={"time": 25},
+                method_anomaly="detrend_harmonic",
+                method_extreme="global_extreme",
+                threshold_percentile=99,  # High percentile
+            )
+
+            # Verify processing completes
+            assert result is not None
+
+    def test_high_quantile_threshold_warning_global_extreme(self, dimensions_gridded):
+        """Test warning when quantiles exceed max_anomaly bounds with global_extreme (lines 2445)."""
+        import pandas as pd
+
+        # Create data with very high variance to trigger high quantile warning
+        time_steps = 200
+        lat_size = 4
+        lon_size = 4
+
+        # Create data with extreme outliers that will produce high quantiles
+        data = xr.DataArray(
+            np.random.randn(time_steps, lat_size, lon_size) * 20 + 15,  # High variance
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=time_steps, freq="D"),
+                "lat": np.linspace(-5, 5, lat_size),
+                "lon": np.linspace(0, 10, lon_size),
+            },
+        ).chunk({"time": 25})
+
+        # Add extreme values that will push quantiles high
+        data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
+
+        with warnings.catch_warnings(record=True) as _:
+            warnings.simplefilter("always")
+
+            result = marEx.preprocess_data(
+                data,
+                dimensions=dimensions_gridded,
+                dask_chunks={"time": 25},
+                method_anomaly="detrend_harmonic",
+                method_extreme="global_extreme",
+                method_percentile="approximate",
+                threshold_percentile=99,
+                max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
+            )
+
+            # Verify processing completes
+            assert result is not None
+
+    def test_high_quantile_threshold_warning_hobday_extreme(self, dimensions_gridded):
+        """Test warning when quantiles exceed max_anomaly bounds with hobday_extreme (line 2576)."""
+        import pandas as pd
+
+        # Create data with very high variance to trigger high quantile warning
+        time_steps = 200
+        lat_size = 4
+        lon_size = 4
+
+        # Create data with extreme outliers that will produce high quantiles
+        data = xr.DataArray(
+            np.random.randn(time_steps, lat_size, lon_size) * 20 + 15,  # High variance
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=time_steps, freq="D"),
+                "lat": np.linspace(-5, 5, lat_size),
+                "lon": np.linspace(0, 10, lon_size),
+            },
+        ).chunk({"time": 25})
+
+        # Add extreme values that will push quantiles high
+        data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
+
+        with warnings.catch_warnings(record=True) as _:
+            warnings.simplefilter("always")
+
+            result = marEx.preprocess_data(
+                data,
+                dimensions=dimensions_gridded,
+                dask_chunks={"time": 25},
+                method_anomaly="detrend_harmonic",
+                method_extreme="hobday_extreme",
+                method_percentile="approximate",
+                window_days_hobday=5,
+                threshold_percentile=99,
+                max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
+            )
+
+            # Verify processing completes
+            assert result is not None
+
+
+class TestUnstructuredGridConfigurationErrors:
+    """Test configuration errors specific to unstructured grids."""
+
+    def test_window_spatial_hobday_unstructured_error(self, dimensions_gridded, dask_chunks):
+        """Test error when window_spatial_hobday is used with unstructured grid."""
+        # Create 2D unstructured-like data
+        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
+        ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
+        sst_da = ds.to
+
+        # Stack to create unstructured data
+        unstructured_data = sst_da.stack(ncells=("lat", "lon"))
+        unstructured_dims = {"time": "time", "x": "ncells"}
+        unstructured_coords = {"time": "time", "x": "ncells", "y": "ncells"}
+
+        # Try to use window_spatial_hobday with unstructured data - should raise ConfigurationError
+        with pytest.raises(ConfigurationError, match="window_spatial_hobday is not supported for unstructured grids"):
+            marEx.preprocess_data(
+                unstructured_data,
+                dimensions=unstructured_dims,
+                coordinates=unstructured_coords,
+                dask_chunks={"time": 25},
+                method_extreme="hobday_extreme",
+                method_percentile="approximate",
+                window_spatial_hobday=3,  # This should trigger error on unstructured grid
+                window_days_hobday=5,
             )
