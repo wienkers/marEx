@@ -2372,7 +2372,7 @@ def _compute_histogram_quantile_2d(
     chunk_dict = {dimensions["time"]: -1}
     for d in ["x", "y"]:
         if d in dimensions:
-            chunk_dict[dimensions[d]] = 10
+            chunk_dict[dimensions[d]] = 8
 
     da_bin = xr.DataArray(
         np.digitize(da.data, bin_edges) - 1,  # -1 so first bin is 0
@@ -2416,6 +2416,9 @@ def _compute_histogram_quantile_2d(
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
         return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
+
+    # Rechunk histogram so core dimensions are unchunked for apply_ufunc
+    hist_raw = hist_raw.chunk({"dayofyear": -1, "da_bin": -1})
 
     # Apply the optimised computation using apply_ufunc
     threshold = xr.apply_ufunc(
