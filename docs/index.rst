@@ -118,12 +118,23 @@ Documentation Contents
 
 .. toctree::
    :maxdepth: 2
-   :caption: User Guide
+   :caption: Getting Started
 
    installation
    quickstart
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Understanding marEx
+
+   concepts
    user_guide
    examples
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Advanced Usage
+
    troubleshooting
 
 .. toctree::

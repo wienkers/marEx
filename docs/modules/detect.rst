@@ -267,6 +267,122 @@ Extreme Event Detection Methods
   * Accounts for seasonal variations
   * Follows Hobday et al. (2016) methodology
 
+Spatial Window Enhancement (``window_spatial_hobday``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**New in v3.0+**: The Hobday extreme method supports optional spatial pooling window for more robust, spatially coherent thresholds.
+
+**Algorithm Details**:
+
+For each grid cell ``(i, j)`` and each day-of-year ``d``:
+
+1. **Temporal Sampling**: Collect anomalies from all years within ±``window_days_hobday`` days around day ``d``
+
+   * Traditional: Samples from single cell ``(i, j)``
+   * With spatial window: Samples from all cells in neighbourhood
+
+2. **Spatial Pooling** (if ``window_spatial_hobday`` specified):
+
+   * Define spatial window centered at ``(i, j)`` with radius ``r = (window_spatial_hobday - 1) / 2``
+   * Pool samples from cells ``(i-r:i+r+1, j-r:j+r+1)``
+   * Edge handling: Smaller windows near boundaries
+
+3. **Percentile Calculation**:
+
+   * Use histogram approximation (``method_percentile='approximate'``)
+   * Precision controlled by ``precision`` parameter (default 0.01°C)
+   * Calculate threshold at ``threshold_percentile`` (e.g., 95th)
+
+**Sample Size Comparison**::
+
+   Configuration                         Sample Count
+   ──────────────────────────────────   ─────────────
+   Traditional (no spatial window)       N_years × window_days_hobday
+   Example: 30 years × 11 days          = 330 samples
+
+   With 5×5 spatial window               N_years × window_days_hobday × 25 cells
+   Example: 30 years × 11 days × 25     = 8,250 samples
+
+   With 9×9 spatial window               N_years × window_days_hobday × 81 cells
+   Example: 30 years × 11 days × 81     = 26,730 samples
+
+**Example: Enabling Spatial Window**:
+
+.. code-block:: python
+
+   # Very long time-series (50+ years): no spatial pooling needed
+   extremes_highres = marEx.preprocess_data(
+       sst_0.1deg,
+       method_extreme='hobday_extreme',
+       window_days_hobday=11,
+       window_spatial_hobday=None
+   )
+
+   # Short time-series: use spatial pooling to increase robustness of threshold calculation
+   extremes_coarse = marEx.preprocess_data(
+       sst_2deg,
+       method_extreme='hobday_extreme',
+       window_days_hobday=11,
+       window_spatial_hobday=5         # Increase samples in anomaly distribution using a 5×5 window
+   )
+
+   # High threshold percentile (>95%): use spatial pooling to robustly sample distribution tails
+   extremes_99th = marEx.preprocess_data(
+       sst,
+       method_extreme='hobday_extreme',
+       threshold_percentile=99,        # Extreme percentiles require more samples
+       window_days_hobday=11,
+       window_spatial_hobday=7         # Larger window to sample tails (7×7 = 49 cells)
+   )
+
+
+**Performance Implications**:
+
+* **Memory**: Approximate method remains memory-efficient regardless of window size
+* **Computation**: Larger windows → more samples → slightly slower but still fast
+* **Typical**: 5×5 window adds ~10-15% to computation time vs. no spatial window
+
+**When to Use Spatial Windowing**:
+
+Spatial windowing increases the sample size for percentile calculation, improving statistical robustness. 
+Note that this is not a spatial smoothing of the data itself, but rather a pooling of samples from 
+neighbouring grid cells to better estimate the percentile thresholds. This is motivated from a spatial decorrelation
+length-scale argument, in the same way Hobday has argued for decorrelation time-scale for the 11-day time window.
+This is critical in several scenarios:
+
+**1. Short Time Series** (insufficient samples):
+
+When time series length is limited, sample size for each day-of-year may be inadequate for robust percentile estimation:
+
+.. code-block:: text
+
+   Time Series Length    Samples (no spatial)    Extreme samples    Recommendation
+   ──────────────────    ───────────────────     ───────────────    ──────────────
+   10 years              110 samples             5 samples          ✓ Use spatial
+   20 years              220 samples             11 samples         ✓ Use spatial
+   30 years              330 samples             16 samples         ○ Optional
+   50+ years             550+ samples            27+ samples        ✗ Not needed
+
+*Guideline*: Use spatial windowing if time series < 30 years for robust 95th percentile estimation.
+
+**2. Extreme Percentiles** (>95%, sampling distribution tails):
+
+Higher percentiles require more samples to characterise the tail of the distribution accurately.
+Without sufficient samples, extreme percentile thresholds become unreliable (Smith et al. 2025,
+https://doi.org/10.1016/j.pocean.2024.103404).
+
+.. code-block:: text
+
+   Percentile    Min Samples Needed    30-years (no spatial)    30-year with 5×5    Recommendation
+   ──────────    ──────────────────    ─────────────────────    ────────────────    ──────────────
+   90th          100-200               330 ✓                    8,250 ✓             Either works
+   95th          200-400               330 ○                    8,250 ✓             Spatial helps
+   97.5th        400-800               330 ✗                    8,250 ✓             ✓ Use spatial
+   99th          1000+                 330 ✗                    8,250 ✓             ✓ Use spatial
+   99.9th        10000+                330 ✗                    8,250 ✗             ✓ Need 9×9+
+
+*Guideline*: For percentiles >95th, spatial windowing is strongly recommended. For >97.5th, it is essential.
+
 Parameter Reference
 ===================
 

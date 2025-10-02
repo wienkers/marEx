@@ -16,6 +16,13 @@ Gridded Data Examples
 * `02_id_track_events.ipynb <https://github.com/wienkers/marEx/blob/main/examples/gridded%20data/02_id_track_events.ipynb>`_ - Event identification and tracking
 * `03_visualise_events.ipynb <https://github.com/wienkers/marEx/blob/main/examples/gridded%20data/03_visualise_events.ipynb>`_ - Visualisation and analysis
 
+Regional Data Examples
+----------------------
+
+* `01_preprocess_extremes.ipynb <https://github.com/wienkers/marEx/blob/main/examples/regional%20data/01_preprocess_extremes.ipynb>`_ - Data preprocessing for regional analysis
+* `02_id_track_events.ipynb <https://github.com/wienkers/marEx/blob/main/examples/regional%20data/02_id_track_events.ipynb>`_ - Regional event identification and tracking
+* `03_visualise_events.ipynb <https://github.com/wienkers/marEx/blob/main/examples/regional%20data/03_visualise_events.ipynb>`_ - Regional data visualisation
+
 Unstructured Data Examples
 ---------------------------
 
