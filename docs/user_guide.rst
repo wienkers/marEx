@@ -776,4 +776,4 @@ When using marEx in publications, please cite:
 * **marEx package**
 * **Marine heatwave methods**: Hobday et al. (2016) for standard MHW definition
 
-For more detailed examples and advanced usage, see the :doc:`examples/index`.
+For more detailed examples and advanced usage, see the :doc:`examples`.

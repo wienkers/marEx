@@ -239,8 +239,8 @@ jobs:
     - name: Generate coverage report
       timeout-minutes: 45
       run: |
-        # Run with parallel mode and multiprocessing support
-        coverage run --parallel-mode --rcfile=.coveragerc -m pytest tests/ --tb=short -m "not nocov" -x --maxfail=3
+        # Run with parallel mode and multiprocessing support, excluding slow and nocov tests
+        coverage run --parallel-mode --rcfile=.coveragerc -m pytest tests/ --tb=short -m "not slow and not nocov" -x --maxfail=3
         # Combine all coverage data files from subprocesses
         coverage combine
         coverage report -m

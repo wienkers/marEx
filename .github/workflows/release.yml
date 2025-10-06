@@ -276,10 +276,26 @@ jobs:
         generate_release_notes: true
         make_latest: ${{ needs.validate-tag.outputs.is_prerelease == 'false' }}
 
+  trigger-docs:
+    name: Trigger ReadTheDocs Build
+    runs-on: ubuntu-latest
+    needs: [validate-tag, publish-pypi]
+
+    steps:
+    - name: Trigger ReadTheDocs build
+      run: |
+        if [ -n "${{ secrets.READTHEDOCS_WEBHOOK_URL }}" ]; then
+          curl -X POST -d "branches=main" -d "token=${{ secrets.READTHEDOCS_WEBHOOK_TOKEN }}" \
+            ${{ secrets.READTHEDOCS_WEBHOOK_URL }}
+          echo "✅ ReadTheDocs build triggered for v${{ needs.validate-tag.outputs.version }}"
+        else
+          echo "ℹ️  No ReadTheDocs webhook configured. Docs will build automatically on next push."
+        fi
+
   announce-release:
     name: Post-Release Notifications
     runs-on: ubuntu-latest
-    needs: [validate-tag, create-github-release]
+    needs: [validate-tag, create-github-release, trigger-docs]
     if: needs.validate-tag.outputs.is_prerelease == 'false'  # Only for stable releases
 
     steps:
@@ -288,6 +304,7 @@ jobs:
         echo "🎉 marEx v${{ needs.validate-tag.outputs.version }} has been successfully released!"
         echo "📦 PyPI: https://pypi.org/project/marEx/${{ needs.validate-tag.outputs.version }}/"
         echo "📋 GitHub: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+        echo "📚 Docs: https://marex.readthedocs.io/"
 
         # You can add additional notification steps here, such as:
         # - Slack notifications

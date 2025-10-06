@@ -251,13 +251,13 @@ Now that you understand marEx's foundational concepts, here's how to proceed:
 For Hands-On Learning
 ---------------------
 
-* **:doc:`quickstart`**: Get started with a working example
-* **:doc:`examples`**: Explore Jupyter notebooks showing complete workflows for gridded, regional, and unstructured data
+* :doc:`quickstart` - Get started with a working example
+* :doc:`examples` - Explore Jupyter notebooks showing complete workflows for gridded, regional, and unstructured data
 
 For Detailed Guidance
 ---------------------
 
-* **:doc:`user_guide`**: Complete guide covering:
+* :doc:`user_guide` - Complete guide covering:
 
   * Method selection (which anomaly/extreme detection method to use)
   * Scientific trade-offs between methods
@@ -268,26 +268,26 @@ For Detailed Guidance
 For Technical Reference
 -----------------------
 
-* **:doc:`api`**: Complete API documentation for all functions
-* **:doc:`modules/detect`**: Detection algorithms and implementation details
-* **:doc:`modules/track`**: Tracking algorithms and merge/split handling
-* **:doc:`modules/plotx`**: Visualisation system and customisation options
-* **:doc:`modules/helper`**: HPC utilities and cluster management
+* :doc:`api` - Complete API documentation for all functions
+* :doc:`modules/detect` - Detection algorithms and implementation details
+* :doc:`modules/track` - Tracking algorithms and merge/split handling
+* :doc:`modules/plotx` - Visualisation system and customisation options
+* :doc:`modules/helper` - HPC utilities and cluster management
 
 For Troubleshooting
 -------------------
 
-* **:doc:`troubleshooting`**: Common issues and solutions for installation, performance, and data problems
+* :doc:`troubleshooting` - Common issues and solutions for installation, performance, and data problems
 
 Key References
 ==============
 
 The scientific methods in marEx are based on established literature:
 
-* **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves" *Progress in Oceanography* 141, 227-238. `doi:10.1016/j.pocean.2016.01.010 <https://doi.org/10.1016/j.pocean.2016.01.010>`_
+* **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves" *Progress in Oceanography* 141, 227-238. `doi:10.1016/j.pocean.2015.12.014 <https://doi.org/10.1016/j.pocean.2015.12.014>`_
 
   * Defines the standard marine heatwave detection methodology using day-of-year specific percentile thresholds
 
-* **Sun et al. (2023)**: "Marine heatwaves in the Arctic Region: Variation in Different Ice Covers" *Geophysical Research Letters* 50. `doi:10.1029/2022GL102359 <https://doi.org/10.1029/2022GL102359>`_
+* **Sun et al. (2023)**: "Marine heatwaves in the Arctic Region: Variation in Different Ice Covers" *Progress in Oceanography* 203, 102947. `doi:10.1016/j.pocean.2022.102947 <https://doi.org/10.1016/j.pocean.2022.102947>`_
 
   * Provides tracking methodology that marEx extends with improved merge/split partitioning
