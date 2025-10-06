@@ -33,6 +33,20 @@ Main Classes
 
    tracker
 
+Tracking Algorithm Comparison
+==============================
+
+The video below demonstrates the critical difference between basic connectivity-based tracking and marEx's advanced merge/split algorithm:
+
+.. video:: /_static/videos/tracking_comparison.mp4
+   :width: 700
+   :autoplay:
+   :loop:
+
+**Left (Basic Method — 3D Connected Components):** Uses simple 3D connected component labeling where ANY objects that touch at any point in space-time are permanently merged into the same event. This creates a chain reaction: Event A touches Event B → merged. The merged AB touches Event C → all become one event. Over time, this produces unrealistic basin-spanning "mega-events" that spuriously link dozens of independent physical phenomena. These mega-events are **algorithmically-induced artifacts** with no coherent physical origin, making their statistics (size, duration, intensity) meaningless for mechanistic analysis.
+
+**Right (marEx Advanced Method — Genealogy Tracking):** Prevents mega-events using ``overlap_threshold`` (requires significant overlap, not just touching) and maintains individual event identities through merge/split events using nearest-neighbor partitioning. Records complete parent/child genealogy in ``merge_ledger``, enabling reconstruction of physically realistic event evolution. Tracked events correspond to actual coherent phenomena, providing mechanistically relevant statistics for scientific analysis.
+
 Detailed Documentation
 ======================
 

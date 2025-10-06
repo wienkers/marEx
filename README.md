@@ -7,21 +7,23 @@
 [![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 [![DOI](https://zenodo.org/badge/945834123.svg)](https://doi.org/10.5281/zenodo.16922881)
 
-Marine Extremes Python Package
-==============================
+# Marine Extremes Detection and Tracking
 
-**Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data.**
+**Efficient & scalable marine extremes detection, identification, & tracking for exascale climate data.**
 
-`MarEx` is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
+marEx is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
 
-## Key Capabilities
+---
+
+## Key Features
 
 - **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
-- **🔬 Advanced Analytics**: Multiple statistical methodologies for robust extreme event detection
-- **📈 Complex Event Tracking**: Seamlessly handles coherent object splitting, merging, and evolution
 - **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
-- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to a supercomputer using up to 1024+ cores
+- **📈 Advanced Event Tracking**: Handles coherent object splitting, merging, and evolution
+- **📊 Multiple Detection Methods**: Scientifically rigorous algorithms for robust extreme event identification
+- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to supercomputer using up to 1024+ cores
 - **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
+
 
 ---
 
@@ -31,96 +33,16 @@ https://github.com/user-attachments/assets/501537ff-5adb-4e13-ba08-6a333bac2a02
 
 ---
 
-## Features
-
-### Data Pre-processing Pipeline
-
-MarEx implements a highly-optimised preprocessing pipeline powered by `dask` for efficient parallel computation and scaling to very large spatio-temporal datasets. Included are four complementary methods for calculating anomalies and two methods for detecting extremes:
-
-**Anomaly Calculation**:
-  1. *Shifting Baseline* — Scientifically-rigorous definition of anomalies relative to a backwards-looking rolling smoothed climatology.
-  2. *Fixed Baseline* — Daily climatology using the full time series without detrending. Preserves long-term trends and maintains a simple interpretation. (Best for baseline comparison studies, trend-inclusive analysis, or for public outreach.)
-  3. *Detrend Fixed Baseline* — Polynomial detrending followed by fixed daily climatology. Removes long-term trends and maintains the full time series of data. (Does not account for changes in seasonal timing, ideal for climate variability studies.)
-  4. *Harmonic Detrending* — Efficiently removes trend & season cycle using a 6+ coefficient model (mean, annual & semi-annual harmonics, and arbitrary polynomial trends). (Highly efficient, but this approximation may lead to biases in certain statistics.)
-
-**Extreme Detection**:
-  1. *Hobday Extreme* — Implements a similar methodology to Hobday et al. (2016) with local day-of-year specific thresholds determined based on the quantile within a rolling window.
-  2. *Global Extreme* — Applies a global-in-time percentile threshold at each point across the entire dataset. Optionally renormalises anomalies using a 30-day rolling standard deviation. (Highly efficient, but may misrepresent seasonal variability and differs from common definitions in literature.)
-
-
-### Object Detection & Tracking
-**Object Detection**:
-  - Implements efficient algorithms for object detection in 2D geographical data.
-  - Fully-parallelised workflow built on `dask` for extremely fast & larger-than-memory computation.
-  - Uses morphological opening & closing to fill small holes and gaps in binary features.
-  - Filters out small objects using flexible area thresholds:
-    - **Percentile-based filtering**: Remove smallest fraction of events (e.g., `area_filter_quartile=0.5` removes smallest 50%)
-    - **Absolute filtering**: Set minimum area threshold (e.g., `area_filter_absolute=100` keeps only events ≥100 grid cells)
-  - Identifies and labels connected regions in binary data representing arbitrary events (e.g. SST or SSS extrema, tracer presence, eddies, etc...).
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
-    - Takes ~5 wall-minutes per _century_
-    - Requires only 1 Gb memory per core (with `dask` chunks of 25 days)
-
-**Object Tracking**:
-  - Implements strict event tracking conditions to avoid very few, very large objects.
-  - Permits temporal gaps (of `T_fill` days) between objects, to allow more continuous event tracking.
-  - Requires objects to overlap by at least `overlap_threshold` fraction of the smaller objects's area to be considered the same event and continue tracking with the same ID.
-  - Accounts for & keeps a history of object splitting & merging events, ensuring objects are more coherent and retain their previous identities & histories.
-  - Improves upon the splitting & merging logic of [Sun et al. (2023)](https://doi.org/10.1038/s41561-023-01325-w):
-    - _In this New Version_: Partition the child object based on the parent of the _nearest-neighbour_ cell (_not_ the nearest parent centroid).
-  - Provides much more accessible and usable tracking outputs:
-    - Tracked object properties (such as area, centroid, and any other user-defined properties) are mapped into `ID`-`time` space
-    - Details & Properties of all Merging/Splitting events are recorded.
-    - Provides other useful information that may be difficult to extract from the large `object ID field`, such as:
-      - Event presence in time
-      - Event start/end times and duration
-      - etc...
-  - Performance/Scaling Test:  100 years of daily 0.25° resolution binary data with 64 cores...
-    - Takes ~8 wall-minutes per decade (cf. _Old_ Method, i.e. _without_ merge-split-tracking, time-gap filling, overlap-thresholding, et al., but here updated to leverage `dask`, now takes 1 wall-minute per decade!)
-    - Requires only ~2 Gb memory per core (with `dask` chunks of 25 days)
-
-### Visualisation
-**Plotting**:
-  - Provides a few helper functions to create pretty plots, wrapped subplots, and animations (e.g. below).
-
-cf. Old (Basic) ID Method vs. New Tracking & Merging Algorithm:
-
-https://github.com/user-attachments/assets/3e14a132-782c-45fe-8369-9b9fe2639ed3
-
-
-
-## Technical Architecture
-
-**Distributed Computing Stack:**
-- **Framework**: `Dask` for distributed computation with asyncronous task scheduling
-- **Parallelism**: Multi-level spatio-temporal parallelisation
-- **Memory Management**: Lazy evaluation with automatic spilling and graph optimisation
-- **I/O Optimisation**: Zarr-based intermediate storage with compression
-
-**Performance Optimisations:**
-- **JIT Compilation**: Numba-accelerated critical paths for numerical kernels
-- **GPU Acceleration**: Optional JAX backend for tensor operations
-- **Sparse Operations**: Custom sparse matrix algorithms for unstructured grids
-- **Cache-Aware**: Memory access patterns optimised for modern CPU architectures
-
-
-## Computational Workflow
-
-1. **Preprocess**: Remove trends & seasonal cycles and identify anomalous extremes
-2. **Detect**: Filter & label connected regions using morphological operations
-3. **Track**: Follow objects through time, handling complex evolution patterns
-4. **Analyse**: Extract event statistics, duration, and spatial properties
-
-## Quick Start Example
+## Quick Start
 
 ```python
 import xarray as xr
 import marEx
 
 # Load sea surface temperature data
-sst = xr.open_dataset('sst_data.nc', chunks={}).sst
+sst = xr.open_dataset('sst_data.nc', chunks={'time': 30}).sst
 
-# Pre-process SST Data to identify extremes: cf. `01_preprocess_extremes.ipynb`
+# Identify extreme events
 extreme_events_ds = marEx.preprocess_data(
     sst,
     threshold_percentile=95,
@@ -128,49 +50,148 @@ extreme_events_ds = marEx.preprocess_data(
     method_extreme='hobday_extreme'
 )
 
-# Identify & Track Marine Heatwaves through time: cf. `02_id_track_events.ipynb`
+# Track events through time
 events_ds = marEx.tracker(
     extreme_events_ds.extreme_events,
     extreme_events_ds.mask,
     R_fill=8,
-    area_filter_absolute=100     # Remove objects smaller than 100 grid cells
+    area_filter_absolute=100,
     allow_merging=True
 ).run()
 
-# Visualise results: cf. `03_visualise_events.ipynb`
-fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96]))
+# Visualise results
+fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(
+    marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96])
+)
 ```
 
+---
 
-## Installation & Setup
+## Installation
 
-### Full Installation
 ```bash
-# Complete HPC installation with all optional dependencies
 pip install marEx[full,hpc]
 ```
 
-### Development Installation
-```bash
-# Clone and install for development
-git clone https://github.com/wienkers/marEx.git
-cd marEx
-pip install -e .[dev]
+For detailed installation instructions, including HPC environments and optional dependencies, see the **[Installation Guide](https://marex.readthedocs.io/en/latest/installation.html)**.
 
-# Install pre-commit hooks
-pre-commit install
+---
+
+## Core Workflow
+
+marEx follows a three-stage pipeline:
+
 ```
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│  1. Detect      │  →   │  2. Track       │  →   │  3. Visualise   │
+│    Extremes     │      │    Events       │      │     & Analyse   │
+└─────────────────┘      └─────────────────┘      └─────────────────┘
+        ↓                        ↓                        ↓
+preprocess_data()           tracker()                  plotX()
+        ↓                        ↓                        ↓
+Binary extreme map        Tracked objects          Maps, animations,
+                            with unique IDs           & statistics
+```
+
+**Learn more**: [Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html) | [User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)
+
+---
+
+## Documentation
+
+For detailed guides, tutorials, and API reference, visit the full documentation:
+
+### 📚 **[marEx Documentation on ReadTheDocs](https://marex.readthedocs.io/)**
+
+**Quick Links:**
+- **[Quickstart Guide](https://marex.readthedocs.io/en/latest/quickstart.html)** - Get started in 5 minutes
+- **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** - Learn about the unique capabilities
+- **[Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html)** - Understanding marEx's design and workflow
+- **[User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)** - Comprehensive usage guide with method selection, parameter tuning, and performance optimisation
+- **[API Reference](https://marex.readthedocs.io/en/latest/api.html)** - Complete function documentation
+- **[Examples](https://marex.readthedocs.io/en/latest/examples.html)** - Jupyter notebooks for gridded, regional, and unstructured data
+- **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** - Common issues and solutions
+
+---
+
+## Examples
+
+Explore complete workflows in the [example notebooks](https://github.com/wienkers/marEx/tree/main/examples):
+
+- **Gridded Data**: Standard analysis for regular lat/lon grids (satellite data, CMIP6 models)
+- **Regional Data**: Regional analysis with boundary handling (EURO-CORDEX)
+- **Unstructured Data**: Analysis for irregular meshes (FESOM, ICON-O, MPAS-Ocean)
+
+Each example demonstrates the full pipeline from preprocessing to visualisation.
+
+---
+
+## Key Capabilities
+
+### Detection Methods
+
+marEx provides multiple scientifically rigorous methods for anomaly calculation and extreme identification:
+
+**Anomaly Detection:**
+- **Shifting Baseline**: Rolling climatology (most accurate, research standard)
+- **Detrend Fixed Baseline**: Polynomial detrending + fixed climatology (preserves full time series)
+- **Fixed Baseline**: Simple daily climatology (trend-inclusive)
+- **Harmonic Detrending**: Fast polynomial + harmonic model (efficient screening)
+
+**Extreme Identification:**
+- **Hobday Method**: Day-of-year specific thresholds with spatial window extension (literature standard, Hobday et al. 2016)
+- **Global Method**: Single threshold across time (fast, exploratory analysis)
+
+**[→ Learn more about method selection](https://marex.readthedocs.io/en/latest/user_guide.html#method-selection-guide)**
+
+### Advanced Tracking
+
+- **Morphological Operations**: Fill spatial gaps and smooth event boundaries
+- **Temporal Gap Filling**: Maintain event continuity across short interruptions
+- **Merge/Split Handling**: Track event genealogy with improved nearest-neighbor partitioning
+- **Area Filtering**: Remove spurious small events with percentile or absolute thresholds
+
+**[→ Explore tracking algorithms](https://marex.readthedocs.io/en/latest/modules/track.html)**
+
+### Performance & Scalability
+
+- **Dask-First Architecture**: Parallel computation with automatic memory management
+- **JAX Acceleration**: Optional GPU/TPU support for 10-50× speedup
+- **HPC Integration**: SLURM cluster support for supercomputing environments
+- **Memory Optimisation**: Process datasets 100-1000× larger than available RAM
+
+**[→ Performance tuning guide](https://marex.readthedocs.io/en/latest/user_guide.html#performance-optimisation)**
+
+---
 
 ## Getting Help
 
-If you encounter installation issues:
+### Support Channels
 
-1. **Documentation**: Check the [full documentation](https://marex.readthedocs.io/) for detailed guides and API reference
-2. **Check Dependencies**: Run `marEx.print_dependency_status()` to identify missing components
-3. **Search Issues**: Check the [GitHub Issues](https://github.com/wienkers/marEx/issues) for similar problems
-4. **System Information**: Include your OS, Python version, and error messages when reporting issues
-5. **Support**: Reach out to [Aaron Wienkers](mailto:aaron.wienkers@gmail.com)
+- **[Documentation](https://marex.readthedocs.io/)** - Detailed guides and API reference
+- **[GitHub Issues](https://github.com/wienkers/marEx/issues)** - Bug reports and feature requests
+- **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)** - Questions, ideas, and community support
+- **[Example Notebooks](https://github.com/wienkers/marEx/tree/main/examples)** - Complete workflow demonstrations
 
+### Reporting Issues
+
+When reporting issues, please include:
+- marEx version (`marEx.__version__`)
+- Python version and operating system
+- Dependency status (`marEx.print_dependency_status()`)
+- Minimal reproducible example
+- Full error traceback
+
+---
+
+## Citation
+
+When using marEx in publications, please cite:
+
+- **marEx package**: DOI [10.5281/zenodo.16922881](https://doi.org/10.5281/zenodo.16922881)
+- **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves." *Progress in Oceanography* 141, 227-238. DOI [10.1016/j.pocean.2016.01.010](https://doi.org/10.1016/j.pocean.2016.01.010)
+
+---
 
 ## Funding
 
@@ -181,4 +202,7 @@ This project has received funding through:
 * The Swiss State Secretariat for Education, Research and Innovation (SERI) under contract #22.00366
 
 ---
-Please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com) with any questions, comments, issues, or bugs.
+
+## Contact
+
+For questions, comments, or collaboration opportunities, please contact [Aaron Wienkers](mailto:aaron.wienkers@gmail.com).

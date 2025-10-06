@@ -26,44 +26,7 @@ Key Features
 Installation and Setup
 ======================
 
-Basic Installation
-------------------
-
-Install marEx from PyPI::
-
-   pip install marEx
-
-For full functionality including GPU acceleration::
-
-   pip install marEx[full]
-
-For development work::
-
-   pip install marEx[dev]
-
-System Requirements
--------------------
-
-* **Python**: 3.10 or higher
-* **Memory**: Minimum 8GB RAM, 32GB+ recommended for large datasets
-* **Storage**: Lustre system recommended for large Zarr datasets
-* **Optional**: GPU for JAX acceleration
-
-Quick Setup Check
------------------
-
-.. code-block:: python
-
-   import marEx
-
-   # Check installation
-   print(f"marEx version: {marEx.__version__}")
-
-   # Check dependencies
-   marEx.print_dependency_status()
-
-   # Start local cluster
-   client = marEx.helper.start_local_cluster()
+For complete installation instructions including system requirements, optional dependencies, and HPC environments, see :doc:`installation`.
 
 Data Preparation
 ================
@@ -133,17 +96,33 @@ Data Loading Examples
 
 .. code-block:: python
 
-   # Apply chunking for efficient processing
+   # Apply chunking for efficient processing (chunk sizes vary by operation)
    sst = sst.chunk({'time': 365, 'lat': 50, 'lon': 100})
 
    # Ensure Dask backing
    if not marEx.is_dask_collection(sst.data):
        sst = sst.chunk()
 
+**Note**: Optimal chunk sizes depend on your dataset size and the operation (preprocessing vs tracking). See the Performance Optimisation section below for detailed chunking strategies.
+
 Core Workflow
 =============
 
-The marEx workflow consists of three main steps:
+The marEx workflow consists of three main steps. For a conceptual overview and foundations, see :doc:`concepts`.
+
+.. code-block:: text
+
+   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+   │  1. Detect      │  →   │  2. Track       │  →   │  3. Visualise   │
+   │    Extremes     │      │    Events       │      │     & Analyse   │
+   └─────────────────┘      └─────────────────┘      └─────────────────┘
+           ↓                        ↓                        ↓
+    preprocess_data()           tracker()                  plotX()
+           ↓                        ↓                        ↓
+    Binary extreme map        Tracked objects          Maps, animations,
+                              with unique IDs           & statistics
+
+**Summary:**
 
 1. **Preprocessing**: Convert raw data to anomalies and identify extremes
 2. **Tracking**: Track extreme events through time
@@ -177,7 +156,7 @@ The preprocessing step transforms raw oceanographic data into anomalies and dete
        sst,
        # Anomaly computation method
        method_anomaly='detrend_fixed_baseline',  # or 'detrend_harmonic', 'fixed_baseline', 'shifting_baseline'
-       detrend_order=[1 2],
+       detrend_order=[1, 2],
        smooth_days_baseline=21,             # Smoothing for climatology
 
        # Extreme identification method
@@ -210,7 +189,7 @@ where:
 * ``thresholds`` (dayofyear, lat, lon): Extreme event thresholds used to determine extreme events
 * ``mask`` (lat, lon): Valid data mask
 
-See, e.g. ``./examples/unstructured data/01_preprocess_extremes.ipynb`` for a detailed example of pre-processing on an *unstructured* grid.
+See ``./examples/unstructured data/01_preprocess_extremes.ipynb`` in :doc:`examples` for a detailed example of pre-processing on an *unstructured* grid.
 
 Step 2: Event Tracking
 ----------------------
@@ -303,7 +282,7 @@ where:
 * ``n_parents``: Number of parent objects in each merging event
 * ``n_children``: Number of child objects in each merging event
 
-See, e.g. ``./examples/unstructured data/02_id_track_events.ipynb`` for a detailed example of identification, tracking, & merging on an *unstructured* grid.
+See ``./examples/unstructured data/02_id_track_events.ipynb`` in :doc:`examples` for a detailed example of identification, tracking, & merging on an *unstructured* grid.
 
 Step 3: Visualisation
 ---------------------
@@ -359,6 +338,8 @@ marEx includes a powerful visualisation system called ``plotX`` that automatical
 Method Selection Guide
 ======================
 
+This section provides practical guidance for selecting appropriate methods. For foundations and definitions, see :doc:`concepts`.
+
 Choosing the Right Anomaly Method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -379,7 +360,7 @@ Use this decision tree to select the most appropriate anomaly calculation method
    │         │        Yes                                                │
    │         │         │                                                 │
    │         │         └──> Need efficiency? ──Yes──> DETREND HARMONIC   │
-   │         │                      │                  (fast, may bias)  │
+   │         │                      │                  (fast, biased)    │
    │         │                     No                                    │
    │         │                      │                                    │
    │         │                      └──> DETREND FIXED BASELINE          │
@@ -445,7 +426,7 @@ Extreme Identification Methods
 Spatial Window for Hobday Extreme (``window_spatial_hobday``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**New in v3.0+**: The Hobday extreme method now supports optional spatial windowing to create more robust thresholds.
+**New in v3.0+**: The Hobday extreme method now supports optional spatial windowing to create more statistically robust thresholds.
 
 .. code-block:: python
 
@@ -457,12 +438,12 @@ Spatial Window for Hobday Extreme (``window_spatial_hobday``)
        window_spatial_hobday=None      # No spatial window
    )
 
-   # With spatial windowing (recommended for short time-series)
+   # With spatial windowing (recommended for most applications)
    extremes_window = marEx.preprocess_data(
        sst,
        method_extreme='hobday_extreme',
        window_days_hobday=11,          # 11-day temporal window
-       window_spatial_hobday=5         # 5×5 spatial window (default)
+       window_spatial_hobday=5         # 5×5 spatial window (marEx default; use 1 for strict Hobday et al. 2016 definition for time-series)
    )
 
 **How Spatial Windowing Works**::
@@ -483,7 +464,7 @@ Spatial Window for Hobday Extreme (``window_spatial_hobday``)
 **Benefits**:
 
 * **Spatially coherent thresholds**: Reduces noise from individual grid cells
-* **More robust statistics**: Larger sample size for percentile calculation
+* **More robust statistics**: Larger sample size for robust percentile calculation
 
 **Limitations**:
 
@@ -515,491 +496,179 @@ Threshold Percentiles
 * **95th percentile**: Standard for marine heatwaves, balanced approach
 * **99th percentile**: Only most extreme events, rare events focus
 
-Scientific Methods: Detailed Concepts and Trade-offs
-=====================================================
-
-This section provides an in-depth understanding of the scientific methods and algorithms underlying marEx. Use this to make informed decisions about which approaches best suit your research questions.
-
-Anomaly Detection: Detailed Concepts
--------------------------------------
-
-What are Anomalies?
-~~~~~~~~~~~~~~~~~~~
-
-Anomalies represent deviations from "normal" conditions. For marine heatwaves, we calculate temperature anomalies: how much warmer is the ocean compared to its typical state?
-
-.. code-block:: text
-
-   Anomaly = Observed Temperature - Climatological Baseline
-
-The key question: **What baseline should we use?**
-
-Baseline Approaches: Detailed Comparison
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-MarEx provides four baseline approaches, each with different scientific assumptions:
-
-**1. Shifting Baseline** (``shifting_baseline``)
-
-* **Concept**: Use a rolling window of previous years to define "normal"
-* **Baseline**: Smoothed climatology from previous N years (e.g., 15 years)
-* **Assumption**: Climate is non-stationary; "normal" changes over time
-
-**Advantages**:
-
-* Most scientifically rigorous for climate change research
-* Captures non-linear trends and seasonal timing shifts
-* Adapts to changing climate baseline
-
-**Disadvantages**:
-
-* Shortens time series by ``window_year_baseline`` years at the start
-* Computationally intensive
-* More complex baseline interpretation
-
-**When to use**: Long-term climate studies, publications, ecological research
-
-**2. Fixed Baseline** (``fixed_baseline``)
-
-* **Concept**: Calculate day-of-year climatology from entire time series
-* **Baseline**: Average conditions for each calendar day across all years
-* **Assumption**: Long-term trends are part of the signal, not noise
-
-**Advantages**:
-
-* Simple interpretation: anomaly relative to long-term average
-* Fast computation
-* Preserves full time series length
-* Highlights long-term warming trends
-
-**Disadvantages**:
-
-* Includes climate change trends in anomalies
-* May not represent "extremes" in warming world
-* Doesn't account for phenological shifts
-
-**When to use**: Trend-inclusive analysis, public outreach, baseline comparisons
-
-**3. Detrend Fixed Baseline** (``detrend_fixed_baseline``)
-
-* **Concept**: Remove polynomial trends, then apply fixed baseline
-* **Baseline**: Daily climatology after detrending
-* **Assumption**: Linear/polynomial trends exist but seasonal timing is stationary
-
-**Advantages**:
-
-* Removes long-term trends while preserving full time series
-* Maintains seasonal cycles accurately
-* Good balance of rigor and simplicity
-
-**Disadvantages**:
-
-* Assumes trends are polynomial (may not capture complex climate change)
-* Doesn't account for changing seasonal timing
-* Medium computational cost
-
-**When to use**: Climate variability studies, when full time series needed with detrending
-
-**4. Harmonic Detrending** (``detrend_harmonic``)
-
-* **Concept**: Model trends and seasons with harmonics, subtract fitted model
-* **Baseline**: Harmonic model (mean + annual/semi-annual + polynomial trends)
-* **Assumption**: Seasonality is purely harmonic (sinusoidal)
-
-**Advantages**:
-
-* Very fast computation (OLS regression)
-* Full time series preserved
-* Memory efficient
-
-**Disadvantages**:
-
-* Harmonic assumption may bias statistics
-* Doesn't capture non-sinusoidal seasonal patterns
-* May misrepresent phenological complexity
-
-**When to use**: Large-scale screening, operational monitoring, efficiency priority
-
-Decision Framework for Anomaly Methods
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: text
-
-   Question 1: Do you need the full time series?
-   ├─ NO  → Use shifting_baseline (most accurate)
-   └─ YES → Continue to Question 2
-
-   Question 2: Do you need to remove climate trends?
-   ├─ NO  → Use fixed_baseline (simplest)
-   └─ YES → Continue to Question 3
-
-   Question 3: Is computational efficiency critical?
-   ├─ YES → Use detrend_harmonic (fastest)
-   └─ NO  → Use detrend_fixed_baseline (balanced)
-
-Extreme Identification: Detailed Concepts
-------------------------------------------
-
-Percentile Thresholds
-~~~~~~~~~~~~~~~~~~~~~
-
-Once anomalies are calculated, we identify "extreme" values using percentile thresholds:
-
-.. code-block:: text
-
-   Extreme Event = Anomaly > Threshold
-
-   Where: Threshold = Pth percentile of anomaly distribution
-
-Common thresholds:
-
-* **90th percentile**: Moderate extremes, more frequent events
-* **95th percentile**: Standard for marine heatwaves (Hobday et al. 2016)
-* **99th percentile**: Rare, severe extremes
-
-Global vs Local Thresholds: Detailed Comparison
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Global Extreme** (``global_extreme``)
-
-* **Concept**: Single threshold value across all days/seasons
-* **Calculation**: Percentile of entire anomaly time series
-* **Assumption**: Extremes defined consistently year-round
-
-**Advantages**:
-
-* Simple interpretation
-* Fast computation
-* Consistent definition across seasons
-
-**Disadvantages**:
-
-* Seasonal bias (summer dominates in many regions)
-* May miss winter extremes
-* Not aligned with ecological/biological impacts
-
-**When to use**: Exploratory analysis, first-order comparisons, non-seasonal systems
-
-**Hobday Extreme** (``hobday_extreme``)
-
-* **Concept**: Day-of-year specific thresholds accounting for seasonality
-* **Calculation**: Percentile within ±N day window around each calendar day
-* **Assumption**: Extremes should be defined relative to seasonal expectations
-
-**Advantages**:
-
-* Accounts for seasonal variability
-* Literature standard (Hobday et al. 2016)
-* Better ecological relevance
-* Avoids seasonal bias
-
-**Disadvantages**:
-
-* Complex threshold interpretation (365 different values)
-* Computationally intensive
-* Requires sufficient data for each day-of-year
-
-**When to use**: Research applications, ecological studies, publication-quality analysis
-
-Spatial Smoothing Concept
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Traditional Hobday**: Calculates thresholds independently for each grid cell
-
-**Spatial Window Enhancement** (``window_spatial_hobday``):
-
-* Pool samples from neighboring cells (e.g., 5×5 window)
-* Creates spatially coherent thresholds
-* Reduces noise from individual cell variability
-
-.. code-block:: text
-
-   Single Cell:              With 5×5 Spatial Window:
-
-   ┌───┐                     ┌───┬───┬───┬───┬───┐
-   │ ● │ 330 samples         │   │   │ X │   │   │
-   └───┘                     ├───┼───┼───┼───┼───┤
-                             │   │   │ X │   │   │
-                             ├───┼───┼─●─┼───┼───┤ 8,250 samples
-                             │   │   │ X │   │   │
-                             ├───┼───┼───┼───┼───┤
-                             │   │   │ X │   │   │
-                             └───┴───┴───┴───┴───┘
-
-**When to use spatial smoothing**:
-
-* Coarse resolution grids (> 1°)
-* Noisy satellite data with gaps
-* When spatial coherence is scientifically important
-
-**When to skip**:
-
-* High resolution grids (< 0.5°)
-* Unstructured grids (not supported)
-* When local variability is scientifically important
-
-Percentile Calculation: Exact vs Approximate
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Exact Method**
-
-* Loads all data into memory
-* Calculates mathematically exact percentiles
-* **Memory**: High (8-16 GB per core)
-* **Speed**: Slower
-* **Precision**: Perfect
-
-**Approximate Method**
-
-* Uses histogram binning approximation
-* **Memory**: Low (1-2 GB per core)
-* **Speed**: Fast
-* **Precision**: ~0.01°C (configurable)
-
-**Trade-off Decision**:
-
-.. code-block:: text
-
-   Dataset Size × Memory Available → Choice
-
-   Small dataset + Abundant memory   → Exact (if precision matters)
-   Large dataset + Limited memory    → Approximate (sufficient for most research)
-
-   Typical research: Approximate is sufficient (difference ~0.005°C)
-
-Event Tracking: Detailed Concepts
-----------------------------------
-
-Connected Component Labeling
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Binary extreme events (True/False) are grouped into spatially connected regions (objects):
-
-.. code-block:: text
-
-   Binary Field:         Labeled Objects:
-
-   1 1 0 0 1 1           A A 0 0 B B
-   1 1 0 1 1 1    →      A A 0 B B B
-   0 0 0 0 1 1           0 0 0 0 B B
-
-Each connected region gets a unique ID.
-
-Temporal Tracking
-~~~~~~~~~~~~~~~~~
-
-Objects are tracked through time by computing overlap between consecutive timesteps:
-
-.. code-block:: text
-
-   Time t:          Time t+1:         Decision:
-
-   Object A         Object A'         If overlap > threshold:
-   ███████          ██████               → Same event (keep ID)
-                                     Else:
-                                        → New event (new ID)
-
-**Overlap Fraction**: ``overlap = intersection / min(area_t, area_t+1)``
-
-Morphological Operations
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Opening + Closing** (controlled by ``R_fill``):
-
-* **Opening**: Removes small isolated objects (noise)
-* **Closing**: Fills small holes within objects
-
-.. code-block:: text
-
-   Raw Binary → Opening → Closing → Cleaned Objects
-
-   Effect: Smooths boundaries, fills gaps up to R_fill radius
-
-**Temporal Gap Filling** (controlled by ``T_fill``):
-
-Allows tracking to continue across short temporal gaps:
-
-.. code-block:: text
-
-   Day 0: Object detected (ID=5)
-   Day 1: Gap (no detection) ← T_fill allows continuity
-   Day 2: Gap (no detection)
-   Day 3: Object detected → Still ID=5 (if T_fill ≥ 2)
-
-Merge and Split Handling
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**The Challenge**: Objects can merge and split over time
-
-.. code-block:: text
-
-   Time t:                Time t+1:
-
-   Object A  Object B     Object C (merged)
-   ●─────┐   ●─────┐     ●──────────────┐
-         │         │     │              │
-         └─────────┴─────┴──────────────┘
-
-   Question: How to partition C back to A and B identities?
-
-**Centroid Method** (``nn_partitioning=False``):
-
-* Assign each cell of C to nearest parent centroid
-* **Problem**: Small objects can get unrealistically large portions
-
-**Nearest-Neighbor Method** (``nn_partitioning=True``, recommended):
-
-* Assign each cell of C to parent of nearest parent cell
-* **Advantage**: Realistic partitioning based on actual proximity
-
-This improves upon Sun et al. (2023) methodology.
-
-Area Filtering Concepts
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-Remove small, likely spurious objects:
-
-**Quartile Filtering** (``area_filter_quartile``):
-
-* Remove smallest fraction of objects
-* Example: 0.5 → remove smallest 50%
-* **Advantage**: Adaptive to dataset
-
-**Absolute Filtering** (``area_filter_absolute``):
-
-* Remove objects smaller than N grid cells
-* Example: 100 → keep only objects ≥ 100 cells
-* **Advantage**: Consistent physical size threshold
-
-Scientific Considerations
--------------------------
-
-Climatology Requirements
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Minimum Data**: 10+ years for robust climatology
-**Recommended**: 20-30 years for stable percentiles
-
-**Why**: Percentiles are statistical measures requiring sufficient samples
-
-For Hobday method with window_days_hobday=11:
-
-.. code-block:: text
-
-   Samples per day-of-year = N_years × 11 days
-
-   10 years:  110 samples (minimum)
-   30 years:  330 samples (robust)
-   50 years:  550 samples (excellent)
-
-Definition Alignment with Literature
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Hobday et al. (2016)** definition:
-
-* Use 95th percentile threshold
-* Day-of-year specific (11-day window)
-* Relative to 30-year baseline climatology
-
-**MarEx default alignment**:
-
-* ``threshold_percentile=95``
-* ``method_extreme='hobday_extreme'``
-* ``window_days_hobday=11``
-* ``method_anomaly='shifting_baseline'`` with ``window_year_baseline=15``
-
-For strict Hobday et al. (2016) compliance, use 30-year baseline if available.
-
-Trends vs Variability
-~~~~~~~~~~~~~~~~~~~~~~
-
-**Trend-inclusive** (``fixed_baseline``):
-
-* Marine heatwaves defined relative to long-term average
-* Increasing frequency reflects both natural variability AND climate change trend
-* Interpretation: "How unusual compared to historical average?"
-
-**Trend-removed** (``shifting_baseline``, ``detrend_fixed_baseline``):
-
-* Marine heatwaves defined relative to recent conditions
-* Frequency reflects natural variability in current climate state
-* Interpretation: "How unusual compared to recent normal?"
-
-**Choice depends on research question**:
-
-* Impacts research: Often trend-inclusive (organisms experience absolute conditions)
-* Attribution research: Often trend-removed (isolate natural variability)
-* Climate change research: Compare both approaches
-
-Summary Decision Matrix for Methods
-------------------------------------
-
-Quick Reference Table
-~~~~~~~~~~~~~~~~~~~~~
-
-+---------------------------+-------------------------+---------------------------+
-| Research Goal             | Recommended Anomaly     | Recommended Extreme       |
-+===========================+=========================+===========================+
-| Publication-quality MHW   | shifting_baseline       | hobday_extreme            |
-| detection                 |                         | window_spatial_hobday=5   |
-+---------------------------+-------------------------+---------------------------+
-| Climate change trends     | fixed_baseline          | hobday_extreme            |
-| (trend-inclusive)         |                         |                           |
-+---------------------------+-------------------------+---------------------------+
-| Ecological impacts        | shifting_baseline       | hobday_extreme            |
-|                           |                         | window_spatial_hobday=5   |
-+---------------------------+-------------------------+---------------------------+
-| Large-scale screening     | detrend_harmonic        | global_extreme            |
-| (efficiency priority)     |                         |                           |
-+---------------------------+-------------------------+---------------------------+
-| Climate variability       | detrend_fixed_baseline  | hobday_extreme            |
-| (full time series needed) |                         |                           |
-+---------------------------+-------------------------+---------------------------+
-| Operational monitoring    | detrend_harmonic        | hobday_extreme            |
-|                           |                         | window_spatial_hobday=3   |
-+---------------------------+-------------------------+---------------------------+
-
 Performance Optimisation
 ========================
 
+This section provides guidance for optimising marEx performance across different computing environments and dataset sizes.
+
+Memory Management and Chunking
+-------------------------------
+
 Chunking Strategy
+~~~~~~~~~~~~~~~~~
+
+Optimal chunking strategies vary by dataset size and operation type:
+
+.. code-block:: python
+
+   # Small datasets (< 10GB): Chunk time dimension
+   sst = sst.chunk({'time': 365, 'lat': -1, 'lon': -1})
+
+   # Large datasets (> 100GB): Chunk all dimensions
+   sst = sst.chunk({'time': 365, 'lat': 180, 'lon': 360})
+
+   # For tracking: Use smaller time chunks
+   sst = sst.chunk({'time': 25, 'lat': -1, 'lon': -1})  # Recommended for tracker
+
+Memory Requirements Estimation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 20 20 40
+
+   * - Operation
+     - Memory (per core)
+     - Optimal Time Chunk
+     - Notes
+   * - ``preprocess_data``
+     - 2-4 GB
+     - 365+ days
+     - Depends on method_anomaly
+   * - ``tracker``
+     - 1-2 GB
+     - 25-50 days
+     - Keep spatial dims unbounded (-1)
+   * - Exact percentiles
+     - 8-16 GB
+     - Full time series
+     - Requires careful chunking
+   * - Approximate percentiles
+     - 1-2 GB
+     - Any
+     - Memory efficient
+
+Exact vs Approximate Percentile Methods
+----------------------------------------
+
+When to Use Each Method
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**APPROXIMATE (default)**: For large datasets
+
+.. code-block:: python
+
+   extremes = marEx.preprocess_data(
+       sst,
+       method_percentile='approximate',
+       precision=0.01,        # ~0.01°C bins
+       max_anomaly=5.0,       # Histogram range ±5°C
+       dask_chunks={'time': 365}  # Any chunking works
+   )
+   # ✓ Memory efficient (1-2 GB/core)
+   # ✓ Fast parallel computation
+   # ✓ ~0.01°C precision (sufficient for most studies)
+
+**EXACT**: For small datasets or high precision needs
+
+.. code-block:: python
+
+   extremes_exact = marEx.preprocess_data(
+       sst,
+       method_percentile='exact',
+       dask_chunks={'time': -1, 'lat': 100, 'lon': 100}  # Careful chunking required!
+   )
+   # ⚠ High memory (8-16 GB/core), depending on time-series length
+   # ⚠ Slower computation
+   # ✓ Mathematically exact percentiles
+
+
+JAX Acceleration
+----------------
+
+When JAX Helps Most
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   import marEx
+
+   # Check JAX availability
+   if marEx.has_dependency('jax'):
+       print("JAX acceleration active")
+       # Best for:
+       # - Harmonic detrending (10-50× speedup)
+       # - Large spatial operations
+       # - GPU/TPU available systems
+   else:
+       print("Install JAX: pip install marEx[full]")
+       # Falls back to NumPy (still fast with Numba JIT)
+
+Performance Gains
+~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 25 25
+
+   * - Operation
+     - NumPy+Numba
+     - JAX (CPU)
+     - JAX (GPU)
+   * - Harmonic detrend
+     - 1× (baseline)
+     - 15× faster
+     - 50× faster
+   * - Percentile calc
+     - 1×
+     - 1× (similar)
+     - 2-3× faster
+   * - Tracking
+     - 1×
+     - 1× (similar)
+     - N/A
+
+HPC Cluster Setup
 -----------------
 
-Optimal chunking is crucial for performance (it is also an art):
+SLURM Distributed Cluster
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For supercomputers:
 
 .. code-block:: python
 
-   # General guidelines for chunking
-   optimal_chunks = {
-       'time': 30,              # ~1 month of daily data
-       'lat': -1,               # All latitude points (if memory permits)
-       'lon': -1                # All longitude points (if memory permits)
-   }
+   import marEx
 
-   # For unstructured data
-   optimal_chunks_unstruct = {
-       'time': 10,
-       'ncells': -1             # If memory permits
-   }
-
-
-Parallel Processing
--------------------
-
-.. code-block:: python
-
-   # Start optimised cluster
-   client = marEx.helper.start_local_cluster(
-       n_workers=4,
-       threads_per_worker=2,
-       memory_limit='8GB'
+   # Start distributed Dask cluster on SLURM
+   client = marEx.helper.start_distributed_cluster(
+       n_workers=64,           # Number of workers
+       cores_per_worker=4,     # Cores per worker
+       memory_per_worker='8GB' # Memory per worker
    )
 
-   # For HPC systems
-   cluster = marEx.helper.start_distributed_cluster(
-       cores=128,
-       memory='256GB',
-       queue='compute'
+   # Get dashboard URL for monitoring
+   marEx.helper.get_cluster_info(client)
+
+   # Run analysis
+   extremes = marEx.preprocess_data(sst, ...)
+   events = marEx.tracker(extremes.extreme_events, ...).run()
+
+   # Clean up
+   client.close()
+
+Local Cluster
+~~~~~~~~~~~~~
+
+For workstations:
+
+.. code-block:: python
+
+   # Auto-detect system resources
+   client = marEx.helper.start_local_cluster(
+       n_workers=8,            # Leave some cores for system
+       threads_per_worker=2,
+       memory_limit='16GB'     # Per worker
    )
 
 Grid Types and Coordinate Systems
@@ -1097,20 +766,7 @@ For marine heatwave studies following Hobday et al. (2016):
 Getting Help and Support
 ========================
 
-Documentation Resources
------------------------
-
-* **Tutorials**: Step-by-step guides in ``docs/tutorials/``
-* **API Reference**: Complete function documentation
-* **Examples**: Real-world analysis examples
-* **Performance Guide**: Optimisation tips and tricks
-
-Community Support
------------------
-
-* **GitHub Issues**: Bug reports and feature requests
-* **Discussions**: Community Q&A and examples
-* **Documentation**: Contributions welcome
+For troubleshooting common issues, diagnostic checklists, and support resources, see :doc:`troubleshooting`.
 
 Citations and References
 ========================

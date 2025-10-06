@@ -107,6 +107,7 @@ docs = [
     "sphinx-autodoc-typehints",
     "nbsphinx",
     "pandoc",
+    "sphinxcontrib-video",
 ]
 
 # Testing framework

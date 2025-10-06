@@ -121,6 +121,7 @@ Documentation Contents
    :caption: Getting Started
 
    installation
+   why_marex
    quickstart
 
 .. toctree::

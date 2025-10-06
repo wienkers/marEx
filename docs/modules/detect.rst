@@ -698,18 +698,18 @@ Method Performance Comparison
    # Relative performance for global 0.25° daily data:
 
    # Fastest: detrend_harmonic + global_extreme
-   # - Processing time: ~2 minutes per decade
-   # - Memory usage: ~4 GB
+   # - Processing time: ~0.5 wall-minutes per decade (2 CPU-hours)
+   # - Memory usage: ~1 GB
    # - Accuracy: Good for first analysis
 
    # Balanced: detrend_fixed_baseline + hobday_extreme
-   # - Processing time: ~8 minutes per decade
+   # - Processing time: ~5 wall-minutes per decade (21 CPU-hours)
    # - Memory usage: ~8 GB
    # - Accuracy: Better climatology
 
    # Most rigorous: shifting_baseline + hobday_extreme
-   # - Processing time: ~25 minutes per decade
-   # - Memory usage: ~15 GB
+   # - Processing time: ~8 wall-minutes per decade (34 CPU-hours)
+   # - Memory usage: ~12 GB
    # - Accuracy: Best for research applications
 
 Scaling Characteristics
