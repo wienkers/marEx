@@ -1,2 +1,5 @@
 # Large test data files - generate dynamically instead of storing in LFS
 # tests/data/** filter=lfs diff=lfs merge=lfs -text
+
+# Mark Jupyter notebooks as documentation to exclude from language statistics
+*.ipynb linguist-documentation
