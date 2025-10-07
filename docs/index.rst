@@ -148,65 +148,6 @@ Documentation Contents
    modules/plotx
    modules/helper
 
-Grid Types Supported
-====================
-
-Structured Grids
------------------
-Regular rectangular grids:
-
-* **Standard climate model output** (CMIP6, reanalysis data)
-* **Satellite data** on regular grids
-* **Observational products** on structured grids
-
-Unstructured Grids
-------------------
-Irregular meshes with dimensions (e.g. time & cell) and connectivity information:
-
-* **Ocean model output** (FESOM, ICON-O, MPAS-Ocean)
-* **Atmospheric model output** on irregular grids
-* **Finite element model** output
-
-Performance Features
-====================
-
-* **Dask-First Architecture**: All processing uses Dask for parallel computation and memory management
-* **Memory Optimisation**: Efficient chunking strategies and memory-aware algorithms
-* **HPC Integration**: SLURM cluster support for supercomputing environments
-* **JAX Acceleration**: Optional GPU/TPU acceleration for performance-critical operations
-* **Numba JIT**: Just-in-time compilation for CPU-bound operations
-
-Scientific Methods
-==================
-
-Anomaly Detection Methods
--------------------------
-
-* **Harmonic Detrending** (``detrend_harmonic``): Efficient method using long-term polynomial trends & harmonics
-* **Fixed Baseline** (``fixed_baseline``): Removes the daily climatology of the full time series without detrending
-* **Detrend Fixed Baseline** (``detrend_fixed_baseline``): Polynomial detrending followed by removing the fixed daily climatology
-* **Shifting Baseline** (``shifting_baseline``): Most accurate method using rolling climatologies
-
-Extreme Event Identification
-----------------------------
-
-* **Global Extreme** (``global_extreme``): Uses global percentile thresholds
-* **Hobday Extreme** (``hobday_extreme``): Uses day-of-year specific percentile thresholds
-
-Tracking Algorithms
--------------------
-
-* **Binary Object Tracking**: Advanced algorithms for tracking connected components through time
-* **Merge/Split Handling**: New logic for handling event merging and splitting
-* **Morphological Operations**: Image processing techniques for binary event preprocessing
-
-Getting Help
-============
-
-* **Documentation**: Complete API reference and user guide
-* **Examples**: Jupyter notebooks demonstrating workflows
-* **Issues**: `GitHub Issues <https://github.com/wienkers/marEx/issues>`_ for bug reports and feature requests
-
 Indices and Tables
 ==================
 

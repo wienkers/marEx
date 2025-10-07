@@ -186,6 +186,18 @@ marEx can leverage JAX for significant performance gains (**10-50× speedup** re
 
 **Code reference:** Install with ``pip install marEx[full]`` for JAX support
 
+Numba JIT Compilation
+---------------------
+
+marEx uses Numba's just-in-time (JIT) compilation as a **core dependency** for CPU-bound operations, providing performance acceleration without requiring any user configuration. Numba compiles Python functions to optimised machine code at runtime, delivering near-C performance for numerical computations.
+
+**Key benefits:**
+
+* Provides baseline acceleration, even without JAX/GPU
+* Transparent performance gains on CPU-intensive tracking and grid operations
+
+**Code reference:** Numba is a required dependency installed automatically with marEx
+
 
 Grid-Agnostic & Universal
 ==========================

@@ -129,50 +129,50 @@ jobs:
 
     - name: Run unit tests
       run: |
-        pytest tests/test_detect_helpers.py tests/test_track_helpers.py -v --tb=short
+        pytest tests/test_detect_helpers.py tests/test_track_helpers.py -n 2 -v --tb=short
 
     - name: Run error handling tests
       run: |
-        pytest tests/test_error_handling.py -v --tb=short
+        pytest tests/test_error_handling.py -n 2 -v --tb=short
 
     - name: Run exception tests
       run: |
-        pytest tests/test_exceptions.py -v --tb=short
+        pytest tests/test_exceptions.py -n 2 -v --tb=short
 
     - name: Run logging system tests
       run: |
-        pytest tests/test_logging_system.py -v --tb=short
+        pytest tests/test_logging_system.py -n 2 -v --tb=short
 
     - name: Run preprocessing tests (gridded)
       run: |
-        pytest tests/test_gridded_preprocessing.py -v --tb=short
+        pytest tests/test_gridded_preprocessing.py -n 2 -v --tb=short
 
     - name: Run preprocessing tests (unstructured)
       run: |
-        pytest tests/test_unstructured_preprocessing.py -v --tb=short
+        pytest tests/test_unstructured_preprocessing.py -n 2 -v --tb=short
 
     - name: Run tracking tests (gridded)
       run: |
-        pytest tests/test_gridded_tracking.py -v --tb=short
+        pytest tests/test_gridded_tracking.py -n 2 -v --tb=short
 
     - name: Run tracking tests (unstructured)
       run: |
-        pytest tests/test_unstructured_tracking.py -v --tb=short
+        pytest tests/test_unstructured_tracking.py -n 2 -v --tb=short
 
     - name: Run plotting tests
       run: |
-        pytest tests/test_plotx.py -v --tb=short
+        pytest tests/test_plotx.py -n 2 -v --tb=short
 
     - name: Run integration tests
       run: |
-        pytest tests/test_integration.py -v --tb=short -m "not slow"
+        pytest tests/test_integration.py -n 2 -v --tb=short -m "not slow"
 
   coverage:
     name: Coverage Report
     runs-on: ubuntu-latest
     needs: test
     if: always()
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - name: Checkout code
@@ -237,15 +237,10 @@ jobs:
         echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
 
     - name: Generate coverage report
-      timeout-minutes: 45
+      timeout-minutes: 30
       run: |
-        # Run with parallel mode and multiprocessing support, excluding slow and nocov tests
-        coverage run --parallel-mode --rcfile=.coveragerc -m pytest tests/ --tb=short -m "not slow and not nocov" -x --maxfail=3
-        # Combine all coverage data files from subprocesses
-        coverage combine
-        coverage report -m
-        coverage html
-        coverage xml
+        # Run tests in parallel with coverage collection
+        pytest tests/ -n auto --cov=marEx --cov-report=term --cov-report=html --cov-report=xml --cov-config=.coveragerc --tb=short -m "not nocov" -x --maxfail=3
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
