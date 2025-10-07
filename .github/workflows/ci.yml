@@ -172,7 +172,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: always()
-    timeout-minutes: 90
+    timeout-minutes: 150
 
     steps:
     - name: Checkout code
@@ -237,7 +237,7 @@ jobs:
         echo "PYTEST_COVERAGE=true" >> $GITHUB_ENV
 
     - name: Generate coverage report
-      timeout-minutes: 30
+      timeout-minutes: 120
       run: |
         # Run tests in parallel with coverage collection
         pytest tests/ -n auto --cov=marEx --cov-report=term --cov-report=html --cov-report=xml --cov-config=.coveragerc --tb=short -m "not nocov" -x --maxfail=3
