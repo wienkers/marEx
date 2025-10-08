@@ -4,11 +4,7 @@ marEx: Marine Extremes Detection and Tracking
 
 .. image:: https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg
    :target: https://github.com/wienkers/marEx/actions/workflows/ci.yml
-   :alt: Continuous Integration
-
-.. image:: https://github.com/wienkers/marEx/workflows/Tests/badge.svg
-   :target: https://github.com/wienkers/marEx/actions/workflows/tests.yml
-   :alt: Tests
+   :alt: CI
 
 .. image:: https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg
    :target: https://codecov.io/gh/wienkers/marEx
@@ -18,9 +14,17 @@ marEx: Marine Extremes Detection and Tracking
    :target: https://badge.fury.io/py/marEx
    :alt: PyPI version
 
+.. image:: https://readthedocs.org/projects/marex/badge/?version=latest
+   :target: https://marex.readthedocs.io/en/latest/
+   :alt: Documentation Status
+
 .. image:: https://static.pepy.tech/badge/marex
    :target: https://pepy.tech/projects/marex
    :alt: PyPI Downloads
+
+.. image:: https://zenodo.org/badge/945834123.svg
+   :target: https://doi.org/10.5281/zenodo.16922881
+   :alt: DOI
 
 **marEx** is a Python package for efficient identification and tracking of marine extremes
 (e.g., Marine Heatwaves) in oceanographic data. It provides a complete pipeline from raw data
