@@ -14,10 +14,6 @@ marEx: Marine Extremes Detection and Tracking
    :target: https://badge.fury.io/py/marEx
    :alt: PyPI version
 
-.. image:: https://readthedocs.org/projects/marex/badge/?version=latest
-   :target: https://marex.readthedocs.io/en/latest/
-   :alt: Documentation Status
-
 .. image:: https://static.pepy.tech/badge/marex
    :target: https://pepy.tech/projects/marex
    :alt: PyPI Downloads

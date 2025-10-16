@@ -217,14 +217,14 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     DataValidationError
         If any unmasked data contains NaN or infinite values
     """
-    # Create a mask for valid (finite) data
-    finite_mask = np.isfinite(da)
+    # Create spatial mask from first time step (2D array)
+    spatial_mask = np.isfinite(da.isel({dimensions["time"]: 0}))
 
-    # Check if there's any data at all
-    if not finite_mask.any():
+    # Check if there's any valid data at all
+    if not spatial_mask.any().compute():
         raise create_data_validation_error(
             "Dataset contains no valid (finite) data",
-            details="All values in the dataset are NaN or infinite",
+            details="All values in the first time step are NaN or infinite",
             suggestions=[
                 "Check your input data for data quality issues",
                 "Verify the data was loaded correctly",
@@ -232,47 +232,50 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
             ],
             data_info={
                 "total_values": int(da.size),
-                "finite_values": 0,
-                "nan_values": int(da.isnull().sum().compute()),
-                "inf_values": int((~np.isfinite(da) & da.notnull()).sum().compute()),
+                "total_spatial_locations": int(np.prod([da.sizes[d] for d in da.dims if d != dimensions["time"]])),
             },
         )
 
-    # Create ocean/land mask from first time step to identify valid spatial locations
-    spatial_mask = np.isfinite(da.isel({dimensions["time"]: 0}))
+    # Reduce first, then mask (avoids broadcasting across time)
+    # Count invalid values at each spatial location across time dimension
+    # This produces a 2D spatial array instead of a 3D array
+    finite_mask = np.isfinite(da)
+    invalid_per_location = (~finite_mask).sum(dim=dimensions["time"])
 
-    # For each spatial location that should have data, check if all time points are finite
-    if spatial_mask.any():
-        # Check for locations that have valid data in first timestep but invalid data elsewhere
-        temporal_validity = finite_mask.where(spatial_mask, True).all(dim=dimensions["time"])
+    # Now apply spatial mask to this 2D result (no broadcasting across time!)
+    invalid_in_valid_locations = invalid_per_location.where(spatial_mask, 0)
 
-        if not temporal_validity.all():
-            # Count problematic locations and values
-            invalid_locations = (~temporal_validity).sum().compute()
-            total_locations = spatial_mask.sum().compute()
+    # Check if any valid ocean location has invalid data
+    max_invalid = invalid_in_valid_locations.max().compute()
 
-            # Count different types of invalid values
-            nan_count = da.isnull().sum().compute()
-            inf_count = (np.isinf(da)).sum().compute()
-            total_invalid = nan_count + inf_count
+    if max_invalid > 0:
+        total_invalid_in_ocean = int(invalid_in_valid_locations.sum().compute())
+        total_ocean_locations = int(spatial_mask.sum().compute())
+        locations_affected = int((invalid_in_valid_locations > 0).sum().compute())
+        total_time_steps = int(da.sizes[dimensions["time"]])
 
-            raise create_data_validation_error(
-                f"Dataset contains invalid values in {invalid_locations} of {total_locations} valid locations",
-                details=f"Found {total_invalid} invalid values: {nan_count} NaN, {inf_count} infinite",
-                suggestions=[
-                    "Remove or interpolate NaN/infinite values before preprocessing",
-                    "Check data quality and loading procedures",
-                    "Consider using data.fillna() or data.interpolate() methods",
-                    "Verify coordinate/dimension alignment in your dataset",
-                ],
-                data_info={
-                    "invalid_locations": int(invalid_locations),
-                    "total_locations": int(total_locations),
-                    "nan_values": int(nan_count),
-                    "inf_values": int(inf_count),
-                    "total_values": int(da.size),
-                },
-            )
+        raise create_data_validation_error(
+            f"Dataset contains {total_invalid_in_ocean} invalid values in {locations_affected} ocean locations",
+            details=(
+                f"Found invalid data across time series. Worst location has {int(max_invalid)} "
+                f"invalid time steps out of {total_time_steps}."
+            ),
+            suggestions=[
+                "Remove or interpolate NaN/infinite values before preprocessing",
+                "Check data quality and loading procedures",
+                "Consider using data.fillna() or data.interpolate_na() methods",
+                "Verify coordinate/dimension alignment in your dataset",
+                "For ocean data, ensure land mask is properly applied before preprocessing",
+            ],
+            data_info={
+                "total_invalid_values_in_ocean": total_invalid_in_ocean,
+                "locations_affected": locations_affected,
+                "total_ocean_locations": total_ocean_locations,
+                "max_invalid_at_one_location": int(max_invalid),
+                "total_time_steps": total_time_steps,
+                "percentage_affected": f"{100.0 * locations_affected / total_ocean_locations:.2f}%",
+            },
+        )
 
 
 # ============================
