@@ -1,0 +1,34 @@
+# Codecov configuration for marEx
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  status:
+    # Overall project coverage
+    project:
+      default:
+        target: 95%  # Maintain 95% overall project coverage
+        threshold: 1%
+        if_ci_failed: error
+
+    # Coverage for new code in patches/PRs - disabled
+    patch:
+      default:
+        enabled: false  # Do not enforce patch coverage requirements
+
+# Comment configuration
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+# Ignore paths
+ignore:
+  - "tests/"
+  - "docs/"
+  - "examples/"
+  - "setup.py"
+  - "**/_dependencies.py"
+  - "**/_coverage_init.py"
+  - "**/plotX/unstructured.py"

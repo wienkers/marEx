@@ -290,7 +290,7 @@ Core Tracking Parameters
 
   **2. Merged State (Time t+1)**
 
-  The features grow and merge into a single large object marked with '#'. 
+  The features grow and merge into a single large object marked with '#'.
   Question: how should these 20 cells be attributed to lineages A and B ?
 
   ::

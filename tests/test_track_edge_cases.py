@@ -259,9 +259,7 @@ class TestComplexMergeSplitValidation:
         # Create tracker with aggressive merging settings
         tracker = marEx.tracker(
             extremes_gridded.extreme_events,
-            extremes_gridded.mask.where(
-                (extremes_gridded.lat < 85) & (extremes_gridded.lat > -90), other=False
-            ),
+            extremes_gridded.mask.where((extremes_gridded.lat < 85) & (extremes_gridded.lat > -90), other=False),
             area_filter_quartile=0.4,
             R_fill=8,
             T_fill=2,  # Must be even
@@ -720,7 +718,7 @@ class TestAbsoluteAreaFiltering:
         ).chunk({"time": 5})
 
         # Add larger, more connected objects that will survive morphological operations
-        data.values[0, 2:8, 2:8] = True 
+        data.values[0, 2:8, 2:8] = True
         data.values[0, 10:16, 10:16] = True
 
         mask = xr.ones_like(data.isel(time=0), dtype=bool)
@@ -956,4 +954,3 @@ class TestEnforceOverlapThreshold:
         # Verify processing completed and filtered correctly
         assert result is not None
         assert len(result) > 0  # Should have at least one valid overlap
-

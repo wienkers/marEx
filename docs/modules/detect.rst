@@ -344,8 +344,8 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
 
 **When to Use Spatial Windowing**:
 
-Spatial windowing increases the sample size for percentile calculation, improving statistical robustness. 
-Note that this is not a spatial smoothing of the data itself, but rather a pooling of samples from 
+Spatial windowing increases the sample size for percentile calculation, improving statistical robustness.
+Note that this is not a spatial smoothing of the data itself, but rather a pooling of samples from
 neighbouring grid cells to better estimate the percentile thresholds. This is motivated from a spatial decorrelation
 length-scale argument, in the same way Hobday has argued for decorrelation time-scale for the 11-day time window.
 This is critical in several scenarios:

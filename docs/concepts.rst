@@ -2,7 +2,7 @@
 Core Concepts
 =============
 
-This guide provides a foundational understanding of marEx's design philosophy and core concepts. 
+This guide provides a foundational understanding of marEx's design philosophy and core concepts.
 
 .. contents:: Table of Contents
    :local:

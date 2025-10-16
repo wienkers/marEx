@@ -1184,6 +1184,36 @@ class TestDetectDataValidationEdgeCases:
                 method_anomaly="detrend_harmonic",
             )
 
+    def test_partial_invalid_data_error(self, dimensions_gridded, dask_chunks):
+        """Test error when some ocean locations have NaN/infinite values across time."""
+        import pandas as pd
+
+        # Create data with mostly valid values
+        data = np.random.rand(100, 3, 4) * 5 + 15
+
+        # Make some specific locations have invalid values across time
+        data[:, 1, 2] = np.nan  # One location all NaN
+        data[50:, 0, 1] = np.inf  # Another location partially infinite
+        data[:20, 2, 0] = np.nan  # Another location with some NaN values
+
+        partial_invalid_data = xr.DataArray(
+            data,
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": pd.date_range("2020-01-01", periods=100),
+                "lat": np.linspace(-10, 10, 3),
+                "lon": np.linspace(0, 20, 4),
+            },
+        ).chunk({"time": 25})
+
+        with pytest.raises(DataValidationError, match="contains.*invalid values.*ocean locations"):
+            marEx.preprocess_data(
+                partial_invalid_data,
+                dimensions=dimensions_gridded,
+                dask_chunks=dask_chunks,
+                method_anomaly="detrend_harmonic",
+            )
+
 
 class TestQuantileThresholdWarnings:
     """Test warnings for quantile threshold edge cases."""
