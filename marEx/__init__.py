@@ -57,6 +57,9 @@ from .exceptions import (  # Main exception hierarchy; Convenience constructors
     wrap_exception,
 )
 
+# Import HPC helper utilities
+from .helper import configure_dask
+
 # Import logging configuration functions
 from .logging_config import (
     configure_logging,
@@ -116,6 +119,8 @@ __all__ = [
     "is_verbose_mode",
     "is_quiet_mode",
     "get_logger",
+    # HPC helper utilities
+    "configure_dask",
 ]
 
 # Version information

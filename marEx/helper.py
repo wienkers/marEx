@@ -35,12 +35,32 @@ except (ImportError, ValueError):
     SLURMCluster = None
 
 
-# Default configuration values
+# Default configuration values optimised for HPC environments
+# These settings are tuned for large-scale climate data processing
+# and have been tested on DKRZ Levante with marEx workloads
 DEFAULT_DASK_CONFIG = {
+    # Array processing
     "array.slicing.split_large_chunks": False,
-    "distributed.comm.timeouts.connect": "240s",  # Increased from default
-    "distributed.comm.timeouts.tcp": "480s",  # Double the connection timeout
-    "distributed.comm.retry.count": 10,  # More retries before giving up
+    "array.chunk-size": "24MiB",  # Optimal chunk size for oceanographic data
+    # Worker memory management
+    "distributed.worker.memory.target": 0.4,  # Target memory threshold for spilling to disk
+    "distributed.worker.memory.spill": 0.5,  # Spill to disk threshold
+    "distributed.worker.memory.pause": 0.6,  # Pause worker threshold
+    "distributed.worker.memory.terminate": 0.8,  # Terminate worker threshold
+    "distributed.worker.memory.recent-to-old-time": "10s",  # Time to consider data old
+    "distributed.worker.daemon": False,  # Workers are not daemons
+    # Scheduler stability settings
+    "distributed.scheduler.allowed-failures": 50,  # Allow many retries (common on HPC)
+    "distributed.scheduler.work-stealing": False,  # Disable for deterministic execution
+    "distributed.scheduler.worker-ttl": "600s",  # Keep workers alive for 10 minutes
+    # Communication timeouts - increased for HPC network latency
+    "distributed.comm.timeouts.connect": "300s",  # Connection timeout
+    "distributed.comm.timeouts.tcp": "300s",  # TCP timeout
+    "distributed.comm.retry.count": 15,  # More retries before giving up
+    "distributed.comm.retry.delay.min": "3s",  # Min delay between retries
+    "distributed.comm.retry.delay.max": "30s",  # Max delay between retries
+    # Admin and logging
+    "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",  # Log format
 }
 
 # DKRZ-specific paths and configuration
