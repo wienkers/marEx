@@ -6,11 +6,14 @@ This module provides utilities for setting up and managing Dask clusters
 in HPC environments, with specific support for the DKRZ Levante Supercomputer.
 """
 
+import logging
 import re
+import shutil
 import subprocess
+import uuid
 from getpass import getuser
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Dict, Optional, Union
 
 import dask
@@ -378,6 +381,12 @@ def start_local_cluster(
 
     # Create cluster and client
     logger.debug("Creating local cluster and client")
+
+    # Configure Bokeh session token expiration via dask config
+    # Set to 24 hours to prevent Bokeh 3.8+ token expiration during long notebooks
+    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400000})
+    logger.debug("Set Bokeh session token expiration to 24 hours (86400000ms)")
+
     with log_timing(logger, "Local cluster startup", log_memory=True, show_progress=True):
         cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, **kwargs)
         client = Client(cluster)
@@ -582,6 +591,18 @@ def start_distributed_cluster(
 
     # Create SLURM cluster
     logger.info("Creating SLURM cluster")
+
+    # Configure Bokeh session token expiration via dask config
+    # Set to 24 hours to prevent Bokeh 3.8+ token expiration during long notebooks
+    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400000})
+    logger.debug("Set Bokeh session token expiration to 24 hours (86400000ms)")
+
+    # Merge user-provided scheduler_options from kwargs if present
+    user_scheduler_options = kwargs.pop("scheduler_options", {})
+    scheduler_options = {"dashboard_address": f":{dashboard_address}", **user_scheduler_options}
+
+    logger.debug(f"Scheduler options: {scheduler_options}")
+
     with log_timing(logger, "SLURM cluster creation"):
         cluster = SLURMCluster(
             name="dask-cluster",
@@ -596,7 +617,7 @@ def start_distributed_cluster(
             job_extra_directives=config["job_extra"],
             log_directory=DKRZ_LOG_PATH,
             local_directory=temp_dir.name,
-            scheduler_options={"dashboard_address": f":{dashboard_address}"},
+            scheduler_options=scheduler_options,
             **kwargs,
         )
 
@@ -616,6 +637,144 @@ def start_distributed_cluster(
     logger.info("Distributed cluster started successfully")
 
     return client
+
+
+def checkpoint_to_zarr(
+    data: Union[xr.DataArray, xr.Dataset],
+    name: str = "checkpoint",
+    cleanup: bool = False,
+    timedim: str = "time",
+) -> Union[xr.DataArray, xr.Dataset]:
+    """
+    Save and reload a Dask-backed xarray object to break graph dependencies.
+
+    This function materialises a Dask array/dataset to a temporary file
+    and immediately reloads it, thereby breaking the computational graph.
+    This prevents expensive recomputations when the same data is used multiple
+    times downstream.
+
+    Parameters
+    ----------
+    data : xarray.DataArray or xarray.Dataset
+        Dask-backed xarray object to checkpoint
+    name : str, default='checkpoint'
+        Name prefix for the temporary file (for logging/debugging)
+    cleanup : bool, default=False
+        Whether to delete the temporary file after reloading.
+        By default (False), temp files are kept for the session and cleaned up
+        by the OS temp directory manager. Set to True to immediately delete after reload.
+    timedim : str, default='time'
+        Name of the time dimension for chunking adjustments
+
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        Reloaded data with broken graph dependencies
+
+    Examples
+    --------
+    >>> import marEx
+    >>> anomalies = marEx.compute_normalised_anomaly(sst)
+    >>> anomalies_checkpointed = marEx.helper.checkpoint_to_zarr(
+    ...     anomalies, name="anomalies"
+    ... )
+    """
+    logger.debug(f"Checkpointing '{name}' to break graph dependencies")
+
+    # Get dask temporary directory, fallback to system temp
+    try:
+        temp_base = dask.config.get("temporary-directory", None)
+        if temp_base is None or not Path(temp_base).exists():
+            temp_base = gettempdir()
+    except Exception:
+        temp_base = gettempdir()
+
+    unique_id = uuid.uuid4().hex[:8]
+    file_path = None
+
+    try:
+        try:
+            zarr_path = Path(temp_base) / f"marEx_checkpoint_{name}_{unique_id}.zarr"
+            file_path = zarr_path
+
+            logger.debug(f"Attempting Zarr checkpoint: {zarr_path}")
+            # Check if time dimension has irregular chunks that need fixing
+            if timedim in data.dims and timedim in data.chunks:
+                time_chunks = data.chunks[timedim]
+                if len(time_chunks) > 1 and len(set(time_chunks)) > 1:
+                    # Chunks are irregular - need to fix for Zarr
+                    first_chunk = time_chunks[0]
+                    total_size = data.sizes[timedim]
+
+                    logger.debug(f"Irregular {timedim} chunks detected: {time_chunks}")
+                    logger.debug(f"Total {timedim} dimension size: {total_size}")
+
+                    # Calculate how many full chunks we can have
+                    n_full_chunks = total_size // first_chunk
+                    remainder = total_size % first_chunk
+
+                    if remainder > 0:
+                        # Need full chunks + one smaller final chunk
+                        new_time_chunks = (first_chunk,) * n_full_chunks + (remainder,)
+                    else:
+                        # All chunks are equal size
+                        new_time_chunks = (first_chunk,) * n_full_chunks
+
+                    data = data.chunk({timedim: new_time_chunks})
+                    logger.debug(f"Adjusted {timedim} chunks for Zarr: {new_time_chunks}")
+                    logger.debug(f"Verification - sum of chunks: {sum(new_time_chunks)}, dimension size: {total_size}")
+
+            with log_timing(logger, f"Saving '{name}' to Zarr", logging.DEBUG, log_memory=False):
+                data.to_zarr(zarr_path, mode="w")
+
+            logger.debug("Zarr save successful, reloading...")
+            with log_timing(logger, f"Reloading '{name}' from Zarr", logging.DEBUG, log_memory=False):
+                if isinstance(data, xr.Dataset):
+                    reloaded = xr.open_zarr(zarr_path, chunks={})
+                else:
+                    ds_temp = xr.open_zarr(zarr_path, chunks={})
+                    reloaded = ds_temp[list(ds_temp.data_vars)[0]]
+
+            logger.info(f"Checkpoint '{name}' saved via Zarr: {zarr_path}")
+            return reloaded
+
+        except (ValueError, OSError) as e:
+            if "incompatible" in str(e) or "chunk" in str(e).lower():
+                logger.warning(f"Zarr failed due to irregular chunks: {str(e)[:200]}")
+                # Clean up failed zarr attempt
+                if zarr_path.exists():
+                    shutil.rmtree(zarr_path)
+            else:
+                raise
+
+    except Exception as e:
+        logger.error(f"Failed to checkpoint '{name}' to disk: {e}")
+        logger.warning(f"Falling back to in-memory persist() only for '{name}'")
+
+        # Fallback to in-memory persist (no disk I/O)
+        try:
+            reloaded = data.persist()
+            from distributed import wait
+
+            wait(reloaded)
+            logger.info(f"Checkpoint '{name}' persisted to distributed memory (no disk)")
+            return reloaded
+        except Exception as e2:
+            logger.error(f"Even persist() failed for '{name}': {e2}")
+            logger.warning("Returning original data without checkpointing")
+            return data
+
+    finally:
+        # Cleanup if requested
+        if cleanup and file_path and file_path.exists():
+            try:
+                if file_path.suffix == ".zarr":
+                    shutil.rmtree(file_path)
+                else:
+                    file_path.unlink()
+                logger.debug(f"Cleaned up checkpoint file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup {file_path}: {e}")
 
 
 def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:

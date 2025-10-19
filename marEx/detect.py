@@ -27,6 +27,7 @@ import flox.xarray
 import numpy as np
 import pandas as pd
 import xarray as xr
+from dask import persist
 from dask.base import is_dask_collection
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
@@ -34,7 +35,7 @@ from xhistogram.xarray import histogram
 
 # Coordinate validation imports removed
 from .exceptions import ConfigurationError, create_data_validation_error
-from .helper import fix_dask_tuple_array
+from .helper import checkpoint_to_zarr, fix_dask_tuple_array
 from .logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 
 # Get module logger
@@ -305,6 +306,7 @@ def preprocess_data(
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
+    use_temp_arrays: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -370,6 +372,12 @@ def preprocess_data(
         Neighbour connectivity for spatial clustering.
     cell_areas : xarray.DataArray, optional
         Cell areas for weighted spatial statistics.
+    use_temp_arrays : bool, default=False
+        Enable checkpointing to temporary zarr stores to break Dask graph dependencies.
+        When True, intermediate results (anomalies, thresholds, extremes) are saved to
+        temporary zarr files and immediately reloaded, preventing expensive recomputations.
+        Recommended for large datasets on HPC systems where the 2D histogram computation
+        is expensive. Temporary files are automatically cleaned up after reloading.
     verbose : bool, default=None
         Enable verbose logging with detailed progress information.
         If None, uses current global logging configuration.
@@ -612,6 +620,11 @@ def preprocess_data(
         time_sel = (ds[coordinates["time"]].dt.year >= start_year).compute()
         ds = ds.isel({dimensions["time"]: time_sel})
 
+    # Break graph after expensive anomaly computation
+    if use_temp_arrays:
+        logger.debug("Checkpointing anomaly dataset to break graph dependencies")
+        ds = checkpoint_to_zarr(ds, name="anomalies", timedim=dimensions["time"])
+
     anomalies = ds.dat_anomaly
 
     # Step 2: Identify extreme events (both methods now return consistent tuple structures)
@@ -640,6 +653,9 @@ def preprocess_data(
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
     # Add extreme events and thresholds to dataset
+    ds_temp = persist(extremes, thresholds)
+    extremes, thresholds = ds_temp
+
     ds["extreme_events"] = extremes
     ds["thresholds"] = thresholds
 
@@ -664,6 +680,13 @@ def preprocess_data(
                 precision,
                 max_anomaly,
             )
+
+            # Break graph after standardized extremes computation
+            if use_temp_arrays:
+                logger.debug("Checkpointing standardized extremes and thresholds to break graph dependencies")
+                extremes_stn = checkpoint_to_zarr(extremes_stn, name="extremes_stn", timedim=dimensions["time"])
+                thresholds_stn = checkpoint_to_zarr(thresholds_stn, name="thresholds_stn", timedim="dayofyear")
+
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
 
@@ -738,6 +761,14 @@ def preprocess_data(
     if method_extreme == "hobday_extreme":
         chunk_dict["dayofyear"] = time_chunks
     ds = ds.chunk(chunk_dict)
+
+    # Clear encoding metadata that may conflict with actual Dask chunks
+    # This encoding carries over from checkpointing and can cause chunk misalignment errors
+    logger.debug("Clearing encoding metadata for Dask-backed variables")
+    for var in ds.data_vars:
+        if hasattr(ds[var].data, "chunks"):  # Only for Dask-backed variables
+            if hasattr(ds[var], "encoding") and "chunks" in ds[var].encoding:
+                del ds[var].encoding["chunks"]
 
     # Fix encoding issue with saving when calendar & units attribute is present
     if "calendar" in ds[coordinates["time"]].attrs:  # pragma: no cover
@@ -1505,8 +1536,9 @@ def rolling_climatology(
     da = da.assign_coords({"year": years, "dayofyear": doys})
 
     # Get temporal bounds
-    year_vals = years.compute().values
-    doy_vals = doys.compute().values
+    years, doys = persist(years, doys)
+    year_vals = years.values
+    doy_vals = doys.values
     unique_years = np.unique(year_vals)
     min_year = int(unique_years.min().item())
 
@@ -1563,7 +1595,9 @@ def rolling_climatology(
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
-    ).persist()
+    ).chunk({"dayofyear": -1})
+
+    climatologies = checkpoint_to_zarr(climatologies, name="climatologies", timedim=timedim)
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
@@ -1699,7 +1733,9 @@ def smoothed_rolling_climatology(
     timedim = dimensions["time"]
 
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    da_smoothed = da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks)))
+    da_smoothed = (
+        da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
+    )
 
     clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
 
@@ -1731,8 +1767,7 @@ def _compute_anomaly_shifting_baseline(
     anomalies = da - climatology_smoothed
 
     # Create ocean/land mask from first time step
-    chunk_dict_mask = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
+    mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]})
 
     # Build output dataset
     return xr.Dataset({"dat_anomaly": anomalies, "mask": mask})
@@ -1801,13 +1836,17 @@ def _identify_extremes_hobday(
             "If your time-series is very short, consider using method_percentile='exact'."
         )
 
-    # Add day-of-year coordinate
-    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
+    # Add day-of-year coordinate (compute it to avoid chunked groupby issues)
+    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear.compute()).chunk(dict(zip(da.dims, da.chunks))).persist()
 
     # Group by day-of-year and compute percentile
     if method_percentile == "exact":
         # Construct rolling window dimension
         da_windowed = da.rolling({dimensions["time"]: window_days_hobday}, center=True).construct("window")
+
+        # Ensure dayofyear coordinate is computed for groupby (required by newer xarray)
+        if "dayofyear" in da_windowed.coords:
+            da_windowed = da_windowed.assign_coords(dayofyear=da_windowed.dayofyear.compute())
 
         thresholds = da_windowed.groupby("dayofyear").reduce(
             np.nanpercentile, q=threshold_percentile, dim=("window", dimensions["time"])
@@ -1825,12 +1864,35 @@ def _identify_extremes_hobday(
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
     spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    thresholds = thresholds.chunk(spatial_chunks).persist()
+    thresholds = thresholds.chunk(spatial_chunks)
+
+    # Drop time coordinate/dimension to avoid conflicts when comparing with data grouped by dayofyear
+    coords_to_drop = []
+    if coordinates["time"] in thresholds.coords:
+        coords_to_drop.append(coordinates["time"])
+    if dimensions["time"] in thresholds.coords and dimensions["time"] not in thresholds.dims:
+        coords_to_drop.append(dimensions["time"])
+    if "time" in thresholds.coords and "time" not in thresholds.dims:
+        coords_to_drop.append("time")
+    if coords_to_drop:
+        thresholds = thresholds.drop_vars(coords_to_drop)
+
+    logger.debug("Checkpointing thresholds to break graph dependencies")
+    thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
 
     # Compare anomalies to day-of-year specific thresholds
     dayofyear_labels = da[coordinates["time"]].dt.dayofyear.compute()
     extremes = da.groupby(dayofyear_labels) >= thresholds
-    extremes = extremes.astype(bool).chunk(spatial_chunks).persist()
+
+    # Preserve input time chunking
+    if "dayofyear" in extremes.coords:
+        extremes = extremes.drop_vars("dayofyear")
+    time_dim_index = da.dims.index(dimensions["time"])
+    spatial_chunks[dimensions["time"]] = da.chunks[time_dim_index][0]
+    extremes = extremes.chunk(spatial_chunks)
+
+    logger.debug("Checkpointing extremes to break graph dependencies")
+    extremes = checkpoint_to_zarr(extremes, name="extremes", timedim=dimensions["time"])
 
     return extremes, thresholds
 
@@ -2366,23 +2428,29 @@ def _compute_histogram_quantile_2d(
     bin_centers_array[0] = 0.0
 
     bin_centers = xr.DataArray(
-        bin_centers_array,
+        bin_centers_array.astype(np.float32),
         dims=["da_bin"],
-        coords={"da_bin": np.arange(len(bin_centers_array), dtype=np.int32)},
+        coords={"da_bin": np.arange(len(bin_centers_array), dtype=np.uint16)},
         name="bin_centers",
     )
 
     chunk_dict = {dimensions["time"]: -1}
-    for d in ["x", "y"]:
-        if d in dimensions:
-            chunk_dict[dimensions[d]] = 8
+    chunk_dict[dimensions["x"]] = 16
+    if "y" in dimensions:
+        chunk_dict[dimensions["y"]] = 16
 
-    da_bin = xr.DataArray(
-        np.digitize(da.data, bin_edges) - 1,  # -1 so first bin is 0
-        dims=da.dims,
-        coords=da.coords,
-        name="da_bin",
-    ).chunk(chunk_dict)
+    da_bin = (
+        xr.DataArray(
+            np.digitize(da.data, bin_edges) - 1,  # -1 so first bin is 0
+            dims=da.dims,
+            coords=da.coords,
+            name="da_bin",
+        )
+        .chunk(chunk_dict)
+        .astype(np.uint16)
+    )
+
+    da_bin = checkpoint_to_zarr(da_bin, name="da_bin", timedim=dimensions["time"]).chunk(chunk_dict)
 
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
@@ -2391,9 +2459,9 @@ def _compute_histogram_quantile_2d(
         da_bin,
         dim=[dimensions["time"]],
         func="count",
-        expected_groups=(np.arange(1, 367, dtype=np.int32), np.arange(len(bin_edges) - 1, dtype=np.int32)),
+        expected_groups=(np.arange(1, 367, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
         isbin=(False, False),
-        dtype=np.int32,
+        dtype=np.uint16,
         fill_value=0,
     )
     hist_raw.name = None
@@ -2438,7 +2506,7 @@ def _compute_histogram_quantile_2d(
     )
 
     # Set threshold to NaN for spatial points that contain NaN values
-    nan_mask = da.isnull().any(dim=dimensions["time"])
+    nan_mask = da.isel({dimensions["time"]: 0}).isnull().compute()
     threshold = threshold.where(~nan_mask).persist()
 
     # Validate threshold values against bounds
@@ -2467,6 +2535,10 @@ def _compute_histogram_quantile_2d(
         )
         # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
         threshold = threshold.where(~too_low, lower_bound).persist()
+
+    # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
+    if "time" in threshold.coords:
+        threshold = threshold.drop_vars("time")
 
     return threshold
 
