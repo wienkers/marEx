@@ -306,7 +306,7 @@ def preprocess_data(
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
-    use_temp_arrays: bool = False,
+    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -372,7 +372,7 @@ def preprocess_data(
         Neighbour connectivity for spatial clustering.
     cell_areas : xarray.DataArray, optional
         Cell areas for weighted spatial statistics.
-    use_temp_arrays : bool, default=False
+    use_temp_checkpoints : bool, default=False
         Enable checkpointing to temporary zarr stores to break Dask graph dependencies.
         When True, intermediate results (anomalies, thresholds, extremes) are saved to
         temporary zarr files and immediately reloaded, preventing expensive recomputations.
@@ -588,6 +588,7 @@ def preprocess_data(
             std_normalise,
             detrend_orders,
             force_zero_mean,
+            use_temp_checkpoints,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
 
@@ -621,7 +622,7 @@ def preprocess_data(
         ds = ds.isel({dimensions["time"]: time_sel})
 
     # Break graph after expensive anomaly computation
-    if use_temp_arrays:
+    if use_temp_checkpoints:
         logger.debug("Checkpointing anomaly dataset to break graph dependencies")
         ds = checkpoint_to_zarr(ds, name="anomalies", timedim=dimensions["time"])
 
@@ -649,6 +650,7 @@ def preprocess_data(
             method_percentile,
             precision,
             max_anomaly,
+            use_temp_checkpoints,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -679,11 +681,12 @@ def preprocess_data(
                 method_percentile,
                 precision,
                 max_anomaly,
+                use_temp_checkpoints,
             )
 
-            # Break graph after standardized extremes computation
-            if use_temp_arrays:
-                logger.debug("Checkpointing standardized extremes and thresholds to break graph dependencies")
+            # Break graph after standardised extremes computation
+            if use_temp_checkpoints:
+                logger.debug("Checkpointing standardised extremes and thresholds to break graph dependencies")
                 extremes_stn = checkpoint_to_zarr(extremes_stn, name="extremes_stn", timedim=dimensions["time"])
                 thresholds_stn = checkpoint_to_zarr(thresholds_stn, name="thresholds_stn", timedim="dayofyear")
 
@@ -786,7 +789,6 @@ def preprocess_data(
         show_progress=True,
     ):
         ds = ds.persist(optimize_graph=True)
-        ds["thresholds"] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
         ds["mask"] = ds.mask.compute()
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
@@ -864,6 +866,7 @@ def compute_normalised_anomaly(
     std_normalise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
+    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -1022,7 +1025,9 @@ def compute_normalised_anomaly(
         return _compute_anomaly_detrended(da, std_normalise, detrend_orders, dimensions, coordinates, force_zero_mean)
     elif method_anomaly == "shifting_baseline":
         logger.debug(f"Shifting baseline parameters: window_years={window_year_baseline}, smooth_days={smooth_days_baseline}")
-        return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
+        return _compute_anomaly_shifting_baseline(
+            da, window_year_baseline, smooth_days_baseline, dimensions, coordinates, use_temp_checkpoints
+        )
     elif method_anomaly == "fixed_baseline":
         logger.debug("Fixed baseline parameters: using full time series for daily climatology")
         return _compute_anomaly_fixed_baseline(da, dimensions, coordinates)
@@ -1059,6 +1064,7 @@ def identify_extremes(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
@@ -1416,6 +1422,7 @@ def identify_extremes(
             coordinates,
             precision,
             max_anomaly,
+            use_temp_checkpoints,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")
@@ -1443,6 +1450,7 @@ def rolling_climatology(
     window_year_baseline: int = 15,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
@@ -1597,7 +1605,9 @@ def rolling_climatology(
         fill_value=np.nan,
     ).chunk({"dayofyear": -1})
 
-    climatologies = checkpoint_to_zarr(climatologies, name="climatologies", timedim=timedim)
+    if use_temp_checkpoints:
+        logger.debug("Checkpointing climatologies to break graph dependencies")
+        climatologies = checkpoint_to_zarr(climatologies, name="climatologies", timedim=timedim)
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
@@ -1621,6 +1631,7 @@ def smoothed_rolling_climatology(
     smooth_days_baseline: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data
@@ -1737,7 +1748,7 @@ def smoothed_rolling_climatology(
         da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
     )
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
+    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates, use_temp_checkpoints)
 
     return clim
 
@@ -1748,6 +1759,7 @@ def _compute_anomaly_shifting_baseline(
     smooth_days_baseline: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    use_temp_checkpoints: bool = False,
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -1761,7 +1773,9 @@ def _compute_anomaly_shifting_baseline(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
+    climatology_smoothed = smoothed_rolling_climatology(
+        da, window_year_baseline, smooth_days_baseline, dimensions, coordinates, use_temp_checkpoints
+    )
 
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed
@@ -1788,6 +1802,7 @@ def _identify_extremes_hobday(
     coordinates: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    use_temp_checkpoints: bool = False,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -1860,10 +1875,12 @@ def _identify_extremes_hobday(
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
+            use_temp_checkpoints=use_temp_checkpoints,
         )
 
-    logger.debug("Checkpointing thresholds to break graph dependencies")
-    thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
+    if use_temp_checkpoints:
+        logger.debug("Checkpointing thresholds to break graph dependencies")
+        thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
 
     # Extract spatial chunk sizes from input data for alignment
     # Use most common chunk size to handle irregular chunks robustly
@@ -1894,9 +1911,9 @@ def _identify_extremes_hobday(
     thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
-    # Keep dayofyear_labels lazy to allow Dask graph optimization
-    dayofyear_labels = da[coordinates["time"]].dt.dayofyear
-    extremes = da.groupby(dayofyear_labels) >= thresholds
+    # Assign dayofyear coordinate and use UniqueGrouper for chunked arrays
+    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
+    extremes = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) >= thresholds
 
     # Drop unnecessary dayofyear coordinate
     if "dayofyear" in extremes.coords:
@@ -1911,8 +1928,9 @@ def _identify_extremes_hobday(
     logger.debug(f"Rechunking extremes to fix irregular chunks from groupby: {rechunk_dict}")
     extremes = extremes.chunk(rechunk_dict)
 
-    logger.debug("Checkpointing extremes to break graph dependencies")
-    extremes = checkpoint_to_zarr(extremes, name="extremes", timedim=dimensions["time"])
+    if use_temp_checkpoints:
+        logger.debug("Checkpointing extremes to break graph dependencies")
+        extremes = checkpoint_to_zarr(extremes, name="extremes", timedim=dimensions["time"])
 
     return extremes, thresholds
 
@@ -2167,7 +2185,12 @@ def _compute_anomaly_detrended(
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings
         std_rolling_safe = std_rolling.where(std_rolling > 1e-10, np.nan)
-        da_stn = da_detrend.groupby(da_detrend[coordinates["time"]].dt.dayofyear) / std_rolling_safe
+        da_detrend = da_detrend.assign_coords(dayofyear=da_detrend[coordinates["time"]].dt.dayofyear)
+        da_stn = da_detrend.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) / std_rolling_safe
+
+        # Drop dayofyear coordinate to avoid merge conflicts
+        if "dayofyear" in da_stn.coords:
+            da_stn = da_stn.drop_vars("dayofyear")
 
         # Rechunk data for efficient processing
         chunk_dict_std = chunk_dict_mask.copy()
@@ -2226,8 +2249,13 @@ def _compute_anomaly_fixed_baseline(
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
-    anomalies = da.groupby(da[coordinates["time"]].dt.dayofyear) - daily_climatology
+    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
+    anomalies = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) - daily_climatology
     anomalies = anomalies.astype(np.float32)
+
+    # Drop dayofyear coordinate to avoid merge conflicts
+    if "dayofyear" in anomalies.coords:
+        anomalies = anomalies.drop_vars("dayofyear")
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
@@ -2409,6 +2437,7 @@ def _compute_histogram_quantile_2d(
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -2470,7 +2499,9 @@ def _compute_histogram_quantile_2d(
         .astype(np.uint16)
     )
 
-    da_bin = checkpoint_to_zarr(da_bin, name="da_bin", timedim=dimensions["time"]).chunk(chunk_dict)
+    if use_temp_checkpoints:
+        logger.debug("Checkpointing binned data to break graph dependencies")
+        da_bin = checkpoint_to_zarr(da_bin, name="da_bin", timedim=dimensions["time"]).chunk(chunk_dict)
 
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
@@ -2530,7 +2561,9 @@ def _compute_histogram_quantile_2d(
         keep_attrs=True,
     )
 
-    threshold = checkpoint_to_zarr(threshold, name="threshold")
+    if use_temp_checkpoints:
+        logger.debug("Checkpointing threshold to break graph dependencies")
+        threshold = checkpoint_to_zarr(threshold, name="threshold")
 
     # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
     if dimensions["time"] in threshold.coords:

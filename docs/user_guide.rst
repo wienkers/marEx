@@ -671,6 +671,107 @@ For workstations:
        memory_limit='16GB'     # Per worker
    )
 
+Example Batch Scripts
+~~~~~~~~~~~~~~~~~~~~~
+
+The ``examples/batch jobs/`` directory provides ready-to-use scripts designed to be run from a login node on HPC systems with SLURM:
+
+**Workflow:**
+
+1. **run_detect.py**: Launches a distributed Dask job to execute the preprocessing and extreme detection pipeline
+2. **run_track.py**: Launches a distributed Dask job for event identification and tracking
+
+Both scripts utilise ``marEx.helper.start_distributed_cluster()`` for cluster management and are configured via environment variables.
+
+**Configuration Environment Variables:**
+
+* ``DASK_N_WORKERS``: Number of Dask workers to launch (default varies by script: 128 for detect, 32 for track)
+* ``DASK_WORKERS_PER_NODE``: Workers per SLURM node (default varies by script: 64 for detect, 32 for track)
+* ``DASK_RUNTIME``: Maximum runtime in minutes (default: 39 for detect, 89 for track)
+* ``SLURM_ACCOUNT``: SLURM account for billing (default: 'bk1377')
+* **Additional for run_track.py**: ``RUN_BASIC_TRACKER``, ``GRID_RESOLUTION``, ``AREA_FILTER``, ``R_FILL``, ``T_FILL``, ``OVERLAP_THRESHOLD``
+
+**Example Usage:**
+
+.. code-block:: bash
+
+   # Run preprocessing on SLURM cluster
+   export DASK_N_WORKERS=256
+   export DASK_RUNTIME=120
+   export SLURM_ACCOUNT=my_project
+   python examples/batch\ jobs/run_detect.py
+
+   # Run tracking after preprocessing completes
+   export DASK_N_WORKERS=64
+   export DASK_RUNTIME=180
+   python examples/batch\ jobs/run_track.py
+
+**Customisation:**
+
+These scripts are designed to be copied and modified for your specific:
+
+* Data file paths and chunk sizes
+* Preprocessing parameters (anomaly method, thresholds)
+* Tracking parameters (spatial filters, merge/split settings)
+* Cluster resources (workers, memory, runtime)
+
+The scripts handle cluster setup, data processing, and saving results to zarr/netCDF files on the scratch filesystem.
+
+Checkpointing for Large Datasets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When processing very large datasets on HPC systems, Dask may recompute intermediate results multiple times, especially for complex operations like 2D histogram-based percentile calculations. This can significantly increase computation time and memory usage.
+
+**The Problem:**
+
+Dask builds a computation graph that tracks all operations. For large preprocessing pipelines, this graph can become deeply nested, causing Dask to recompute expensive intermediate steps (climatologies, anomalies, thresholds) whenever downstream operations need them.
+
+**The Solution:**
+
+The ``use_temp_checkpoints=True`` parameter breaks the Dask computation graph by saving intermediate results to temporary zarr stores and immediately reloading them. This prevents expensive recomputations at the cost of some disk I/O.
+
+**How It Works:**
+
+1. Intermediate arrays (anomalies, climatologies, thresholds, extremes) are saved to temporary zarr files
+2. The saved data is immediately reloaded as a fresh Dask array
+3. This breaks the dependency chain in the computation graph
+4. Temporary files are automatically cleaned up after reloading
+
+**When to Use:**
+
+* Large datasets (>100 GB) where preprocessing takes hours
+* HPC environments with fast scratch storage
+* When 2D histogram percentile calculations are a bottleneck
+* When you notice Dask recomputing the same operations multiple times
+
+**Example Usage:**
+
+.. code-block:: python
+
+   import xarray as xr
+   import marEx
+
+   # Load large dataset
+   sst = xr.open_zarr('large_dataset.zarr', chunks={'time': 30}).sst
+
+   # Enable checkpointing to prevent expensive recomputations
+   extremes = marEx.preprocess_data(
+       sst,
+       method_anomaly='shifting_baseline',
+       method_extreme='hobday_extreme',
+       threshold_percentile=95,
+       use_temp_checkpoints=True,  # Enable checkpointing
+       dask_chunks={'time': 25}
+   )
+
+**Performance Trade-offs:**
+
+* **Benefit**: Prevents expensive recomputations, reduces memory pressure
+* **Cost**: Requires fast disk I/O for temporary zarr stores
+* **Recommendation**: Enable on HPC systems with high-speed scratch storage; test on your specific dataset to measure performance impact
+
+**Note:** Temporary files are automatically removed after data is reloaded, so no manual cleanup is required.
+
 Grid Types and Coordinate Systems
 =================================
 
