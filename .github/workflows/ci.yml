@@ -64,6 +64,7 @@ jobs:
     name: Test Suite
     runs-on: ${{ matrix.os }}
     needs: code-quality
+    timeout-minutes: 90  # Windows can be significantly slower than Linux/macOS
     strategy:
       fail-fast: false
       matrix:
@@ -144,18 +145,22 @@ jobs:
         pytest tests/test_logging_system.py -n 2 -v --tb=short
 
     - name: Run preprocessing tests (gridded)
+      timeout-minutes: 30  # Windows can be slow for these tests
       run: |
         pytest tests/test_gridded_preprocessing.py -n 2 -v --tb=short
 
     - name: Run preprocessing tests (unstructured)
+      timeout-minutes: 30  # Windows can be slow for these tests
       run: |
         pytest tests/test_unstructured_preprocessing.py -n 2 -v --tb=short
 
     - name: Run tracking tests (gridded)
+      timeout-minutes: 30  # Windows can be slow for these tests
       run: |
         pytest tests/test_gridded_tracking.py -n 2 -v --tb=short
 
     - name: Run tracking tests (unstructured)
+      timeout-minutes: 30  # Windows can be slow for these tests
       run: |
         pytest tests/test_unstructured_tracking.py -n 2 -v --tb=short
 

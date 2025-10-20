@@ -5,6 +5,7 @@ concurrency = thread,multiprocessing
 sigterm = True
 omit =
     */tests/*
+    */examples/*
     */test_*
     */__pycache__/*
     */site-packages/*

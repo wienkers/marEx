@@ -1862,9 +1862,20 @@ def _identify_extremes_hobday(
             max_anomaly=max_anomaly,
         )
 
-    # Ensure spatial dimensions are fully loaded for efficient comparison
-    spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    thresholds = thresholds.chunk(spatial_chunks)
+    logger.debug("Checkpointing thresholds to break graph dependencies")
+    thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
+
+    # Extract spatial chunk sizes from input data for alignment
+    # Use most common chunk size to handle irregular chunks robustly
+    spatial_chunks = {}
+    for dim_key in ["x", "y"]:
+        if dim_key in dimensions:
+            dim_name = dimensions[dim_key]
+            if dim_name in da.dims:
+                dim_index = da.dims.index(dim_name)
+                chunks_tuple = da.chunks[dim_index]
+                # Get the most common chunk size (handles irregular chunks better)
+                spatial_chunks[dim_name] = max(set(chunks_tuple), key=chunks_tuple.count)
 
     # Drop time coordinate/dimension to avoid conflicts when comparing with data grouped by dayofyear
     coords_to_drop = []
@@ -1877,19 +1888,28 @@ def _identify_extremes_hobday(
     if coords_to_drop:
         thresholds = thresholds.drop_vars(coords_to_drop)
 
-    logger.debug("Checkpointing thresholds to break graph dependencies")
-    thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
+    # Rechunk thresholds BEFORE comparison to align with input data
+    # This eliminates expensive implicit rechunking during the groupby operation
+    logger.debug(f"Aligning threshold chunks to match input data spatial chunks: {spatial_chunks}")
+    thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
-    dayofyear_labels = da[coordinates["time"]].dt.dayofyear.compute()
+    # Keep dayofyear_labels lazy to allow Dask graph optimization
+    dayofyear_labels = da[coordinates["time"]].dt.dayofyear
     extremes = da.groupby(dayofyear_labels) >= thresholds
 
-    # Preserve input time chunking
+    # Drop unnecessary dayofyear coordinate
     if "dayofyear" in extremes.coords:
         extremes = extremes.drop_vars("dayofyear")
+
+    # Rechunk to fix irregular time chunks created by groupby operation
+    # Zarr requires uniform chunks, so we rechunk to match input data's time chunks
     time_dim_index = da.dims.index(dimensions["time"])
-    spatial_chunks[dimensions["time"]] = da.chunks[time_dim_index][0]
-    extremes = extremes.chunk(spatial_chunks)
+    time_chunk_size = max(set(da.chunks[time_dim_index]), key=da.chunks[time_dim_index].count)
+    rechunk_dict = {dimensions["time"]: time_chunk_size}
+    rechunk_dict.update(spatial_chunks)
+    logger.debug(f"Rechunking extremes to fix irregular chunks from groupby: {rechunk_dict}")
+    extremes = extremes.chunk(rechunk_dict)
 
     logger.debug("Checkpointing extremes to break graph dependencies")
     extremes = checkpoint_to_zarr(extremes, name="extremes", timedim=dimensions["time"])
@@ -2489,7 +2509,12 @@ def _compute_histogram_quantile_2d(
         return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
-    hist_raw = hist_raw.chunk({"dayofyear": -1, "da_bin": -1})
+    # Create chunk dict for hist_raw that preserves spatial chunks but drops time
+    hist_chunk_dict = {dimensions["x"]: chunk_dict.get(dimensions["x"], 16), "dayofyear": -1, "da_bin": -1}
+    if "y" in dimensions:
+        hist_chunk_dict[dimensions["y"]] = chunk_dict.get(dimensions["y"], 16)
+
+    hist_raw = hist_raw.chunk(hist_chunk_dict)
 
     # Apply the optimised computation using apply_ufunc
     threshold = xr.apply_ufunc(
@@ -2505,6 +2530,12 @@ def _compute_histogram_quantile_2d(
         keep_attrs=True,
     )
 
+    threshold = checkpoint_to_zarr(threshold, name="threshold")
+
+    # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
+    if dimensions["time"] in threshold.coords:
+        threshold = threshold.drop_vars(dimensions["time"])
+
     # Set threshold to NaN for spatial points that contain NaN values
     nan_mask = da.isel({dimensions["time"]: 0}).isnull().compute()
     threshold = threshold.where(~nan_mask).persist()
@@ -2514,7 +2545,7 @@ def _compute_histogram_quantile_2d(
     lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
     # Check if any values are too high (ignore NaN values)
-    too_high = (threshold > upper_bound) & threshold.notnull()
+    too_high = threshold > upper_bound
     if too_high.any():
         warnings.warn(
             f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
@@ -2524,7 +2555,7 @@ def _compute_histogram_quantile_2d(
         )
 
     # Check if any values are too low (ignore NaN values)
-    too_low = (threshold < lower_bound) & threshold.notnull()
+    too_low = threshold < lower_bound
     if too_low.any():
         warnings.warn(
             f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
@@ -2534,11 +2565,7 @@ def _compute_histogram_quantile_2d(
             stacklevel=2,
         )
         # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = threshold.where(~too_low, lower_bound).persist()
-
-    # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
-    if "time" in threshold.coords:
-        threshold = threshold.drop_vars("time")
+        threshold = threshold.where(~too_low, lower_bound)
 
     return threshold
 
