@@ -18,6 +18,12 @@ from dask.distributed import Client, LocalCluster
 # Configure logging to suppress noisy distributed messages
 def pytest_configure(config):
     """Configure pytest with custom logging settings."""
+    # Configure matplotlib to use non-interactive backend for CI/testing
+    # This must be done before importing pyplot to avoid TkAgg errors on Windows
+    import matplotlib
+
+    matplotlib.use("Agg")
+
     # Suppress all distributed logging to ERROR level or higher
     # This removes all the noisy INFO messages from distributed components
     distributed_loggers = [
