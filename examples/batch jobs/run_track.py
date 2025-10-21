@@ -53,7 +53,7 @@ def main():
 
     # Choose optimal chunk size & load preprocessed data
     print("\nLoading preprocessed extremes data...")
-    input_file = scratch_dir / "mhws" / "extremes_binary_gridded_shifting_hobday.zarr"
+    input_file = scratch_dir / "mhws" / "extremes_binary_gridded_shifting_hobday_batch.zarr"
     chunk_size = {"time": 25, "lat": -1, "lon": -1}
     ds = xr.open_zarr(str(input_file), chunks=chunk_size)
     print(f"Data loaded: {ds}")

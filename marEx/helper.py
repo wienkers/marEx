@@ -644,7 +644,7 @@ def checkpoint_to_zarr(
     name: str = "checkpoint",
     cleanup: bool = False,
     timedim: str = "time",
-) -> Union[xr.DataArray, xr.Dataset]:
+) -> Union[xr.DataArray, xr.Dataset]:  # pragma: no cover
     """
     Save and reload a Dask-backed xarray object to break graph dependencies.
 

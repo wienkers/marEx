@@ -72,7 +72,7 @@ def main():
             "y": "lat",
         },  # Define the dimensions of the data -- if 'y' exists, MarEx-Detect knows this is a gridded dataset
         dask_chunks={"time": 25},  # Dask chunks for *output* data
-        use_temp_arrays=True,  # Enable checkpointing to prevent expensive recomputations
+        use_temp_checkpoints=True,  # Enable checkpointing to prevent expensive recomputations
     )
     print(f"Processing complete: {extremes_ds}")
 
