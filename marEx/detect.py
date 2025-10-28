@@ -531,6 +531,25 @@ def preprocess_data(
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
 
+    # Validate use_temp_checkpoints configuration
+    if use_temp_checkpoints:
+        if method_anomaly != "shifting_baseline" or method_extreme != "hobday_extreme":
+            logger.warning(
+                "use_temp_checkpoints=True is not fully supported with "
+                f"method_anomaly='{method_anomaly}' and method_extreme='{method_extreme}'. "
+                "Temporary checkpointing is only tested and validated for "
+                "method_anomaly='shifting_baseline' and method_extreme='hobday_extreme'. "
+                "Using checkpoints with other methods may give undefined results."
+            )
+    else:
+        if method_anomaly == "shifting_baseline" and method_extreme == "hobday_extreme":
+            logger.warning(
+                "use_temp_checkpoints=False with method_anomaly='shifting_baseline' and "
+                "method_extreme='hobday_extreme'. It is recommended to enable temporary "
+                "checkpointing (use_temp_checkpoints=True) to periodically collapse the "
+                "Dask task graph and prevent expensive recomputations, especially for large datasets."
+            )
+
     # Log preprocessing start with parameters
     logger.info(f"Starting data preprocessing - Method: {method_anomaly} -> {method_extreme}")
     logger.info(f"Parameters: percentile={threshold_percentile}%, method_percentile={method_percentile}")
@@ -789,6 +808,8 @@ def preprocess_data(
         show_progress=True,
     ):
         ds = ds.persist(optimize_graph=True)
+        if not use_temp_checkpoints:
+            ds["thresholds"] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
         ds["mask"] = ds.mask.compute()
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
