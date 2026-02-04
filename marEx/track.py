@@ -2071,38 +2071,20 @@ class tracker:
             # We don't need to adjust centroids for periodic boundaries
             return original_centroid
 
-        # Check if object is near either edge of x dimension
-        near_left_BC = np.any(binary_mask[:, :100])
-        near_right_BC = np.any(binary_mask[:, -100:])
+        nx = binary_mask.shape[1]
 
         if original_centroid is None:  # pragma: no cover
-            # Calculate y centroid from scratch
-            y_indices = np.nonzero(binary_mask)[0]
-            y_centroid = np.mean(y_indices)
+            y_indices, x_indices = np.nonzero(binary_mask)
+            y_centroid = np.mean(y_indices.astype(np.float64))
         else:
             y_centroid = original_centroid[0]
-
-        # If object is near both edges, recalculate x-centroid to handle wrapping
-        # N.B.: We calculate _near_ rather than touching, to catch the edge case where the
-        # object may be split and straddling the boundary !
-        if near_left_BC and near_right_BC:
-            # Adjust x coordinates that are near right edge
             x_indices = np.nonzero(binary_mask)[1]
-            x_indices_adj = x_indices.copy()
-            right_side = x_indices > binary_mask.shape[1] // 2
-            x_indices_adj[right_side] -= binary_mask.shape[1]
 
-            x_centroid = np.mean(x_indices_adj)
-            if x_centroid < 0:  # Ensure centroid is positive
-                x_centroid += binary_mask.shape[1]
-
-        elif original_centroid is None:  # pragma: no cover
-            # Calculate x-centroid from scratch
-            x_indices = np.nonzero(binary_mask)[1]
-            x_centroid = np.mean(x_indices)
-
-        else:
-            x_centroid = original_centroid[1]
+        # Circular mean for x-centroid: handles periodic boundaries without thresholds
+        angles = (2.0 * np.pi * x_indices) / nx
+        x_centroid = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles))) * nx / (2.0 * np.pi)
+        if x_centroid < 0:
+            x_centroid += nx
 
         return (y_centroid, x_centroid)
 
@@ -3235,25 +3217,18 @@ class tracker:
 
                         # Calculate area-weighted x centroid (longitude) - handle wrapping if needed
                         if not regional_mode:
-                            # Check if object is near both edges (wrapping around periodic boundary)
-                            near_left = np.any(x_indices < 100)
-                            near_right = np.any(x_indices >= nx - 100)
-
-                            if near_left and near_right:
-                                # Object wraps around - adjust coordinates
-                                x_adjusted = x_indices.copy().astype(np.float64)
-                                right_side = x_indices > nx / 2
-                                x_adjusted[right_side] -= nx
-
-                                # Area-weighted mean with adjusted coordinates
-                                centroid_x_pix = np.sum(x_adjusted * pixel_areas) / total_area
-
-                                # Ensure centroid is positive
-                                if centroid_x_pix < 0:
-                                    centroid_x_pix += nx
-                            else:
-                                # No wrapping - standard area-weighted calculation
-                                centroid_x_pix = np.sum(x_indices * pixel_areas) / total_area
+                            # Circular mean for x-centroid: handles periodic boundaries without thresholds
+                            angles = (2.0 * np.pi * x_indices) / nx
+                            centroid_x_pix = (
+                                np.arctan2(
+                                    np.sum(pixel_areas * np.sin(angles)),
+                                    np.sum(pixel_areas * np.cos(angles)),
+                                )
+                                * nx
+                                / (2.0 * np.pi)
+                            )
+                            if centroid_x_pix < 0:
+                                centroid_x_pix += nx
                         else:
                             # Regional mode - no wrapping, area-weighted
                             centroid_x_pix = np.sum(x_indices * pixel_areas) / total_area
