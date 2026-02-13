@@ -50,17 +50,23 @@ conda activate super
 # Set default environment variables if not already set
 export DASK_N_WORKERS=${DASK_N_WORKERS:-32}
 export DASK_THREADS_PER_WORKER=${DASK_THREADS_PER_WORKER:-1}
+export RUN_BASIC_TRACKER=${RUN_BASIC_TRACKER:-false}
+export GRID_RESOLUTION=${GRID_RESOLUTION:-0.25}
+export AREA_FILTER=${AREA_FILTER:-600}
+export R_FILL=${R_FILL:-12}
+export T_FILL=${T_FILL:-4}
+export OVERLAP_THRESHOLD=${OVERLAP_THRESHOLD:-0.25}
 
 # Print configuration
 echo "Configuration:"
 echo "  DASK_N_WORKERS: $DASK_N_WORKERS"
 echo "  DASK_THREADS_PER_WORKER: $DASK_THREADS_PER_WORKER"
-echo "  RUN_BASIC_TRACKER: ${RUN_BASIC_TRACKER:-false}"
-echo "  GRID_RESOLUTION: ${GRID_RESOLUTION:-0.25}"
-echo "  AREA_FILTER: ${AREA_FILTER:-600}"
-echo "  R_FILL: ${R_FILL:-12}"
-echo "  T_FILL: ${T_FILL:-4}"
-echo "  OVERLAP_THRESHOLD: ${OVERLAP_THRESHOLD:-0.25}"
+echo "  RUN_BASIC_TRACKER: $RUN_BASIC_TRACKER"
+echo "  GRID_RESOLUTION: $GRID_RESOLUTION"
+echo "  AREA_FILTER: $AREA_FILTER"
+echo "  R_FILL: $R_FILL"
+echo "  T_FILL: $T_FILL"
+echo "  OVERLAP_THRESHOLD: $OVERLAP_THRESHOLD"
 echo ""
 
 # Run the tracking script
