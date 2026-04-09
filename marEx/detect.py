@@ -298,6 +298,7 @@ def preprocess_data(
     std_normalise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
+    reference_period: Optional[Tuple[int, int]] = None,  # for fixed_baseline & detrend_fixed_baseline
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
@@ -354,6 +355,12 @@ def preprocess_data(
         Default is 1st order (linear) detrend. `[1,2]` e.g. would use a linear+quadratic detrending.
     force_zero_mean : bool, default=True
         Whether to enforce zero mean in detrended anomalies (detrend_harmonic method only).
+    reference_period : tuple of (int, int), optional
+        Year range (start_year, end_year) inclusive for computing the daily climatology
+        (fixed_baseline and detrend_fixed_baseline only). If None (default), uses all
+        available years. Anomalies are computed for the full time series regardless.
+        Example: reference_period=(1990, 2020) computes the climatology from 1990-2020
+        but outputs anomalies for the entire input time range.
     method_percentile : str, default='approximate'
         Method for percentile calculation ('exact' or 'approximate') for both global_extreme & hobday_extreme methods.
         N.B.: Using the exact percentile calculation requires both careful/thoughtful chunking & sufficient memory,
@@ -588,6 +595,7 @@ def preprocess_data(
             std_normalise,
             detrend_orders,
             force_zero_mean,
+            reference_period,
             use_temp_checkpoints,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
@@ -723,6 +731,7 @@ def preprocess_data(
                 smooth_days_baseline,
                 window_days_hobday,
                 window_spatial_hobday,
+                reference_period,
             ),
         }
     )
@@ -744,14 +753,18 @@ def preprocess_data(
             }
         )
     elif method_anomaly == "fixed_baseline":
-        ds.attrs.update({})  # No method-specific parameters
+        attrs = {}
+        if reference_period is not None:
+            attrs["reference_period"] = list(reference_period)
+        ds.attrs.update(attrs)
     elif method_anomaly == "detrend_fixed_baseline":
-        ds.attrs.update(
-            {
-                "detrend_orders": detrend_orders,
-                "force_zero_mean": force_zero_mean,
-            }
-        )
+        attrs = {
+            "detrend_orders": detrend_orders,
+            "force_zero_mean": force_zero_mean,
+        }
+        if reference_period is not None:
+            attrs["reference_period"] = list(reference_period)
+        ds.attrs.update(attrs)
 
     if method_extreme == "hobday_extreme":
         ds.attrs.update({"window_days_hobday": window_days_hobday})
@@ -826,6 +839,7 @@ def _get_preprocessing_steps(
     smooth_days_baseline: int,
     window_days_hobday: int,
     window_spatial_hobday: Optional[int],
+    reference_period: Optional[Tuple[int, int]] = None,
 ) -> List[str]:
     """Generate preprocessing steps description based on selected methods."""
     steps = []
@@ -838,10 +852,16 @@ def _get_preprocessing_steps(
         steps.append(f"Rolling climatology using {window_year_baseline} years")
         steps.append(f"Smoothed with {smooth_days_baseline}-day window")
     elif method_anomaly == "fixed_baseline":
-        steps.append("Daily climatology computed from full time series")
+        if reference_period is not None:
+            steps.append(f"Daily climatology computed from {reference_period[0]}-{reference_period[1]}")
+        else:
+            steps.append("Daily climatology computed from full time series")
     elif method_anomaly == "detrend_fixed_baseline":
         steps.append(f"Removed polynomial trend orders={detrend_orders}")
-        steps.append("Daily climatology computed from detrended data")
+        if reference_period is not None:
+            steps.append(f"Daily climatology computed from detrended data ({reference_period[0]}-{reference_period[1]})")
+        else:
+            steps.append("Daily climatology computed from detrended data")
 
     # Extreme method steps
     if method_extreme == "global_extreme":
@@ -869,6 +889,7 @@ def compute_normalised_anomaly(
     std_normalise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
+    reference_period: Optional[Tuple[int, int]] = None,  # for fixed_baseline & detrend_fixed_baseline
     use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
@@ -901,7 +922,10 @@ def compute_normalised_anomaly(
         Polynomial orders for trend removal (detrend_harmonic and detrend_fixed_baseline only)
     force_zero_mean : bool, default=True
         Explicitly enforce zero mean in final anomalies (detrend_harmonic and detrend_fixed_baseline only)
-
+    reference_period : tuple of (int, int), optional
+        Year range (start_year, end_year) inclusive for computing the daily climatology
+        (fixed_baseline and detrend_fixed_baseline only). If None (default), uses all
+        available years. Anomalies are computed for the full time series regardless.
 
     Returns
     -------
@@ -997,6 +1021,15 @@ def compute_normalised_anomaly(
     ... )
     >>> # Climatology computed from all available years
 
+    Fixed baseline with a restricted reference period:
+
+    >>> # Compute climatology from 1990-2020 only, but output anomalies for all years
+    >>> result_ref = marEx.compute_normalised_anomaly(
+    ...     sst,
+    ...     method_anomaly="fixed_baseline",
+    ...     reference_period=(1990, 2020)
+    ... )
+
     Fixed detrended baseline:
 
     >>> # Remove long-term trends then compute fixed climatology
@@ -1021,6 +1054,17 @@ def compute_normalised_anomaly(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
+    # Validate reference_period is only used with compatible methods
+    if reference_period is not None and method_anomaly not in ("fixed_baseline", "detrend_fixed_baseline"):
+        raise ConfigurationError(
+            f"reference_period is not supported for method_anomaly='{method_anomaly}'",
+            details="reference_period is only applicable to 'fixed_baseline' and 'detrend_fixed_baseline' methods",
+            suggestions=[
+                "Remove the reference_period parameter, or",
+                "Use method_anomaly='fixed_baseline' or 'detrend_fixed_baseline'",
+            ],
+        )
+
     if method_anomaly == "detrend_harmonic":
         logger.debug(
             f"Detrended baseline parameters: std_normalise={std_normalise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
@@ -1032,11 +1076,16 @@ def compute_normalised_anomaly(
             da, window_year_baseline, smooth_days_baseline, dimensions, coordinates, use_temp_checkpoints
         )
     elif method_anomaly == "fixed_baseline":
-        logger.debug("Fixed baseline parameters: using full time series for daily climatology")
-        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates)
+        logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
+        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period)
     elif method_anomaly == "detrend_fixed_baseline":
-        logger.debug(f"Fixed detrended baseline parameters: orders={detrend_orders}, zero_mean={force_zero_mean}")
-        return _compute_anomaly_detrend_fixed_baseline(da, detrend_orders, dimensions, coordinates, force_zero_mean)
+        logger.debug(
+            f"Fixed detrended baseline parameters: orders={detrend_orders}, "
+            f"zero_mean={force_zero_mean}, reference_period={reference_period}"
+        )
+        return _compute_anomaly_detrend_fixed_baseline(
+            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period
+        )
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")
         raise ConfigurationError(
@@ -1859,16 +1908,41 @@ def _identify_extremes_hobday(
 
     # Group by day-of-year and compute percentile
     if method_percentile == "exact":
-        # Construct rolling window dimension
-        da_windowed = da.rolling({dimensions["time"]: window_days_hobday}, center=True).construct("window")
+        # Use apply_ufunc to compute DOY percentiles per spatial chunk in pure numpy.
+        da_ufunc = da.chunk({dimensions["time"]: -1})
+        dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
+        half_w = window_days_hobday // 2
 
-        # Ensure dayofyear coordinate is computed for groupby (required by newer xarray)
-        if "dayofyear" in da_windowed.coords:
-            da_windowed = da_windowed.assign_coords(dayofyear=da_windowed.dayofyear.compute())
+        # Pre-compute boolean masks (which time indices contribute to each DOY)
+        doy_masks = []
+        for doy in range(1, 367):
+            mask = np.zeros(len(dayofyear_vals), dtype=bool)
+            for offset in range(-half_w, half_w + 1):
+                target = ((doy - 1 + offset) % 366) + 1
+                mask |= dayofyear_vals == target
+            doy_masks.append(mask)
 
-        thresholds = da_windowed.groupby("dayofyear").reduce(
-            np.nanpercentile, q=threshold_percentile, dim=("window", dimensions["time"])
+        def _doy_percentiles(data, doy_masks, percentile):
+            """Compute per-DOY percentiles. data: (*spatial, time) -> (*spatial, 366)."""
+            result = np.full(data.shape[:-1] + (366,), np.nan, dtype=np.float32)
+            for i, mask in enumerate(doy_masks):
+                if mask.any():
+                    result[..., i] = np.nanpercentile(data[..., mask], percentile, axis=-1)
+            return result
+
+        thresholds = xr.apply_ufunc(
+            _doy_percentiles,
+            da_ufunc,
+            input_core_dims=[[dimensions["time"]]],
+            output_core_dims=[["dayofyear"]],
+            dask="parallelized",
+            kwargs={"doy_masks": doy_masks, "percentile": threshold_percentile},
+            output_dtypes=[np.float32],
+            dask_gufunc_kwargs={"output_sizes": {"dayofyear": 366}},
         )
+
+        # Assign dayofyear coordinate values and move dayofyear to first dimension
+        thresholds = thresholds.assign_coords(dayofyear=np.arange(1, 367)).transpose("dayofyear", ...)
     else:  # Optimised histogram approximation method
         thresholds = _compute_histogram_quantile_2d(
             da,
@@ -2214,12 +2288,14 @@ def _compute_anomaly_fixed_baseline(
     da: xr.DataArray,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    reference_period: Optional[Tuple[int, int]] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed baseline method with full time series climatology.
 
-    This method computes a daily climatology using all available years in the dataset,
-    then subtracts this climatology from the original data to obtain anomalies.
+    This method computes a daily climatology using all available years in the dataset
+    (or a specified reference period), then subtracts this climatology from the
+    original data to obtain anomalies.
 
     Parameters
     ----------
@@ -2229,6 +2305,10 @@ def _compute_anomaly_fixed_baseline(
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Mapping of coordinates to names in the data
+    reference_period : tuple of (int, int), optional
+        Year range (start_year, end_year) inclusive for computing the daily climatology.
+        If None (default), uses all available years. Anomalies are still computed for
+        the full time series.
 
     Returns
     -------
@@ -2238,11 +2318,41 @@ def _compute_anomaly_fixed_baseline(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
-    # Compute daily climatology across all years using flox for efficiency
-    logger.debug("Computing daily climatology across all years")
+    # Select data for climatology computation (optionally restricted to reference period)
+    if reference_period is not None:
+        start_year, end_year = reference_period
+        if start_year > end_year:
+            raise ConfigurationError(
+                f"Invalid reference_period: start year ({start_year}) must be <= end year ({end_year})",
+                details="The reference_period tuple must be (start_year, end_year) with start_year <= end_year",
+                suggestions=[f"Swap the order: use reference_period=({end_year}, {start_year})"],
+            )
+        years = da[coordinates["time"]].dt.year
+        year_mask = (years >= start_year) & (years <= end_year)
+        da_for_clim = da.isel({dimensions["time"]: year_mask})
+        if da_for_clim.sizes[dimensions["time"]] == 0:
+            data_min_year = int(years.min().values)
+            data_max_year = int(years.max().values)
+            raise ConfigurationError(
+                f"No data found in reference_period ({start_year}, {end_year})",
+                details=f"Dataset spans {data_min_year}-{data_max_year} but no timesteps fall within the specified period",
+                suggestions=[
+                    f"Adjust reference_period to overlap with data range ({data_min_year}-{data_max_year})",
+                    "Set reference_period=None to use the full time series",
+                ],
+            )
+        logger.debug(
+            f"Using reference_period ({start_year}-{end_year}): "
+            f"{da_for_clim.sizes[dimensions['time']]} of {da.sizes[dimensions['time']]} timesteps"
+        )
+    else:
+        da_for_clim = da
+
+    # Compute daily climatology using flox for efficiency
+    logger.debug("Computing daily climatology across %s", "reference period" if reference_period else "all years")
     daily_climatology = flox.xarray.xarray_reduce(
-        da,
-        da[coordinates["time"]].dt.dayofyear,
+        da_for_clim,
+        da_for_clim[coordinates["time"]].dt.dayofyear,
         dim=dimensions["time"],
         func="nanmean",
         isbin=False,
@@ -2281,13 +2391,14 @@ def _compute_anomaly_detrend_fixed_baseline(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     force_zero_mean: bool = True,
+    reference_period: Optional[Tuple[int, int]] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed detrended baseline method.
 
     This method first removes polynomial trends (without harmonics) from the data,
-    then removes a full-time-series daily climatology from the detrended signal.
-    Uses _compute_anomaly_detrended internally to perform the trend removal.
+    then removes a daily climatology from the detrended signal. The trend removal
+    always uses the full time series; only the climatology step respects reference_period.
 
     Parameters
     ----------
@@ -2301,6 +2412,10 @@ def _compute_anomaly_detrend_fixed_baseline(
         Mapping of coordinates to names in the data
     force_zero_mean : bool, default=True
         Whether to enforce zero mean in detrended data
+    reference_period : tuple of (int, int), optional
+        Year range (start_year, end_year) inclusive for computing the daily climatology.
+        If None (default), uses all available years. Only affects the climatology step,
+        not the polynomial detrending.
 
     Returns
     -------
@@ -2329,6 +2444,7 @@ def _compute_anomaly_detrend_fixed_baseline(
         da=detrended_result,
         dimensions=dimensions,
         coordinates=coordinates,
+        reference_period=reference_period,
     )
 
     return final_result

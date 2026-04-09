@@ -381,7 +381,7 @@ Anomaly Methods
 
 **Fixed Baseline** (``fixed_baseline``):
 
-* Daily climatology using full time series -- does not remove climate trends
+* Removes the daily climatology (calculated in a ``reference_period``) -- does not remove climate trends
 * **Best for**: Simple anomaly calculation without detrending
 * **Pros**: Straightforward interpretation, preserves long-term trends
 * **Cons**: Does not account for climate change trends, seasonal timing shifts
@@ -390,6 +390,7 @@ Anomaly Methods
 **Detrend Fixed Baseline** (``detrend_fixed_baseline``):
 
 * Polynomial detrending followed by fixed daily climatology -- keeps full time-series of data, but does not account for trends in the timing of seasonal transitions
+* Also supports calculating the climatology only within a ``reference_period`` (detrending still uses all data)
 * **Best for**: Studies requiring detrending but maintaining full temporal data coverage
 * **Pros**: Removes long-term trends while preserving seasonal cycles, maintains full time series
 * **Cons**: Does not account for changes in seasonal timing or seasonality

@@ -1,11 +1,19 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 import marEx
+from marEx.exceptions import ConfigurationError
 
 from .conftest import assert_percentile_frequency
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_dask_client(dask_client):
+    """Ensure a distributed Dask client is active for this module."""
+    return dask_client
 
 
 class TestGriddedPreprocessing:
@@ -767,3 +775,80 @@ class TestGriddedPreprocessing:
             assert (
                 0.025 < extreme_frequency < 0.075
             ), f"{method_anomaly}+{method_extreme} produced unreasonable frequency: {extreme_frequency}"
+
+    def test_fixed_baseline_with_reference_period(self):
+        """Test fixed_baseline reference_period restricts climatology to specified years."""
+        import pandas as pd
+
+        # Build a small synthetic dataset: 4 years of daily data at 3x3 grid
+        # Years 2000-2001 have a warm bias (+2), years 2002-2003 are baseline (0)
+        times = pd.date_range("2000-01-01", "2003-12-31", freq="D")
+        rng = np.random.default_rng(42)
+        base = rng.standard_normal((len(times), 3, 3)).astype(np.float32)
+
+        # Add a +2 warm bias to the first two years
+        warm_mask = np.array([t.year <= 2001 for t in times])
+        base[warm_mask] += 2.0
+
+        da = xr.DataArray(
+            base,
+            dims=["time", "lat", "lon"],
+            coords={"time": times, "lat": [0.0, 1.0, 2.0], "lon": [0.0, 1.0, 2.0]},
+        ).chunk({"time": -1})
+
+        dims = {"time": "time", "x": "lon", "y": "lat"}
+
+        # Full-range climatology: mean mixes warm+cool years → anomalies centred on mixed mean
+        result_full = marEx.compute_normalised_anomaly(da, method_anomaly="fixed_baseline", dimensions=dims)
+
+        # Reference period restricted to cool years 2002-2003:
+        # climatology is ~0, so warm years produce large positive anomalies
+        result_ref = marEx.compute_normalised_anomaly(
+            da, method_anomaly="fixed_baseline", reference_period=(2002, 2003), dimensions=dims
+        )
+
+        # Output should preserve all time steps
+        assert result_ref.sizes["time"] == da.sizes["time"]
+
+        # Anomalies during the warm period (2000-2001) should be larger when the
+        # climatology is computed from the cool period only
+        warm_slice = {"time": slice("2000-01-01", "2001-12-31")}
+        mean_anom_full = float(result_full.dat_anomaly.sel(**warm_slice).mean())
+        mean_anom_ref = float(result_ref.dat_anomaly.sel(**warm_slice).mean())
+        assert mean_anom_ref > mean_anom_full + 0.5, (
+            f"Reference-period anomalies during warm years ({mean_anom_ref:.2f}) should be "
+            f"substantially larger than full-range anomalies ({mean_anom_full:.2f})"
+        )
+
+    def test_reference_period_attr_stored_in_preprocess_data(self):
+        """Test that reference_period attribute is stored by preprocess_data."""
+        import pandas as pd
+
+        times = pd.date_range("2000-01-01", "2001-12-31", freq="D")
+        da = xr.DataArray(
+            np.random.default_rng(0).standard_normal((len(times), 3, 3)).astype(np.float32),
+            dims=["time", "lat", "lon"],
+            coords={"time": times, "lat": [0.0, 1.0, 2.0], "lon": [0.0, 1.0, 2.0]},
+        ).chunk({"time": -1})
+
+        result = marEx.preprocess_data(
+            da,
+            method_anomaly="fixed_baseline",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+            reference_period=(2000, 2000),
+            dimensions={"time": "time", "x": "lon", "y": "lat"},
+            dask_chunks={"time": -1},
+        )
+        assert result.attrs.get("reference_period") == [2000, 2000]
+
+    def test_reference_period_invalid_for_shifting_baseline(self):
+        """Test that reference_period raises ConfigurationError for incompatible methods."""
+        with pytest.raises(ConfigurationError, match="reference_period is not supported"):
+            marEx.preprocess_data(
+                self.sst_data,
+                method_anomaly="shifting_baseline",
+                reference_period=(1990, 2010),
+                dimensions=self.dimensions,
+                dask_chunks=self.dask_chunks,
+            )

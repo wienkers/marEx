@@ -172,7 +172,7 @@ Anomaly Detection Methods
 
 .. code-block:: python
 
-   # Daily climatology using full time series without detrending
+   # Daily climatology (calculated using the full time series) without detrending
    extremes_ds = marEx.preprocess_data(
        sst,
        method_anomaly='fixed_baseline',
@@ -181,8 +181,16 @@ Anomaly Detection Methods
        smooth_days_baseline=11       # Smoothing window for climatology
    )
 
+   # Or where the climatology is calculated for a specific reference period (e.g., 1990-2020)
+   extremes_ds = marEx.preprocess_data(
+       sst,
+       method_anomaly='fixed_baseline',
+       threshold_percentile=95,
+       reference_period=(1990, 2020)  # Climatology from 1990-2020 only
+   )
+
 **Characteristics:**
-  * Anomaly relative to the daily climatology using full time series
+  * Anomaly relative to the daily climatology using full time series (or a specified ``reference_period``)
   * Preserves long-term / climate trends
   * Simple interpretation and fast computation
   * Best for: Baseline comparison studies, trend-inclusive analysis, public outreach
@@ -199,7 +207,8 @@ Anomaly Detection Methods
        # Additional parameters:
        detrend_orders=[1],           # Linear detrending (default)
        smooth_days_baseline=11,      # Smoothing window for climatology
-       force_zero_mean=True          # Enforce zero mean
+       force_zero_mean=True,         # Enforce zero mean
+       reference_period=(1990, 2020) # Optional: restrict climatology to a specific reference period
    )
 
 **Characteristics:**
@@ -420,6 +429,11 @@ Anomaly Method Parameters
 **smooth_days_baseline** : int, default=11
   Number of days for smoothing the daily climatology
 
+**reference_period** : tuple of (int, int), optional
+  Year range ``(start_year, end_year)`` inclusive for computing the daily climatology.
+  If ``None`` (default), uses all available years. Anomalies are computed for the full
+  time series regardless. Example: ``reference_period=(1990, 2020)``
+
 **Detrend Fixed Baseline Parameters:**
 
 **detrend_orders** : list of int, default=[1]
@@ -430,6 +444,11 @@ Anomaly Method Parameters
 
 **force_zero_mean** : bool, default=True
   Whether to explicitly enforce zero mean in final anomalies
+
+**reference_period** : tuple of (int, int), optional
+  Year range ``(start_year, end_year)`` inclusive for computing the daily climatology
+  (only affects the climatology step; detrending still uses all data).
+  If ``None`` (default), uses all available years.
 
 **Shifting Baseline Parameters:**
 

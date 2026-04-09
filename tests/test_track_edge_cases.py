@@ -20,14 +20,14 @@ from marEx.exceptions import ConfigurationError, DataValidationError
 
 
 @pytest.fixture(scope="module")
-def extremes_gridded():
+def extremes_gridded(dask_client):
     """Load gridded extremes data for testing."""
     test_data_path = Path(__file__).parent / "data" / "extremes_gridded.zarr"
     return xr.open_zarr(str(test_data_path), chunks={}).persist()
 
 
 @pytest.fixture(scope="module")
-def extremes_unstructured():
+def extremes_unstructured(dask_client):
     """Load unstructured extremes data for testing."""
     test_data_path = Path(__file__).parent / "data" / "extremes_unstructured.zarr"
     return xr.open_zarr(str(test_data_path), chunks={}).persist()
@@ -45,7 +45,7 @@ def temp_checkpoint_dir():
 class TestCheckpointFunctionality:
     """Test checkpoint save and load functionality."""
 
-    def test_checkpoint_save(self, extremes_unstructured, temp_checkpoint_dir, dask_client_unstructured):
+    def test_checkpoint_save(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
         """Test saving checkpoints during preprocessing (unstructured grids only)."""
         neighbours = extremes_unstructured.neighbours
         cell_areas = extremes_unstructured.cell_areas
@@ -84,7 +84,7 @@ class TestCheckpointFunctionality:
         loaded_zarr = xr.open_zarr(str(checkpoint_zarr))
         assert "data_bin_preproc" in loaded_zarr, "Preprocessed data not in checkpoint"
 
-    def test_checkpoint_load(self, extremes_unstructured, temp_checkpoint_dir, dask_client_unstructured):
+    def test_checkpoint_load(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
         """Test loading from existing checkpoints (unstructured grids only)."""
         neighbours = extremes_unstructured.neighbours
         cell_areas = extremes_unstructured.cell_areas
@@ -144,7 +144,7 @@ class TestCheckpointFunctionality:
 class TestChunkingValidationWarnings:
     """Test chunking validation and rechunking warnings."""
 
-    def test_neighbours_nv_chunking_warning(self, extremes_unstructured, temp_checkpoint_dir, dask_client_unstructured):
+    def test_neighbours_nv_chunking_warning(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
         """Test warning when neighbours has multiple chunks in nv dimension."""
         neighbours = extremes_unstructured.neighbours
         cell_areas = extremes_unstructured.cell_areas
@@ -178,7 +178,7 @@ class TestChunkingValidationWarnings:
 class TestDataValidationEdgeCases:
     """Test edge cases in data validation."""
 
-    def test_empty_data_bin_attrs(self, extremes_gridded, dask_client_gridded):
+    def test_empty_data_bin_attrs(self, extremes_gridded, dask_client):
         """Test handling of DataArray with no attrs."""
         # Remove all attributes
         data_no_attrs = extremes_gridded.extreme_events.copy(deep=True)
@@ -195,7 +195,7 @@ class TestDataValidationEdgeCases:
 
         assert tracker.data_attrs == {}, "Should handle empty attrs gracefully"
 
-    def test_missing_coordinates_unstructured(self, dask_client_unstructured):
+    def test_missing_coordinates_unstructured(self, dask_client):
         """Test error when required coordinates are missing in unstructured data."""
         # Create data with missing coordinates
         test_data = xr.DataArray(
@@ -231,7 +231,7 @@ class TestDataValidationEdgeCases:
 class TestOverlapValidationAndWarnings:
     """Test overlap validation and warning conditions."""
 
-    def test_empty_overlap_list_return(self, extremes_gridded, dask_client_gridded):
+    def test_empty_overlap_list_return(self, extremes_gridded, dask_client):
         """Test handling of empty overlap lists."""
         # Create minimal tracker
         tracker = marEx.tracker(
@@ -254,7 +254,7 @@ class TestOverlapValidationAndWarnings:
 class TestComplexMergeSplitValidation:
     """Test complex merge/split validation and logging."""
 
-    def test_complex_merging_scenario(self, extremes_gridded, dask_client_gridded):
+    def test_complex_merging_scenario(self, extremes_gridded, dask_client):
         """Test complex merging with validation logging."""
         # Create tracker with aggressive merging settings
         tracker = marEx.tracker(
@@ -277,7 +277,7 @@ class TestComplexMergeSplitValidation:
         assert "allow_merging" in tracked_ds.attrs
         assert tracked_ds.attrs["allow_merging"] == 1
 
-    def test_merging_with_temporal_fill(self, extremes_gridded, dask_client_gridded):
+    def test_merging_with_temporal_fill(self, extremes_gridded, dask_client):
         """Test merging with temporal filling."""
         tracker = marEx.tracker(
             extremes_gridded.extreme_events,
@@ -301,10 +301,12 @@ class TestComplexMergeSplitValidation:
 class TestUnstructuredPartitioning:
     """Test unstructured grid partitioning code paths."""
 
-    def test_unstructured_tracking_with_merging(self, extremes_unstructured, temp_checkpoint_dir, dask_client_unstructured):
+    def test_unstructured_tracking_with_merging(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
         """Test unstructured grid tracking with merging to trigger partition code."""
         neighbours = extremes_unstructured.neighbours
-        cell_areas = extremes_unstructured.cell_areas
+        # Compute cell_areas to numpy so it doesn't serialise as a distributed
+        # future into Dask workers
+        cell_areas = extremes_unstructured.cell_areas.compute()
 
         # Create tracker with merging enabled
         tracker = marEx.tracker(
