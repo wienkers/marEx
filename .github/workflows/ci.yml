@@ -147,7 +147,7 @@ jobs:
     - name: Run preprocessing tests (gridded)
       timeout-minutes: 30  # Windows can be slow for these tests
       run: |
-        pytest tests/test_gridded_preprocessing.py -n 2 -v --tb=short
+        pytest tests/test_gridded_preprocessing.py tests/test_detect_detrending.py -n 2 -v --tb=short
 
     - name: Run preprocessing tests (unstructured)
       timeout-minutes: 30  # Windows can be slow for these tests
@@ -163,6 +163,11 @@ jobs:
       timeout-minutes: 30  # Windows can be slow for these tests
       run: |
         pytest tests/test_unstructured_tracking.py -n 2 -v --tb=short
+
+    - name: Run tracking edge case tests
+      timeout-minutes: 30  # Windows can be slow for these tests
+      run: |
+        pytest tests/test_track_edge_cases.py -n 2 -v --tb=short
 
     - name: Run plotting tests
       run: |
