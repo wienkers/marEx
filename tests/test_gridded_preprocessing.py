@@ -10,12 +10,6 @@ from marEx.exceptions import ConfigurationError
 from .conftest import assert_percentile_frequency
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _require_dask_client(dask_client):
-    """Ensure a distributed Dask client is active for this module."""
-    return dask_client
-
-
 class TestGriddedPreprocessing:
     """Test preprocessing functionality for gridded data using test datasets."""
 

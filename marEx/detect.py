@@ -567,6 +567,17 @@ def preprocess_data(
             data_info={"data_type": type(da.data).__name__, "shape": da.shape},
         )
 
+    # Validate reference_period before triggering any computation
+    if reference_period is not None and method_anomaly not in ("fixed_baseline", "detrend_fixed_baseline"):
+        raise ConfigurationError(
+            f"reference_period is not supported for method_anomaly='{method_anomaly}'",
+            details="reference_period is only applicable to 'fixed_baseline' and 'detrend_fixed_baseline' methods",
+            suggestions=[
+                "Remove the reference_period parameter, or",
+                "Use method_anomaly='fixed_baseline' or 'detrend_fixed_baseline'",
+            ],
+        )
+
     # Validate that all unmasked data is valid (finite values only)
     logger.debug("Validating data values for NaN/infinite values")
     _validate_data_values(da, dimensions)
@@ -2253,6 +2264,7 @@ def _compute_anomaly_detrended(
             func="std",
             isbin=False,
             method="cohorts",
+            dtype=np.float32,
         )
 
         # Calculate 30-day rolling standard deviation with annual wrapped padding
