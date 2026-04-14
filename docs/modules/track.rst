@@ -101,8 +101,8 @@ Advanced Tracking Configuration
        cell_areas=grid_areas        # Optional: physical cell areas (m²)
    )
 
-   # Run tracking and get merge information
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
+   # Run tracking and get the consolidated genealogy dataset
+   tracked_events, genealogy_ds = event_tracker.run(return_genealogy=True)
 
 Unstructured Grid Tracking
 ---------------------------
@@ -562,7 +562,7 @@ Main Tracking Dataset
 
    # tracked_events Dataset structure:
    xarray.Dataset
-   Dimensions: (lat, lon, time, ID, component, sibling_ID)
+   Dimensions: (lat, lon, time, ID, component)
    Coordinates:
        lat         (lat)
        lon         (lon)
@@ -576,7 +576,6 @@ Main Tracking Dataset
        presence              (time, ID)              bool        # Event presence
        time_start            (ID)                    datetime64  # Start times
        time_end              (ID)                    datetime64  # End times
-       merge_ledger          (time, ID, sibling_ID)  int32       # Merge information
 
 **Key Variables:**
 
@@ -586,30 +585,43 @@ Main Tracking Dataset
 * **centroid**: (x,y) centroid coordinates of each event
 * **presence**: Boolean indicating event presence at each time
 * **time_start/time_end**: Temporal bounds of each event
-* **merge_ledger**: Sibling IDs for merging events (-1 = no merge)
 
-Merge Information Dataset
--------------------------
+Genealogy Dataset
+-----------------
+
+The consolidated genealogy dataset replaces the old ``merge_ledger`` / ``*_merges.nc`` outputs.
+It combines the partitioned-merge records (parent/child relationships logged when the overlap-based
+merge detector fires) with a new per-timestep spatial adjacency ledger. The adjacency ledger is the
+primitive consumed by :mod:`marEx.genealogy` to reconstruct the full merge/split DAG — including
+absorptive merges (a small event ends while touching a larger continuing event) and partitioned
+splits (two co-tracked events separate apart).
 
 .. code-block:: python
 
-   # merges_ds Dataset structure (when return_merges=True):
+   # genealogy_ds Dataset structure (when return_genealogy=True):
    xarray.Dataset
-   Dimensions: (merge_ID, parent_idx, child_idx)
+   Dimensions: (merge_ID, parent_idx, child_idx, edge)
    Data variables:
-       parent_IDs      (merge_ID, parent_idx)  int32       # Parent event IDs
-       child_IDs       (merge_ID, child_idx)   int32       # Child event IDs
-       overlap_areas   (merge_ID, parent_idx)  int32       # Overlap areas
-       merge_time      (merge_ID)              datetime64  # Merge timestamps
-       n_parents       (merge_ID)              int8        # Number of parents
-       n_children      (merge_ID)              int8        # Number of children
+       parent_IDs           (merge_ID, parent_idx)   int32       # Parent event IDs
+       child_IDs            (merge_ID, child_idx)    int32       # Child event IDs
+       overlap_areas        (merge_ID, parent_idx)   int32       # Overlap areas
+       merge_time           (merge_ID)               datetime64  # PM timestamps
+       n_parents            (merge_ID)               int8        # Number of parents
+       n_children           (merge_ID)               int8        # Number of children
+       adj_time             (edge)                   datetime64  # Adjacency timestamps
+       adj_id_a             (edge)                   int32       # Smaller-ID endpoint
+       adj_id_b             (edge)                   int32       # Larger-ID endpoint
+       adj_boundary_length  (edge)                   int32       # # shared boundary cells
 
 **Key Variables:**
 
-* **parent_IDs/child_IDs**: Original parent and child IDs in merge events
-* **overlap_areas**: Spatial overlap between parent and child objects
-* **merge_time**: Timestamp of each merge event
-* **n_parents/n_children**: Number of objects involved in each merge
+* **parent_IDs / child_IDs**: Original parent/child IDs in each partitioned-merge event
+* **overlap_areas**: Spatial overlap between each parent and the labelling child
+* **merge_time**: Timestamp of each partitioned-merge event
+* **n_parents / n_children**: Number of objects involved in each partitioned merge
+* **adj_id_a / adj_id_b**: Canonicalised pair (``adj_id_a`` <= ``adj_id_b``) of event IDs whose
+  labelled regions share at least one boundary cell at ``adj_time``
+* **adj_boundary_length**: Number of shared boundary cells (adjacency strength)
 
 Advanced Usage Examples
 ========================
@@ -620,7 +632,7 @@ Analysing Event Properties
 .. code-block:: python
 
    # Run tracking
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
+   tracked_events, genealogy_ds = event_tracker.run(return_genealogy=True)
 
    # Analyse event durations
    event_durations = (tracked_events.time_end - tracked_events.time_start).dt.days
@@ -639,23 +651,23 @@ Merge Event Analysis
 
 .. code-block:: python
 
-   # Analyse merge events
-   if merges_ds is not None:
+   # Analyse partitioned-merge events stored on the genealogy dataset
+   if "merge_ID" in genealogy_ds.dims:
        # Find complex merge events (multiple parents/children)
-       complex_merges = merges_ds.where(
-           (merges_ds.n_parents > 1) | (merges_ds.n_children > 1),
-           drop=True
+       complex_merges = genealogy_ds.where(
+           (genealogy_ds.n_parents > 1) | (genealogy_ds.n_children > 1),
+           drop=True,
        )
 
        # Analyse merge timing
-       merge_times = merges_ds.merge_time.values
-       seasonal_merges = merges_ds.groupby(merges_ds.merge_time.dt.season).count()
+       merge_times = genealogy_ds.merge_time.values
+       seasonal_merges = genealogy_ds.groupby(genealogy_ds.merge_time.dt.season).count()
 
        # Find parent-child relationships
        for merge_id in complex_merges.merge_ID:
-           parents = merges_ds.parent_IDs.sel(merge_ID=merge_id).values
-           children = merges_ds.child_IDs.sel(merge_ID=merge_id).values
-           print(f"Merge {merge_id}: {parents} → {children}")
+           parents = genealogy_ds.parent_IDs.sel(merge_ID=merge_id).values
+           children = genealogy_ds.child_IDs.sel(merge_ID=merge_id).values
+           print(f"Merge {merge_id}: {parents} -> {children}")
 
 Visualisation Integration
 -------------------------
@@ -840,12 +852,12 @@ Complete Workflow Example
    )
 
    # Step 3: Run tracking
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
+   tracked_events, genealogy_ds = event_tracker.run(return_genealogy=True)
 
    # Step 4: Save results
    tracked_events.to_netcdf('tracked_events.nc')
-   if merges_ds is not None:
-       merges_ds.to_netcdf('merge_events.nc')
+   if len(genealogy_ds.data_vars):
+       genealogy_ds.to_netcdf('tracked_events_genealogy.nc')
 
 See Also
 ========

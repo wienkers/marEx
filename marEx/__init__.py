@@ -57,6 +57,18 @@ from .exceptions import (  # Main exception hierarchy; Convenience constructors
     wrap_exception,
 )
 
+# Import genealogy post-processing
+from .genealogy import (
+    build_adjacency_from_existing,
+    build_genealogy,
+    compute_event_statistics,
+    compute_family_statistics,
+    compute_global_statistics,
+    load_genealogy,
+    plot_genealogy_timeline,
+    to_networkx,
+)
+
 # Import HPC helper utilities
 from .helper import configure_dask
 
@@ -90,6 +102,15 @@ __all__ = [
     # Tracking
     "tracker",
     "regional_tracker",
+    # Genealogy post-processing
+    "build_genealogy",
+    "load_genealogy",
+    "build_adjacency_from_existing",
+    "compute_event_statistics",
+    "compute_global_statistics",
+    "compute_family_statistics",
+    "to_networkx",
+    "plot_genealogy_timeline",
     # Visualisation
     "specify_grid",
     "PlotConfig",

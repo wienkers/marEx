@@ -230,13 +230,13 @@ The tracking step identifies coherent extreme events and follows them through ti
        nn_partitioning=True,        # Use nearest-neighbour partitioning when splitting events
    )
 
-   # Run tracking and return merging data
-   tracked_events, merge_events = tracker.run(return_merges=True)
+   # Run tracking and return the consolidated genealogy dataset
+   tracked_events, genealogy_ds = tracker.run(return_genealogy=True)
 
 The resulting xarray dataset ``tracked_events`` will have the following structure & entries::
 
    xarray.Dataset
-   Dimensions: (lat, lon, time, ID, component, sibling_ID)
+   Dimensions: (lat, lon, time, ID, component)
    Coordinates:
        lat         (lat)
        lon         (lon)
@@ -250,7 +250,6 @@ The resulting xarray dataset ``tracked_events`` will have the following structur
        presence              (time, ID)              bool        ndarray
        time_start            (ID)                    datetime64  ndarray
        time_end              (ID)                    datetime64  ndarray
-       merge_ledger          (time, ID, sibling_ID)  int32       ndarray
 where:
 
 * ``ID_field``: Field containing the IDs of tracked events (0=background)
@@ -260,27 +259,34 @@ where:
 * ``presence``: Presence (boolean) of each event at each time (anywhere in space)
 * ``time_start``: Start time of each event
 * ``time_end``: End time of each event
-* ``merge_ledger``: Sibling IDs for merging events (matching ``ID_field``); ``-1`` indicates no merging event occurred
 
-When running with ``return_merges=True``, the resulting xarray dataset ``merge_events`` will have the following structure & entries::
+When running with ``return_genealogy=True``, the resulting xarray dataset ``genealogy_ds`` consolidates
+the partitioned-merge records with the per-timestep spatial adjacency ledger (a new primitive used by
+:mod:`marEx.genealogy` to derive absorptive merges and partitioned splits downstream)::
 
    xarray.Dataset
-   Dimensions: (merge_ID, parent_idx, child_idx)
+   Dimensions: (merge_ID, parent_idx, child_idx, edge)
    Data variables:
-       parent_IDs      (merge_ID, parent_idx)  int32       ndarray
-       child_IDs       (merge_ID, child_idx)   int32       ndarray
-       overlap_areas   (merge_ID, parent_idx)  int32       ndarray
-       merge_time      (merge_ID)              datetime64  ndarray
-       n_parents       (merge_ID)              int8        ndarray
-       n_children      (merge_ID)              int8        ndarray
+       parent_IDs           (merge_ID, parent_idx)   int32       ndarray
+       child_IDs            (merge_ID, child_idx)    int32       ndarray
+       overlap_areas        (merge_ID, parent_idx)   int32       ndarray
+       merge_time           (merge_ID)               datetime64  ndarray
+       n_parents            (merge_ID)               int8        ndarray
+       n_children           (merge_ID)               int8        ndarray
+       adj_time             (edge)                   datetime64  ndarray
+       adj_id_a             (edge)                   int32       ndarray
+       adj_id_b             (edge)                   int32       ndarray
+       adj_boundary_length  (edge)                   int32       ndarray
 where:
 
-* ``parent_IDs``: Original parent IDs of each merging event
-* ``child_IDs``: Original child IDs of each merging event
-* ``overlap_areas``: Area of overlap between parent and child objects in each merging event
-* ``merge_time``: Time of each merging event
-* ``n_parents``: Number of parent objects in each merging event
-* ``n_children``: Number of child objects in each merging event
+* ``parent_IDs`` / ``child_IDs``: Original parent/child IDs of each partitioned-merge event.
+* ``overlap_areas``: Area of overlap between each parent and the labelling child.
+* ``merge_time``: Time of each partitioned-merge event.
+* ``n_parents`` / ``n_children``: Number of parents/children in each partitioned-merge event.
+* ``adj_time``: Time of each adjacency snapshot (one row per (time, id_a, id_b) triple).
+* ``adj_id_a`` / ``adj_id_b``: Canonicalised ID pair (``adj_id_a`` <= ``adj_id_b``) of two events
+  whose labelled regions share at least one boundary cell at ``adj_time``.
+* ``adj_boundary_length``: Number of shared boundary cells (adjacency strength).
 
 See ``./examples/unstructured data/02_id_track_events.ipynb`` in :doc:`examples` for a detailed example of identification, tracking, & merging on an *unstructured* grid.
 

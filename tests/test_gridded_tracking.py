@@ -94,8 +94,8 @@ class TestGriddedTracking:
             quiet=True,
         )
 
-        # Run tracking with merge information
-        tracked_ds, merges_ds = tracker.run(return_merges=True)
+        # Run tracking with genealogy information
+        tracked_ds, genealogy_ds = tracker.run(return_genealogy=True)
 
         # Verify main output structure
         assert isinstance(tracked_ds, xr.Dataset)
@@ -106,21 +106,28 @@ class TestGriddedTracking:
         assert "presence" in tracked_ds.data_vars
         assert "time_start" in tracked_ds.data_vars
         assert "time_end" in tracked_ds.data_vars
-        assert "merge_ledger" in tracked_ds.data_vars
 
-        # Verify merge dataset structure
-        assert isinstance(merges_ds, xr.Dataset)
-        assert "parent_IDs" in merges_ds.data_vars
-        assert "child_IDs" in merges_ds.data_vars
-        assert "overlap_areas" in merges_ds.data_vars
-        assert "merge_time" in merges_ds.data_vars
-        assert "n_parents" in merges_ds.data_vars
-        assert "n_children" in merges_ds.data_vars
+        # Verify consolidated genealogy dataset structure
+        assert isinstance(genealogy_ds, xr.Dataset)
+        # Partitioned-merge records
+        assert "parent_IDs" in genealogy_ds.data_vars
+        assert "child_IDs" in genealogy_ds.data_vars
+        assert "overlap_areas" in genealogy_ds.data_vars
+        assert "merge_time" in genealogy_ds.data_vars
+        assert "n_parents" in genealogy_ds.data_vars
+        assert "n_children" in genealogy_ds.data_vars
+        # Per-timestep adjacency edges (new primitive)
+        assert "adj_time" in genealogy_ds.data_vars
+        assert "adj_id_a" in genealogy_ds.data_vars
+        assert "adj_id_b" in genealogy_ds.data_vars
+        assert "adj_boundary_length" in genealogy_ds.data_vars
+        assert "edge" in genealogy_ds.dims
 
         # Verify advanced tracking attributes
         assert tracked_ds.attrs["allow_merging"] == 1
         assert tracked_ds.attrs["T_fill"] == 2
-        assert "total_merges" in tracked_ds.attrs
+        assert "total_partitioned_merges" in tracked_ds.attrs
+        assert "total_adjacency_edges" in tracked_ds.attrs
 
         # Verify ID dimension consistency
         n_events = tracked_ds.sizes["ID"]
@@ -142,7 +149,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 20, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 13, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_partitioned_merges"], 13, tolerance=2)
 
     def test_tracking_data_consistency(self, dask_client_gridded):
         """Test that tracking produces consistent data structures."""
@@ -200,7 +207,7 @@ class TestGriddedTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 21, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 15, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_partitioned_merges"], 15, tolerance=2)
 
     def test_different_filtering_parameters(self, dask_client_gridded):
         """Test tracking with different area filtering parameters."""
@@ -428,7 +435,7 @@ class TestGriddedTracking:
 
         # Verify custom case output structure (with merging)
         assert isinstance(tracked_custom_merge, xr.Dataset)
-        expected_vars = {"ID_field", "global_ID", "area", "centroid", "presence", "time_start", "time_end", "merge_ledger"}
+        expected_vars = {"ID_field", "global_ID", "area", "centroid", "presence", "time_start", "time_end"}
         assert set(tracked_custom_merge.data_vars.keys()) == expected_vars
 
         # Verify custom dimensions are correctly named
@@ -545,15 +552,8 @@ class TestGriddedTracking:
                 err_msg="time_end values differ between standard and custom dimensions",
             )
 
-            # Compare merge_ledger values - should be identical
-            standard_merge_ledger = standard_ds.merge_ledger.transpose("time", "ID", "sibling_ID")
-            custom_merge_ledger = custom_ds.merge_ledger.transpose("t", "ID", "sibling_ID")
-
-            np.testing.assert_array_equal(
-                standard_merge_ledger.values,
-                custom_merge_ledger.values,
-                err_msg="merge_ledger values differ between standard and custom dimensions",
-            )
+            # merge_ledger has been removed from the main dataset in favour of
+            # the consolidated genealogy sidecar dataset — nothing more to compare here.
 
         # Verify coordinate values are the same (just with different names)
         if allow_merging:

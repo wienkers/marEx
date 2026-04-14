@@ -26,7 +26,7 @@ import os
 import shutil
 import time
 import warnings
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 import dask.array as dsa
 import numpy as np
@@ -50,6 +50,143 @@ from .logging_config import configure_logging, get_logger, log_dask_info, log_me
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Upper bound on adjacency neighbours recorded per event per timestep.
+# Each event's labelled perimeter can only touch so many distinct neighbouring
+# event IDs; 64 is a generous budget given overlap-threshold constraints.
+MAX_ADJACENCY_SLOTS = 64
+
+
+def calculate_adjacency_for_slice(
+    slice_data: NDArray[np.int32],
+    present_mask: NDArray[np.bool_],
+    all_event_ids: NDArray[np.int32],
+    neighbours_int: NDArray[np.int32],
+    is_unstructured: bool,
+    regional_mode: bool,
+    max_slots: int = MAX_ADJACENCY_SLOTS,
+) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:
+    """
+    Per-timestep spatial adjacency between distinct event IDs.
+
+    For each event ID present at this timestep, record up to ``max_slots``
+    neighbouring event IDs and the number of shared boundary cells
+    ("boundary_length"). Empty slots are filled with -1. The resulting dense
+    tensor is post-processed into a sparse edge list after ``apply_ufunc``
+    returns.
+
+    Parameters
+    ----------
+    slice_data : (ny, nx) or (ncells,) int32 array
+        Label field for a single timestep.
+    present_mask : (n_ids,) bool array
+        Which events in ``all_event_ids`` are present at this timestep.
+    all_event_ids : (n_ids,) int32 array
+        Event IDs, in the order that populates the output rows.
+    neighbours_int : int32 array
+        For unstructured grids, the (3, ncells) or (ncells, 3) neighbour index
+        table with ``-1`` sentinels. Ignored for structured grids.
+    is_unstructured : bool
+        If True, iterate over mesh neighbours; otherwise scan 4-connected
+        horizontal/vertical pairs (plus periodic longitude seam when
+        ``regional_mode`` is False).
+    regional_mode : bool
+        Suppress periodic longitude wrap for structured grids.
+    max_slots : int
+        Maximum neighbours recorded per event per timestep.
+
+    Returns
+    -------
+    adj_neighbours : (n_ids, max_slots) int32
+        Neighbour event IDs (-1 sentinel for empty slots).
+    adj_counts : (n_ids, max_slots) int32
+        Boundary length (shared-cell count) for each recorded neighbour.
+    """
+    n_ids = len(all_event_ids)
+    adj_neighbours = np.full((n_ids, max_slots), -1, dtype=np.int32)
+    adj_counts = np.full((n_ids, max_slots), -1, dtype=np.int32)
+
+    if not np.any(present_mask):
+        return adj_neighbours, adj_counts
+
+    if is_unstructured:
+        nbrs = neighbours_int
+        if nbrs.ndim == 2 and nbrs.shape[0] != 3 and nbrs.shape[1] == 3:
+            nbrs = nbrs.T
+        a_lists = []
+        b_lists = []
+        for k in range(nbrs.shape[0]):
+            n_idx = nbrs[k]
+            valid_nbr = n_idx >= 0
+            cell_idx = np.where(valid_nbr)[0]
+            if cell_idx.size == 0:
+                continue
+            left = slice_data[cell_idx]
+            right = slice_data[n_idx[cell_idx]]
+            pair_valid = (left > 0) & (right > 0) & (left != right)
+            if np.any(pair_valid):
+                a_lists.append(left[pair_valid])
+                b_lists.append(right[pair_valid])
+        a_arr = np.concatenate(a_lists) if a_lists else np.empty(0, dtype=np.int32)
+        b_arr = np.concatenate(b_lists) if b_lists else np.empty(0, dtype=np.int32)
+    else:
+        a_lists = []
+        b_lists = []
+
+        left = slice_data[:, :-1]
+        right = slice_data[:, 1:]
+        m = (left > 0) & (right > 0) & (left != right)
+        if np.any(m):
+            a_lists.append(left[m])
+            b_lists.append(right[m])
+
+        top = slice_data[:-1, :]
+        bottom = slice_data[1:, :]
+        m = (top > 0) & (bottom > 0) & (top != bottom)
+        if np.any(m):
+            a_lists.append(top[m])
+            b_lists.append(bottom[m])
+
+        if not regional_mode and slice_data.shape[1] > 1:
+            wleft = slice_data[:, -1]
+            wright = slice_data[:, 0]
+            m = (wleft > 0) & (wright > 0) & (wleft != wright)
+            if np.any(m):
+                a_lists.append(wleft[m])
+                b_lists.append(wright[m])
+
+        a_arr = np.concatenate(a_lists) if a_lists else np.empty(0, dtype=np.int32)
+        b_arr = np.concatenate(b_lists) if b_lists else np.empty(0, dtype=np.int32)
+
+    if a_arr.size == 0:
+        return adj_neighbours, adj_counts
+
+    id_small = np.minimum(a_arr, b_arr).astype(np.int32)
+    id_large = np.maximum(a_arr, b_arr).astype(np.int32)
+    pairs = np.stack([id_small, id_large], axis=1)
+    unique_pairs, counts = np.unique(pairs, axis=0, return_counts=True)
+
+    id_to_idx = {int(eid): i for i, eid in enumerate(all_event_ids)}
+
+    slot_counters = np.zeros(n_ids, dtype=np.int32)
+    for (a, b), cnt in zip(unique_pairs, counts):
+        ai = id_to_idx.get(int(a), -1)
+        bi = id_to_idx.get(int(b), -1)
+        if ai < 0 or bi < 0:
+            continue
+        sa = slot_counters[ai]
+        if sa < max_slots:
+            adj_neighbours[ai, sa] = b
+            adj_counts[ai, sa] = cnt
+            slot_counters[ai] = sa + 1
+        sb = slot_counters[bi]
+        if sb < max_slots:
+            adj_neighbours[bi, sb] = a
+            adj_counts[bi, sb] = cnt
+            slot_counters[bi] = sb + 1
+
+    return adj_neighbours, adj_counts
+
 
 try:
     import jax.numpy as jnp
@@ -206,7 +343,7 @@ class tracker:
     ...     overlap_threshold=0.3    # Lower threshold for object linking
     ... )
     >>>
-    >>> events_advanced, merges_log = advanced_tracker.run(return_merges=True)
+    >>> events_advanced, genealogy_ds = advanced_tracker.run(return_genealogy=True)
     >>> print(events_advanced.data_vars)
     Data variables:
         event           (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
@@ -218,7 +355,8 @@ class tracker:
         presence        (time, ID)              bool            dask.array<chunksize=(25, 1247)>
         time_start      (ID)                    datetime64[ns]  dask.array<chunksize=(1247,)>
         time_end        (ID)                    datetime64[ns]  dask.array<chunksize=(1247,)>
-        merge_ledger    (time, ID, sibling_ID)  int32           dask.array<chunksize=(25, 1247, 10)>
+    # genealogy_ds contains /partitioned_merges variables (merge_ID, parent_idx, child_idx)
+    # and adjacency edges (edge dim) with per-timestep shared-boundary counts.
 
     Processing unstructured ocean model data (ICON):
 
@@ -1160,7 +1298,7 @@ class tracker:
     # ============================
 
     def run(
-        self, return_merges: bool = False, checkpoint: Optional[str] = None
+        self, return_genealogy: bool = False, checkpoint: Optional[str] = None
     ) -> Union[xr.Dataset, Tuple[xr.Dataset, xr.Dataset]]:
         """
         Run the complete object identification and tracking pipeline.
@@ -1173,8 +1311,13 @@ class tracker:
 
         Parameters
         ----------
-        return_merges : bool, default=False
-            If True, return merge events dataset alongside the main events
+        return_genealogy : bool, default=False
+            If True, return the genealogy dataset alongside the main events.
+            The genealogy dataset consolidates partitioned-merge records
+            (merge_ID / parent_idx / child_idx) with the per-timestep
+            spatial adjacency ledger (edge dim) used by
+            :mod:`marEx.genealogy` to derive absorptive merges and
+            partitioned splits downstream.
         checkpoint : str, optional
             Override the instance checkpoint setting
 
@@ -1182,8 +1325,8 @@ class tracker:
         -------
         events_ds : xarray.Dataset
             Dataset containing tracked events and their properties
-        merges_ds : xarray.Dataset, optional
-            Dataset with merge event information (only if return_merges=True)
+        genealogy_ds : xarray.Dataset, optional
+            Consolidated genealogy dataset (only if return_genealogy=True).
         """
         logger.info("Starting complete tracking pipeline")
         log_memory_usage(logger, "Pipeline start")
@@ -1207,7 +1350,7 @@ class tracker:
             log_memory=True,
             show_progress=True,
         ):
-            events_ds, merges_ds, N_events_final = self.run_tracking(data_bin_preprocessed)
+            events_ds, genealogy_ds, N_events_final = self.run_tracking(data_bin_preprocessed)
 
         # Compute statistics and finalise output
         current_step += 1
@@ -1218,15 +1361,15 @@ class tracker:
             log_memory=True,
             show_progress=True,
         ):
-            events_ds = self.run_stats_attributes(events_ds, merges_ds, object_stats, N_events_final)
+            events_ds = self.run_stats_attributes(events_ds, genealogy_ds, object_stats, N_events_final)
 
         logger.info(f"Tracking pipeline completed successfully - {N_events_final} events identified")
         logger.debug(f"Final dataset dimensions: {events_ds.dims}")
         log_memory_usage(logger, "Pipeline completion")
 
-        if self.allow_merging and return_merges:
-            logger.debug("Returning both events and merge datasets")
-            return events_ds, merges_ds
+        if self.allow_merging and return_genealogy:
+            logger.debug("Returning both events and genealogy datasets")
+            return events_ds, genealogy_ds
         else:
             logger.debug("Returning events dataset only")
             return events_ds
@@ -1380,19 +1523,20 @@ class tracker:
         -------
         events_ds : xarray.Dataset
             Dataset containing tracked events
-        merges_ds : xarray.Dataset
-            Dataset with merge information
+        genealogy_ds : xarray.Dataset
+            Consolidated genealogy dataset (partitioned-merge records plus
+            per-timestep adjacency edges). Empty if ``allow_merging=False``.
         N_events_final : int
             Final number of unique events
         """
         if self.allow_merging or self.unstructured_grid:
             # Track with merging & splitting
-            events_ds, merges_ds, N_events_final = self.track_objects(data_bin_preprocessed)
+            events_ds, genealogy_ds, N_events_final = self.track_objects(data_bin_preprocessed)
         else:
             # Track without merging or splitting
             events_da, _, N_events_final = self.identify_objects(data_bin_preprocessed, time_connectivity=True)
             events_ds = xr.Dataset({"ID_field": events_da})
-            merges_ds = xr.Dataset()
+            genealogy_ds = xr.Dataset()
 
         # Set all filler IDs < 0 to 0
         events_ds["ID_field"] = events_ds.ID_field.where(events_ds.ID_field > 0, drop=False, other=0)
@@ -1409,12 +1553,12 @@ class tracker:
 
         logger.info("Finished tracking all extreme events!")
 
-        return events_ds, merges_ds, N_events_final
+        return events_ds, genealogy_ds, N_events_final
 
     def run_stats_attributes(
         self,
         events_ds: xr.Dataset,
-        merges_ds: xr.Dataset,
+        genealogy_ds: xr.Dataset,
         object_stats: Tuple[float, int, int, float, float, float],
         N_events_final: int,
     ) -> xr.Dataset:
@@ -1425,8 +1569,9 @@ class tracker:
         ----------
         events_ds : xarray.Dataset
             Dataset containing tracked events
-        merges_ds : xarray.Dataset
-            Dataset with merge information
+        genealogy_ds : xarray.Dataset
+            Consolidated genealogy dataset (partitioned-merge records +
+            adjacency edges) — used here only for summary attributes.
         object_stats : tuple
             Preprocessed object statistics
         N_events_final : int
@@ -1474,11 +1619,24 @@ class tracker:
             events_ds.attrs["overlap_threshold"] = self.overlap_threshold
             events_ds.attrs["nn_partitioning"] = int(self.nn_partitioning)
 
-            # Add merge summary attributes
-            events_ds.attrs["total_merges"] = len(merges_ds.merge_ID)
-            events_ds.attrs["multi_parent_merges"] = int((merges_ds.n_parents > 2).sum().item())
+            # Add genealogy summary attributes
+            if "merge_ID" in genealogy_ds.dims:
+                events_ds.attrs["total_partitioned_merges"] = int(genealogy_ds.sizes["merge_ID"])
+                if "n_parents" in genealogy_ds.data_vars:
+                    events_ds.attrs["multi_parent_merges"] = int((genealogy_ds.n_parents > 2).sum().item())
+                else:
+                    events_ds.attrs["multi_parent_merges"] = 0
+            else:
+                events_ds.attrs["total_partitioned_merges"] = 0
+                events_ds.attrs["multi_parent_merges"] = 0
 
-            print(f"   Total Merging Events Recorded: {events_ds.attrs['total_merges']}")
+            if "edge" in genealogy_ds.dims:
+                events_ds.attrs["total_adjacency_edges"] = int(genealogy_ds.sizes["edge"])
+            else:
+                events_ds.attrs["total_adjacency_edges"] = 0
+
+            print(f"   Total Partitioned Merges Recorded: {events_ds.attrs['total_partitioned_merges']}")
+            print(f"   Total Adjacency Edges Recorded:    {events_ds.attrs['total_adjacency_edges']}")
 
         # Inherit metadata from input data_bin
         events_ds.attrs.update(self.data_attrs)
@@ -2783,7 +2941,7 @@ class tracker:
         object_id_field, object_props, overlap_objects_list, merge_events = results
 
         # Cluster & rename objects to get globally unique event IDs
-        split_merged_events_ds = self.cluster_rename_objects_and_props(
+        split_merged_events_ds, adjacency_ds = self.cluster_rename_objects_and_props(
             object_id_field, object_props, overlap_objects_list, merge_events
         )
 
@@ -2792,7 +2950,6 @@ class tracker:
             self.timedim: self.timechunks,
             "ID": -1,
             "component": -1,
-            "sibling_ID": -1,
             self.xdim: -1,
         }
         if not self.unstructured_grid:
@@ -2804,7 +2961,11 @@ class tracker:
         # Count final number of events
         N_events = split_merged_events_ds.ID_field.max().compute().data
 
-        return split_merged_events_ds, merge_events, N_events
+        # Build the consolidated genealogy dataset: partitioned-merge records
+        # (formerly *_merges.nc) plus the new per-timestep adjacency edge list.
+        genealogy_ds = xr.merge([merge_events, adjacency_ds], combine_attrs="drop_conflicts")
+
+        return split_merged_events_ds, genealogy_ds, N_events
 
     def cluster_rename_objects_and_props(
         self,
@@ -3023,88 +3184,6 @@ class tracker:
 
             object_props_extended[var_name] = temp
 
-        # Map the merge_events using the old IDs to be from dimensions (merge_ID, parent_idx)
-        #     --> new merge_ledger with dimensions (time, ID, sibling_ID)
-        # i.e. for each merge_ID --> merge_parent_IDs   gives the old IDs  --> map to new ID using ID_to_cluster_index_da
-        #                   --> merge_time
-
-        old_parent_IDs = xr.where(merge_events.parent_IDs > 0, merge_events.parent_IDs, 0)
-        new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
-
-        # Replace the coordinate merge_ID in new_IDs_parents with merge_time.
-        #    merge_events.merge_time gives merge_time for each merge_ID
-        new_IDs_parents_t = (
-            new_IDs_parents.assign_coords({"merge_time": merge_events.merge_time})
-            .drop_vars("ID")
-            .swap_dims({"merge_ID": "merge_time"})
-            .persist()
-        )
-
-        # Map new_IDs_parents_t into a new data array with dimensions time, ID, and sibling_ID
-        merge_ledger = (
-            xr.full_like(global_id_mapping, fill_value=-1)
-            .chunk({self.timedim: self.timechunks})
-            .expand_dims({"sibling_ID": new_IDs_parents_t.parent_idx.shape[0]})
-            .copy()
-        )
-
-        # Wrapper for processing/mapping mergers in parallel
-        def process_time_group(
-            time_block: xr.DataArray,
-            IDs_data: NDArray[np.int32],
-            IDs_coords: Dict[str, Any],
-        ) -> xr.DataArray:
-            """Process all mergers for a single block of timesteps."""
-            result = xr.full_like(time_block, -1)
-
-            # Get unique times in this block
-            # time_block might not have the coordinate, so get it from the dimension index
-            if self.timecoord in time_block.coords:
-                unique_times = np.unique(time_block.coords[self.timecoord])
-            else:
-                # Fall back to using the dimension index
-                unique_times = np.unique(time_block[self.timedim])
-
-            for time_val in unique_times:
-                # Get IDs for this time
-                time_mask = IDs_coords["merge_time"] == time_val
-                if not np.any(time_mask):
-                    continue
-
-                IDs_at_time = IDs_data[time_mask]
-
-                # Handle single merger case
-                if IDs_at_time.ndim == 1:
-                    valid_mask = IDs_at_time > 0
-                    if np.any(valid_mask):
-                        # Create expanded array for sibling_ID dimension
-                        expanded_IDs = np.broadcast_to(IDs_at_time, (len(time_block.sibling_ID), len(IDs_at_time)))
-                        result.loc[{self.timedim: time_val, "ID": IDs_at_time[valid_mask]}] = expanded_IDs[:, valid_mask]
-
-                # Handle multiple mergers case
-                else:
-                    for merger_IDs in IDs_at_time:
-                        valid_mask = merger_IDs > 0
-                        if np.any(valid_mask):
-                            expanded_IDs = np.broadcast_to(
-                                merger_IDs,
-                                (len(time_block.sibling_ID), len(merger_IDs)),
-                            )
-                            result.loc[{self.timedim: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
-
-            return result
-
-        # Map blocks in parallel
-        merge_ledger = xr.map_blocks(
-            process_time_group,
-            merge_ledger,
-            args=(new_IDs_parents_t.values, new_IDs_parents_t.coords),
-            template=merge_ledger,
-        )
-
-        # Format merge ledger
-        merge_ledger = merge_ledger.rename("merge_ledger").transpose(self.timedim, "ID", "sibling_ID").persist()
-
         # Add start and end time indices for each ID
         valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
@@ -3318,17 +3397,117 @@ class tracker:
 
             logger.info("Property recalculation complete.")
 
+            # Compute per-timestep spatial adjacency between distinct event IDs.
+            # This is the primitive from which absorptive merges and partitioned
+            # splits are derived downstream in marEx.genealogy.
+            logger.info("Computing per-timestep adjacency ledger...")
+
+            if self.unstructured_grid:
+                neighbours_int_arr = self.neighbours_int.values
+            else:
+                # Structured grid: unused, pass a zero-size placeholder.
+                neighbours_int_arr = np.empty((0, 0), dtype=np.int32)
+
+            adj_neighbours_da, adj_counts_da = xr.apply_ufunc(
+                calculate_adjacency_for_slice,
+                split_merged_relabeled_object_id_field,
+                object_props_extended.presence,
+                object_props_extended.ID,
+                kwargs={
+                    "neighbours_int": neighbours_int_arr,
+                    "is_unstructured": self.unstructured_grid,
+                    "regional_mode": self.regional_mode,
+                    "max_slots": MAX_ADJACENCY_SLOTS,
+                },
+                input_core_dims=[spatial_dims, ["ID"], ["ID"]],
+                output_core_dims=[["ID", "adj_slot"], ["ID", "adj_slot"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[np.int32, np.int32],
+                dask_gufunc_kwargs={"output_sizes": {"adj_slot": MAX_ADJACENCY_SLOTS}},
+            )
+
+            adj_neighbours_da, adj_counts_da = persist(adj_neighbours_da, adj_counts_da)
+
+            adj_neighbours_np = adj_neighbours_da.transpose(self.timedim, "ID", "adj_slot").values
+            adj_counts_np = adj_counts_da.transpose(self.timedim, "ID", "adj_slot").values
+
+            # Warn if any timestep saturated the slot budget.
+            saturated = (adj_neighbours_np[..., -1] >= 0).sum()
+            if saturated > 0:
+                logger.warning(
+                    f"Adjacency slot budget (MAX_ADJACENCY_SLOTS={MAX_ADJACENCY_SLOTS}) "
+                    f"was saturated at {int(saturated)} (time, ID) entries — some "
+                    "adjacency edges may be missing. Consider raising MAX_ADJACENCY_SLOTS."
+                )
+
+            if self.timecoord in object_props_extended.coords:
+                time_vals = object_props_extended[self.timecoord].values
+            else:
+                time_vals = object_props_extended[self.timedim].values
+            id_vals = object_props_extended.ID.values.astype(np.int32)
+
+            valid = adj_neighbours_np >= 0
+            t_idx, id_idx, slot_idx = np.where(valid)
+            if t_idx.size > 0:
+                edge_time = time_vals[t_idx]
+                edge_id_a_raw = id_vals[id_idx]
+                edge_id_b_raw = adj_neighbours_np[t_idx, id_idx, slot_idx]
+                edge_count = adj_counts_np[t_idx, id_idx, slot_idx]
+
+                # Each pair is emitted twice (once from each endpoint's slot row);
+                # canonicalise to (min, max) and dedupe per timestep.
+                pair_small = np.minimum(edge_id_a_raw, edge_id_b_raw).astype(np.int32)
+                pair_large = np.maximum(edge_id_a_raw, edge_id_b_raw).astype(np.int32)
+                key = np.stack([t_idx.astype(np.int64), pair_small, pair_large], axis=1)
+                _, unique_idx = np.unique(key, axis=0, return_index=True)
+
+                adj_time = edge_time[unique_idx]
+                adj_id_a = pair_small[unique_idx]
+                adj_id_b = pair_large[unique_idx]
+                adj_boundary_length = edge_count[unique_idx].astype(np.int32)
+            else:
+                adj_time = np.empty(0, dtype=time_vals.dtype)
+                adj_id_a = np.empty(0, dtype=np.int32)
+                adj_id_b = np.empty(0, dtype=np.int32)
+                adj_boundary_length = np.empty(0, dtype=np.int32)
+
+            adjacency_ds = xr.Dataset(
+                {
+                    "adj_time": ("edge", adj_time),
+                    "adj_id_a": ("edge", adj_id_a),
+                    "adj_id_b": ("edge", adj_id_b),
+                    "adj_boundary_length": ("edge", adj_boundary_length),
+                },
+                attrs={
+                    "adjacency_connectivity": "unstructured" if self.unstructured_grid else "4",
+                    "regional_mode": int(self.regional_mode),
+                    "max_adjacency_slots": MAX_ADJACENCY_SLOTS,
+                },
+            )
+            logger.info(f"Adjacency ledger: {adj_id_a.size} unique edges across all timesteps.")
+        else:
+            adjacency_ds = xr.Dataset(
+                {
+                    "adj_time": ("edge", np.empty(0, dtype="datetime64[ns]")),
+                    "adj_id_a": ("edge", np.empty(0, dtype=np.int32)),
+                    "adj_id_b": ("edge", np.empty(0, dtype=np.int32)),
+                    "adj_boundary_length": ("edge", np.empty(0, dtype=np.int32)),
+                }
+            )
+
         # Combine all components into final dataset
         split_merged_relabeled_events_ds = xr.merge(
             [
                 split_merged_relabeled_object_id_field.rename("ID_field"),
                 object_props_extended,
-                merge_ledger,
             ]
         )
 
         # Remove the last ID -- it is all 0s (because we added an extra padding one above)
-        return split_merged_relabeled_events_ds.isel(ID=slice(0, -1))
+        split_merged_relabeled_events_ds = split_merged_relabeled_events_ds.isel(ID=slice(0, -1))
+
+        return split_merged_relabeled_events_ds, adjacency_ds
 
     # ============================
     # Splitting and Merging Methods

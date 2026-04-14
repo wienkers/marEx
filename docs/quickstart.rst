@@ -69,7 +69,7 @@ Identify & Track Marine Heatwaves
       overlap_threshold=0.5,         # Overlap threshold for merging events. If overlap < threshold, events keep independent IDs.
       nn_partitioning=True           # Use nearest-neighbor partitioning
    )
-   tracked_events, merge_events = tracker.run(return_merges=True)
+   tracked_events, genealogy_ds = tracker.run(return_genealogy=True)
 
 **Output variables:**
 
@@ -80,15 +80,21 @@ Identify & Track Marine Heatwaves
 * ``presence`` (time): Presence (boolean) of each event at each time (anywhere in space)
 * ``time_start`` (ID): Start time of each event
 * ``time_end`` (ID): End time of each event
-* ``merge_ledger`` (time, ID, sibling_ID): Sibling IDs for merging events (matching ``ID_field``); ``-1`` indicates no merging event occurred
 
-* If ``return_merges=True``, the ``merge_events`` dataset will include:
-  * ``parent_IDs`` (merge_ID, parent_idx): Original parent IDs of each merging event
-  * ``child_IDs`` (merge_ID, child_idx): Original child IDs of each merging event
-  * ``overlap_areas`` (merge_ID, parent_idx): Area of overlap between parent and child objects in each merging event
-  * ``merge_time`` (merge_ID): Time of each merging event
-  * ``n_parents`` (merge_ID): Number of parent objects in each merging event
-  * ``n_children`` (merge_ID): Number of child objects in each merging event
+* If ``return_genealogy=True``, the ``genealogy_ds`` dataset consolidates partitioned-merge records
+  with the per-timestep spatial adjacency ledger:
+
+  * ``parent_IDs`` (merge_ID, parent_idx): Original parent IDs of each partitioned-merge event
+  * ``child_IDs`` (merge_ID, child_idx): Original child IDs of each partitioned-merge event
+  * ``overlap_areas`` (merge_ID, parent_idx): Area of overlap between parent and child objects
+  * ``merge_time`` (merge_ID): Time of each partitioned-merge event
+  * ``n_parents`` / ``n_children`` (merge_ID): Number of parents/children in each partitioned merge
+  * ``adj_time`` (edge): Time of each adjacency snapshot
+  * ``adj_id_a`` / ``adj_id_b`` (edge): Canonicalised ID pair of adjacent events
+  * ``adj_boundary_length`` (edge): Number of shared boundary cells at ``adj_time``
+
+  This dataset is the primitive consumed by :mod:`marEx.genealogy` to derive absorptive merges,
+  partitioned splits, and the full merge/split DAG.
 
 Visualise Results
 -----------------

@@ -16,7 +16,7 @@ Independent Event Tracking with Merge/Split Genealogy
 
 **The Mega-Event Problem:** Basic tracking methods (e.g., 3D connected component labeling with `ocetrac`) treat time as just another spatial dimension, permanently merging ANY objects that touch at any point in space-time. This creates a chain reaction where distinct events that briefly touch become irrevocably linked, producing unrealistic basin-spanning "mega-events" that combine dozens of independent phenomena. These algorithmic artefacts have no coherent physical origin and produce meaningless statistics, making them unsuitable for mechanistic studies of extreme event dynamics.
 
-**marEx Solution:** marEx tracks events through advection, spatio-temporal morphing, splitting, and merging with complete parent/child relationships recorded in ``merge_ledger``. This genealogical reconstruction prevents mega-events by requiring significant overlap (not just touching) and maintaining individual event identities. This approach is critical for mechanistic studies of ocean extreme event evolution and enables accurate, unbiased Lagrangian statistics on physically realistic events.
+**marEx Solution:** marEx tracks events through advection, spatio-temporal morphing, splitting, and merging with complete parent/child relationships recorded in the consolidated genealogy dataset (partitioned-merge records + per-timestep adjacency ledger). This genealogical reconstruction prevents mega-events by requiring significant overlap (not just touching) and maintaining individual event identities. This approach is critical for mechanistic studies of ocean extreme event evolution and enables accurate, unbiased Lagrangian statistics on physically realistic events.
 
 **Tracking Algorithm Comparison:**
 
@@ -29,11 +29,11 @@ The video below demonstrates why marEx's selective merging with overlap threshol
 
 **Left (Basic Method — Chain-Reaction Merging):** 3D connected components permanently merge any touching objects. Event A touches B → merged as AB. AB touches C → all become one "mega-event". Over time, independent physical phenomena are spuriously linked into single, basin-spanning artefacts with no mechanistic relevance. Statistics derived from these mega-events are scientifically meaningless.
 
-**Right (marEx Advanced Method — Genealogy Tracking):** Prevents mega-events using ``overlap_threshold`` to distinguish transient contact from true merging. Maintains individual event identities and records complete parent/child genealogy in ``merge_ledger``. Enables reconstruction of physically realistic event evolution where tracked objects correspond to actual coherent phenomena, providing mechanistically relevant statistics for scientific analysis.
+**Right (marEx Advanced Method — Genealogy Tracking):** Prevents mega-events using ``overlap_threshold`` to distinguish transient contact from true merging. Maintains individual event identities and records complete parent/child genealogy in the consolidated genealogy dataset returned by ``tracker.run(return_genealogy=True)``. Enables reconstruction of physically realistic event evolution where tracked objects correspond to actual coherent phenomena, providing mechanistically relevant statistics for scientific analysis.
 
 **Key benefits:**
 
-* Full parent/child ID tracking in ``merge_ledger`` dataset
+* Full parent/child ID tracking in the consolidated genealogy dataset (partitioned merges + adjacency ledger)
 * Overlap requirement for each merge/split event
 * Enables reconstruction of complex event dynamics (e.g., fusion of two smaller marine heatwaves into one larger event)
 

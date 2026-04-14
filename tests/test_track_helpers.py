@@ -411,3 +411,174 @@ class TestDistanceCalculationValidation:
         # Point at (0, 4) should be distance 4 from (0, 0) (not wrapped)
         dist = track.wrapped_euclidian_distance_points(0, 4, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 4.0, atol=1e-10)
+
+
+def _decode_adjacency(neighbours, counts, event_ids):
+    """Helper: convert the (n_ids, max_slots) adjacency tensor to a dict
+    keyed by canonical (min_id, max_id) → boundary_length."""
+    edges = {}
+    for i, eid in enumerate(event_ids):
+        for s in range(neighbours.shape[1]):
+            nb = neighbours[i, s]
+            if nb < 0:
+                break
+            key = (int(min(eid, nb)), int(max(eid, nb)))
+            edges[key] = int(counts[i, s])
+    return edges
+
+
+class TestCalculateAdjacencyForSlice:
+    """Test calculate_adjacency_for_slice on hand-built toy label fields."""
+
+    def test_structured_two_adjacent_events(self):
+        """Two horizontally adjacent events share a boundary."""
+        field = np.zeros((10, 10), dtype=np.int32)
+        field[2:6, 1:4] = 1
+        field[2:6, 4:7] = 2
+
+        event_ids = np.array([1, 2], dtype=np.int32)
+        present = np.array([True, True], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+
+        edges = _decode_adjacency(neighbours, counts, event_ids)
+        # Four rows × one shared column boundary each = 4 shared cells
+        assert edges == {(1, 2): 4}
+
+    def test_structured_no_adjacency_when_separated(self):
+        """Events with a gap between them produce no adjacency edge."""
+        field = np.zeros((10, 10), dtype=np.int32)
+        field[2:6, 1:4] = 1
+        field[2:6, 5:8] = 2  # gap at column 4
+
+        event_ids = np.array([1, 2], dtype=np.int32)
+        present = np.array([True, True], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+        edges = _decode_adjacency(neighbours, counts, event_ids)
+        assert edges == {}
+
+    def test_structured_periodic_longitude_wrap(self):
+        """Periodic longitude wrap introduces an adjacency across the seam."""
+        field = np.zeros((6, 6), dtype=np.int32)
+        field[1:4, 0] = 1  # left seam column
+        field[1:4, -1] = 2  # right seam column
+
+        event_ids = np.array([1, 2], dtype=np.int32)
+        present = np.array([True, True], dtype=bool)
+
+        # regional_mode=True: no seam, no edge
+        neighbours_r, counts_r = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+        assert _decode_adjacency(neighbours_r, counts_r, event_ids) == {}
+
+        # Global mode: three cells in seam overlap
+        neighbours_g, counts_g = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=False,
+        )
+        assert _decode_adjacency(neighbours_g, counts_g, event_ids) == {(1, 2): 3}
+
+    def test_structured_three_events_partial_adjacency(self):
+        """Three events with distinct adjacency patterns."""
+        field = np.zeros((10, 10), dtype=np.int32)
+        field[1:4, 1:4] = 1  # top-left
+        field[1:4, 4:7] = 2  # top-right, touches #1 on one axis
+        field[4:7, 1:4] = 3  # bottom-left, touches #1 on other axis
+        # #2 and #3 diagonal only → 4-connectivity gives no edge
+
+        event_ids = np.array([1, 2, 3], dtype=np.int32)
+        present = np.array([True, True, True], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+        edges = _decode_adjacency(neighbours, counts, event_ids)
+        assert edges == {(1, 2): 3, (1, 3): 3}
+
+    def test_structured_no_self_adjacency(self):
+        """A single connected event with itself produces no edge."""
+        field = np.zeros((10, 10), dtype=np.int32)
+        field[2:8, 2:8] = 1
+        event_ids = np.array([1], dtype=np.int32)
+        present = np.array([True], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+        assert _decode_adjacency(neighbours, counts, event_ids) == {}
+
+    def test_empty_slice_returns_empty(self):
+        """All-background slice returns all-sentinel arrays."""
+        field = np.zeros((10, 10), dtype=np.int32)
+        event_ids = np.array([1, 2], dtype=np.int32)
+        present = np.array([False, False], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            field,
+            present,
+            event_ids,
+            neighbours_int=np.empty(0, dtype=np.int32),
+            is_unstructured=False,
+            regional_mode=True,
+        )
+        assert (neighbours == -1).all()
+        assert (counts == -1).all()
+
+    def test_unstructured_adjacent_via_mesh(self):
+        """Unstructured mesh: adjacency derived from neighbours table."""
+        # 6-cell linear mesh; neighbours_int is (3, ncells) with -1 for missing.
+        # Cells 0-1-2 labelled 1; cells 3-4-5 labelled 2. Cell 2 ↔ cell 3 boundary.
+        slice_data = np.array([1, 1, 1, 2, 2, 2], dtype=np.int32)
+        neighbours_int = np.array(
+            [
+                [-1, 0, 1, 2, 3, 4],
+                [1, 2, 3, 4, 5, -1],
+                [-1, -1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+
+        event_ids = np.array([1, 2], dtype=np.int32)
+        present = np.array([True, True], dtype=bool)
+        neighbours, counts = track.calculate_adjacency_for_slice(
+            slice_data,
+            present,
+            event_ids,
+            neighbours_int=neighbours_int,
+            is_unstructured=True,
+            regional_mode=True,
+        )
+        # Each undirected boundary is encoded twice in the neighbours table
+        # (once per endpoint row), so _unique_ canonical count = 2.
+        edges = _decode_adjacency(neighbours, counts, event_ids)
+        assert edges == {(1, 2): 2}

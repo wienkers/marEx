@@ -190,8 +190,8 @@ class TestUnstructuredTracking:
             cell_areas=self.extremes_data_merging.cell_areas,
         )
 
-        # Run tracking with merge information
-        tracked_ds, merges_ds = tracker.run(return_merges=True)
+        # Run tracking with genealogy information
+        tracked_ds, genealogy_ds = tracker.run(return_genealogy=True)
 
         # Verify main output structure
         assert isinstance(tracked_ds, xr.Dataset)
@@ -202,21 +202,28 @@ class TestUnstructuredTracking:
         assert "presence" in tracked_ds.data_vars
         assert "time_start" in tracked_ds.data_vars
         assert "time_end" in tracked_ds.data_vars
-        assert "merge_ledger" in tracked_ds.data_vars
 
-        # Verify merge dataset structure
-        assert isinstance(merges_ds, xr.Dataset)
-        assert "parent_IDs" in merges_ds.data_vars
-        assert "child_IDs" in merges_ds.data_vars
-        assert "overlap_areas" in merges_ds.data_vars
-        assert "merge_time" in merges_ds.data_vars
-        assert "n_parents" in merges_ds.data_vars
-        assert "n_children" in merges_ds.data_vars
+        # Verify consolidated genealogy dataset structure
+        assert isinstance(genealogy_ds, xr.Dataset)
+        # Partitioned-merge records
+        assert "parent_IDs" in genealogy_ds.data_vars
+        assert "child_IDs" in genealogy_ds.data_vars
+        assert "overlap_areas" in genealogy_ds.data_vars
+        assert "merge_time" in genealogy_ds.data_vars
+        assert "n_parents" in genealogy_ds.data_vars
+        assert "n_children" in genealogy_ds.data_vars
+        # Per-timestep adjacency edges (new primitive)
+        assert "adj_time" in genealogy_ds.data_vars
+        assert "adj_id_a" in genealogy_ds.data_vars
+        assert "adj_id_b" in genealogy_ds.data_vars
+        assert "adj_boundary_length" in genealogy_ds.data_vars
+        assert "edge" in genealogy_ds.dims
 
         # Verify advanced tracking attributes
         assert tracked_ds.attrs["allow_merging"] == 1
         assert tracked_ds.attrs["T_fill"] == 2
-        assert "total_merges" in tracked_ds.attrs
+        assert "total_partitioned_merges" in tracked_ds.attrs
+        assert "total_adjacency_edges" in tracked_ds.attrs
 
         # Verify dimensions for unstructured data
         assert "time" in tracked_ds.ID_field.dims
@@ -257,7 +264,7 @@ class TestUnstructuredTracking:
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 98, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 97, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 12, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 9, tolerance=1)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_partitioned_merges"], 9, tolerance=1)
 
     @pytest.mark.slow
     def test_unstructured_tracking_data_consistency(self, dask_client_unstructured):
@@ -296,7 +303,6 @@ class TestUnstructuredTracking:
         assert "presence" in tracked_ds.data_vars
         assert "time_start" in tracked_ds.data_vars
         assert "time_end" in tracked_ds.data_vars
-        assert "merge_ledger" in tracked_ds.data_vars
 
         # Verify dimensions for unstructured data
         assert "time" in tracked_ds.ID_field.dims
@@ -309,7 +315,7 @@ class TestUnstructuredTracking:
         assert "N_events_final" in tracked_ds.attrs
         assert "allow_merging" in tracked_ds.attrs
         assert tracked_ds.attrs["allow_merging"] == 1
-        assert "total_merges" in tracked_ds.attrs
+        assert "total_partitioned_merges" in tracked_ds.attrs
 
         # Test that presence matches where global_ID is non-zero
         presence_from_global_id = tracked_ds.global_ID != 0
@@ -604,7 +610,6 @@ class TestUnstructuredTracking:
         assert "presence" in tracked_ds.data_vars
         assert "time_start" in tracked_ds.data_vars
         assert "time_end" in tracked_ds.data_vars
-        assert "merge_ledger" in tracked_ds.data_vars
 
         # Verify dimensions for unstructured data
         assert "time" in tracked_ds.ID_field.dims
@@ -769,7 +774,6 @@ class TestUnstructuredTracking:
         assert "presence" in tracked_ds_with_merge.data_vars
         assert "time_start" in tracked_ds_with_merge.data_vars
         assert "time_end" in tracked_ds_with_merge.data_vars
-        assert "merge_ledger" in tracked_ds_with_merge.data_vars
 
         # Verify custom dimensions are preserved
         assert "t" in tracked_ds_with_merge.ID_field.dims
@@ -778,7 +782,7 @@ class TestUnstructuredTracking:
         # Verify advanced tracking attributes
         assert tracked_ds_with_merge.attrs["allow_merging"] == 1
         assert tracked_ds_with_merge.attrs["T_fill"] == 2
-        assert "total_merges" in tracked_ds_with_merge.attrs
+        assert "total_partitioned_merges" in tracked_ds_with_merge.attrs
 
         # Verify ID_field is int
         assert np.issubdtype(tracked_ds_with_merge.ID_field.dtype, np.integer), "ID_field should be integer type"

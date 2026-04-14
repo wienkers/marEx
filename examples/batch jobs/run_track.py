@@ -78,9 +78,9 @@ def main():
         verbose=True,
     )
 
-    extreme_events_ds, merges_ds = tracker.run(return_merges=True)
+    extreme_events_ds, genealogy_ds = tracker.run(return_genealogy=True)
     print(f"\nTracking complete: {extreme_events_ds}")
-    print(f"Merges dataset: {merges_ds}")
+    print(f"Genealogy dataset: {genealogy_ds}")
 
     # Save IDed/Tracked/Merged Events to zarr for efficient parallel I/O
     print("\nSaving tracked events data...")
@@ -88,11 +88,13 @@ def main():
     extreme_events_ds.to_zarr(output_file, mode="w")
     print(f"Events data saved to: {output_file}")
 
-    # Save Merges Dataset to netcdf
-    print("Saving merges data...")
-    merges_file = scratch_dir / "mhws" / "extreme_events_merged_gridded_shifting_merges_batch.nc"
-    merges_ds.to_netcdf(merges_file, mode="w")
-    print(f"Merges data saved to: {merges_file}")
+    # Save consolidated genealogy (partitioned merges + adjacency edges) to netcdf.
+    # This sidecar file is consumed by marEx.genealogy to reconstruct the full
+    # merge/split DAG in post-processing.
+    print("Saving genealogy data...")
+    genealogy_file = scratch_dir / "mhws" / "extreme_events_merged_gridded_shifting_genealogy_batch.nc"
+    genealogy_ds.to_netcdf(genealogy_file, mode="w")
+    print(f"Genealogy data saved to: {genealogy_file}")
 
     # Optionally run basic tracking for comparison
     if run_basic:
