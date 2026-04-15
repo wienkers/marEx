@@ -213,3 +213,45 @@ class TestBuildGenealogyRoundTrip:
         # Lifetime of e3 is 4 days (t=2..t=5 inclusive).
         row = df[df["event_id"] == 3].iloc[0]
         assert row["lifetime_days"] == 4
+
+    def test_partitioned_merge_dedup_consecutive_rows(self):
+        """Contiguous partition calls with the same parent/child sets must
+        collapse into one PM episode. The tracker re-invokes partition every
+        timestep a merged blob still straddles its parents, so the raw ledger
+        contains one row per timestep — genealogy must emit a single episode
+        anchored at the earliest time. A time gap ≥2 starts a new episode."""
+        events_ds, genealogy_ds = _make_synthetic_inputs()
+
+        times = events_ds["time"].values
+
+        # Replace the single-row PM ledger with three contiguous rows at
+        # t=2,3,4 (one episode) plus an isolated row at a different group-key
+        # — none here; test focuses on the contiguous-run collapse.
+        parent_IDs = np.array([[1, 2], [1, 2], [1, 2]], dtype=np.int32)
+        child_IDs = np.array([[3], [3], [3]], dtype=np.int32)
+        overlap_areas = np.array([[10.0, 15.0]] * 3, dtype=np.float32)
+        merge_time = np.array([times[2], times[3], times[4]], dtype="datetime64[ns]")
+        n_parents = np.array([2, 2, 2], dtype=np.int32)
+        n_children = np.array([1, 1, 1], dtype=np.int32)
+
+        genealogy_ds = genealogy_ds.drop_dims("merge_ID")
+        genealogy_ds = genealogy_ds.assign(
+            parent_IDs=(("merge_ID", "parent_idx"), parent_IDs),
+            child_IDs=(("merge_ID", "child_idx"), child_IDs),
+            overlap_areas=(("merge_ID", "parent_idx"), overlap_areas),
+            merge_time=(("merge_ID",), merge_time),
+            n_parents=(("merge_ID",), n_parents),
+            n_children=(("merge_ID",), n_children),
+        )
+
+        out = marEx.build_genealogy(events_ds, genealogy_ds)
+        edge_type = out["edge_type"].values.astype("U2")
+        pm_mask = edge_type == "PM"
+
+        # Three contiguous rows collapse to a single episode → 2 parents × 1 child = 2 PM edges.
+        assert pm_mask.sum() == 2
+
+        pm_times = np.unique(out["edge_time"].values[pm_mask])
+        # Episode anchored at t=2 (earliest row in the run).
+        assert len(pm_times) == 1
+        assert pm_times[0] == times[2]

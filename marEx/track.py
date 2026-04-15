@@ -2940,8 +2940,9 @@ class tracker:
         results = persist(object_id_field, object_props, overlap_objects_list, merge_events)
         object_id_field, object_props, overlap_objects_list, merge_events = results
 
-        # Cluster & rename objects to get globally unique event IDs
-        split_merged_events_ds, adjacency_ds = self.cluster_rename_objects_and_props(
+        # Cluster & rename objects to get globally unique event IDs.
+        # merge_events is returned remapped into global-ID space.
+        split_merged_events_ds, adjacency_ds, merge_events = self.cluster_rename_objects_and_props(
             object_id_field, object_props, overlap_objects_list, merge_events
         )
 
@@ -3056,6 +3057,25 @@ class tracker:
         ID_to_cluster_index_array = np.full(max_ID + 1, 0, dtype=np.int32)  # 0 = background
         for original_id, event_id in original_to_event.items():
             ID_to_cluster_index_array[original_id] = np.int32(event_id)
+
+        # Remap merge_events parent/child IDs from the pre-cluster local ID space
+        # into the final global event ID space. Partitioned merges are recorded
+        # every timestep the partition function runs, so downstream deduplication
+        # of consecutive-in-time rows with the same global parent/child sets is
+        # required in marEx.genealogy.
+        if "merge_ID" in merge_events.dims and merge_events.sizes["merge_ID"] > 0:
+
+            def _remap_local_to_global(arr: NDArray[np.int32]) -> NDArray[np.int32]:
+                out = np.full_like(arr, -1, dtype=np.int32)
+                valid = (arr >= 0) & (arr <= max_ID)
+                out[valid] = ID_to_cluster_index_array[arr[valid]]
+                out[valid & (out == 0)] = -1  # treat background as absent
+                return out
+
+            merge_events = merge_events.assign(
+                parent_IDs=(merge_events["parent_IDs"].dims, _remap_local_to_global(merge_events["parent_IDs"].values)),
+                child_IDs=(merge_events["child_IDs"].dims, _remap_local_to_global(merge_events["child_IDs"].values)),
+            )
 
         # Convert to DataArray for apply_ufunc
         #  N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly
@@ -3507,7 +3527,7 @@ class tracker:
         # Remove the last ID -- it is all 0s (because we added an extra padding one above)
         split_merged_relabeled_events_ds = split_merged_relabeled_events_ds.isel(ID=slice(0, -1))
 
-        return split_merged_relabeled_events_ds, adjacency_ds
+        return split_merged_relabeled_events_ds, adjacency_ds, merge_events
 
     # ============================
     # Splitting and Merging Methods

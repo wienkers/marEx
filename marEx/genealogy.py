@@ -674,6 +674,69 @@ def _build_partitioned_merge_edges(
     overlap_areas = genealogy_ds["overlap_areas"].values.astype(np.float32)
     merge_time = genealogy_ds["merge_time"].values
 
+    n_rows = parent_IDs.shape[0]
+    if n_rows == 0:
+        return _empty_edges()
+
+    time_index = pd.Series(np.arange(times.size, dtype=np.int64), index=pd.Index(times))
+
+    # Canonicalise each row into (parent_set, child_set) of *global* event IDs
+    # and resolve the merge_time to a position in the main events time axis.
+    # Duplicates within a row (from the local→global remap collapsing several
+    # local IDs into the same global event) are folded into the set. Rows
+    # whose time is not in the events time axis are skipped.
+    row_parent_sets: list[frozenset] = []
+    row_child_sets: list[frozenset] = []
+    row_time_pos: list[int] = []
+    row_per_parent_overlap: list[dict] = []  # parent_global_id -> accumulated overlap area
+    row_orig_idx: list[int] = []
+
+    for merge_idx in range(n_rows):
+        mt = merge_time[merge_idx]
+        t_pos_arr = time_index.get(mt)
+        if t_pos_arr is None:
+            continue
+        t_pos = int(t_pos_arr) if np.isscalar(t_pos_arr) else int(t_pos_arr[0])
+
+        parent_overlap_acc: dict = {}
+        for p_slot in range(parent_IDs.shape[1]):
+            p = int(parent_IDs[merge_idx, p_slot])
+            if p < 0:
+                continue
+            parent_overlap_acc[p] = parent_overlap_acc.get(p, 0.0) + float(overlap_areas[merge_idx, p_slot])
+        parents = frozenset(parent_overlap_acc.keys())
+        children = frozenset(int(c) for c in child_IDs[merge_idx] if int(c) >= 0)
+        if not parents or not children:
+            continue
+
+        row_parent_sets.append(parents)
+        row_child_sets.append(children)
+        row_time_pos.append(t_pos)
+        row_per_parent_overlap.append(parent_overlap_acc)
+        row_orig_idx.append(merge_idx)
+
+    if not row_parent_sets:
+        return _empty_edges()
+
+    # Group rows by (parent_set, child_set) and, within each group, collapse
+    # runs of *consecutive* tracked timesteps into a single PM episode anchored
+    # at the earliest time. The tracker re-invokes partition every timestep a
+    # merged blob still straddles its parents, so those contiguous rows all
+    # describe the same event. A gap of ≥2 timesteps starts a new episode.
+    group_to_rows: dict = {}
+    for i, (ps, cs) in enumerate(zip(row_parent_sets, row_child_sets)):
+        group_to_rows.setdefault((ps, cs), []).append(i)
+
+    keep_rows: list[int] = []
+    for _key, row_indices in group_to_rows.items():
+        row_indices.sort(key=lambda k: row_time_pos[k])
+        prev_tpos = -10
+        for k in row_indices:
+            tp = row_time_pos[k]
+            if tp - prev_tpos >= 2:
+                keep_rows.append(k)
+            prev_tpos = tp
+
     source_id = []
     target_id = []
     edge_time = []
@@ -681,26 +744,17 @@ def _build_partitioned_merge_edges(
     source_area = []
     target_area = []
 
-    time_index = pd.Series(np.arange(times.size, dtype=np.int64), index=pd.Index(times))
-
-    for merge_idx in range(parent_IDs.shape[0]):
-        mt = merge_time[merge_idx]
-        t_pos_arr = time_index.get(mt)
-        if t_pos_arr is None:
-            continue
-        t_pos = int(t_pos_arr) if np.isscalar(t_pos_arr) else int(t_pos_arr[0])
-        for p_slot in range(parent_IDs.shape[1]):
-            p = int(parent_IDs[merge_idx, p_slot])
-            if p < 0:
-                continue
-            for c_slot in range(child_IDs.shape[1]):
-                c = int(child_IDs[merge_idx, c_slot])
-                if c < 0:
-                    continue
+    for k in keep_rows:
+        t_pos = row_time_pos[k]
+        mt = merge_time[row_orig_idx[k]]
+        parent_overlap_acc = row_per_parent_overlap[k]
+        children = row_child_sets[k]
+        for p in sorted(parent_overlap_acc.keys()):
+            for c in sorted(children):
                 source_id.append(p)
                 target_id.append(c)
                 edge_time.append(mt)
-                overlap.append(float(overlap_areas[merge_idx, p_slot]))
+                overlap.append(float(parent_overlap_acc[p]))
                 source_area.append(_area_at(area, p, t_pos, id_to_idx))
                 target_area.append(_area_at(area, c, t_pos, id_to_idx))
 
