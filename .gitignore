@@ -10,3 +10,9 @@ build/
 
 # Environment variables
 .env
+
+# Local-only files (never commit)
+/CLAUDE.md
+backup/
+docs/superpowers/
+container/

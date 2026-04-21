@@ -1,31 +1,25 @@
 """
-HPC Dask Helper: Utilities for High-Performance Computing with Dask
+Dask cluster management for HPC environments.
 --------------------------------------------------------------------
 
-This module provides utilities for setting up and managing Dask clusters
-in HPC environments, with specific support for the DKRZ Levante Supercomputer.
+Provides utilities for starting local and SLURM-based distributed Dask
+clusters (with specific support for the DKRZ Levante Supercomputer) and
+for retrieving cluster connection information.
 """
 
-import logging
 import re
-import shutil
 import subprocess
-import uuid
 from getpass import getuser
 from pathlib import Path
-from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 import dask
-import dask.array as dask_array
-import numpy as np
 import psutil
-import xarray as xr
 from dask.distributed import Client, LocalCluster
-from numpy.typing import NDArray
 
-from .exceptions import ConfigurationError
-from .logging_config import configure_logging, get_logger, is_verbose_mode, log_memory_usage, log_timing
+from ..exceptions import ConfigurationError
+from ..logging_config import configure_logging, get_logger, is_verbose_mode, log_memory_usage, log_timing
+from .dask_config import configure_dask
 
 # Get module logger
 logger = get_logger(__name__)
@@ -38,36 +32,6 @@ except (ImportError, ValueError):
     SLURMCluster = None
 
 
-# Default configuration values optimised for HPC environments
-# These settings are tuned for large-scale climate data processing
-# and have been tested on DKRZ Levante with marEx workloads
-DEFAULT_DASK_CONFIG = {
-    # Array processing
-    "array.slicing.split_large_chunks": False,
-    "array.chunk-size": "24MiB",  # Optimal chunk size for oceanographic data
-    # Worker memory management
-    "distributed.worker.memory.target": 0.4,  # Target memory threshold for spilling to disk
-    "distributed.worker.memory.spill": 0.5,  # Spill to disk threshold
-    "distributed.worker.memory.pause": 0.6,  # Pause worker threshold
-    "distributed.worker.memory.terminate": 0.8,  # Terminate worker threshold
-    "distributed.worker.memory.recent-to-old-time": "10s",  # Time to consider data old
-    "distributed.worker.daemon": False,  # Workers are not daemons
-    # Scheduler stability settings
-    "distributed.scheduler.allowed-failures": 50,  # Allow many retries (common on HPC)
-    "distributed.scheduler.work-stealing": False,  # Disable for deterministic execution
-    "distributed.scheduler.worker-ttl": "600s",  # Keep workers alive for 10 minutes
-    # Communication timeouts - increased for HPC network latency
-    "distributed.comm.timeouts.connect": "300s",  # Connection timeout
-    "distributed.comm.timeouts.tcp": "300s",  # TCP timeout
-    "distributed.comm.retry.count": 15,  # More retries before giving up
-    "distributed.comm.retry.delay.min": "3s",  # Min delay between retries
-    "distributed.comm.retry.delay.max": "30s",  # Max delay between retries
-    # Admin and logging
-    "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",  # Log format
-}
-
-# DKRZ-specific paths and configuration
-DKRZ_SCRATCH_PATH = Path("/scratch") / getuser()[0] / getuser() / "clients"
 DKRZ_LOG_PATH = Path("/home/b") / getuser() / ".log_trash"
 DKRZ_ACCOUNT = "bk1377"
 
@@ -85,57 +49,6 @@ MEMORY_CONFIGS = {
         "job_extra": ["--constraint=1024G --mem=0"],
     },
 }
-
-
-def configure_dask(
-    scratch_dir: Optional[Union[str, Path]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> TemporaryDirectory:  # pragma: no cover
-    """
-    Configure Dask with appropriate settings for HPC environments.
-
-    Parameters
-    ----------
-    scratch_dir : str or Path, optional
-        Directory to use for temporary files.
-    config : dict, optional
-        Additional Dask configuration settings to apply.
-
-    Returns
-    -------
-    TemporaryDirectory
-        Temporary directory object that should be kept alive while Dask is in use.
-    """
-    logger.info("Configuring Dask for HPC environment")
-
-    # Use provided scratch directory or default to DKRZ scratch
-    scratch_path = Path(scratch_dir) if scratch_dir else DKRZ_SCRATCH_PATH
-    logger.debug(f"Using scratch directory: {scratch_path}")
-
-    # Create temporary directory
-    if not scratch_path.exists():
-        logger.debug(f"Creating scratch directory: {scratch_path}")
-        scratch_path.mkdir(parents=True, exist_ok=True)
-
-    temp_dir = TemporaryDirectory(dir=scratch_path)
-    logger.info(f"Dask temporary directory: {temp_dir.name}")
-
-    # Apply default configuration
-    dask.config.set(temporary_directory=temp_dir.name)
-
-    # Apply default settings
-    logger.debug("Applying default Dask configuration")
-    for key, value in DEFAULT_DASK_CONFIG.items():
-        dask.config.set({key: value})
-        logger.debug(f"Set Dask config: {key} = {value}")
-
-    # Apply any additional configuration
-    if config:
-        logger.debug(f"Applying additional Dask configuration: {config}")
-        dask.config.set(config)
-
-    logger.info("Dask configuration completed")
-    return temp_dir
 
 
 def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
@@ -553,7 +466,7 @@ def start_distributed_cluster(
     logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime}h runtime")
 
     if SLURMCluster is None:
-        from ._dependencies import require_dependencies
+        from .._dependencies import require_dependencies
 
         logger.error("dask_jobqueue not available - cannot create SLURM cluster")
         require_dependencies(["dask_jobqueue"], "SLURM cluster functionality")
@@ -637,184 +550,3 @@ def start_distributed_cluster(
     logger.info("Distributed cluster started successfully")
 
     return client
-
-
-def checkpoint_to_zarr(
-    data: Union[xr.DataArray, xr.Dataset],
-    name: str = "checkpoint",
-    cleanup: bool = False,
-    timedim: str = "time",
-) -> Union[xr.DataArray, xr.Dataset]:  # pragma: no cover
-    """
-    Save and reload a Dask-backed xarray object to break graph dependencies.
-
-    This function materialises a Dask array/dataset to a temporary file
-    and immediately reloads it, thereby breaking the computational graph.
-    This prevents expensive recomputations when the same data is used multiple
-    times downstream.
-
-    Parameters
-    ----------
-    data : xarray.DataArray or xarray.Dataset
-        Dask-backed xarray object to checkpoint
-    name : str, default='checkpoint'
-        Name prefix for the temporary file (for logging/debugging)
-    cleanup : bool, default=False
-        Whether to delete the temporary file after reloading.
-        By default (False), temp files are kept for the session and cleaned up
-        by the OS temp directory manager. Set to True to immediately delete after reload.
-    timedim : str, default='time'
-        Name of the time dimension for chunking adjustments
-
-    Returns
-    -------
-    xarray.DataArray or xarray.Dataset
-        Reloaded data with broken graph dependencies
-
-    Examples
-    --------
-    >>> import marEx
-    >>> anomalies = marEx.compute_normalised_anomaly(sst)
-    >>> anomalies_checkpointed = marEx.helper.checkpoint_to_zarr(
-    ...     anomalies, name="anomalies"
-    ... )
-    """
-    logger.debug(f"Checkpointing '{name}' to break graph dependencies")
-
-    # Get dask temporary directory, fallback to system temp
-    try:
-        temp_base = dask.config.get("temporary-directory", None)
-        if temp_base is None or not Path(temp_base).exists():
-            temp_base = gettempdir()
-    except Exception:
-        temp_base = gettempdir()
-
-    unique_id = uuid.uuid4().hex[:8]
-    file_path = None
-
-    try:
-        try:
-            zarr_path = Path(temp_base) / f"marEx_checkpoint_{name}_{unique_id}.zarr"
-            file_path = zarr_path
-
-            logger.debug(f"Attempting Zarr checkpoint: {zarr_path}")
-            # Check if time dimension has irregular chunks that need fixing
-            if timedim in data.dims and timedim in data.chunks:
-                time_chunks = data.chunks[timedim]
-                if len(time_chunks) > 1 and len(set(time_chunks)) > 1:
-                    # Chunks are irregular - need to fix for Zarr
-                    first_chunk = time_chunks[0]
-                    total_size = data.sizes[timedim]
-
-                    logger.debug(f"Irregular {timedim} chunks detected: {time_chunks}")
-                    logger.debug(f"Total {timedim} dimension size: {total_size}")
-
-                    # Calculate how many full chunks we can have
-                    n_full_chunks = total_size // first_chunk
-                    remainder = total_size % first_chunk
-
-                    if remainder > 0:
-                        # Need full chunks + one smaller final chunk
-                        new_time_chunks = (first_chunk,) * n_full_chunks + (remainder,)
-                    else:
-                        # All chunks are equal size
-                        new_time_chunks = (first_chunk,) * n_full_chunks
-
-                    data = data.chunk({timedim: new_time_chunks})
-                    logger.debug(f"Adjusted {timedim} chunks for Zarr: {new_time_chunks}")
-                    logger.debug(f"Verification - sum of chunks: {sum(new_time_chunks)}, dimension size: {total_size}")
-
-            with log_timing(logger, f"Saving '{name}' to Zarr", logging.DEBUG, log_memory=False):
-                data.to_zarr(zarr_path, mode="w")
-
-            logger.debug("Zarr save successful, reloading...")
-            with log_timing(logger, f"Reloading '{name}' from Zarr", logging.DEBUG, log_memory=False):
-                if isinstance(data, xr.Dataset):
-                    reloaded = xr.open_zarr(zarr_path, chunks={})
-                else:
-                    ds_temp = xr.open_zarr(zarr_path, chunks={})
-                    reloaded = ds_temp[list(ds_temp.data_vars)[0]]
-
-            logger.info(f"Checkpoint '{name}' saved via Zarr: {zarr_path}")
-            return reloaded
-
-        except (ValueError, OSError) as e:
-            if "incompatible" in str(e) or "chunk" in str(e).lower():
-                logger.warning(f"Zarr failed due to irregular chunks: {str(e)[:200]}")
-                # Clean up failed zarr attempt
-                if zarr_path.exists():
-                    shutil.rmtree(zarr_path)
-            else:
-                raise
-
-    except Exception as e:
-        logger.error(f"Failed to checkpoint '{name}' to disk: {e}")
-        logger.warning(f"Falling back to in-memory persist() only for '{name}'")
-
-        # Fallback to in-memory persist (no disk I/O)
-        try:
-            reloaded = data.persist()
-            from distributed import wait
-
-            wait(reloaded)
-            logger.info(f"Checkpoint '{name}' persisted to distributed memory (no disk)")
-            return reloaded
-        except Exception as e2:
-            logger.error(f"Even persist() failed for '{name}': {e2}")
-            logger.warning("Returning original data without checkpointing")
-            return data
-
-    finally:
-        # Cleanup if requested
-        if cleanup and file_path and file_path.exists():
-            try:
-                if file_path.suffix == ".zarr":
-                    shutil.rmtree(file_path)
-                else:
-                    file_path.unlink()
-                logger.debug(f"Cleaned up checkpoint file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup {file_path}: {e}")
-
-
-def fix_dask_tuple_array(da: xr.DataArray) -> xr.DataArray:
-    """
-    Fix a dask array that has tuple (i.e. task) references in its chunks.
-    This addresses a longstanding issue/bug when dask arrays are saved to Zarr.
-    Process chunk by chunk to maintain memory efficiency.
-
-    Parameters
-    ----------
-    da : xarray.DataArray
-        DataArray with Dask array backend that may have tuple chunk references
-
-    Returns
-    -------
-    xarray.DataArray
-        DataArray with materialised chunks that can be safely saved to Zarr
-
-    """
-    # N.B.: Analyse the outputs of:
-    #   first_key = result.data.__dask_keys__()[0]
-    #   first_chunk = dask.compute(first_key)[0]
-    #   print(type(first_chunk), first_chunk)
-
-    def materialise_chunk(block: NDArray[Any]) -> NDArray[Any]:  # pragma: no cover
-        """Force materialisation of a single chunk."""
-        # This ensures we return an actual numpy array, not a task reference
-        return np.asarray(block)
-
-    chunks = da.chunks
-
-    # Use map_blocks to process each chunk
-    clean_data = dask_array.map_blocks(
-        materialise_chunk,
-        da.data,
-        dtype=da.dtype,
-        chunks=chunks,
-        drop_axis=[],  # Keep all axes
-        meta=np.array([], dtype=da.dtype),
-    )
-
-    # Create new DataArray with clean dask array
-    return xr.DataArray(clean_data, dims=da.dims, coords=da.coords, attrs=da.attrs, name=da.name)

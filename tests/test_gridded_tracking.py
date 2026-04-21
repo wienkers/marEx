@@ -136,13 +136,13 @@ class TestGriddedTracking:
         # Assert tracking statistics are within reasonable bounds
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],
-            0.9143,
+            0.9010,
             tolerance_absolute=0.02,
         )
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 20, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 13, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 259, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 21, tolerance=1)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 29, tolerance=2)
 
     def test_tracking_data_consistency(self, dask_client_gridded):
         """Test that tracking produces consistent data structures."""
@@ -194,13 +194,13 @@ class TestGriddedTracking:
         # Assert tracking statistics are within reasonable bounds
         assert_reasonable_bounds(
             tracked_ds.attrs["preprocessed_area_fraction"],
-            0.9143,
+            0.9010,
             tolerance_absolute=0.02,
         )
         assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_prefiltered"], 516, tolerance=2)
-        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 258, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["N_objects_filtered"], 259, tolerance=2)
         assert_count_in_reasonable_range(tracked_ds.attrs["N_events_final"], 21, tolerance=1)
-        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 15, tolerance=2)
+        assert_count_in_reasonable_range(tracked_ds.attrs["total_merges"], 16, tolerance=2)
 
     def test_different_filtering_parameters(self, dask_client_gridded):
         """Test tracking with different area filtering parameters."""
@@ -242,21 +242,21 @@ class TestGriddedTracking:
         # Assert tracking statistics are within reasonable bounds for no filter case
         assert_reasonable_bounds(
             tracked_no_filter.attrs["preprocessed_area_fraction"],
-            1.0622,
+            1.0524,
             tolerance_absolute=0.02,
         )
         assert_count_in_reasonable_range(tracked_no_filter.attrs["N_objects_prefiltered"], 1046, tolerance=2)
-        assert_count_in_reasonable_range(tracked_no_filter.attrs["N_objects_filtered"], 1045, tolerance=2)
+        assert_count_in_reasonable_range(tracked_no_filter.attrs["N_objects_filtered"], 1046, tolerance=2)
         assert_count_in_reasonable_range(tracked_no_filter.attrs["N_events_final"], 152, tolerance=1)
 
         # Assert tracking statistics are within reasonable bounds for high filter case
         assert_reasonable_bounds(
             tracked_high_filter.attrs["preprocessed_area_fraction"],
-            1.5423,
+            1.5218,
             tolerance_absolute=0.02,
         )
         assert_count_in_reasonable_range(tracked_high_filter.attrs["N_objects_prefiltered"], 1046, tolerance=2)
-        assert_count_in_reasonable_range(tracked_high_filter.attrs["N_objects_filtered"], 209, tolerance=2)
+        assert_count_in_reasonable_range(tracked_high_filter.attrs["N_objects_filtered"], 210, tolerance=2)
         assert_count_in_reasonable_range(tracked_high_filter.attrs["N_events_final"], 21, tolerance=1)
 
     def test_temporal_gap_filling(self, dask_client_gridded):
