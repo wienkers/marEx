@@ -310,6 +310,163 @@ def calculate_centroid(
     return (y_centroid, x_centroid)
 
 
+def calculate_partitioned_child_properties(
+    y_idx: NDArray[np.intp],
+    x_idx: NDArray[np.intp],
+    new_labels: NDArray[np.int32],
+    Nx: int,
+    regional_mode: bool,
+) -> xr.Dataset:
+    """Area + wrap-aware centroid for each label in ``new_labels``, from the child blob's pixels.
+
+    Reproduces ``calculate_object_properties(..., properties=["area", "centroid"])`` on a structured
+    grid -- unweighted pixel-count area and unweighted pixel-coordinate centroid, with the same
+    antimeridian-wrap convention as :func:`calculate_centroid` -- but computed only from the supplied
+    pixels (global ``y_idx``/``x_idx`` coordinates labelled by ``new_labels``) rather than a
+    full-slice ``regionprops_table``. Used per merge in ``split_and_merge_objects`` where the freshly
+    minted child IDs exist only within the partitioned child blob, so their full-slice properties
+    equal these local ones.
+
+    Parameters
+    ----------
+    y_idx, x_idx : numpy.ndarray
+        Global pixel coordinates (rows, columns) of the partitioned child blob.
+    new_labels : numpy.ndarray
+        Object ID assigned to each pixel (same length and order as ``y_idx``/``x_idx``).
+    Nx : int
+        Global number of longitude points (slice width); used for the periodic x-wrap.
+    regional_mode : bool
+        If True, skip the antimeridian adjustment (raw means), matching :func:`calculate_centroid`.
+
+    Returns
+    -------
+    xarray.Dataset
+        ``area`` (dim ``ID``) and ``centroid`` (dims ``component``, ``ID``); ``ID`` is the index
+        coordinate. Matches the structure returned by :func:`calculate_object_properties`.
+    """
+    labels = np.unique(new_labels)
+    labels = labels[labels > 0]  # regionprops ignores background (0)
+    n = labels.size
+    areas = np.empty(n, dtype=np.int64)
+    cy = np.empty(n, dtype=np.float64)
+    cx = np.empty(n, dtype=np.float64)
+    half_Nx = Nx // 2
+    for i, lab in enumerate(labels):
+        sel = new_labels == lab
+        ys = y_idx[sel]
+        xs = x_idx[sel]
+        areas[i] = ys.size
+        cy[i] = ys.mean()
+        # Match calculate_centroid: only objects near BOTH x-edges get the wrap adjustment.
+        if not regional_mode and np.any(xs < 100) and np.any(xs >= Nx - 100):
+            xs_adj = xs.astype(np.float64)
+            xs_adj[xs > half_Nx] -= Nx
+            x_centroid = xs_adj.mean()
+            if x_centroid < 0:  # keep the centroid in [0, Nx)
+                x_centroid += Nx
+            cx[i] = x_centroid
+        else:
+            cx[i] = xs.mean()
+    return xr.Dataset(
+        {
+            "area": ("ID", areas),
+            "centroid": (("component", "ID"), np.stack([cy, cx])),
+        },
+        coords={"ID": labels.astype(np.int32)},
+    )
+
+
+class ObjectPropsStore:
+    """O(1) in-memory store of per-object ``area`` + ``centroid``, keyed by integer ID.
+
+    Replaces the per-merge xarray ``Dataset`` mutations (``xr.concat`` / ``.sel`` / ``.loc`` /
+    ``.drop_sel``) in ``split_and_merge_objects``, whose cost grew O(N^2) as the object set
+    accumulated over the run. Backed by plain dicts, so every lookup / insert / update / delete is
+    O(1) (O(k) for a k-ID batch lookup). Build from / convert to the xarray ``Dataset`` that
+    :func:`calculate_object_properties` produces at the function boundaries
+    (:meth:`from_dataset` / :meth:`to_dataset`).
+
+    Holds ``area`` (pixel count) and ``centroid`` (y, x) -- the structured-grid properties used by
+    the merge/split loop and the overlap helpers (``enforce_overlap_threshold``,
+    ``consolidate_object_ids``).
+    """
+
+    __slots__ = ("_area", "_cy", "_cx")
+
+    def __init__(self, area=None, cy=None, cx=None):
+        """Create a store, optionally seeded with ``area``/``cy``/``cx`` dicts (keyed by int ID)."""
+        self._area = {} if area is None else area
+        self._cy = {} if cy is None else cy
+        self._cx = {} if cx is None else cx
+
+    @classmethod
+    def from_dataset(cls, object_props: xr.Dataset) -> "ObjectPropsStore":
+        """Build a store from an ``area``/``centroid`` Dataset (ID-indexed, centroid dims component,ID)."""
+        ids = object_props["ID"].values
+        area = object_props["area"].values
+        centroid = object_props["centroid"]
+        cy = centroid.isel(component=0).values
+        cx = centroid.isel(component=1).values
+        return cls(
+            area={int(i): a for i, a in zip(ids, area)},
+            cy={int(i): float(v) for i, v in zip(ids, cy)},
+            cx={int(i): float(v) for i, v in zip(ids, cx)},
+        )
+
+    def to_dataset(self) -> xr.Dataset:
+        """Convert back to the ID-indexed ``area`` + ``centroid`` Dataset (IDs in sorted order)."""
+        ids = np.array(sorted(self._area), dtype=np.int32)
+        area = np.array([self._area[int(i)] for i in ids])
+        cy = np.array([self._cy[int(i)] for i in ids], dtype=np.float64)
+        cx = np.array([self._cx[int(i)] for i in ids], dtype=np.float64)
+        return xr.Dataset(
+            {
+                "area": ("ID", area),
+                "centroid": (("component", "ID"), np.stack([cy, cx])),
+            },
+            coords={"ID": ids},
+        )
+
+    def __contains__(self, object_id) -> bool:
+        """Whether ``object_id`` is currently present in the store."""
+        return int(object_id) in self._area
+
+    def max_id(self) -> int:
+        """Largest current object ID (0 if the store is empty)."""
+        return max(self._area) if self._area else 0
+
+    def area(self, object_id):
+        """Area (pixel count) of a single object ID."""
+        return self._area[int(object_id)]
+
+    def centroid(self, object_id) -> NDArray[np.float64]:
+        """(y, x) centroid of a single object ID."""
+        oid = int(object_id)
+        return np.array([self._cy[oid], self._cx[oid]])
+
+    def areas(self, ids) -> NDArray:
+        """Areas for a sequence of IDs, order-preserving (like ``object_props['area'].sel(ID=ids)``)."""
+        return np.array([self._area[int(i)] for i in ids])
+
+    def centroids(self, ids) -> NDArray[np.float64]:
+        """Return an (k, 2) array of (y, x) centroids, matching ``object_props.sel(ID=ids).centroid.values.T``."""
+        return np.array([[self._cy[int(i)], self._cx[int(i)]] for i in ids], dtype=np.float64)
+
+    def set(self, object_id, area, cy, cx) -> None:
+        """Insert or update the area + (y, x) centroid for ``object_id``."""
+        oid = int(object_id)
+        self._area[oid] = area
+        self._cy[oid] = float(cy)
+        self._cx[oid] = float(cx)
+
+    def drop(self, object_id) -> None:
+        """Remove ``object_id`` from the store (no-op if absent)."""
+        oid = int(object_id)
+        self._area.pop(oid, None)
+        self._cy.pop(oid, None)
+        self._cx.pop(oid, None)
+
+
 def calculate_object_properties(
     object_id_field: xr.DataArray,
     unstructured_grid: bool,

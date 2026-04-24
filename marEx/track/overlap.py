@@ -200,7 +200,7 @@ def find_overlapping_objects(
 
 def enforce_overlap_threshold(
     overlap_objects_list: NDArray[Union[np.float32, np.int32]],
-    object_props: xr.Dataset,
+    object_props,
     unstructured_grid: bool,
     overlap_threshold: float,
 ) -> NDArray[Union[np.float32, np.int32]]:
@@ -211,8 +211,8 @@ def enforce_overlap_threshold(
     ----------
     overlap_objects_list : (N x 3) numpy.ndarray
         Array of object ID pairs with overlap area
-    object_props : xarray.Dataset
-        Object properties including area
+    object_props : ObjectPropsStore
+        O(1) per-ID area/centroid store (membership and ``areas`` lookups used here)
 
     Returns
     -------
@@ -222,9 +222,8 @@ def enforce_overlap_threshold(
     if len(overlap_objects_list) == 0:
         return np.empty((0, 3), dtype=np.float32 if unstructured_grid else np.int32)
 
-    # Filter out overlaps where either ID doesn't exist in object_props
-    existing_ids = set(object_props.ID.values)
-    valid_mask = np.array([(overlap[0] in existing_ids) and (overlap[1] in existing_ids) for overlap in overlap_objects_list])
+    # Filter out overlaps where either ID doesn't exist in object_props (O(1) membership per pair)
+    valid_mask = np.array([(overlap[0] in object_props) and (overlap[1] in object_props) for overlap in overlap_objects_list])
 
     if not np.any(valid_mask):
         return np.empty((0, 3), dtype=np.float32 if unstructured_grid else np.int32)
@@ -232,8 +231,8 @@ def enforce_overlap_threshold(
     valid_overlaps = overlap_objects_list[valid_mask]
 
     # Calculate overlap fractions
-    areas_0 = object_props["area"].sel(ID=valid_overlaps[:, 0]).values
-    areas_1 = object_props["area"].sel(ID=valid_overlaps[:, 1]).values
+    areas_0 = object_props.areas(valid_overlaps[:, 0])
+    areas_1 = object_props.areas(valid_overlaps[:, 1])
     min_areas = np.minimum(areas_0, areas_1)
     overlap_fractions = valid_overlaps[:, 2].astype(float) / min_areas
 
@@ -251,7 +250,7 @@ def enforce_overlap_threshold(
 def consolidate_object_ids(
     data_t_minus_2: xr.DataArray,
     data_t_minus_1: xr.DataArray,
-    object_props: xr.Dataset,
+    object_props,
     timestep: int,
     unstructured_grid: bool,
     cell_area: xr.DataArray,
@@ -285,8 +284,8 @@ def consolidate_object_ids(
     -------
     data_t_minus_1_consolidated : xr.DataArray
         Updated t-1 field with consolidated IDs
-    object_props_updated : xr.Dataset
-        Updated object properties with merged/deleted objects
+    object_props_updated : ObjectPropsStore
+        The same store, mutated in place (consolidated objects updated, redundant ones dropped)
 
     Notes
     -----
@@ -318,7 +317,7 @@ def consolidate_object_ids(
 
     for parent_id in splitting_parents:
         # Skip if parent doesn't exist in properties
-        if parent_id not in object_props.ID.values:
+        if parent_id not in object_props:
             continue
 
         # Get all children for this parent
@@ -330,22 +329,21 @@ def consolidate_object_ids(
             first_child_id = int(children_for_parent[0])
 
             # Skip if first child doesn't exist in properties
-            if first_child_id not in object_props.ID.values:
+            if first_child_id not in object_props:
                 continue
 
             # Rename all other children to first_child_id
             for child_id in children_for_parent[1:]:
                 child_id = int(child_id)
                 # Skip if child doesn't exist in properties
-                if child_id not in object_props.ID.values:
+                if child_id not in object_props:
                     continue
 
                 # Rename child_id to first_child_id in data_t_minus_1
                 data_t_minus_1 = data_t_minus_1.where(data_t_minus_1 != child_id, first_child_id)
 
                 # Remove redundant child_id from object_props
-                if child_id in object_props.ID:
-                    object_props = object_props.drop_sel(ID=child_id)
+                object_props.drop(child_id)
 
                 # Track the mapping
                 id_mappings[child_id] = first_child_id
@@ -370,9 +368,13 @@ def consolidate_object_ids(
 
                 if first_child_id in consolidated_props.ID:
                     # Update first child properties with consolidated values
-                    for var_name in ["area", "centroid"]:
-                        if var_name in consolidated_props:
-                            object_props[var_name].loc[{"ID": first_child_id}] = consolidated_props[var_name].sel(ID=first_child_id)
+                    cp = consolidated_props.sel(ID=first_child_id)
+                    object_props.set(
+                        first_child_id,
+                        cp["area"].values.item(),
+                        cp["centroid"].values[0],
+                        cp["centroid"].values[1],
+                    )
 
     return data_t_minus_1, object_props
 

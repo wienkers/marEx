@@ -6,8 +6,10 @@ Focuses on testing individual function behaviour rather than full pipeline integ
 """
 
 import numpy as np
+import xarray as xr
 
 import marEx.track as track
+from marEx.track.objects import ObjectPropsStore, calculate_object_properties, calculate_partitioned_child_properties
 
 
 class TestWrappedEuclidianParallel:
@@ -363,6 +365,64 @@ class TestPartitionNNValidation:
         # Should still assign to the only available parent (fallback to centroid)
         assert result[0] == 100
 
+    def test_partition_nn_grid_matches_legacy_gridsearch(self):
+        """The EDT partition_nn_grid is physically equivalent to the legacy grid search.
+
+        Both assign each child pixel to the parent owning the nearest pixel (within
+        max_distance, else nearest centroid), so over a randomized battery -- including
+        seam-straddling cases -- the assignments must agree everywhere except a small set
+        of (near-)equidistant boundary pixels, where scipy's feature-transform tie-break
+        differs from the grid search's first-parent-in-index-order. A large disagreement
+        would indicate a real bug, not a tie.
+        """
+        from marEx.track.partitioning import _partition_nn_grid_gridsearch as legacy
+
+        rng = np.random.default_rng(2024)
+        ny, nx = 50, 100
+
+        def make_blob(cy, cx, r):
+            yy, xx = np.ogrid[:ny, :nx]
+            dx = np.abs(xx - cx)
+            dx = np.minimum(dx, nx - dx)  # wrapped longitude distance
+            return ((yy - cy) ** 2 + dx**2) <= r * r
+
+        total = 0
+        diff = 0
+        trials = 0
+        for trial in range(60):
+            n_parents = int(rng.integers(2, 6))
+            # Half the trials place the child near the antimeridian seam.
+            seam = trial % 2 == 0
+            base_x = 0 if seam else int(rng.integers(20, 80))
+            centres, parent_masks = [], []
+            for _ in range(n_parents):
+                cy = int(rng.integers(8, ny - 8))
+                cx = int((base_x + rng.integers(-12, 13)) % nx)
+                centres.append((cy, cx))
+                parent_masks.append(make_blob(cy, cx, int(rng.integers(2, 5))))
+            parent_masks = np.array(parent_masks)
+            if not parent_masks.any(axis=(1, 2)).all():
+                continue  # skip trials with an empty parent (covered elsewhere)
+            parent_centroids = np.array([[float(c[0]), float(c[1])] for c in centres])
+            ccy = int(np.mean([c[0] for c in centres]))
+            child_mask = make_blob(ccy, base_x, int(rng.integers(8, 14)))
+            if not child_mask.any():
+                continue
+            child_ids = np.arange(100, 100 + n_parents, dtype=np.int32)
+            md = 60
+            new_edt = track.partition_nn_grid(
+                child_mask, parent_masks, child_ids, parent_centroids, Nx=nx, max_distance=md, wrap=True
+            )
+            new_leg = legacy(child_mask, parent_masks, child_ids, parent_centroids, nx, md, True)
+            assert new_edt.shape == new_leg.shape
+            total += new_edt.size
+            diff += int(np.sum(new_edt != new_leg))
+            trials += 1
+
+        assert trials >= 20, "Too few valid trials generated"
+        frac = diff / max(total, 1)
+        assert frac < 0.02, f"EDT vs grid-search disagreement {frac:.3%} exceeds 2% (only equidistant ties expected)"
+
 
 class TestDistanceCalculationValidation:
     """Test validation of distance calculation edge cases."""
@@ -411,3 +471,153 @@ class TestDistanceCalculationValidation:
         # Point at (0, 4) should be distance 4 from (0, 0) (not wrapped)
         dist = track.wrapped_euclidian_distance_points(0, 4, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 4.0, atol=1e-10)
+
+
+class TestPartitionedChildProperties:
+    """Test calculate_partitioned_child_properties against the full-slice regionprops oracle.
+
+    The helper must reproduce calculate_object_properties(..., properties=["area","centroid"]) on a
+    structured grid (unweighted pixel-count area + unweighted pixel-coordinate centroid with the same
+    antimeridian-wrap convention), but computed only from a label set's own pixels rather than a
+    full-slice regionprops_table per merge.
+    """
+
+    @staticmethod
+    def _oracle(ids):
+        """Full-slice structured calculate_object_properties for a 2D label array."""
+        field = xr.DataArray(ids, dims=["lat", "lon"])
+        ds = calculate_object_properties(
+            field,
+            unstructured_grid=False,
+            lat=None,
+            lon=None,
+            cell_area=None,
+            timedim="time",
+            regional_mode=False,
+            ydim="lat",
+            xdim="lon",
+            properties=["area", "centroid"],
+        )
+        return ds.sortby("ID")
+
+    @staticmethod
+    def _helper(ids, regional_mode=False):
+        y_idx, x_idx = np.nonzero(ids)
+        new_labels = ids[y_idx, x_idx]
+        ds = calculate_partitioned_child_properties(y_idx, x_idx, new_labels, Nx=ids.shape[1], regional_mode=regional_mode)
+        return ds.sortby("ID")
+
+    def _assert_matches_oracle(self, ids):
+        oracle = self._oracle(ids)
+        helper = self._helper(ids)
+        # Same set of IDs
+        np.testing.assert_array_equal(helper.ID.values, oracle.ID.values)
+        # Area: exact (pixel count)
+        np.testing.assert_array_equal(helper.area.values.astype(np.int64), oracle.area.values.astype(np.int64))
+        # Centroid: identical to floating-point tolerance (summation order)
+        max_diff = float(np.max(np.abs(helper.centroid.values - oracle.centroid.values)))
+        assert max_diff < 1e-6, f"centroid diff {max_diff}"
+
+    def test_simple_blobs(self):
+        """Interior blobs away from any edge."""
+        ids = np.zeros((30, 60), dtype=np.int32)
+        ids[5:10, 5:12] = 7
+        ids[20:25, 30:40] = 13
+        ids[15:18, 45:50] = 21
+        self._assert_matches_oracle(ids)
+
+    def test_edge_touching_blobs(self):
+        """Blobs touching only one x-edge must NOT trigger wrap adjustment."""
+        ids = np.zeros((30, 60), dtype=np.int32)
+        ids[5:10, 0:8] = 3  # left edge only
+        ids[20:25, 52:60] = 9  # right edge only
+        self._assert_matches_oracle(ids)
+
+    def test_antimeridian_straddling_blob(self):
+        """A blob with pixels near BOTH x-edges must wrap-adjust the x-centroid like the oracle."""
+        ids = np.zeros((20, 200), dtype=np.int32)
+        # Pixels in the first and last few columns (within the 100-col edge band) -> straddle
+        ids[8:12, 0:5] = 4
+        ids[8:12, 196:200] = 4
+        # An ordinary interior blob alongside it
+        ids[2:6, 90:100] = 8
+        self._assert_matches_oracle(ids)
+
+    def test_regional_mode_no_wrap(self):
+        """regional_mode=True: raw means, no antimeridian adjustment."""
+        ids = np.zeros((20, 200), dtype=np.int32)
+        ids[8:12, 0:5] = 4
+        ids[8:12, 196:200] = 4
+        oracle = self._oracle(ids)  # regional_mode handled below
+        # Oracle in regional mode:
+        field = xr.DataArray(ids, dims=["lat", "lon"])
+        oracle_reg = calculate_object_properties(
+            field,
+            unstructured_grid=False,
+            lat=None,
+            lon=None,
+            cell_area=None,
+            timedim="time",
+            regional_mode=True,
+            ydim="lat",
+            xdim="lon",
+            properties=["area", "centroid"],
+        ).sortby("ID")
+        helper_reg = self._helper(ids, regional_mode=True).sortby("ID")
+        np.testing.assert_array_equal(helper_reg.ID.values, oracle_reg.ID.values)
+        np.testing.assert_array_equal(helper_reg.area.values.astype(np.int64), oracle_reg.area.values.astype(np.int64))
+        max_diff = float(np.max(np.abs(helper_reg.centroid.values - oracle_reg.centroid.values)))
+        assert max_diff < 1e-6, f"regional centroid diff {max_diff}"
+        # Sanity: the straddling blob's raw x-mean is mid-grid (~100), not wrap-adjusted
+        assert abs(float(oracle.centroid.sel(ID=4).values[1]) - float(oracle_reg.centroid.sel(ID=4).values[1])) > 50
+
+
+class TestObjectPropsStore:
+    """Test the O(1) ObjectPropsStore that replaces the in-loop xarray object_props Dataset."""
+
+    @staticmethod
+    def _dataset(ids, areas, cys, cxs):
+        return xr.Dataset(
+            {
+                "area": ("ID", np.array(areas)),
+                "centroid": (("component", "ID"), np.array([cys, cxs], dtype=np.float64)),
+            },
+            coords={"ID": np.array(ids, dtype=np.int32)},
+        )
+
+    def test_roundtrip_dataset(self):
+        """from_dataset -> to_dataset preserves IDs (sorted), areas, centroids."""
+        ds = self._dataset([5, 2, 9], [100, 50, 7], [1.0, 2.0, 3.0], [10.0, 20.0, 30.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        out = store.to_dataset()
+        np.testing.assert_array_equal(out.ID.values, np.array([2, 5, 9], dtype=np.int32))
+        # Aligned by ID, values must match the input
+        ds_sorted = ds.sortby("ID")
+        np.testing.assert_array_equal(out.area.values.astype(np.int64), ds_sorted.area.values.astype(np.int64))
+        np.testing.assert_allclose(out.centroid.values, ds_sorted.centroid.values)
+
+    def test_lookups_match_sel(self):
+        """areas()/centroids()/centroid() match xarray .sel(ID=...) semantics (order-preserving)."""
+        ds = self._dataset([5, 2, 9], [100, 50, 7], [1.0, 2.0, 3.0], [10.0, 20.0, 30.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        ids = np.array([9, 5])
+        np.testing.assert_array_equal(store.areas(ids), ds["area"].sel(ID=ids).values)
+        # centroids() must equal object_props.sel(ID=ids).centroid.values.T  (shape (k, 2), [:,0]=y)
+        np.testing.assert_allclose(store.centroids(ids), ds["centroid"].sel(ID=ids).values.T)
+        np.testing.assert_allclose(store.centroid(2), ds["centroid"].sel(ID=2).values)
+        assert store.area(5) == 100
+        assert store.max_id() == 9
+        assert 2 in store and 999 not in store
+
+    def test_set_drop_add(self):
+        """set updates/inserts, drop removes; max_id and membership track correctly."""
+        ds = self._dataset([1, 2], [10, 20], [0.0, 0.0], [0.0, 0.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        store.set(2, 99, 5.0, 6.0)  # update existing
+        assert store.area(2) == 99
+        np.testing.assert_allclose(store.centroid(2), [5.0, 6.0])
+        store.set(50, 7, 1.0, 2.0)  # insert new
+        assert 50 in store and store.max_id() == 50
+        store.drop(1)  # delete
+        assert 1 not in store
+        np.testing.assert_array_equal(store.to_dataset().ID.values, np.array([2, 50], dtype=np.int32))

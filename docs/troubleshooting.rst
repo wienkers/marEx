@@ -4,10 +4,6 @@ Troubleshooting
 
 This guide helps you diagnose and resolve common issues when using marEx for marine extreme event analysis.
 
-.. contents:: Table of Contents
-   :local:
-   :depth: 3
-
 Quick Diagnostic Checklist
 ===========================
 
@@ -189,7 +185,7 @@ Slow Performance
 
 **Solutions**:
 
-1. **Analyse the Dask Dashboard**::
+1. **Analyse the Dask Dashboard**
 
 2. **Optimise chunks for operation**::
 

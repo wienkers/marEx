@@ -17,6 +17,7 @@ import xarray as xr
 
 import marEx
 from marEx.exceptions import ConfigurationError, DataValidationError
+from marEx.track.objects import ObjectPropsStore
 
 
 @pytest.fixture(scope="module")
@@ -893,11 +894,8 @@ class TestEnforceOverlapThreshold:
         # Create overlap list with IDs that don't exist in object_props
         overlap_list = np.array([[999, 1000, 50.0], [1001, 1002, 60.0]], dtype=np.float32)
 
-        # Create object_props with different IDs
-        object_props = xr.Dataset(
-            {"area": ("ID", [100.0, 200.0]), "centroid-0": ("ID", [0.0, 1.0]), "centroid-1": ("ID", [0.0, 1.0])},
-            coords={"ID": [1, 2]},
-        )
+        # Create object_props store with different IDs (enforce uses area + membership)
+        object_props = ObjectPropsStore(area={1: 100.0, 2: 200.0}, cy={1: 0.0, 2: 1.0}, cx={1: 0.0, 2: 1.0})
 
         # Call enforce_overlap_threshold - should return empty array
         result = tracker.enforce_overlap_threshold(overlap_list, object_props)
@@ -940,14 +938,11 @@ class TestEnforceOverlapThreshold:
             dtype=np.int32,
         )
 
-        # Create object_props where ID 1,2 have small areas relative to overlap
-        object_props = xr.Dataset(
-            {
-                "area": ("ID", [100.0, 120.0, 200.0, 300.0]),
-                "centroid-0": ("ID", [0.0, 1.0, 2.0, 3.0]),
-                "centroid-1": ("ID", [0.0, 1.0, 2.0, 3.0]),
-            },
-            coords={"ID": [1, 2, 3, 4]},
+        # Create object_props store where IDs 1,2 have small areas relative to overlap
+        object_props = ObjectPropsStore(
+            area={1: 100.0, 2: 120.0, 3: 200.0, 4: 300.0},
+            cy={1: 0.0, 2: 1.0, 3: 2.0, 4: 3.0},
+            cx={1: 0.0, 2: 1.0, 3: 2.0, 4: 3.0},
         )
 
         # Call enforce_overlap_threshold - should log warning

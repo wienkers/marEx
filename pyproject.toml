@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -28,7 +29,7 @@ dynamic = ["version"]
 dependencies = [
     "numpy",
     "xarray[complete]",
-    "dask[complete]==2025.3.0",
+    "dask[complete]>=2025.9.0",
     "netcdf4",
     "scipy",
     "scikit-image",

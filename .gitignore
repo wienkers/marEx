@@ -16,3 +16,12 @@ build/
 backup/
 docs/superpowers/
 container/
+
+# Sphinx build artefacts and generated sources
+docs/_build/
+docs/_autosummary/
+docs/generated/
+# Example notebooks copied into the docs tree at build time (see docs/conf.py)
+docs/tutorials/gridded/
+docs/tutorials/regional/
+docs/tutorials/unstructured/

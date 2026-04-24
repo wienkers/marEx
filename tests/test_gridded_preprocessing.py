@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
+from dask.base import is_dask_collection
 
 import marEx
 from marEx.exceptions import ConfigurationError
@@ -136,6 +137,41 @@ class TestGriddedPreprocessing:
         extreme_frequency = float(extremes_ds.extreme_events.mean())
         print(f"Exact extreme_frequency for detrend_harmonic + global_extreme: {extreme_frequency}")
         assert_percentile_frequency(extreme_frequency, 95, description="detrend_harmonic + global_extreme")
+
+    def test_auxiliary_coords_are_materialised(self):
+        """Regression: auxiliary (non-index) coordinates must be materialised after preprocessing.
+
+        Index coords (lon/lat) are already NumPy, so the original two-line patch happened to work
+        for them. But auxiliary non-index coords -- e.g. integer grid indices ``x``/``y`` carried
+        alongside lon/lat -- become Dask-backed via ``.chunk()`` and retain tuple chunk references
+        that break the distributed store path on save ("AttributeError: 'tuple' object has no
+        attribute 'size'" from dask.array.store). The crash only surfaces with the pinned dask under
+        a cluster, so we assert the scheduler-independent invariant the fix guarantees: no
+        coordinate stays Dask-backed. (Confirmed to fail with the prior two-line patch.)
+        """
+        # Attach auxiliary non-index integer grid-index coords alongside lon/lat.
+        sst_aux = self.sst_data.assign_coords(
+            x=("lon", np.arange(self.sst_data.sizes["lon"], dtype="int32")),
+            y=("lat", np.arange(self.sst_data.sizes["lat"], dtype="int32")),
+        )
+
+        extremes_ds = marEx.preprocess_data(
+            sst_aux,
+            method_anomaly="detrend_harmonic",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+            detrend_orders=[1, 2],
+            dimensions=self.dimensions,
+            dask_chunks=self.dask_chunks,
+        )
+
+        # The auxiliary coordinates must survive preprocessing...
+        assert "x" in extremes_ds.coords
+        assert "y" in extremes_ds.coords
+
+        # ...and NO coordinate may remain Dask-backed (the crux of the fix).
+        dask_coords = [c for c in extremes_ds.coords if is_dask_collection(extremes_ds[c].data)]
+        assert not dask_coords, f"Coordinates left Dask-backed (would break distributed save): {dask_coords}"
 
     def test_output_consistency(self):
         """Test that all preprocessing methods produce consistent output structures."""

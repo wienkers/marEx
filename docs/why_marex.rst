@@ -4,10 +4,6 @@ Why marEx?
 
 marEx provides unique capabilities not available in alternative tools (e.g., ocetrac), making it the choice for extreme event analysis. This page highlights the distinguishing features that set marEx apart.
 
-.. contents:: Table of Contents
-   :local:
-   :depth: 2
-
 Advanced Tracking & Identification
 ===================================
 
@@ -249,7 +245,7 @@ marEx provides a convenience function ``regional_tracker()`` for spatially bound
 Automatic Grid Cell Area Calculation
 -------------------------------------
 
-marEx provides transparent conversion from cell counts to physical areas (km²) using spherical geometry for regular lat/lon grids. The ``grid_resolution`` parameter calculates Area = R² × |sin(lat + dlat/2) - sin(lat - dlat/2)| × dlon without requiring manual pre-computation of cell areas.
+marEx provides transparent conversion from cell counts to physical areas (km²) using spherical geometry for regular lat/lon grids. The ``grid_resolution`` parameter calculates ``Area = R² × |sin(lat + dlat/2) - sin(lat - dlat/2)| × dlon`` without requiring manual pre-computation of cell areas.
 
 **Key benefits:**
 
@@ -292,6 +288,6 @@ These capabilities position marEx as a high-performance, scalable, and scientifi
 **Next Steps:**
 
 * :doc:`installation` - Get marEx installed
-* :doc:`quickstart` - Start analysing extremes in 5 minutes
-* :doc:`user_guide` - Usage guide with method selection
-* :doc:`examples` - Complete workflow demonstrations
+* :doc:`getting_started/quickstart` - Start analysing extremes in 5 minutes
+* :doc:`guide/index` - Usage guide with method selection
+* :doc:`tutorials/index` - Complete workflow demonstrations
