@@ -1,0 +1,11 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "time"
+    ],
+    "axis": "T",
+    "calendar": "proleptic_gregorian",
+    "comment": "",
+    "long_name": "reference time of sst field",
+    "standard_name": "time",
+    "units": "seconds since 1981-01-01"
+}

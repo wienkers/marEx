@@ -1,0 +1,9 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "dayofyear"
+    ],
+    "axis": "T",
+    "comment": "",
+    "long_name": "reference time of sst field",
+    "standard_name": "time"
+}

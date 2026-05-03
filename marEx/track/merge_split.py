@@ -192,7 +192,10 @@ def cluster_rename_objects_and_props(
 
     # Create mapping from new IDs to the original IDs _at the corresponding time_
     valid_new_ids = split_merged_relabeled_object_id_field > 0
-    original_ids_field = object_id_field_unique.where(valid_new_ids)
+    # Fill masked points with 0 (not NaN) to keep the ID field integer. These positions are
+    # never read: process_timestep indexes original_ids_field only through valid_mask, which
+    # is derived from new_ids_field (> 0) at exactly the same points.
+    original_ids_field = object_id_field_unique.where(valid_new_ids, 0)
     new_ids_field = split_merged_relabeled_object_id_field.where(valid_new_ids)
 
     if not unstructured_grid:
@@ -254,8 +257,11 @@ def cluster_rename_objects_and_props(
     object_props = xr.concat([dummy.assign_coords(ID=0), object_props], dim="ID")
 
     for var_name in object_props.data_vars:
-        # Filter global_id_mapping to only include IDs that exist in object_props
-        existing_ids = set(object_props.ID.values)
+        # Filter global_id_mapping to only include IDs that exist in object_props.
+        # Pass an ndarray, not a set: xarray/np.isin against a Python set returns all-False,
+        # which silently NaN-ed every transferred property (masked only because area and
+        # centroid are recomputed below).
+        existing_ids = np.asarray(object_props.ID.values)
         valid_mapping_mask = global_id_mapping.isin(existing_ids)
 
         # Only select existing IDs
@@ -285,7 +291,13 @@ def cluster_rename_objects_and_props(
     #                   --> merge_time
 
     old_parent_IDs = xr.where(merge_events.parent_IDs > 0, merge_events.parent_IDs, 0)
+    # Guard against ledger parent IDs beyond the final field's max_ID (rare stale entries):
+    # map out-of-range IDs to background (0) so .sel does not raise KeyError (§5.6).
+    old_parent_IDs = xr.where(old_parent_IDs <= max_ID, old_parent_IDs, 0)
     new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
+    # Real parents always map to an event ID >= 1; only padded / out-of-range slots yield 0.
+    # Map those to -1 so the sentinel matches the merge_ledger fill value (§5.20).
+    new_IDs_parents = xr.where(new_IDs_parents > 0, new_IDs_parents, -1)
 
     # Replace the coordinate merge_ID in new_IDs_parents with merge_time.
     #    merge_events.merge_time gives merge_time for each merge_ID
@@ -327,26 +339,18 @@ def cluster_rename_objects_and_props(
             if not np.any(time_mask):
                 continue
 
+            # IDs_data[time_mask] always retains the parent_idx axis, so IDs_at_time is 2D
+            # (n_mergers_at_time, n_parent_idx); iterate over each merger's parent vector.
             IDs_at_time = IDs_data[time_mask]
 
-            # Handle single merger case
-            if IDs_at_time.ndim == 1:
-                valid_mask = IDs_at_time > 0
+            for merger_IDs in IDs_at_time:
+                valid_mask = merger_IDs > 0
                 if np.any(valid_mask):
-                    # Create expanded array for sibling_ID dimension
-                    expanded_IDs = np.broadcast_to(IDs_at_time, (len(time_block.sibling_ID), len(IDs_at_time)))
-                    result.loc[{timedim: time_val, "ID": IDs_at_time[valid_mask]}] = expanded_IDs[:, valid_mask]
-
-            # Handle multiple mergers case
-            else:
-                for merger_IDs in IDs_at_time:
-                    valid_mask = merger_IDs > 0
-                    if np.any(valid_mask):
-                        expanded_IDs = np.broadcast_to(
-                            merger_IDs,
-                            (len(time_block.sibling_ID), len(merger_IDs)),
-                        )
-                        result.loc[{timedim: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
+                    expanded_IDs = np.broadcast_to(
+                        merger_IDs,
+                        (len(time_block.sibling_ID), len(merger_IDs)),
+                    )
+                    result.loc[{timedim: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
 
         return result
 
@@ -489,9 +493,12 @@ def cluster_rename_objects_and_props(
 
                     # Calculate area-weighted x centroid (longitude) - handle wrapping if needed
                     if not regional_mode:
-                        # Check if object is near both edges (wrapping around periodic boundary)
-                        near_left = np.any(x_indices < 100)
-                        near_right = np.any(x_indices >= nx - 100)
+                        # Check if object is near both edges (wrapping around periodic boundary).
+                        # Scale the margin so it never exceeds a quarter of the grid width (a fixed
+                        # 100-column margin flags every object on grids with <=200 longitude points).
+                        edge_margin = min(100, nx // 4)
+                        near_left = np.any(x_indices < edge_margin)
+                        near_right = np.any(x_indices >= nx - edge_margin)
 
                         if near_left and near_right:
                             # Object wraps around - adjust coordinates
@@ -1090,7 +1097,12 @@ def split_and_merge_objects(
     # Convert lists to padded numpy arrays
     parent_ids_array = np.full((len(merge_parent_ids), max_parents), -1, dtype=np.int32)
     child_ids_array = np.full((len(merge_child_ids), max_children), -1, dtype=np.int32)
-    overlap_areas_array = np.full((len(merge_areas), max_parents), -1, dtype=np.int32)
+    # Unstructured merge areas are float32 m^2 that can exceed 2^31; match the parallel path.
+    overlap_areas_array = np.full(
+        (len(merge_areas), max_parents),
+        -1,
+        dtype=np.float32 if unstructured_grid else np.int32,
+    )
 
     for i, parents in enumerate(merge_parent_ids):
         parent_ids_array[i, : len(parents)] = parents
@@ -1150,7 +1162,7 @@ def split_and_merge_objects_parallel(
     overlap_threshold: float,
     regional_mode: bool,
     max_iteration: int,
-    scratch_dir: str,
+    temp_field_path: str,
 ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
     """
     Optimised parallel implementation of object splitting and merging.
@@ -1230,8 +1242,14 @@ def split_and_merge_objects_parallel(
         #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting...
         #           (i.e. 'nv' dimension gets injected into all the other arrays!)
 
-        chunk_data_m1 = chunk_data_m1_full.squeeze()[0].astype(np.int32).copy()
-        chunk_data = chunk_data_m1_full.squeeze()[1].astype(np.int32).copy()
+        # Squeeze only the injected trailing (e.g. 'nv') axes, never the time axis. A blanket
+        # .squeeze() drops the time dimension for a size-1 time chunk (n_time % timechunks == 1),
+        # after which [0]/[1] index cells instead of the stacked (prev, current) slices and
+        # merges in that chunk are silently dropped or crash. Target shape is (2, time, ncells).
+        while chunk_data_m1_full.ndim > 3:
+            chunk_data_m1_full = chunk_data_m1_full.squeeze(axis=-1)
+        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32).copy()
+        chunk_data = chunk_data_m1_full[1].astype(np.int32).copy()
         del chunk_data_m1_full  # Free memory immediately
         chunk_data_p1 = chunk_data_p1_full.astype(np.int32).copy()
         # Remove any singleton dimensions except time and space
@@ -1382,10 +1400,10 @@ def split_and_merge_objects_parallel(
 
                 # Record merge event
                 curr_merge_idx = merge_counts[t]
-                if curr_merge_idx > MAX_MERGES:  # pragma: no cover
+                if curr_merge_idx >= MAX_MERGES:  # pragma: no cover
                     raise TrackingError(
                         "Too many merge operations",
-                        details=f"Timestep {t} requires {curr_merge_idx} merges (limit: {MAX_MERGES})",
+                        details=f"Timestep {t} requires {curr_merge_idx + 1} merges (limit: {MAX_MERGES})",
                         suggestions=[
                             "Increase area_filter_quartile to reduce small objects",
                             "Consider adjusting tracking parameters",
@@ -1473,10 +1491,14 @@ def split_and_merge_objects_parallel(
                 else:
                     # Record for next chunk
                     for new_object_id in new_merging_list:
-                        if final_merge_count > MAX_MERGES:  # pragma: no cover
+                        # Dedup first: an already-queued object needs no new slot, so it must
+                        # not trip the capacity guard.
+                        if np.any(final_merging_objects[t][:final_merge_count] == new_object_id):
+                            continue
+                        if final_merge_count >= MAX_MERGES:  # pragma: no cover
                             raise TrackingError(
                                 "Excessive merge operations detected",
-                                details=f"Final merge count {final_merge_count} exceeds limit {MAX_MERGES} at timestep {t}",
+                                details=f"Final merge count {final_merge_count + 1} exceeds limit {MAX_MERGES} at timestep {t}",
                                 suggestions=[
                                     "Increase area_filter_quartile to reduce small objects",
                                     "Consider adjusting tracking parameters",
@@ -1487,10 +1509,8 @@ def split_and_merge_objects_parallel(
                                     "limit": MAX_MERGES,
                                 },
                             )
-
-                        if not np.any(final_merging_objects[t][:final_merge_count] == new_object_id):
-                            final_merging_objects[t][final_merge_count] = new_object_id
-                            final_merge_count += 1
+                        final_merging_objects[t][final_merge_count] = new_object_id
+                        final_merge_count += 1
 
         return (
             merge_child_ids,
@@ -1617,7 +1637,7 @@ def split_and_merge_objects_parallel(
         if not bool(has_merge.any().compute().item()):
             return object_id_field
 
-        zarr_path = f"{scratch_dir}/marEx_temp_field.zarr/"
+        zarr_path = temp_field_path
 
         # Initialise zarr store if needed
         if not os.path.exists(zarr_path):
@@ -1788,11 +1808,13 @@ def split_and_merge_objects_parallel(
             coords={timecoord: object_id_field_unique[timecoord]},
         )
 
-        # Calculate ID offsets for each timestep to ensure unique IDs
-        next_id_offsets = np.arange(n_time, dtype=np.int64) * max_merges * timechunks + global_id_counter
-        # N.B.: We also need to account for possibility of newly-split objects subsequently creating
-        #          more than max_merges by the end of the iteration through the chunk
-        # !!! This is likely the root cause of any errors such as "ID needs to be contiguous/continuous/full/unrepeated"
+        # Calculate ID offsets for each timestep to ensure unique IDs. Stride by the hard
+        # worst case (MAX_MERGES merges each spawning up to MAX_PARENTS-1 new IDs) rather
+        # than the data-dependent `max_merges * timechunks` (whose initial queue can be as
+        # small as 1). A too-small stride lets one timestep's cascade merges overrun into
+        # the next timestep's ID range, silently fusing two distinct events under one ID.
+        id_stride = MAX_MERGES * (MAX_PARENTS - 1)
+        next_id_offsets = np.arange(n_time, dtype=np.int64) * id_stride + global_id_counter
         next_id_offsets_da = xr.DataArray(
             next_id_offsets,
             dims=[timedim],

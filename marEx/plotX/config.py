@@ -48,6 +48,9 @@ class PlotConfig:
         quiet: Enable quiet logging
         projection: Cartopy projection for map plots
         framerate: Frames per second for animations (default 10)
+        ckdtree_res: Resolution (degrees) of the pre-computed ckdtree grid used
+            for unstructured interpolation, matching the ``res<value>.nc`` file
+            naming (default 0.3)
     """
 
     title: Optional[str] = None
@@ -68,6 +71,7 @@ class PlotConfig:
     quiet: Optional[bool] = None
     projection: Optional[Any] = None
     framerate: int = 10
+    ckdtree_res: float = 0.3
 
     def __post_init__(self) -> None:
         """Initialise default values and configure logging."""
@@ -79,7 +83,7 @@ class PlotConfig:
             self.coordinates = {"time": "time", "y": "lat", "x": "lon"}
         if self.plot_IDs:
             self.show_colorbar = False
-        if self.projection is None:
+        if self.projection is None and HAS_CARTOPY:
             self.projection = ccrs.Robinson()
 
         # Configure logging if verbose/quiet parameters are provided

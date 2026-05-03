@@ -1,7 +1,26 @@
 """Dependency management for marEx."""
 
+import importlib.util
 import warnings
 from typing import Dict, List
+
+# Optional dependency name -> importable module name to probe.
+# pillow is imported as ``PIL``; every other key matches its module name.
+_OPTIONAL_MODULES: Dict[str, str] = {
+    # Performance
+    "jax": "jax",
+    "jaxlib": "jaxlib",
+    # HPC
+    "dask_jobqueue": "dask_jobqueue",
+    "psutil": "psutil",
+    # Visualisation
+    "matplotlib": "matplotlib",
+    "cartopy": "cartopy",
+    "seaborn": "seaborn",
+    "cmocean": "cmocean",
+    # Image processing
+    "pillow": "PIL",
+}
 
 
 class DependencyTracker:
@@ -13,75 +32,24 @@ class DependencyTracker:
         self._check_all_dependencies()
 
     def _check_all_dependencies(self) -> None:
-        """Check availability of all optional dependencies."""
-        # Performance dependencies
+        """Check availability of all optional dependencies.
+
+        Uses ``importlib.util.find_spec`` so that presence is detected without
+        importing the (often heavy) package itself at marEx import time.
+        """
+        for dep_name, module_name in _OPTIONAL_MODULES.items():
+            self._dependencies[dep_name] = self._module_available(module_name)
+
+    @staticmethod
+    def _module_available(module_name: str) -> bool:
+        """Return True if ``module_name`` can be imported, without importing it."""
         try:
-            pass
-
-            self._dependencies["jax"] = True
-        except ImportError:
-            self._dependencies["jax"] = False
-
-        try:
-            pass
-
-            self._dependencies["jaxlib"] = True
-        except ImportError:
-            self._dependencies["jaxlib"] = False
-
-        # HPC dependencies
-        try:
-            pass
-
-            self._dependencies["dask_jobqueue"] = True
+            return importlib.util.find_spec(module_name) is not None
         except (ImportError, ValueError):
-            # ValueError can occur when importing dask_jobqueue in worker threads
-            # due to signal handling limitations
-            self._dependencies["dask_jobqueue"] = False
-
-        try:
-            pass
-
-            self._dependencies["psutil"] = True
-        except ImportError:
-            self._dependencies["psutil"] = False
-
-        # Visualisation dependencies
-        try:
-            pass
-
-            self._dependencies["matplotlib"] = True
-        except ImportError:
-            self._dependencies["matplotlib"] = False
-
-        try:
-            pass
-
-            self._dependencies["cartopy"] = True
-        except ImportError:
-            self._dependencies["cartopy"] = False
-
-        try:
-            pass
-
-            self._dependencies["seaborn"] = True
-        except ImportError:
-            self._dependencies["seaborn"] = False
-
-        try:
-            pass
-
-            self._dependencies["cmocean"] = True
-        except ImportError:
-            self._dependencies["cmocean"] = False
-
-        # PIL for image processing
-        try:
-            pass
-
-            self._dependencies["pillow"] = True
-        except ImportError:
-            self._dependencies["pillow"] = False
+            # ImportError: a parent package is missing/broken.
+            # ValueError: e.g. importing dask_jobqueue's spec in a worker thread
+            #   can trip signal-handling limitations.
+            return False
 
     def has_dependency(self, dep_name: str) -> bool:
         """Check if a specific dependency is available."""

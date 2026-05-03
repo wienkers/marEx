@@ -180,7 +180,11 @@ def fill_holes(
 
             def edt_close_open(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.bool_]:
                 """Euclidean-disk closing (fill gaps) then opening (remove specks) on one slice."""
-                padded = np.pad(bitmap_binary, ((pad_width, pad_width), (pad_width, pad_width)), mode=mode).astype(bool)
+                # Pad longitude (axis 1) with `mode` (periodic wrap for global grids); always pad
+                # latitude (axis 0) with edge. The poles are not periodic, so a single mode="wrap"
+                # pad coupled features across the north/south array boundary.
+                lon_padded = np.pad(bitmap_binary, ((0, 0), (pad_width, pad_width)), mode=mode)
+                padded = np.pad(lon_padded, ((pad_width, pad_width), (0, 0)), mode="edge").astype(bool)
 
                 def dilate(b: NDArray[np.bool_]) -> NDArray[np.bool_]:
                     # True where the nearest foreground pixel is within disk radius R_fill.
@@ -285,7 +289,7 @@ def fill_time_gaps(
     return data_bin_filled
 
 
-def refresh_dask_graph(data_bin: xr.DataArray, scratch_dir: str) -> xr.DataArray:
+def refresh_dask_graph(data_bin: xr.DataArray, zarr_path: str) -> xr.DataArray:
     """
     Clear and reset the Dask graph via save/load cycle.
 
@@ -296,20 +300,24 @@ def refresh_dask_graph(data_bin: xr.DataArray, scratch_dir: str) -> xr.DataArray
     ----------
     data_bin : xarray.DataArray
         Data to refresh
+    zarr_path : str
+        Full path of this run's refresh store. Must not be shared with the merge loop's
+        store (see ``update_object_id_field_zarr``) or with a concurrent run.
 
     Returns
     -------
     data_new : xarray.DataArray
-        Data with fresh Dask graph
+        Data with fresh Dask graph. This is a lazy ``open_zarr`` view, so ``zarr_path``
+        must outlive the returned array.
     """
     logger.debug("Refreshing Dask task graph...")
 
     data_bin.name = "temp"
-    data_bin.to_zarr(f"{scratch_dir}/marEx_temp_field.zarr", mode="w")
+    data_bin.to_zarr(zarr_path, mode="w")
     del data_bin
     gc.collect()
 
-    data_new = xr.open_zarr(f"{scratch_dir}/marEx_temp_field.zarr", chunks={}).temp
+    data_new = xr.open_zarr(zarr_path, chunks={}).temp
     return data_new
 
 
@@ -392,7 +400,12 @@ def filter_small_objects(
         results = persist(cluster_sizes, unique_cluster_IDs)
         cluster_sizes, unique_cluster_IDs = results
 
-        # Pre-filter tiny objects for performance (greatly reduces the size for the percentile calculation)
+        # Pre-filter tiny objects before the percentile calculation. This is a deliberate
+        # performance approximation for unstructured (ICON-scale) grids, where computing the
+        # quartile over millions of 1-2 cell specks would be prohibitively memory-heavy on the
+        # driver. NOTE: it also means "remove the smallest quartile" is evaluated over objects
+        # larger than the pre-filter cutoff here, whereas the structured branch uses all objects;
+        # the two grid types therefore define the quantile over slightly different populations.
         if use_absolute_filtering:
             cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 5).data
         else:
@@ -420,16 +433,18 @@ def filter_small_objects(
             area_threshold = area_filter_absolute
         else:
             area_threshold = np.percentile(object_areas, area_filter_quartile * 100)
-        N_objects_filtered = np.sum(object_areas > area_threshold)
+        # Keep ties (area == threshold), matching the structured branch and the
+        # accepted-area statistic (>= everywhere).
+        N_objects_filtered = np.sum(object_areas >= area_threshold)
 
         def filter_area_binary(cluster_IDs_0: NDArray[np.int32], keep_IDs_0: NDArray[np.int32]) -> NDArray[np.bool_]:
-            """Keep only clusters above threshold area."""
+            """Keep only clusters at or above the threshold area."""
             keep_IDs_0 = keep_IDs_0[keep_IDs_0 > 0]
             keep_where = np.isin(cluster_IDs_0, keep_IDs_0)
             return keep_where
 
         # Create filtered binary data
-        keep_IDs = xr.where(cluster_sizes > area_threshold, unique_cluster_IDs, 0)
+        keep_IDs = xr.where(cluster_sizes >= area_threshold, unique_cluster_IDs, 0)
 
         data_bin_filtered = xr.apply_ufunc(
             filter_area_binary,

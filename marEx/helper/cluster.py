@@ -17,7 +17,7 @@ import dask
 import psutil
 from dask.distributed import Client, LocalCluster
 
-from ..exceptions import ConfigurationError
+from ..exceptions import ConfigurationError, DependencyError
 from ..logging_config import configure_logging, get_logger, is_verbose_mode, log_memory_usage, log_timing
 from .dask_config import configure_dask
 
@@ -273,21 +273,23 @@ def start_local_cluster(
         f"{memory.total / 1024**3:.1f}GB total memory"
     )
 
-    # Warn if requested resources exceed available
+    # Warn if requested resources exceed available.
+    # Check the logical-core overage first: physical_cores <= logical_cores always,
+    # so testing physical first would shadow this branch and the clamp would never run.
     total_threads = n_workers * threads_per_worker
-    if total_threads > physical_cores:
+    if total_threads > logical_cores:
+        logger.warning(
+            f"Requested {n_workers} workers with {threads_per_worker} threads each, "
+            f"but only {logical_cores} logical cores available"
+        )
+        n_workers = max(1, logical_cores // threads_per_worker)
+        logger.info(f"Reducing to {n_workers} workers")
+    elif total_threads > physical_cores:
         logger.warning(
             f"Requested {n_workers} workers with {threads_per_worker} threads each, "
             f"but only {physical_cores} physical cores available"
         )
         logger.warning("Hyper-threading can reduce performance for compute-intensive tasks!")
-    elif total_threads > logical_cores:
-        logger.warning(
-            f"Requested {n_workers} workers with {threads_per_worker} threads each, "
-            f"but only {logical_cores} logical cores available"
-        )
-        n_workers = logical_cores // threads_per_worker
-        logger.info(f"Reducing to {n_workers} workers")
 
     memory_per_worker = memory.total / n_workers / (1024**3)
     logger.info(f"Memory per worker: {memory_per_worker:.2f} GB")
@@ -295,10 +297,10 @@ def start_local_cluster(
     # Create cluster and client
     logger.debug("Creating local cluster and client")
 
-    # Configure Bokeh session token expiration via dask config
-    # Set to 24 hours to prevent Bokeh 3.8+ token expiration during long notebooks
-    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400000})
-    logger.debug("Set Bokeh session token expiration to 24 hours (86400000ms)")
+    # Configure Bokeh session token expiration via dask config.
+    # Bokeh expresses this in SECONDS, so 24 h = 86400 (the previous 86400000 was ~2.7 years).
+    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400})
+    logger.debug("Set Bokeh session token expiration to 24 hours (86400s)")
 
     with log_timing(logger, "Local cluster startup", log_memory=True, show_progress=True):
         cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, **kwargs)
@@ -462,14 +464,24 @@ def start_distributed_cluster(
     ...     n_workers=64, workers_per_node=16, node_memory=256
     ... )
     """
-    logger.info(f"Starting distributed SLURM cluster - {n_workers} workers on {n_workers//workers_per_node} nodes")
-    logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime}h runtime")
+    n_nodes = -(-n_workers // workers_per_node)  # ceil division: don't under-report partial nodes
+    logger.info(f"Starting distributed SLURM cluster - {n_workers} workers on {n_nodes} nodes")
+    logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime} min runtime")
 
+    # SLURMCluster is None whenever the dask_jobqueue import failed at module load
+    # (ImportError if absent, ValueError in some worker-thread contexts). Raise directly
+    # rather than routing through require_dependencies: find_spec can report the package
+    # "available" even though the class object failed to import here.
     if SLURMCluster is None:
-        from .._dependencies import require_dependencies
-
         logger.error("dask_jobqueue not available - cannot create SLURM cluster")
-        require_dependencies(["dask_jobqueue"], "SLURM cluster functionality")
+        raise DependencyError(
+            "SLURM cluster functionality requires dask_jobqueue",
+            details="dask_jobqueue could not be imported (ImportError or ValueError at load time)",
+            suggestions=[
+                "Install HPC extras with: pip install marEx[hpc]",
+                "Or install directly: pip install dask_jobqueue",
+            ],
+        )
 
     # Configure Dask
     temp_dir = configure_dask(scratch_dir)
@@ -505,10 +517,10 @@ def start_distributed_cluster(
     # Create SLURM cluster
     logger.info("Creating SLURM cluster")
 
-    # Configure Bokeh session token expiration via dask config
-    # Set to 24 hours to prevent Bokeh 3.8+ token expiration during long notebooks
-    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400000})
-    logger.debug("Set Bokeh session token expiration to 24 hours (86400000ms)")
+    # Configure Bokeh session token expiration via dask config.
+    # Bokeh expresses this in SECONDS, so 24 h = 86400 (the previous 86400000 was ~2.7 years).
+    dask.config.set({"distributed.scheduler.dashboard.bokeh-application.session_token_expiration": 86400})
+    logger.debug("Set Bokeh session token expiration to 24 hours (86400s)")
 
     # Merge user-provided scheduler_options from kwargs if present
     user_scheduler_options = kwargs.pop("scheduler_options", {})

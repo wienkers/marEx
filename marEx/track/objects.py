@@ -274,9 +274,12 @@ def calculate_centroid(
         # We don't need to adjust centroids for periodic boundaries
         return original_centroid
 
-    # Check if object is near either edge of x dimension
-    near_left_BC = np.any(binary_mask[:, :100])
-    near_right_BC = np.any(binary_mask[:, -100:])
+    # Check if object is near either edge of x dimension. Scale the margin so it never
+    # exceeds a quarter of the grid width: a fixed 100-column margin on a grid with <=200
+    # longitude points marks every object "near both edges" and corrupts mid-domain centroids.
+    edge_margin = min(100, binary_mask.shape[1] // 4)
+    near_left_BC = np.any(binary_mask[:, :edge_margin])
+    near_right_BC = np.any(binary_mask[:, -edge_margin:])
 
     if original_centroid is None:  # pragma: no cover
         # Calculate y centroid from scratch
@@ -358,7 +361,8 @@ def calculate_partitioned_child_properties(
         areas[i] = ys.size
         cy[i] = ys.mean()
         # Match calculate_centroid: only objects near BOTH x-edges get the wrap adjustment.
-        if not regional_mode and np.any(xs < 100) and np.any(xs >= Nx - 100):
+        edge_margin = min(100, Nx // 4)
+        if not regional_mode and np.any(xs < edge_margin) and np.any(xs >= Nx - edge_margin):
             xs_adj = xs.astype(np.float64)
             xs_adj[xs > half_Nx] -= Nx
             x_centroid = xs_adj.mean()
@@ -728,7 +732,10 @@ def calculate_object_properties(
         # Process single time or multiple times
         # If time dimension doesn't exist, treat as single time slice
         if timedim not in object_id_field.dims or object_id_field.sizes[timedim] == 1:
-            object_props = object_properties_chunk(object_id_field.values)
+            # Drop a size-1 time axis so object_properties_chunk receives a 2D (ny, nx) slice;
+            # a 3D (1, ny, nx) array makes regionprops emit a spurious third centroid component.
+            field_slice = object_id_field.isel({timedim: 0}) if timedim in object_id_field.dims else object_id_field
+            object_props = object_properties_chunk(field_slice.values)
             object_props = xr.Dataset({key: (["ID"], value) for key, value in object_props.items()})
         else:
             # Run in parallel

@@ -18,11 +18,11 @@ from dask import persist
 from dask.base import is_dask_collection
 
 from ..exceptions import ConfigurationError, create_data_validation_error
-from ..helper import checkpoint_to_zarr, fix_dask_tuple_array
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from .anomaly.base import compute_normalised_anomaly
 from .config import PreprocessConfig
 from .extremes.base import identify_extremes
+from .utils import make_netcdf_safe_attrs
 from .validation import _infer_dims_coords, _validate_data_values
 
 # Get module logger
@@ -52,7 +52,6 @@ def preprocess_data(
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
-    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -124,12 +123,6 @@ def preprocess_data(
         Neighbour connectivity for spatial clustering.
     cell_areas : xarray.DataArray, optional
         Cell areas for weighted spatial statistics.
-    use_temp_checkpoints : bool, default=False
-        Enable checkpointing to temporary zarr stores to break Dask graph dependencies.
-        When True, intermediate results (anomalies, thresholds, extremes) are saved to
-        temporary zarr files and immediately reloaded, preventing expensive recomputations.
-        Recommended for large datasets on HPC systems where the 2D histogram computation
-        is expensive. Temporary files are automatically cleaned up after reloading.
     verbose : bool, default=None
         Enable verbose logging with detailed progress information.
         If None, uses current global logging configuration.
@@ -301,7 +294,6 @@ def preprocess_data(
         precision=precision,
         max_anomaly=max_anomaly,
         dask_chunks=dask_chunks,
-        use_temp_checkpoints=use_temp_checkpoints,
     )
 
     # Unpack the validated config back into local names so the orchestration body
@@ -321,7 +313,6 @@ def preprocess_data(
     precision = config.precision
     max_anomaly = config.max_anomaly
     dask_chunks = config.dask_chunks
-    use_temp_checkpoints = config.use_temp_checkpoints
 
     # Configure logging if verbose/quiet parameters are provided
     if verbose is not None or quiet is not None:
@@ -372,6 +363,9 @@ def preprocess_data(
     _validate_data_values(da, dimensions)
 
     logger.debug("Enabling Dask large chunk splitting for preprocessing")
+    # Capture the caller's value so we can restore it before returning rather than
+    # leaking split_large_chunks=True into their global dask config.
+    _prev_split_large_chunks = dask.config.get("array.slicing.split_large_chunks", None)
     dask.config.set({"array.slicing.split_large_chunks": True})
 
     # Step 1: Compute anomalies
@@ -396,7 +390,6 @@ def preprocess_data(
             detrend_orders,
             force_zero_mean,
             reference_period,
-            use_temp_checkpoints,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
 
@@ -429,13 +422,6 @@ def preprocess_data(
         time_sel = (ds[coordinates["time"]].dt.year >= start_year).compute()
         ds = ds.isel({dimensions["time"]: time_sel})
 
-    # Break graph after expensive anomaly computation
-    #   Only needed for shifting baseline, because this is the most expensive method
-    #   Other methods result in an odd chunking structure that cannot be checkpointed easily
-    if use_temp_checkpoints and method_anomaly == "shifting_baseline":
-        logger.debug("Checkpointing anomaly dataset to break graph dependencies")
-        ds = checkpoint_to_zarr(ds, name="anomalies", timedim=dimensions["time"])
-
     anomalies = ds.dat_anomaly
 
     # Step 2: Identify extreme events (both methods now return consistent tuple structures)
@@ -460,7 +446,6 @@ def preprocess_data(
             method_percentile,
             precision,
             max_anomaly,
-            use_temp_checkpoints,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -491,14 +476,7 @@ def preprocess_data(
                 method_percentile,
                 precision,
                 max_anomaly,
-                use_temp_checkpoints,
             )
-
-            # Break graph after standardised extremes computation
-            if use_temp_checkpoints:
-                logger.debug("Checkpointing standardised extremes and thresholds to break graph dependencies")
-                extremes_stn = checkpoint_to_zarr(extremes_stn, name="extremes_stn", timedim=dimensions["time"])
-                thresholds_stn = checkpoint_to_zarr(thresholds_stn, name="thresholds_stn", timedim="dayofyear")
 
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
@@ -516,6 +494,14 @@ def preprocess_data(
         chunk_dict = {dim: -1 for dim in cell_areas.dims}
         ds["cell_areas"] = cell_areas.astype(np.float32).chunk(chunk_dict)
 
+    # Resolve the spatial hobday window actually used. identify_extremes silently
+    # defaults a gridded hobday run to a 5x5 window when the user leaves it None, so
+    # the recorded attrs/steps must reflect that rather than the raw None. (Mirrors
+    # the default in extremes/base.py.)
+    effective_window_spatial_hobday = window_spatial_hobday
+    if method_extreme == "hobday_extreme" and window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in ds.dims:
+        effective_window_spatial_hobday = 5
+
     # Add processing parameters to metadata
     ds.attrs.update(
         {
@@ -530,7 +516,7 @@ def preprocess_data(
                 window_year_baseline,
                 smooth_days_baseline,
                 window_days_hobday,
-                window_spatial_hobday,
+                effective_window_spatial_hobday,
                 reference_period,
             ),
         }
@@ -568,11 +554,14 @@ def preprocess_data(
 
     if method_extreme == "hobday_extreme":
         ds.attrs.update({"window_days_hobday": window_days_hobday})
+        if effective_window_spatial_hobday is not None:
+            ds.attrs.update({"window_spatial_hobday": effective_window_spatial_hobday})
 
     ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
-    # Final rechunking
-    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 10))
+    # Final rechunking. Fall back to the documented default time chunk (25), not 10,
+    # so a partial dask_chunks dict does not silently get 10-step chunks.
+    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     chunk_dict = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
     chunk_dict[dimensions["time"]] = time_chunks
@@ -581,7 +570,7 @@ def preprocess_data(
     ds = ds.chunk(chunk_dict)
 
     # Clear encoding metadata that may conflict with actual Dask chunks
-    # This encoding carries over from checkpointing and can cause chunk misalignment errors
+    # (stale ``chunks`` encoding can otherwise trigger chunk-misalignment errors on save)
     logger.debug("Clearing encoding metadata for Dask-backed variables")
     for var in ds.data_vars:
         if hasattr(ds[var].data, "chunks"):  # Only for Dask-backed variables
@@ -604,33 +593,25 @@ def preprocess_data(
         show_progress=True,
     ):
         ds = ds.persist(optimize_graph=True)
-        ds["thresholds"] = ds.thresholds.compute()  # Patch for a dask-Zarr bug that has problems saving this data array...
-        ds["mask"] = ds.mask.compute()
-        ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
-
-        # Patch for same dask-Zarr bug: materialise *any* remaining Dask-backed coordinates.
-        # Auxiliary (non-index) coordinates (e.g. gridded `x`/`y` or unstructured `lon`/`lat`)
-        # become Dask-backed via `.chunk()` and otherwise retain tuple chunk references that
-        # break distributed serialisation on save. This is seen as an
-        # "AttributeError: 'tuple' object has no attribute 'size'" from dask.array.store.
-        for coord_name in list(ds.coords):
-            if is_dask_collection(ds[coord_name].data):
-                ds[coord_name] = ds[coord_name].compute()
-        if "neighbours" in ds.data_vars:
-            ds["neighbours"] = ds.neighbours.compute()
-        if "cell_areas" in ds.data_vars:
-            ds["cell_areas"] = ds.cell_areas.compute()
 
         log_memory_usage(logger, "After dataset persistence", logging.DEBUG)
 
-    # Final success reporting with summary
-    extreme_count = ds.extreme_events.sum()
-    if hasattr(extreme_count, "compute"):
-        extreme_count = extreme_count.compute()
-
-    logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
+    # Final success reporting with summary. Only pay for the full reduction when the
+    # INFO line will actually be emitted (this sum is a pass over the whole field).
+    if logger.isEnabledFor(logging.INFO):
+        extreme_count = ds.extreme_events.sum()
+        if hasattr(extreme_count, "compute"):
+            extreme_count = extreme_count.compute()
+        logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
     logger.debug(f"Final dataset shape: {ds.dims}")
     log_dask_info(logger, ds, "Final preprocessed dataset")
+
+    # Ensure the returned dataset is directly saveable to *both* Zarr and NetCDF.
+    # Booleans/None in attrs round-trip through Zarr but break Dataset.to_netcdf.
+    ds = make_netcdf_safe_attrs(ds)
+
+    # Restore the caller's dask slicing config (see the capture above).
+    dask.config.set({"array.slicing.split_large_chunks": _prev_split_large_chunks})
 
     return ds
 

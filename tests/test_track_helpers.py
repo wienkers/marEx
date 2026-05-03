@@ -5,11 +5,15 @@ Tests core utility functions for marine extreme tracking and partitioning.
 Focuses on testing individual function behaviour rather than full pipeline integration.
 """
 
+import warnings
+
 import numpy as np
+import pytest
 import xarray as xr
 
 import marEx.track as track
 from marEx.track.objects import ObjectPropsStore, calculate_object_properties, calculate_partitioned_child_properties
+from marEx.track.validation import validate_unstructured_chunking
 
 
 class TestWrappedEuclidianParallel:
@@ -621,3 +625,60 @@ class TestObjectPropsStore:
         store.drop(1)  # delete
         assert 1 not in store
         np.testing.assert_array_equal(store.to_dataset().ID.values, np.array([2, 50], dtype=np.int32))
+
+
+class TestValidateUnstructuredChunking:
+    """Test validate_unstructured_chunking returns arrays that are actually rechunked.
+
+    The function warns "Rechunking to single chunk", so callers must receive arrays
+    whose spatial (and ``nv``) dimensions really are single-chunked -- otherwise the
+    downstream ``apply_ufunc`` core-dimension requirement fails despite the warning.
+    """
+
+    @staticmethod
+    def _multi_chunk_inputs():
+        n_cells, n_nv = 40, 3
+        neighbours = xr.DataArray(
+            np.ones((n_nv, n_cells), dtype=np.int32),
+            dims=("nv", "ncells"),
+        ).chunk({"nv": 1, "ncells": 10})
+        cell_areas = xr.DataArray(
+            np.ones(n_cells, dtype=np.float32),
+            dims=("ncells",),
+        ).chunk({"ncells": 10})
+        return neighbours, cell_areas
+
+    def test_returns_single_chunked_arrays(self):
+        """Multi-chunk neighbours/cell_areas come back single-chunked along nv and xdim."""
+        neighbours, cell_areas = self._multi_chunk_inputs()
+        assert len(neighbours.chunksizes["ncells"]) > 1  # precondition
+        assert len(cell_areas.chunksizes["ncells"]) > 1
+
+        with pytest.warns(UserWarning, match="Rechunking to single chunk"):
+            neighbours_out, cell_areas_out = validate_unstructured_chunking(neighbours, cell_areas, "ncells")
+
+        assert len(neighbours_out.chunksizes["ncells"]) == 1
+        assert len(neighbours_out.chunksizes["nv"]) == 1
+        assert len(cell_areas_out.chunksizes["ncells"]) == 1
+
+    def test_values_preserved_by_rechunking(self):
+        """Rechunking must not alter the data."""
+        neighbours, cell_areas = self._multi_chunk_inputs()
+
+        with pytest.warns(UserWarning):
+            neighbours_out, cell_areas_out = validate_unstructured_chunking(neighbours, cell_areas, "ncells")
+
+        np.testing.assert_array_equal(neighbours_out.values, neighbours.values)
+        np.testing.assert_array_equal(cell_areas_out.values, cell_areas.values)
+
+    def test_already_single_chunk_passthrough(self):
+        """Single-chunk inputs are returned unchanged and raise no warning."""
+        neighbours = xr.DataArray(np.ones((3, 40), dtype=np.int32), dims=("nv", "ncells")).chunk({"nv": -1, "ncells": -1})
+        cell_areas = xr.DataArray(np.ones(40, dtype=np.float32), dims=("ncells",)).chunk({"ncells": -1})
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            neighbours_out, cell_areas_out = validate_unstructured_chunking(neighbours, cell_areas, "ncells")
+
+        assert len(neighbours_out.chunksizes["ncells"]) == 1
+        assert len(cell_areas_out.chunksizes["ncells"]) == 1

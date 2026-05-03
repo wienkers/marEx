@@ -21,7 +21,10 @@ Key terminology:
 """
 
 import logging
+import os
+import shutil
 import time
+import uuid
 import warnings
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
@@ -32,7 +35,7 @@ from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
-from ..exceptions import create_data_validation_error
+from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
 from . import merge_split as _merge_split
@@ -40,10 +43,73 @@ from . import morphology as _morphology
 from . import objects as _objects
 from . import overlap as _overlap
 from . import validation as _validation
-from .config import TrackerConfig
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Prefixes of the per-run temporary zarr stores written during tracking. The bare
+# "marEx_temp_field.zarr" written by older versions also matches, so stale legacy stores
+# get cleaned up too. Checkpoint artefacts ("marEx_checkpoint_*") deliberately do not match.
+_TEMP_STORE_PREFIXES = ("marEx_temp_field", "marEx_temp_refresh")
+_TEMP_STORE_MAX_AGE_S = 24 * 3600
+
+
+def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_AGE_S) -> None:
+    """Delete temp zarr stores left behind by earlier tracking runs.
+
+    These stores cannot be removed when ``run()`` returns: both ``refresh_dask_graph`` and
+    the merge loop hand back ``xr.open_zarr`` views, so the returned dataset still reads
+    from them lazily until the caller computes. Pruning by age instead bounds disk usage
+    without touching a store a concurrent run may still own.
+    """
+    try:
+        entries = os.listdir(temp_dir)
+    except OSError:
+        return
+    now = time.time()
+    for name in entries:
+        if not name.startswith(_TEMP_STORE_PREFIXES):
+            continue
+        path = os.path.join(temp_dir, name)
+        try:
+            if now - os.path.getmtime(path) > max_age_s:
+                shutil.rmtree(path, ignore_errors=True)
+                logger.debug(f"Pruned stale temp store {path}")
+        except OSError:
+            continue
+
+
+# Module-level state for the distributed.scheduler warning filter. The filter is
+# installed exactly once on the global logger (guarded by ``_DASK_WARNING_FILTER_INSTALLED``)
+# so that repeated ``tracker(...)`` construction does not accumulate duplicate filters (and
+# pin dead instances). The active debug level is read from module state rather than closed
+# over ``self``; the most recently configured tracker wins.
+_DASK_WARNING_FILTER_INSTALLED = False
+_dask_warning_debug_level = 0
+
+
+def _filter_dask_warnings(record: logging.LogRecord) -> bool:  # pragma: no cover
+    """Filter noisy distributed.scheduler warnings based on the active debug level."""
+    msg = str(record.msg)
+
+    if _dask_warning_debug_level == 0:
+        # Suppress both run_spec and large graph warnings
+        if any(
+            pattern in msg
+            for pattern in [
+                "Detected different `run_spec`",
+                "Sending large graph",
+                "This may cause some slowdown",
+            ]
+        ):
+            return False
+        return True
+    else:
+        # Suppress only run_spec warnings
+        if "Detected different `run_spec`" in msg:
+            return False
+        return True
+
 
 try:
     import jax.numpy as jnp
@@ -387,6 +453,10 @@ class tracker:
             self.xcoord = coordinates.get("x", self.xdim)
             self.ycoord = coordinates.get("y", self.ydim)
 
+        # Validate coordinate presence before touching them, so a missing coordinate raises
+        # the descriptive error rather than a bare KeyError from the indexing below (§4.4).
+        _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
+
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
         self.lon_init = data_bin[self.xcoord].persist()
         self.coordinate_units, self.data_bin = _grid.unify_coordinates(
@@ -410,8 +480,10 @@ class tracker:
         self.allow_merging = allow_merging
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
-        self.lat = data_bin[self.ycoord].persist()
-        self.lon = data_bin[self.xcoord].persist()
+        # Read the degree-unit coordinates from self.data_bin (the converted output of
+        # unify_coordinates); the input data_bin is no longer mutated in place (§1.3).
+        self.lat = self.data_bin[self.ycoord].persist()
+        self.lon = self.data_bin[self.xcoord].persist()
         if data_bin.chunks is not None:
             self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
         else:
@@ -423,6 +495,39 @@ class tracker:
         self.unstructured_grid = unstructured_grid
         self.checkpoint = checkpoint
         self.debug = debug
+
+        # Resolve the scratch directory used for checkpointing and temporary zarr stores.
+        # This must be available on BOTH grid branches: previously it was only set inside the
+        # unstructured setup, so checkpoint='save'/'load' raised AttributeError on structured
+        # grids (§4.1). The path is kept stable and user-managed so that a later
+        # checkpoint='load' can find the files written by an earlier checkpoint='save' run.
+        if self.checkpoint and not temp_dir:
+            raise ConfigurationError(
+                "Checkpointing requires a temporary directory",
+                details=f"checkpoint={self.checkpoint!r} was requested but temp_dir is None",
+                suggestions=[
+                    "Provide temp_dir: tracker(..., temp_dir='/scratch/user/marex')",
+                    "Disable checkpointing by leaving checkpoint=None",
+                ],
+            )
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+        self.scratch_dir = temp_dir
+
+        # Per-run temp stores. These used to share one fixed path
+        # ({scratch_dir}/marEx_temp_field.zarr) between refresh_dask_graph and the merge
+        # loop: on unstructured grids refresh created the store first, so the merge loop
+        # skipped its own initialisation and region-wrote into it, leaving time chunks
+        # without merges holding stale pre-filter IDs. Concurrent runs sharing a
+        # scratch_dir corrupted each other the same way.
+        if temp_dir:
+            _prune_stale_temp_stores(temp_dir)
+            run_token = uuid.uuid4().hex[:12]
+            self.temp_refresh_path = os.path.join(temp_dir, f"marEx_temp_refresh_{run_token}.zarr")
+            self.temp_merge_path = os.path.join(temp_dir, f"marEx_temp_field_{run_token}.zarr")
+        else:
+            self.temp_refresh_path = None
+            self.temp_merge_path = None
 
         logger.debug(f"Dimensions: time={self.timedim}, x={self.xdim}, y={self.ydim}")
         logger.debug(f"Coordinates: time={self.timecoord}, x={self.xcoord}, y={self.ycoord}")
@@ -465,8 +570,11 @@ class tracker:
 
         # Handle cell_areas for both structured and unstructured grids
         if self.unstructured_grid:
-            # Validation already done in _validate_inputs
-            pass
+            # Validation already done in _validate_inputs, but the spatial chunking of
+            # neighbours/cell_areas still has to be enforced here: self.cell_area is
+            # persisted below, before setup_unstructured_grid runs, so a rechunk applied
+            # any later would never reach it (§4.2).
+            neighbours, cell_areas = _validation.validate_unstructured_chunking(neighbours, cell_areas, self.xdim)
         else:
             # Handle structured grids
             if grid_resolution is not None:
@@ -542,34 +650,6 @@ class tracker:
 
         self._configure_warnings()
 
-        # Bundle the resolved scalar configuration into an immutable snapshot.
-        # This is an internal threading vehicle; the individual ``self.X`` attributes
-        # above remain the source of truth and are left untouched. Note ``max_iteration``
-        # is sourced from the local parameter because ``self.max_iteration`` is only set
-        # on the unstructured-grid path.
-        self.config = TrackerConfig(
-            R_fill=self.R_fill,
-            T_fill=self.T_fill,
-            area_filter_quartile=self.area_filter_quartile,
-            area_filter_absolute=self.area_filter_absolute,
-            use_absolute_filtering=self._use_absolute_filtering,
-            allow_merging=self.allow_merging,
-            nn_partitioning=self.nn_partitioning,
-            overlap_threshold=self.overlap_threshold,
-            unstructured_grid=self.unstructured_grid,
-            timedim=self.timedim,
-            xdim=self.xdim,
-            ydim=self.ydim,
-            timecoord=self.timecoord,
-            xcoord=self.xcoord,
-            ycoord=self.ycoord,
-            regional_mode=self.regional_mode,
-            coordinate_units=self.coordinate_units,
-            max_iteration=max_iteration,
-            checkpoint=self.checkpoint,
-            debug=self.debug,
-        )
-
     def _remap_coordinates(self, events_ds: xr.Dataset) -> xr.Dataset:
         """Remap coordinates to original lat/lon values after processing.
         Map centroids from lat=[-180,180] back into original lat/lon units & range.
@@ -590,28 +670,14 @@ class tracker:
             # Configure logging warning filters
             logging.getLogger("distributed.scheduler").setLevel(logging.ERROR)
 
-            def filter_dask_warnings(record):  # pragma: no cover
-                msg = str(record.msg)
-
-                if self.debug == 0:
-                    # Suppress both run_spec and large graph warnings
-                    if any(
-                        pattern in msg
-                        for pattern in [
-                            "Detected different `run_spec`",
-                            "Sending large graph",
-                            "This may cause some slowdown",
-                        ]
-                    ):
-                        return False
-                    return True
-                else:
-                    # Suppress only run_spec warnings
-                    if "Detected different `run_spec`" in msg:
-                        return False
-                    return True
-
-            logging.getLogger("distributed.scheduler").addFilter(filter_dask_warnings)
+            # Record the active debug level in module state and install the module-level
+            # filter exactly once, so repeated tracker construction cannot stack duplicate
+            # filters on the global distributed.scheduler logger.
+            global _DASK_WARNING_FILTER_INSTALLED, _dask_warning_debug_level
+            _dask_warning_debug_level = self.debug
+            if not _DASK_WARNING_FILTER_INSTALLED:
+                logging.getLogger("distributed.scheduler").addFilter(_filter_dask_warnings)
+                _DASK_WARNING_FILTER_INSTALLED = True
 
             # Configure Python warnings
             if self.debug == 0:
@@ -652,6 +718,15 @@ class tracker:
         merges_ds : xarray.Dataset, optional
             Dataset with merge event information (only if return_merges=True)
         """
+        if self.data_bin is None:
+            raise TrackingError(
+                "This tracker instance has already been run",
+                details="run() frees the binary input to save memory, so a tracker is single-use",
+                suggestions=[
+                    "Construct a fresh instance for another run: tracker(data_bin, mask, ...)",
+                ],
+            )
+
         logger.info("Starting complete tracking pipeline")
         log_memory_usage(logger, "Pipeline start")
 
@@ -759,7 +834,7 @@ class tracker:
             # rather than being deferred into the later "Small object filtering" step.
             data_bin_filled = self.fill_holes(self.data_bin).persist()
             wait(data_bin_filled)
-            del self.data_bin  # Free memory
+            self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
 
         # Fill small time-gaps between objects
@@ -787,11 +862,10 @@ class tracker:
         if checkpoint and "save" in checkpoint:
             logger.info("Saving preprocessed data to checkpoint")
             with log_timing(logger, "Checkpoint saving"):
-                time.sleep(5)
                 data_bin_filtered.name = "data_bin_preproc"
-                data_bin_filtered.to_zarr(
-                    f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w"
-                )  # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
+                # Write lazily (no .persist()): the store computes the preprocessing graph
+                # straight to disk, then we reload to break the graph for downstream steps.
+                data_bin_filtered.to_zarr(f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w")
                 data_bin_filtered = load_data_from_checkpoint()
         else:
             logger.debug("Persisting preprocessed data in memory")
@@ -805,7 +879,9 @@ class tracker:
         object_areas = object_areas.compute()
         total_area_IDed = float(object_areas.sum().item())
 
-        accepted_area = float(object_areas.where(object_areas > area_threshold, drop=True).sum().item())
+        # Use >= so the accepted-area statistic matches the area filter, which keeps ties
+        # (area == threshold) on both grid types.
+        accepted_area = float(object_areas.where(object_areas >= area_threshold, drop=True).sum().item())
         accepted_area_fraction = accepted_area / total_area_IDed
 
         total_hobday_area = float(raw_area.sum().compute().item())
@@ -832,9 +908,9 @@ class tracker:
                 accepted_area_fraction=accepted_area_fraction,
                 preprocessed_area_fraction=preprocessed_area_fraction,
             )
-            # Reload to refresh the dask graph
-            data_bin_filtered = load_data_from_checkpoint()
-            object_stats = load_stats_from_checkpoint()
+            # The zarr store is already reloaded above (its contents have not changed since),
+            # and object_stats holds the values just written -- re-reading the npz only
+            # replaced Python scalars with 0-d numpy arrays (§4.6).
 
         return data_bin_filtered, object_stats
 
@@ -1061,7 +1137,7 @@ class tracker:
         data_new : xarray.DataArray
             Data with fresh Dask graph
         """
-        return _morphology.refresh_dask_graph(data_bin, self.scratch_dir)
+        return _morphology.refresh_dask_graph(data_bin, self.temp_refresh_path)
 
     def filter_small_objects(self, data_bin: xr.DataArray) -> Tuple[xr.DataArray, float, xr.DataArray, int, int]:
         """
@@ -1559,5 +1635,5 @@ class tracker:
             self.overlap_threshold,
             self.regional_mode,
             self.max_iteration,
-            self.scratch_dir,
+            self.temp_merge_path,
         )

@@ -135,8 +135,10 @@ def _infer_dims_coords(
 
     # Handle coordinates parameter based on data structure
     if coordinates is None:
-        if "y" not in dimensions:
-            # Unstructured (2D) data - requires explicit coordinate specification
+        if "x" in dimensions and "y" not in dimensions:
+            # Unstructured (2D) data (an x dimension but no y) - requires explicit
+            # coordinate specification. Only reachable when 'x' is present, so the
+            # message below can safely reference dimensions['x'].
             logger.error("Coordinates parameter required for unstructured data")
             raise create_data_validation_error(
                 "Coordinates parameter must be explicitly specified for unstructured data",
@@ -154,9 +156,11 @@ def _infer_dims_coords(
                 },
             )
         else:
-            # Gridded (3D) data - copy dimensions to coordinates
+            # Gridded (3D, has y) or 1D time series (no x and no y): copy dimensions
+            # to coordinates. This keeps the 1D-harmonic path reachable with defaults
+            # instead of raising a bare KeyError on dimensions['x'].
             coordinates = dimensions.copy()
-            logger.debug("Gridded data detected - copying dimensions to coordinates")
+            logger.debug("Copying dimensions to coordinates (gridded or 1D time series)")
     else:
         # Coordinates provided but ensure time coordinate is included if missing
         if "time" not in coordinates:

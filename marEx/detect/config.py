@@ -63,9 +63,6 @@ class PreprocessConfig:
         Maximum anomaly value for histogram binning in the approximate method.
     dask_chunks : dict
         Chunking specification for distributed computation.
-    use_temp_checkpoints : bool
-        Enable checkpointing to temporary zarr stores to break Dask graph
-        dependencies.
     """
 
     method_anomaly: Literal["detrend_harmonic", "shifting_baseline", "fixed_baseline", "detrend_fixed_baseline"]
@@ -83,4 +80,3 @@ class PreprocessConfig:
     precision: float
     max_anomaly: float
     dask_chunks: Dict[str, int]
-    use_temp_checkpoints: bool

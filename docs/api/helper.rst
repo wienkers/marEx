@@ -15,7 +15,6 @@ datasets. For deployment guidance and examples, see :doc:`../guide/performance`.
    start_local_cluster
    configure_dask
    get_cluster_info
-   fix_dask_tuple_array
 
 Detailed reference
 ==================
@@ -27,5 +26,3 @@ Detailed reference
 .. autofunction:: configure_dask
 
 .. autofunction:: get_cluster_info
-
-.. autofunction:: fix_dask_tuple_array

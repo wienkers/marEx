@@ -13,7 +13,6 @@ from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import xarray as xr
 
-from ...helper import checkpoint_to_zarr
 from ...logging_config import get_logger
 from .histogram import _compute_histogram_quantile_2d
 
@@ -31,7 +30,6 @@ def _identify_extremes_hobday(
     coordinates: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
-    use_temp_checkpoints: bool = False,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -129,12 +127,7 @@ def _identify_extremes_hobday(
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
-            use_temp_checkpoints=use_temp_checkpoints,
         )
-
-    if use_temp_checkpoints:
-        logger.debug("Checkpointing thresholds to break graph dependencies")
-        thresholds = checkpoint_to_zarr(thresholds, name="thresholds", timedim="dayofyear")
 
     # Extract spatial chunk sizes from input data for alignment
     # Use most common chunk size to handle irregular chunks robustly
@@ -181,9 +174,5 @@ def _identify_extremes_hobday(
     rechunk_dict.update(spatial_chunks)
     logger.debug(f"Rechunking extremes to fix irregular chunks from groupby: {rechunk_dict}")
     extremes = extremes.chunk(rechunk_dict)
-
-    if use_temp_checkpoints:
-        logger.debug("Checkpointing extremes to break graph dependencies")
-        extremes = checkpoint_to_zarr(extremes, name="extremes", timedim=dimensions["time"])
 
     return extremes, thresholds

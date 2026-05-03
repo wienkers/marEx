@@ -56,14 +56,13 @@ def get_logger(name: str = "marEx") -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    global _logger_configured
-
     logger = logging.getLogger(name)
 
-    # Configure the root marEx logger only once
-    if not _logger_configured and name == "marEx":
-        configure_logging()
-        _logger_configured = True
+    # Lazily configure the root marEx logger the first time any marEx logger is
+    # requested. Internal modules call get_logger("marEx.<module>"), never the bare
+    # "marEx", so this must match on the prefix or auto-configuration never fires.
+    if not _logger_configured and name.startswith("marEx"):
+        configure_logging()  # sets _logger_configured
 
     return logger
 
@@ -91,7 +90,7 @@ def configure_logging(
         verbose: Enable verbose mode (detailed logging with DEBUG level)
         quiet: Enable quiet mode (minimal logging with WARNING level)
     """
-    global _current_verbosity_level
+    global _current_verbosity_level, _logger_configured
 
     # Handle verbose/quiet mode precedence
     if verbose is None:
@@ -178,6 +177,10 @@ def configure_logging(
     root_logger.info(f"MarEx logging configured - Level: {logging.getLevelName(level)}, Mode: {_current_verbosity_level}")
     if log_file:
         root_logger.info(f"Logging to file: {log_file}")
+
+    # Mark configured so lazy get_logger() auto-config does not later re-run with
+    # defaults and silently wipe an explicit configuration the user just set.
+    _logger_configured = True
 
 
 def set_verbose_mode(verbose: bool = True) -> None:
@@ -416,6 +419,7 @@ def log_progress(
     total: int,
     operation: str = "Processing",
     frequency: int = 10,
+    start_time: Optional[float] = None,
 ) -> None:
     """
     Log progress information without using progress bars.
@@ -426,6 +430,9 @@ def log_progress(
         total: Total count
         operation: Description of the operation
         frequency: Log every N percent (default: 10%)
+        start_time: Optional ``time.perf_counter()`` value captured at the start of
+            the operation. When given, a throughput rate is reported from the elapsed
+            delta; without it, no (meaningless absolute-clock) rate is shown.
     """
     if is_quiet_mode():
         return
@@ -435,12 +442,21 @@ def log_progress(
 
     percentage = (current / total) * 100
 
-    # Log at frequency intervals
-    if percentage % frequency == 0 or current == total:
+    # Integer-bucket the percentage: fire once when the current step is the first to
+    # enter a new `frequency`-wide bucket. The old `percentage % frequency == 0` test
+    # used a float and so virtually never matched.
+    current_bucket = int(percentage // frequency)
+    prev_percentage = ((current - 1) / total) * 100 if current > 0 else -1.0
+    prev_bucket = int(prev_percentage // frequency)
+
+    if current_bucket != prev_bucket or current == total:
         if is_verbose_mode():
-            logger.debug(
-                f"{operation}: {current}/{total} ({percentage:.1f}%) - " f"Rate: {current/(time.perf_counter()):.2f} items/sec"
-            )
+            if start_time is not None:
+                elapsed = time.perf_counter() - start_time
+                rate = current / elapsed if elapsed > 0 else float("nan")
+                logger.debug(f"{operation}: {current}/{total} ({percentage:.1f}%) - Rate: {rate:.2f} items/sec")
+            else:
+                logger.debug(f"{operation}: {current}/{total} ({percentage:.1f}%)")
         else:
             logger.info(f"{operation}: {percentage:.0f}% complete ({current}/{total})")
 

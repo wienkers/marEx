@@ -913,7 +913,10 @@ class TestTrackerDataValidationErrors:
         dimensions = {"time": "time", "x": "cell"}
         coordinates = {"time": "time", "x": "missing_lon", "y": "missing_lat"}
 
-        with pytest.raises(KeyError, match="missing_lat"):
+        # Previously this surfaced as a bare KeyError from the coordinate capture in
+        # tracker.__init__, which ran before validation. §4.4 moved the presence check
+        # ahead of that capture, so the descriptive error is now the one raised.
+        with pytest.raises(DataValidationError, match="Missing required coordinates"):
             marEx.tracker(binary_data, mask, R_fill=8, area_filter_quartile=0.5, dimensions=dimensions, coordinates=coordinates)
 
     def test_non_boolean_data_bin(self, valid_binary_data):
@@ -1399,4 +1402,44 @@ class TestUnstructuredGridConfigurationErrors:
                 method_percentile="approximate",
                 window_spatial_hobday=3,  # This should trigger error on unstructured grid
                 window_days_hobday=5,
+            )
+
+
+class TestCoordinateCaptureOrdering:
+    """Coordinate access must not precede validation (§4.4).
+
+    ``lat_init``/``lon_init`` were captured at construction before ``validate_inputs``
+    ran, so a missing coordinate surfaced as a raw ``KeyError`` and the friendly
+    "Missing required coordinates" error was unreachable.
+    """
+
+    @staticmethod
+    def _unstructured_missing_ycoord():
+        data = xr.DataArray(
+            np.random.rand(10, 100),
+            dims=["time", "cell"],
+            coords={
+                "time": range(10),
+                "lon": ("cell", np.random.uniform(-180, 180, 100)),
+                # 'lat' deliberately absent
+            },
+        ).chunk({"time": 5})
+        binary_data = (data > data.mean()).astype(bool)
+        mask = xr.ones_like(binary_data.isel(time=0), dtype=bool)
+        return binary_data, mask
+
+    def test_missing_ycoord_raises_friendly_error(self):
+        """A missing y coordinate raises DataValidationError, not a bare KeyError."""
+        binary_data, mask = self._unstructured_missing_ycoord()
+
+        with pytest.raises(DataValidationError, match="Missing required coordinates"):
+            marEx.tracker(
+                binary_data,
+                mask,
+                R_fill=8,
+                area_filter_quartile=0.5,
+                dimensions={"time": "time", "x": "cell"},
+                coordinates={"time": "time", "x": "lon", "y": "lat"},
+                unstructured_grid=True,
+                coordinate_units="degrees",
             )

@@ -32,7 +32,6 @@ def identify_extremes(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
-    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
@@ -352,8 +351,17 @@ def identify_extremes(
             },
         )
 
-    # Set default spatial window (only for hobday_extreme method)
-    if method_extreme == "hobday_extreme" and window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in da.dims:
+    # Set default spatial window (only for the approximate hobday_extreme method). The
+    # exact percentile path ignores window_spatial_hobday entirely, and the validation
+    # above rejects it when user-supplied with method_percentile='exact', so it must not
+    # be silently defaulted there (which only inflated N_samples and hid the warning).
+    if (
+        method_extreme == "hobday_extreme"
+        and method_percentile != "exact"
+        and window_spatial_hobday is None
+        and "y" in dimensions
+        and dimensions["y"] in da.dims
+    ):
         window_spatial_hobday = 5  # Default to 5x5 spatial window for structured grids
 
     if method_extreme == "hobday_extreme" and window_spatial_hobday is not None and window_spatial_hobday % 2 == 0:
@@ -390,7 +398,6 @@ def identify_extremes(
             coordinates,
             precision,
             max_anomaly,
-            use_temp_checkpoints,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")

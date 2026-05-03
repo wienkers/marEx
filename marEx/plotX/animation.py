@@ -17,7 +17,7 @@ import dask
 import numpy as np
 import xarray as xr
 
-from ..exceptions import DependencyError
+from ..exceptions import DependencyError, VisualisationError
 
 # Handle optional dependencies for plotting
 try:
@@ -30,13 +30,18 @@ except ImportError:
     ccrs = None
     cfeature = None
 
+# Use the object-oriented Figure / FigureCanvasAgg API rather than the pyplot global
+# state machine: frame rendering runs on Dask's (default) threaded scheduler, and the
+# pyplot state machine is not thread-safe.
 try:
-    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
 
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
-    plt = None
+    Figure = None
+    FigureCanvasAgg = None
 
 try:
     from PIL import Image
@@ -93,11 +98,23 @@ def _animate(
 
     if not file_name:
         file_name = f"movie_{plotter.da.name}.mp4"
+    # Only append the extension when it is missing (avoids ``movie_<name>.mp4.mp4``).
+    if not file_name.endswith(".mp4"):
+        file_name = f"{file_name}.mp4"
 
-    output_file = plot_dir / f"{file_name}.mp4"
+    output_file = plot_dir / file_name
 
     # Set up plotting parameters
     cmap, norm, clim, var_units, extend = plotter._setup_common_params(config)
+
+    # Resolve dimension/coordinate mappings from the plotter (the validated, data-consistent
+    # source of truth) so that a custom-dims plotter is not clobbered by a default config.
+    dims_map = getattr(plotter, "dimensions", None) or config.dimensions or {}
+    coords_map = getattr(plotter, "coordinates", None) or config.coordinates or {}
+    time_dim = dims_map.get("time", "time")
+    time_coord = coords_map.get("time", time_dim)
+    x_coord = coords_map.get("x", "lon")
+    y_coord = coords_map.get("y", "lat")
 
     plot_params = {
         "cmap": cmap,
@@ -107,97 +124,125 @@ def _animate(
         "extend": extend,
         "show_colorbar": config.show_colorbar,
         "grid_labels": config.grid_labels,
+        "projection": config.projection,
+        "x_coord": x_coord,
+        "y_coord": y_coord,
     }
 
-    # Set up grid information if needed
+    # Set up grid information if needed. The unstructured plotter always carries
+    # ``fpath_tgrid``/``fpath_ckdtree`` attributes (possibly None), so only treat the data as
+    # unstructured when a grid path is actually set; otherwise fail early with an informative
+    # error rather than an UnboundLocalError deep inside frame rendering.
     grid_info = None
-    if hasattr(plotter, "fpath_tgrid") or hasattr(plotter, "fpath_ckdtree"):
+    is_unstructured = hasattr(plotter, "fpath_tgrid") or hasattr(plotter, "fpath_ckdtree")
+    tgrid_path = getattr(plotter, "fpath_tgrid", None)
+    ckdtree_path = getattr(plotter, "fpath_ckdtree", None)
+    if tgrid_path is not None or ckdtree_path is not None:
         grid_info = {
             "type": "unstructured",
-            "tgrid_path": getattr(plotter, "fpath_tgrid", None),
-            "ckdtree_path": getattr(plotter, "fpath_ckdtree", None),
-            "res": 0.3,
+            "tgrid_path": tgrid_path,
+            "ckdtree_path": ckdtree_path,
+            "res": getattr(config, "ckdtree_res", 0.3),
         }
+    elif is_unstructured:
+        raise VisualisationError(
+            "Missing grid specification for unstructured animation",
+            details="Unstructured animation requires either triangulation or ckdtree data",
+            suggestions=[
+                "Provide fpath_tgrid for triangulation-based plotting",
+                "Provide fpath_ckdtree for interpolated regular grid plotting",
+                "Use specify_grid() to set global grid paths before animating",
+            ],
+        )
 
-    # Generate frames using dask for parallel processing
-    delayed_tasks = []
-    time_dim = config.dimensions["time"] if config.dimensions else "time"
-    time_coord = config.coordinates.get("time", time_dim) if config.coordinates else time_dim
+    # For gridded plotters, wrap the periodic longitude boundary (avoids a dateline gap in
+    # global animations). ``wrap_lon`` is only defined on the gridded plotter, so its presence
+    # doubles as the gridded/unstructured discriminator.
+    wrap_fn = getattr(plotter, "wrap_lon", None)
 
     # Use provided centroids or None if not provided
     centroid_data = centroids
 
-    for time_ind in range(len(plotter.da[time_dim])):
-        data_slice = plotter.da.isel({time_dim: time_ind})
+    try:
+        # Generate frames using dask for parallel processing
+        delayed_tasks = []
+        for time_ind in range(len(plotter.da[time_dim])):
+            data_slice = plotter.da.isel({time_dim: time_ind})
+            if wrap_fn is not None:
+                data_slice = wrap_fn(data_slice)
 
-        # Create fresh copy of plot_params for this frame to avoid shared references
-        frame_params = plot_params.copy()
-        frame_params["time_str"] = str(plotter.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
+            # Create fresh copy of plot_params for this frame to avoid shared references
+            frame_params = plot_params.copy()
+            frame_params["time_str"] = str(plotter.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
 
-        # Extract centroids for this time step if available
-        if centroid_data is not None:
-            try:
-                centroids_time = centroid_data.isel({time_dim: time_ind})
-                frame_params["centroids"] = centroids_time
-            except Exception:
+            # Extract centroids for this time step if available
+            if centroid_data is not None:
+                try:
+                    centroids_time = centroid_data.isel({time_dim: time_ind})
+                    frame_params["centroids"] = centroids_time
+                except Exception:
+                    frame_params["centroids"] = None
+            else:
                 frame_params["centroids"] = None
-        else:
-            frame_params["centroids"] = None
 
-        # Extract object IDs for this time step if available
-        if object_ids is not None:
-            try:
-                object_ids_time = object_ids.isel({time_dim: time_ind})
-                frame_params["object_ids"] = object_ids_time
-            except Exception:
+            # Extract object IDs for this time step if available
+            if object_ids is not None:
+                try:
+                    object_ids_time = object_ids.isel({time_dim: time_ind})
+                    # Wrap the ID field too so it stays shape-consistent with the wrapped data.
+                    if wrap_fn is not None and x_coord in object_ids_time.coords:
+                        object_ids_time = wrap_fn(object_ids_time)
+                    frame_params["object_ids"] = object_ids_time
+                except Exception:
+                    frame_params["object_ids"] = None
+            else:
                 frame_params["object_ids"] = None
-        else:
-            frame_params["object_ids"] = None
 
-        delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, frame_params, grid_info))
+            delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, frame_params, grid_info))
 
-    # Process frames in batches to manage memory efficiently
-    batch_size = 200
-    filenames = []
-    for i in range(0, len(delayed_tasks), batch_size):
-        batch = delayed_tasks[i : i + batch_size]
-        batch_results = dask.compute(*batch)
-        filenames.extend(batch_results)
-        # Force garbage collection between batches to release memory
-        gc.collect()
+        # Process frames in batches to manage memory efficiently
+        batch_size = 200
+        filenames = []
+        for i in range(0, len(delayed_tasks), batch_size):
+            batch = delayed_tasks[i : i + batch_size]
+            batch_results = dask.compute(*batch)
+            filenames.extend(batch_results)
+            # Force garbage collection between batches to release memory
+            gc.collect()
 
-    filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
+        filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
 
-    # Create movie using ffmpeg
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-threads",
-            "0",
-            "-framerate",
-            str(config.framerate),
-            "-i",
-            str(temp_dir / "time_%04d.jpg"),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "22",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(output_file),
-        ],
-        check=True,
-    )
+        # Create movie using ffmpeg
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-threads",
+                "0",
+                "-framerate",
+                str(config.framerate),
+                "-i",
+                str(temp_dir / "time_%04d.jpg"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "22",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(output_file),
+            ],
+            check=True,
+        )
 
-    # Clean up temporary frames directory
-    shutil.rmtree(temp_dir)
-
-    return str(output_file)
+        return str(output_file)
+    finally:
+        # Always clean up the temporary frames directory, even if frame generation or ffmpeg
+        # raised (a mid-run error would otherwise leave potentially GBs of JPEGs behind).
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @dask.delayed
@@ -217,181 +262,188 @@ def make_frame(
         plot_params: Dict containing plotting parameters
         grid_info: Dict containing grid paths and settings for unstructured data
     """
-    # Set up plotting parameters
-    plt.rc("text", usetex=False)
-    plt.rc("font", family="serif")
+    x_coord = plot_params.get("x_coord", "lon")
+    y_coord = plot_params.get("y_coord", "lat")
+    projection = plot_params.get("projection") or ccrs.Robinson()
 
-    fig = plt.figure(figsize=(7, 5))
-    ax = plt.axes(projection=ccrs.Robinson())
+    # Object-oriented Figure/canvas: does not touch the (non-thread-safe) pyplot global state.
+    fig = Figure(figsize=(7, 5))
+    FigureCanvasAgg(fig)
+    try:
+        ax = fig.add_subplot(1, 1, 1, projection=projection)
 
-    data_slice_np = data_slice.values
+        data_slice_np = data_slice.values
 
-    # Set up plot kwargs
-    plot_kwargs = {
-        "transform": ccrs.PlateCarree(),
-        "cmap": plot_params["cmap"],
-        "shading": "auto",
-    }
+        # Set up plot kwargs
+        plot_kwargs = {
+            "transform": ccrs.PlateCarree(),
+            "cmap": plot_params["cmap"],
+            "shading": "auto",
+        }
 
-    if plot_params.get("norm") is not None:
-        plot_kwargs["norm"] = plot_params["norm"]
-    elif plot_params.get("clim") is not None:
-        plot_kwargs["vmin"] = plot_params["clim"][0]
-        plot_kwargs["vmax"] = plot_params["clim"][1]
+        if plot_params.get("norm") is not None:
+            plot_kwargs["norm"] = plot_params["norm"]
+        elif plot_params.get("clim") is not None:
+            plot_kwargs["vmin"] = plot_params["clim"][0]
+            plot_kwargs["vmax"] = plot_params["clim"][1]
 
-    # Handle different grid types
-    if grid_info and grid_info.get("type") == "unstructured":
-        try:
-            from .unstructured import _load_ckdtree, _load_triangulation
-        except ImportError as e:
-            raise DependencyError(
-                "Unstructured plotting dependencies missing",
-                details=str(e),
-                suggestions=[
-                    "Install plotting dependencies: pip install marEx[plot]",
-                    "Check that scipy and matplotlib are available",
-                    "Verify unstructured grid support is properly installed",
-                ],
-                context={"missing_dependency": str(e), "plot_type": "unstructured"},
-            )
+        im = None
+        # Handle different grid types
+        if grid_info and grid_info.get("type") == "unstructured":
+            try:
+                from .unstructured import _load_ckdtree, _load_triangulation
+            except ImportError as e:
+                raise DependencyError(
+                    "Unstructured plotting dependencies missing",
+                    details=str(e),
+                    suggestions=[
+                        "Install plotting dependencies: pip install marEx[plot]",
+                        "Check that scipy and matplotlib are available",
+                        "Verify unstructured grid support is properly installed",
+                    ],
+                    context={"missing_dependency": str(e), "plot_type": "unstructured"},
+                )
 
-        if grid_info.get("ckdtree_path"):
-            # Use cached ckdtree data
-            ckdt_data = _load_ckdtree(grid_info["ckdtree_path"], grid_info.get("res", 0.3))
-            grid_data = data_slice_np[ckdt_data["indices"]].reshape(ckdt_data["lat"].size, ckdt_data["lon"].size)
-            grid_data = np.ma.masked_invalid(grid_data)
-            im = ax.pcolormesh(ckdt_data["lon"], ckdt_data["lat"], grid_data, **plot_kwargs)
-        elif grid_info.get("tgrid_path"):
-            # Use triangulation
-            triang = _load_triangulation(grid_info["tgrid_path"])
-            data_masked = np.ma.masked_invalid(data_slice_np)
-            im = ax.tripcolor(triang, data_masked, **plot_kwargs)
-    else:
-        # Regular grid plotting
-        lat = data_slice.lat.values
-        lon = data_slice.lon.values
-        im = ax.pcolormesh(lon, lat, data_slice_np, **plot_kwargs)
+            if grid_info.get("ckdtree_path"):
+                # Use cached ckdtree data
+                ckdt_data = _load_ckdtree(grid_info["ckdtree_path"], grid_info.get("res", 0.3))
+                grid_data = data_slice_np[ckdt_data["indices"]].reshape(ckdt_data["lat"].size, ckdt_data["lon"].size)
+                grid_data = np.ma.masked_invalid(grid_data)
+                im = ax.pcolormesh(ckdt_data["lon"], ckdt_data["lat"], grid_data, **plot_kwargs)
+            elif grid_info.get("tgrid_path"):
+                # Use triangulation. tripcolor does not accept the ``shading`` kwarg.
+                triang = _load_triangulation(grid_info["tgrid_path"])
+                data_masked = np.ma.masked_invalid(data_slice_np)
+                tri_kwargs = {k: v for k, v in plot_kwargs.items() if k != "shading"}
+                im = ax.tripcolor(triang, data_masked, **tri_kwargs)
+        else:
+            # Regular grid plotting - use the resolved coordinate names (not hardcoded lat/lon)
+            lat = data_slice[y_coord].values
+            lon = data_slice[x_coord].values
+            im = ax.pcolormesh(lon, lat, data_slice_np, **plot_kwargs)
 
-    time_str = plot_params.get("time_str", f"Frame {time_ind}")
-    ax.set_title(time_str, size=12)
+        time_str = plot_params.get("time_str", f"Frame {time_ind}")
+        ax.set_title(time_str, size=12)
 
-    # Plot object ID contours if available
-    object_ids_data = plot_params.get("object_ids")
-    if object_ids_data is not None:
-        try:
-            object_ids_np = object_ids_data.values
-            # Create binary mask where object IDs > 0
-            object_mask = object_ids_np > 0
+        # Plot object ID contours if available
+        object_ids_data = plot_params.get("object_ids")
+        if object_ids_data is not None:
+            try:
+                object_ids_np = object_ids_data.values
+                # Create binary mask where object IDs > 0
+                object_mask = object_ids_np > 0
 
-            if np.any(object_mask):
-                # Handle different grid types for contouring
-                if grid_info and grid_info.get("type") == "unstructured":
-                    # For unstructured grids, we need to handle contouring differently
-                    # This is more complex and may require interpolation to regular grid
-                    pass
-                else:
-                    # Regular grid plotting - use lat/lon coordinates
-                    lat = data_slice.lat.values
-                    lon = data_slice.lon.values
+                if np.any(object_mask):
+                    # Handle different grid types for contouring
+                    if grid_info and grid_info.get("type") == "unstructured":
+                        # For unstructured grids, we need to handle contouring differently
+                        # This is more complex and may require interpolation to regular grid
+                        pass
+                    else:
+                        # Regular grid plotting - use the resolved coordinate names
+                        lat = data_slice[y_coord].values
+                        lon = data_slice[x_coord].values
 
-                    # Draw contours around object boundaries (treating all IDs > 0 the same)
-                    ax.contour(
-                        lon,
-                        lat,
-                        object_mask.astype(float),
-                        levels=[0.5],
-                        colors=["white"],
-                        linewidths=1.5,
-                        transform=ccrs.PlateCarree(),
-                        zorder=6,
-                    )
-        except Exception:
-            # Silently skip object ID contouring if any error occurs
-            pass
+                        # Draw contours around object boundaries (treating all IDs > 0 the same)
+                        ax.contour(
+                            lon,
+                            lat,
+                            object_mask.astype(float),
+                            levels=[0.5],
+                            colors=["white"],
+                            linewidths=1.5,
+                            transform=ccrs.PlateCarree(),
+                            zorder=6,
+                        )
+            except Exception:
+                # Silently skip object ID contouring if any error occurs
+                pass
 
-    # Plot centroids if available
-    centroids = plot_params.get("centroids")
-    if centroids is not None:
-        try:
-            # Get unique object IDs present in this frame
-            unique_ids = np.unique(data_slice_np)
-            unique_ids = unique_ids[unique_ids > 0]  # Remove background (0)
+        # Plot centroids if available
+        centroids = plot_params.get("centroids")
+        if centroids is not None:
+            try:
+                # Get unique object IDs present in this frame
+                unique_ids = np.unique(data_slice_np)
+                unique_ids = unique_ids[unique_ids > 0]  # Remove background (0)
 
-            if len(unique_ids) > 0:
-                # Extract centroid coordinates for present objects
-                # centroids shape: (component, ID) where component 0=lat, 1=lon
-                centroids_np = centroids.values
+                if len(unique_ids) > 0:
+                    # Extract centroid coordinates for present objects
+                    # centroids shape: (component, ID) where component 0=lat, 1=lon
+                    centroids_np = centroids.values
 
-                # Find which IDs have valid centroids
-                valid_centroids = []
-                for obj_id in unique_ids:
-                    try:
-                        # Find ID index in centroids
-                        id_idx = np.where(centroids.ID.values == obj_id)[0]
-                        if len(id_idx) > 0:
-                            idx = id_idx[0]
-                            lat_centroid = centroids_np[0, idx]  # component 0 = latitude
-                            lon_centroid = centroids_np[1, idx]  # component 1 = longitude
+                    # Find which IDs have valid centroids
+                    valid_centroids = []
+                    for obj_id in unique_ids:
+                        try:
+                            # Find ID index in centroids
+                            id_idx = np.where(centroids.ID.values == obj_id)[0]
+                            if len(id_idx) > 0:
+                                idx = id_idx[0]
+                                lat_centroid = centroids_np[0, idx]  # component 0 = latitude
+                                lon_centroid = centroids_np[1, idx]  # component 1 = longitude
 
-                            # Check if centroid is valid (not NaN)
-                            if not (np.isnan(lat_centroid) or np.isnan(lon_centroid)):
-                                valid_centroids.append((lon_centroid, lat_centroid))
-                    except (IndexError, KeyError):
-                        continue
+                                # Check if centroid is valid (not NaN)
+                                if not (np.isnan(lat_centroid) or np.isnan(lon_centroid)):
+                                    valid_centroids.append((lon_centroid, lat_centroid))
+                        except (IndexError, KeyError):
+                            continue
 
-                # Plot centroids as scatter points
-                if valid_centroids:
-                    centroid_lons, centroid_lats = zip(*valid_centroids)
-                    ax.scatter(
-                        centroid_lons,
-                        centroid_lats,
-                        c="black",
-                        s=20,
-                        marker="o",
-                        edgecolors="white",
-                        linewidth=1.5,
-                        transform=ccrs.PlateCarree(),
-                        zorder=5,  # Plot above data but below grid lines
-                        alpha=0.8,
-                    )
-        except Exception:
-            # Silently skip centroid plotting if any error occurs
-            pass
+                    # Plot centroids as scatter points
+                    if valid_centroids:
+                        centroid_lons, centroid_lats = zip(*valid_centroids)
+                        ax.scatter(
+                            centroid_lons,
+                            centroid_lats,
+                            c="black",
+                            s=20,
+                            marker="o",
+                            edgecolors="white",
+                            linewidth=1.5,
+                            transform=ccrs.PlateCarree(),
+                            zorder=5,  # Plot above data but below grid lines
+                            alpha=0.8,
+                        )
+            except Exception:
+                # Silently skip centroid plotting if any error occurs
+                pass
 
-    if plot_params.get("show_colorbar"):
-        cb = plt.colorbar(im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both"))
-        if plot_params.get("var_units"):
-            cb.ax.set_ylabel(plot_params["var_units"], fontsize=10)
-        cb.ax.tick_params(labelsize=10)
+        if plot_params.get("show_colorbar") and im is not None:
+            cb = fig.colorbar(im, shrink=0.6, ax=ax, extend=plot_params.get("extend", "both"))
+            if plot_params.get("var_units"):
+                cb.ax.set_ylabel(plot_params["var_units"], fontsize=10)
+            cb.ax.tick_params(labelsize=10)
 
-    land = cfeature.LAND.with_scale("50m")
-    coastlines = cfeature.COASTLINE.with_scale("50m")
-    ax.add_feature(land, facecolor="darkgrey", zorder=2)
-    ax.add_feature(coastlines, linewidth=0.5, zorder=3)
-    ax.gridlines(
-        crs=ccrs.PlateCarree(),
-        draw_labels=plot_params.get("grid_labels", False),
-        linewidth=1,
-        color="gray",
-        alpha=0.5,
-        linestyle="--",
-        zorder=4,
-    )
+        land = cfeature.LAND.with_scale("50m")
+        coastlines = cfeature.COASTLINE.with_scale("50m")
+        ax.add_feature(land, facecolor="darkgrey", zorder=2)
+        ax.add_feature(coastlines, linewidth=0.5, zorder=3)
+        ax.gridlines(
+            crs=ccrs.PlateCarree(),
+            draw_labels=plot_params.get("grid_labels", False),
+            linewidth=1,
+            color="gray",
+            alpha=0.5,
+            linestyle="--",
+            zorder=4,
+        )
 
-    # Save and process frame
-    filename = f"time_{time_ind:04d}.jpg"
-    temp_file = temp_dir / f"temp_{filename}"
-    fig.savefig(str(temp_file), dpi=300, bbox_inches="tight")
-    plt.close(fig)
+        # Save the frame at a fixed figure size (no ``bbox_inches="tight"``, which would make
+        # frame dimensions content-dependent and break ffmpeg). Crop to even dimensions for
+        # h264, and skip any resize/re-encode when the frame is already even.
+        filename = f"time_{time_ind:04d}.jpg"
+        frame_path = temp_dir / filename
+        fig.savefig(str(frame_path), dpi=300)
 
-    # Ensure dimensions are even for video encoding
-    image = Image.open(str(temp_file))
-    width, height = image.size
-    new_width = width - (width % 2)
-    new_height = height - (height % 2)
-    image = image.resize((new_width, new_height), Image.LANCZOS)
+        image = Image.open(str(frame_path))
+        width, height = image.size
+        if (width % 2) or (height % 2):
+            image = image.crop((0, 0, width - (width % 2), height - (height % 2)))
+            image.save(str(frame_path))
+        image.close()
 
-    image.save(str(temp_dir / filename))
-    temp_file.unlink()
-
-    return filename
+        return filename
+    finally:
+        # Release the figure promptly (belt-and-braces with the OO API, which does not
+        # register the figure in any global pyplot state).
+        fig.clear()

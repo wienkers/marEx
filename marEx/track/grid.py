@@ -9,8 +9,6 @@ return the values they produced so the orchestrator can reassign them.
 Behaviour and numerics are identical to the original ``tracker`` methods.
 """
 
-import os
-import shutil
 from typing import Optional, Tuple
 
 import numpy as np
@@ -20,7 +18,6 @@ from scipy.sparse import coo_matrix, csr_matrix, eye
 from .._dependencies import warn_missing_dependency
 from ..exceptions import ConfigurationError, create_coordinate_error, create_data_validation_error
 from ..logging_config import get_logger
-from .validation import validate_unstructured_chunking
 
 logger = get_logger(__name__)
 
@@ -72,13 +69,24 @@ def unify_coordinates(
             # Auto-detect coordinate units for global data
             lon = data_bin[xcoord]
             lon_range = float(lon.max()) - float(lon.min())
+            # Global grids come in two conventions: endpoint-exclusive (e.g. 0 to 360-dlon,
+            # so the range is one grid step short of a full turn) and endpoint-inclusive
+            # (the range is exactly a full turn). Accept either, with a half-step tolerance.
+            #
+            # Matching only "close to a full turn" with a +-1.5*dlon window is unbounded: on a
+            # short-range grid with few points dlon grows large enough to swallow unrelated
+            # ranges, and a 10 degree grid with 5 points was mis-detected as radians because
+            # |10 - 2*pi| = 3.72 fell inside a 3.75 tolerance. Matching only the
+            # endpoint-exclusive span is the opposite error: it rejects genuine full-turn
+            # grids whose range is exactly 360 (or 2*pi).
+            dlon = lon_range / max(int(lon.size) - 1, 1)
 
-            # Check for degrees (range close to 360)
-            if abs(lon_range - 360.0) <= 1.0:
+            # Check for degrees (range close to 360, or to 360 - dlon)
+            if min(abs(lon_range - 360.0), abs(lon_range - (360.0 - dlon))) <= max(1.0, 0.5 * dlon):
                 coordinate_units = "degrees"
 
-            # Check for radians (range close to 2π)
-            elif abs(lon_range - 2 * np.pi) <= 0.02:
+            # Check for radians (range close to 2π, or to 2π - dlon)
+            elif min(abs(lon_range - 2 * np.pi), abs(lon_range - (2 * np.pi - dlon))) <= max(0.02, 0.5 * dlon):
                 coordinate_units = "radians"
 
             # If neither, throw error
@@ -95,10 +103,16 @@ def unify_coordinates(
                     context={"detected_range": lon_range, "xdim": xcoord},
                 )
 
-    # Convert lat & lon to degrees
+    # Convert lat & lon to degrees. Use assign_coords (returns a new object) rather than
+    # writing the coordinates in place, which mutated the caller's DataArray and would
+    # double-convert on a second pass.
     if coordinate_units == "radians":
-        data_bin[xcoord] = data_bin[xcoord] * 180.0 / np.pi
-        data_bin[ycoord] = data_bin[ycoord] * 180.0 / np.pi
+        data_bin = data_bin.assign_coords(
+            {
+                xcoord: data_bin[xcoord] * 180.0 / np.pi,
+                ycoord: data_bin[ycoord] * 180.0 / np.pi,
+            }
+        )
 
     return coordinate_units, data_bin
 
@@ -186,10 +200,6 @@ def setup_unstructured_grid(
 
     scratch_dir = temp_dir
 
-    # Clear any existing temporary storage
-    if os.path.exists(f"{scratch_dir}/marEx_temp_field.zarr/"):
-        shutil.rmtree(f"{scratch_dir}/marEx_temp_field.zarr/")
-
     # Remove coordinate variables to avoid memory issues
     data_bin = data_bin.drop_vars({ycoord, xcoord})
     mask = mask.drop_vars({ycoord, xcoord})
@@ -197,8 +207,8 @@ def setup_unstructured_grid(
     lon = lon.drop_vars(lon.coords)
     neighbours = neighbours.drop_vars({ycoord, xcoord, "nv"}.intersection(set(neighbours.coords)))
 
-    # Validate spatial chunking for unstructured grid data
-    validate_unstructured_chunking(neighbours, cell_areas, xdim)
+    # Spatial chunking of neighbours/cell_areas is validated by the caller, which needs the
+    # rechunked cell_areas before this point (§4.2).
 
     # Initialise dilation array for unstructured grid
     neighbours_int = neighbours.astype(np.int32) - 1  # Convert to 0-based indexing

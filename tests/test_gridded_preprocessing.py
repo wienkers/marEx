@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
-from dask.base import is_dask_collection
 
 import marEx
 from marEx.exceptions import ConfigurationError
@@ -138,16 +137,15 @@ class TestGriddedPreprocessing:
         print(f"Exact extreme_frequency for detrend_harmonic + global_extreme: {extreme_frequency}")
         assert_percentile_frequency(extreme_frequency, 95, description="detrend_harmonic + global_extreme")
 
-    def test_auxiliary_coords_are_materialised(self):
-        """Regression: auxiliary (non-index) coordinates must be materialised after preprocessing.
+    def test_auxiliary_coords_survive_save_roundtrip(self, dask_client, tmp_path):
+        """Auxiliary (non-index) coordinates must survive a distributed save round-trip.
 
-        Index coords (lon/lat) are already NumPy, so the original two-line patch happened to work
-        for them. But auxiliary non-index coords -- e.g. integer grid indices ``x``/``y`` carried
-        alongside lon/lat -- become Dask-backed via ``.chunk()`` and retain tuple chunk references
-        that break the distributed store path on save ("AttributeError: 'tuple' object has no
-        attribute 'size'" from dask.array.store). The crash only surfaces with the pinned dask under
-        a cluster, so we assert the scheduler-independent invariant the fix guarantees: no
-        coordinate stays Dask-backed. (Confirmed to fail with the prior two-line patch.)
+        Non-index coords (e.g. integer grid indices ``x``/``y`` carried alongside lon/lat) become
+        Dask-backed via ``.chunk()``. The output dataset must therefore be writable to *both* Zarr
+        and NetCDF under a distributed scheduler and reload with those coordinates intact -- which is
+        the real, user-facing invariant. (Historically a "tuple"/store bug under an older dask made
+        this fail, which the code worked around by eagerly materialising every coordinate; that
+        workaround has been removed, so this test guards the actual save path instead.)
         """
         # Attach auxiliary non-index integer grid-index coords alongside lon/lat.
         sst_aux = self.sst_data.assign_coords(
@@ -165,13 +163,22 @@ class TestGriddedPreprocessing:
             dask_chunks=self.dask_chunks,
         )
 
-        # The auxiliary coordinates must survive preprocessing...
+        # The auxiliary coordinates must survive preprocessing.
         assert "x" in extremes_ds.coords
         assert "y" in extremes_ds.coords
 
-        # ...and NO coordinate may remain Dask-backed (the crux of the fix).
-        dask_coords = [c for c in extremes_ds.coords if is_dask_collection(extremes_ds[c].data)]
-        assert not dask_coords, f"Coordinates left Dask-backed (would break distributed save): {dask_coords}"
+        # ...and the dataset must save to BOTH formats under a distributed client and reload intact.
+        for fmt in ("zarr", "netcdf"):
+            if fmt == "zarr":
+                target = tmp_path / "aux.zarr"
+                extremes_ds.to_zarr(target, mode="w")
+                reloaded = xr.open_zarr(target)
+            else:
+                target = tmp_path / "aux.nc"
+                extremes_ds.to_netcdf(target)
+                reloaded = xr.open_dataset(target)
+            np.testing.assert_array_equal(reloaded["x"].values, np.arange(self.sst_data.sizes["lon"]))
+            np.testing.assert_array_equal(reloaded["y"].values, np.arange(self.sst_data.sizes["lat"]))
 
     def test_output_consistency(self):
         """Test that all preprocessing methods produce consistent output structures."""
@@ -265,7 +272,8 @@ class TestGriddedPreprocessing:
         assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
         assert extremes_ds.attrs["method_extreme"] == "global_extreme"
         assert extremes_ds.attrs["threshold_percentile"] == 95
-        assert extremes_ds.attrs["std_normalise"] is True
+        # Boolean flags are stored as int8 (0/1) so the dataset stays NetCDF-saveable.
+        assert bool(extremes_ds.attrs["std_normalise"]) is True
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
@@ -690,7 +698,8 @@ class TestGriddedPreprocessing:
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "detrend_fixed_baseline"
         assert extremes_ds.attrs["detrend_orders"] == [1, 2]
-        assert extremes_ds.attrs["force_zero_mean"] is True
+        # Boolean flags are stored as int8 (0/1) so the dataset stays NetCDF-saveable.
+        assert bool(extremes_ds.attrs["force_zero_mean"]) is True
 
         # Should preserve all time steps
         input_time_size = self.sst_data.sizes["time"]

@@ -230,15 +230,20 @@ def _compute_anomaly_detrended(
             dtype=np.float32,
         )
 
-        # Calculate 30-day rolling standard deviation with annual wrapped padding
+        # Calculate 30-day rolling standard deviation with annual wrapped padding.
+        # Slice/label by the actual number of day-of-year groups: a span with no
+        # leap year yields 365 groups, and hardcoding 366 produced a duplicate wrap
+        # label and an align error. The common (leap-containing) case is 366, so this
+        # is behaviour-preserving there.
+        n_doy = std_day.sizes["dayofyear"]
         std_day_wrap = std_day.pad(dayofyear=16, mode="wrap")
-        std_rolling = np.sqrt((std_day_wrap**2).rolling(dayofyear=30, center=True).mean()).isel(dayofyear=slice(16, 366 + 16))
+        std_rolling = np.sqrt((std_day_wrap**2).rolling(dayofyear=30, center=True).mean()).isel(dayofyear=slice(16, n_doy + 16))
 
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings
         std_rolling_safe = std_rolling.where(std_rolling > 1e-10, np.nan)
         da_detrend = da_detrend.assign_coords(dayofyear=da_detrend[coordinates["time"]].dt.dayofyear)
-        da_stn = da_detrend.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) / std_rolling_safe
+        da_stn = da_detrend.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, n_doy + 1))) / std_rolling_safe
 
         # Drop dayofyear coordinate to avoid merge conflicts
         if "dayofyear" in da_stn.coords:

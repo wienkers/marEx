@@ -187,12 +187,16 @@ def find_overlapping_objects(
     unique_pairs, inverse_indices = np.unique(all_pairs_with_areas[:, :2], axis=0, return_inverse=True)
     inverse_indices = inverse_indices.astype(np.int32)  # Ensure int32 for serialisation
 
-    # Sum the overlap areas using the inverse indices
+    # Take the per-pair MAXIMUM single-boundary overlap, not the sum. Post-tracking, IDs
+    # persist across timesteps, so a pair (A, B) recurs at every time boundary they overlap;
+    # summing pooled those into a total that, divided by a single-time area downstream,
+    # exceeded 1.0 ("overlap fraction > 1.0" warnings) and could pass a pair whose per-boundary
+    # overlap never met the threshold. The max is the largest instantaneous overlap.
     output_dtype = np.float32 if unstructured_grid else np.int32
     total_summed_areas = np.zeros(len(unique_pairs), dtype=output_dtype)
-    np.add.at(total_summed_areas, inverse_indices, all_pairs_with_areas[:, 2])
+    np.maximum.at(total_summed_areas, inverse_indices, all_pairs_with_areas[:, 2])
 
-    # Stack the pairs with their summed areas
+    # Stack the pairs with their per-pair max overlap area
     overlap_objects_list_unique = np.column_stack((unique_pairs, total_summed_areas))
 
     return overlap_objects_list_unique
