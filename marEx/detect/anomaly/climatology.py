@@ -14,6 +14,7 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
+from ...exceptions import ConfigurationError
 from ...logging_config import get_logger
 from ..validation import _infer_dims_coords
 
@@ -313,7 +314,51 @@ def smoothed_rolling_climatology(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
 
+    # Whether a given (length, chunking, window) combination can actually be reduced is a
+    # property of the xarray -> dask.overlap -> bottleneck chain, and it is not a simple
+    # one. It has at least three regimes: chunks that divide smooth_days_baseline - 1 leave
+    # a block one element short of the window; arrays shorter than the overlap depth are
+    # rejected outright; and a window longer than the whole series is fine and yields NaN.
+    # Modelling that here would hard-code one version's behaviour and go stale silently.
+    #
+    # Instead, ask the real stack. The probe reproduces the exact time geometry on a 1-D
+    # zero array -- a few KB and a few ms even for decades of daily data -- so whatever
+    # upstream does, the user gets a clear error here instead of a cryptic one from
+    # bottleneck after the pipeline has been running for half an hour.
+    time_chunks = da.chunksizes.get(timedim, ())
+    if time_chunks:
+        probe = xr.DataArray(np.zeros(sum(time_chunks), dtype=np.float32), dims=[timedim]).chunk({timedim: time_chunks})
+        try:
+            probe.rolling({timedim: smooth_days_baseline}, center=True).mean().compute()
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Time chunking cannot support a {smooth_days_baseline}-day centred rolling mean",
+                details=(
+                    f"Reducing a {smooth_days_baseline}-day window over time chunks "
+                    f"{sorted(set(time_chunks))} failed with: {exc}"
+                ),
+                suggestions=[
+                    f"Rechunk the time dimension to at least smooth_days_baseline: "
+                    f"da.chunk({{'{timedim}': {smooth_days_baseline}}})",
+                    "Chunk the spatial dimension instead, to keep chunk sizes manageable",
+                    "Reduce smooth_days_baseline",
+                ],
+                context={
+                    "time_chunks": sorted(set(time_chunks)),
+                    "smooth_days_baseline": smooth_days_baseline,
+                    "upstream_error": str(exc),
+                },
+            ) from exc
+
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
+    #
+    # Kept in float32 deliberately. bottleneck's move_mean carries a running sum that
+    # restarts at each dask block boundary, so the result shifts slightly with the chunk
+    # layout: ~1e-4 for a 21-day window on SST, i.e. a few float32 ULP at 280 K. Accumulating
+    # in float64 removes that exactly, but doubles the working set of this reduction, which
+    # was enough to exhaust the workers and take down a distributed run. Forcing xarray off
+    # bottleneck also removes it, at 33x the cost. A spread at float32 precision is the
+    # accepted trade -- see the tolerance in tests/test_climatology_chunking.py.
     da_smoothed = (
         da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
     )
