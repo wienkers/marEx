@@ -23,57 +23,14 @@ from scipy.ndimage import label as scipy_label
 
 from ..exceptions import TrackingError
 from ..logging_config import get_logger
-from .objects import identify_objects
+
+# _EIGHT_CONNECTIVITY and _merge_lon_seam live in objects.py (imported by this module) to avoid
+# duplicating the periodic-longitude seam union-find; both the small-object filter (here) and the
+# tracking per-slice labeller (objects.identify_objects) use them.
+from .objects import _EIGHT_CONNECTIVITY, _merge_lon_seam, identify_objects
 from .overlap import sparse_bool_power
 
 logger = get_logger(__name__)
-
-# 8-connectivity structuring element for per-2D-slice connected-component labelling.
-_EIGHT_CONNECTIVITY = np.ones((3, 3), dtype=int)
-
-
-def _merge_lon_seam(labels: NDArray[np.int32], n_labels: int) -> NDArray[np.int32]:
-    """
-    Union connected-component labels that touch across the periodic-longitude seam.
-
-    ``scipy.ndimage.label`` treats the array as non-periodic, so an object straddling
-    the antimeridian is split into a left-edge (column 0) and right-edge (column -1)
-    component. This re-joins them with full 8-connectivity across the seam (i.e. column 0
-    of row r connects to column -1 of rows r-1, r, r+1), matching the behaviour of
-    ``dask_image.ndmeasure.label(..., wrap_axes=(2,))``. Returns ``labels`` with the
-    relevant components relabelled to a shared root (label values may become non-contiguous;
-    callers using ``np.bincount`` are unaffected).
-    """
-    if n_labels == 0:
-        return labels
-    left = labels[:, 0]
-    right = labels[:, -1]
-    parent = np.arange(n_labels + 1)
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(int(a)), find(int(b))
-        if ra != rb:
-            parent[max(ra, rb)] = min(ra, rb)
-
-    # Same row, and the two diagonal off-by-one-row pairings (8-connectivity across the seam).
-    same = (left > 0) & (right > 0)
-    for a, b in zip(left[same], right[same]):
-        union(a, b)
-    diag_down = (left[1:] > 0) & (right[:-1] > 0)
-    for a, b in zip(left[1:][diag_down], right[:-1][diag_down]):
-        union(a, b)
-    diag_up = (left[:-1] > 0) & (right[1:] > 0)
-    for a, b in zip(left[:-1][diag_up], right[1:][diag_up]):
-        union(a, b)
-
-    roots = np.array([find(i) for i in range(n_labels + 1)], dtype=labels.dtype)
-    return roots[labels]
 
 
 def compute_area(

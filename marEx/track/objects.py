@@ -15,6 +15,7 @@ import xarray as xr
 from dask import persist
 from dask_image.ndmeasure import label
 from numpy.typing import NDArray
+from scipy.ndimage import label as scipy_label
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from skimage.measure import regionprops_table
@@ -23,6 +24,52 @@ from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# 8-connectivity structuring element for per-2D-slice connected-component labelling.
+_EIGHT_CONNECTIVITY = np.ones((3, 3), dtype=int)
+
+
+def _merge_lon_seam(labels: NDArray[np.int32], n_labels: int) -> NDArray[np.int32]:
+    """
+    Union connected-component labels that touch across the periodic-longitude seam.
+
+    ``scipy.ndimage.label`` treats the array as non-periodic, so an object straddling
+    the antimeridian is split into a left-edge (column 0) and right-edge (column -1)
+    component. This re-joins them with full 8-connectivity across the seam (column 0 of
+    row r connects to column -1 of rows r-1, r, r+1), matching the behaviour of
+    ``dask_image.ndmeasure.label(..., wrap_axes=(2,))``. Returns ``labels`` with the
+    relevant components relabelled to a shared root (label values may become
+    non-contiguous; callers using ``np.bincount`` / compaction are unaffected).
+    """
+    if n_labels == 0:
+        return labels
+    left = labels[:, 0]
+    right = labels[:, -1]
+    parent = np.arange(n_labels + 1)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(int(a)), find(int(b))
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    same = (left > 0) & (right > 0)
+    for a, b in zip(left[same], right[same]):
+        union(a, b)
+    diag_down = (left[1:] > 0) & (right[:-1] > 0)
+    for a, b in zip(left[1:][diag_down], right[:-1][diag_down]):
+        union(a, b)
+    diag_up = (left[:-1] > 0) & (right[1:] > 0)
+    for a, b in zip(left[:-1][diag_up], right[1:][diag_up]):
+        union(a, b)
+
+    roots = np.array([find(i) for i in range(n_labels + 1)], dtype=labels.dtype)
+    return roots[labels]
 
 
 def identify_objects(
@@ -128,36 +175,20 @@ def identify_objects(
         object_id_field = object_id_field.rename("ID_field")
         N_objects = 1  # Placeholder (IDs aren't unique across time)
 
-    else:  # Structured Grid
-        # Create connectivity kernel for labeling
+    elif time_connectivity:
+        # Structured grid, 3D (space & time) labelling -- IDs unique across time.
+        # Genuine cross-time connectivity is required, so dask_image's global relabel is used.
         neighbours = np.zeros((3, 3, 3))
+        neighbours[:, :, :] = 1  # +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
 
-        if time_connectivity:
-            # ID objects in 3D (i.e. space & time) -- N.B. IDs are unique across time
-            neighbours[:, :, :] = 1  # +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
-        else:
-            # ID objects only in 2D (i.e. space) -- N.B. IDs are _not_ unique across time (i.e. each time starts at 0 again)
-            neighbours[1, :, :] = 1  # All 8 neighbours, but ignore time
-
-        # Cluster & label binary data
-        # Apply dask-powered ndimage & persist in memory
         if regional_mode:
-            object_id_field, N_objects = label(
-                data_bin,
-                structure=neighbours,
-            )
+            object_id_field, N_objects = label(data_bin, structure=neighbours)
         else:
-            object_id_field, N_objects = label(
-                data_bin,
-                structure=neighbours,
-                wrap_axes=(2,),  # Wrap in x-direction !
-            )
+            object_id_field, N_objects = label(data_bin, structure=neighbours, wrap_axes=(2,))  # Wrap in x-direction !
         results = persist(object_id_field, N_objects)
         object_id_field, N_objects = results
-
         N_objects = N_objects.compute()
 
-        # Convert to DataArray with same coordinates as input
         object_id_field = (
             xr.DataArray(
                 object_id_field,
@@ -168,6 +199,53 @@ def identify_objects(
             .rename("ID_field")
             .astype(np.int32)
         )
+
+    else:
+        # Structured grid, 2D-per-time-slice labelling (no time connectivity).
+        #
+        # The connectivity is purely within each 2D slice, so dask_image.ndmeasure.label's
+        # cross-block adjacency machinery (label_adjacency_graph) is pure waste here -- and its
+        # graph CONSTRUCTION is single-threaded and ~cubic in the number of time-chunks
+        # (e.g. ~30-40 min to merely build the graph for a 9282-day, 372-chunk run, before any
+        # compute). Instead label each 2D slice independently with scipy.ndimage.label (8-conn,
+        # periodic-longitude seam merge except in regional mode) and offset by the running
+        # cumulative object count so IDs are globally unique and monotonically increasing with
+        # time -- matching the old dask_image(wrap_axes=(2,), time-only-2D) semantics. This is
+        # embarrassingly parallel with a tiny task graph (mirrors the unstructured branch).
+        # Structured data is ordered (time, ydim, xdim); xdim is known.
+        non_x_dims = [d for d in data_bin.dims if d != xdim]
+        timedim, ydim = non_x_dims[0], non_x_dims[1]
+
+        def label_slice_2d(binary_2d: NDArray[np.bool_]) -> NDArray[np.int32]:
+            """Label one 2D slice; compact local labels to 1..k (0 = background)."""
+            labels, n_labels = scipy_label(binary_2d, structure=_EIGHT_CONNECTIVITY)
+            if not regional_mode:
+                labels = _merge_lon_seam(labels, n_labels)
+            if labels.max() == 0:
+                return labels.astype(np.int32)
+            # Compact (seam-merge leaves gaps) so per-slice max == object count -> valid offsets.
+            unique = np.unique(labels)
+            remap = np.zeros(int(unique.max()) + 1, dtype=np.int32)
+            remap[unique] = np.arange(len(unique), dtype=np.int32)  # background 0 -> 0
+            return remap[labels]
+
+        local_ids = xr.apply_ufunc(
+            label_slice_2d,
+            data_bin,
+            input_core_dims=[[ydim, xdim]],
+            output_core_dims=[[ydim, xdim]],
+            output_dtypes=[np.int32],
+            vectorize=True,
+            dask="parallelized",
+        )
+
+        # Per-slice object counts -> cumulative offset (slice t gets the sum of all earlier counts).
+        per_slice_counts = local_ids.max(dim=[ydim, xdim])
+        offsets = per_slice_counts.cumsum(timedim).shift({timedim: 1}, fill_value=0)
+        object_id_field = xr.where(local_ids > 0, local_ids + offsets, 0).rename("ID_field").astype(np.int32)
+
+        object_id_field = object_id_field.persist()
+        N_objects = int(object_id_field.max().compute().item())
 
     return object_id_field, None, N_objects
 
