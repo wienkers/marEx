@@ -755,7 +755,10 @@ class tracker:
         # Fill small holes & gaps between objects
         logger.info(f"Filling spatial holes with radius R_fill={self.R_fill}")
         with log_timing(logger, "Spatial hole filling"):
-            data_bin_filled = self.fill_holes(self.data_bin)
+            # Force compute here (persist + wait) so this step's time is attributed to it,
+            # rather than being deferred into the later "Small object filtering" step.
+            data_bin_filled = self.fill_holes(self.data_bin).persist()
+            wait(data_bin_filled)
             del self.data_bin  # Free memory
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
 
@@ -763,6 +766,7 @@ class tracker:
         logger.info(f"Filling temporal gaps with T_fill={self.T_fill}")
         with log_timing(logger, "Temporal gap filling"):
             data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
+            wait(data_bin_filled)  # Force compute so this step's time is attributed correctly
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
         # Remove small objects

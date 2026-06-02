@@ -17,16 +17,63 @@ import numpy as np
 import xarray as xr
 from dask import persist
 from dask_image.ndmorph import binary_closing as binary_closing_dask
-from dask_image.ndmorph import binary_opening as binary_opening_dask
 from numpy.typing import NDArray
-from scipy.ndimage import binary_closing, binary_opening
+from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import label as scipy_label
 
 from ..exceptions import TrackingError
 from ..logging_config import get_logger
-from .objects import calculate_object_properties, identify_objects
+from .objects import identify_objects
 from .overlap import sparse_bool_power
 
 logger = get_logger(__name__)
+
+# 8-connectivity structuring element for per-2D-slice connected-component labelling.
+_EIGHT_CONNECTIVITY = np.ones((3, 3), dtype=int)
+
+
+def _merge_lon_seam(labels: NDArray[np.int32], n_labels: int) -> NDArray[np.int32]:
+    """
+    Union connected-component labels that touch across the periodic-longitude seam.
+
+    ``scipy.ndimage.label`` treats the array as non-periodic, so an object straddling
+    the antimeridian is split into a left-edge (column 0) and right-edge (column -1)
+    component. This re-joins them with full 8-connectivity across the seam (i.e. column 0
+    of row r connects to column -1 of rows r-1, r, r+1), matching the behaviour of
+    ``dask_image.ndmeasure.label(..., wrap_axes=(2,))``. Returns ``labels`` with the
+    relevant components relabelled to a shared root (label values may become non-contiguous;
+    callers using ``np.bincount`` are unaffected).
+    """
+    if n_labels == 0:
+        return labels
+    left = labels[:, 0]
+    right = labels[:, -1]
+    parent = np.arange(n_labels + 1)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(int(a)), find(int(b))
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    # Same row, and the two diagonal off-by-one-row pairings (8-connectivity across the seam).
+    same = (left > 0) & (right > 0)
+    for a, b in zip(left[same], right[same]):
+        union(a, b)
+    diag_down = (left[1:] > 0) & (right[:-1] > 0)
+    for a, b in zip(left[1:][diag_down], right[:-1][diag_down]):
+        union(a, b)
+    diag_up = (left[:-1] > 0) & (right[1:] > 0)
+    for a, b in zip(left[:-1][diag_up], right[1:][diag_up]):
+        union(a, b)
+
+    roots = np.array([find(i) for i in range(n_labels + 1)], dtype=labels.dtype)
+    return roots[labels]
 
 
 def compute_area(
@@ -156,63 +203,46 @@ def fill_holes(
         )
 
     else:
-        # Structured grid using dask-powered morphological operations
-        use_dask_morph = True
-
-        # Generate structuring element (disk-shaped)
-        y, x = np.ogrid[-R_fill : R_fill + 1, -R_fill : R_fill + 1]
-        r = x**2 + y**2
-        diameter = 2 * R_fill
-        se_kernel = r < (R_fill**2) + 1
+        # Structured grid: exact Euclidean-disk closing + opening via distance transforms.
+        #
+        # The previous implementation used dask_image.ndmorph.binary_closing/opening with a
+        # brute-force disk structuring element (O(N * R_fill^2) per pixel) split into a large
+        # per-chunk task graph; profiling showed this morphology dominated tracker preprocessing
+        # (deferred into the "Small object filtering" step). The distance-transform formulation
+        # is O(N) per 2D slice regardless of R_fill, embarrassingly parallel across time, and a
+        # tiny task graph. Padding by 4*R_fill resolves the full closing+opening reach (4*R_fill)
+        # exactly at the periodic-longitude seam -- this also removes a latent under-padding
+        # artifact in the old code, which padded only 2*R_fill.
         mode = "wrap" if not regional_mode else "edge"
 
-        if use_dask_morph:
-            # Skip all operations if R_fill is 0
-            if R_fill == 0:
-                pass  # No morphological operations needed
-            else:
-                # Pad data to avoid edge effects
-                data_bin = data_bin.pad({ydim: diameter, xdim: diameter}, mode=mode)
-                data_coords = data_bin.coords
-                data_dims = data_bin.dims
+        if R_fill == 0:
+            pass  # No morphological operations needed
+        else:
+            r_squared = R_fill * R_fill
+            pad_width = 4 * R_fill
 
-                # Apply morphological operations
-                data_bin = binary_closing_dask(
-                    data_bin.data, structure=se_kernel[np.newaxis, :, :]
-                )  # N.B.: There may be a rearing bug in constructing the dask task graph when we
-                # extract and then re-imbed the dask array into an xarray DataArray
-                data_bin = binary_opening_dask(data_bin, structure=se_kernel[np.newaxis, :, :])
+            def edt_close_open(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.bool_]:
+                """Euclidean-disk closing (fill gaps) then opening (remove specks) on one slice."""
+                padded = np.pad(bitmap_binary, ((pad_width, pad_width), (pad_width, pad_width)), mode=mode).astype(bool)
 
-                # Convert back to xarray.DataArray and trim padding
-                data_bin = xr.DataArray(data_bin, coords=data_coords, dims=data_dims)
-                data_bin = data_bin.isel(
-                    {
-                        ydim: slice(diameter, -diameter),
-                        xdim: slice(diameter, -diameter),
-                    }
-                )
-        else:  # pragma: no cover
+                def dilate(b: NDArray[np.bool_]) -> NDArray[np.bool_]:
+                    # True where the nearest foreground pixel is within disk radius R_fill.
+                    return distance_transform_edt(~b) ** 2 <= r_squared
 
-            def binary_open_close(
-                bitmap_binary: NDArray[np.bool_],
-            ) -> NDArray[np.bool_]:
-                """Apply binary opening and closing in one function."""
-                bitmap_binary_padded = np.pad(
-                    bitmap_binary,
-                    ((diameter, diameter), (diameter, diameter)),
-                    mode=mode,
-                )
-                s1 = binary_closing(bitmap_binary_padded, se_kernel, iterations=1)
-                s2 = binary_opening(s1, se_kernel, iterations=1)
-                unpadded = s2[diameter:-diameter, diameter:-diameter]
-                return unpadded
+                def erode(b: NDArray[np.bool_]) -> NDArray[np.bool_]:
+                    # True where the nearest background pixel is beyond disk radius R_fill.
+                    return distance_transform_edt(b) ** 2 > r_squared
+
+                closed = erode(dilate(padded))
+                opened = dilate(erode(closed))
+                return opened[pad_width:-pad_width, pad_width:-pad_width]
 
             data_bin = xr.apply_ufunc(
-                binary_open_close,
+                edt_close_open,
                 data_bin,
                 input_core_dims=[[ydim, xdim]],
                 output_core_dims=[[ydim, xdim]],
-                output_dtypes=[data_bin.dtype],
+                output_dtypes=[np.bool_],
                 vectorize=True,
                 dask="parallelized",
             )
@@ -363,18 +393,18 @@ def filter_small_objects(
     N_objects_filtered : int
         Number of objects after filtering
     """
-    # Cluster & Label Binary Data: Time-independent in 2D (i.e. no time connectivity!)
-    object_id_field, _, N_objects_unfiltered = identify_objects(
-        data_bin,
-        time_connectivity=False,
-        unstructured_grid=unstructured_grid,
-        mask=mask,
-        neighbours_int=neighbours_int,
-        xdim=xdim,
-        regional_mode=regional_mode,
-    )
-
     if unstructured_grid:
+        # Cluster & Label Binary Data: Time-independent in 2D (i.e. no time connectivity!)
+        object_id_field, _, N_objects_unfiltered = identify_objects(
+            data_bin,
+            time_connectivity=False,
+            unstructured_grid=unstructured_grid,
+            mask=mask,
+            neighbours_int=neighbours_int,
+            xdim=xdim,
+            regional_mode=regional_mode,
+        )
+
         # Get the maximum ID to dimension arrays
         #  Note: identify_objects() starts at ID=0 for every time slice
         max_ID = int(object_id_field.max().compute().item())
@@ -458,28 +488,57 @@ def filter_small_objects(
         object_areas = cluster_sizes  # Store pre-filtered areas
 
     else:
-        # Structured grid approach
+        # Structured grid: per-2D-slice connected-component labelling + bincount areas.
+        #
+        # The previous implementation labelled the whole (time, y, x) field with
+        # dask_image.ndmeasure.label and then ran skimage.regionprops_table per slice.
+        # Profiling showed dask_image.label's global cross-block relabel carries a large
+        # fixed overhead that dominates this step even when there are few objects (the
+        # object-count-dependent regionprops "max-label" cost is incidental here, because
+        # fill_holes already collapses the object count). Labelling each 2D slice
+        # independently with scipy.ndimage.label + np.bincount avoids that overhead, is
+        # embarrassingly parallel, and uses a tiny task graph. Connectivity is 8-connected
+        # in space with periodic-longitude wrap (except in regional mode), matching the old
+        # identify_objects(time_connectivity=False, wrap_axes=(2,)). Areas are pixel counts
+        # (identical to the old regionprops 'area' on a structured grid).
+        area_buffer = 8192  # max objects per 2D slice; overflow is checked below
 
-        # Calculate object properties including area
-        object_props = calculate_object_properties(
-            object_id_field,
-            unstructured_grid=unstructured_grid,
-            lat=lat,
-            lon=lon,
-            cell_area=cell_area,
-            timedim=timedim,
-            regional_mode=regional_mode,
-            ydim=ydim,
-            xdim=xdim,
+        def slice_object_areas(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.int64]:
+            """Per-object pixel areas for one slice, padded to ``area_buffer`` (0 == empty)."""
+            labels, n_labels = scipy_label(bitmap_binary, structure=_EIGHT_CONNECTIVITY)
+            if not regional_mode:
+                labels = _merge_lon_seam(labels, n_labels)
+            counts = np.bincount(labels.ravel())
+            areas = counts[1:][counts[1:] > 0]  # drop background; compact post-merge gaps
+            out = np.zeros(area_buffer, dtype=np.int64)
+            out[: min(len(areas), area_buffer)] = areas[:area_buffer]
+            return out
+
+        padded_areas = xr.apply_ufunc(
+            slice_object_areas,
+            data_bin,
+            input_core_dims=[[ydim, xdim]],
+            output_core_dims=[["object_buffer"]],
+            dask_gufunc_kwargs={"output_sizes": {"object_buffer": area_buffer}},
+            output_dtypes=[np.int64],
+            vectorize=True,
+            dask="parallelized",
         )
-        object_areas, object_ids = object_props.area, object_props.ID
+        padded_areas = np.atleast_2d(padded_areas.compute().values)  # (time, area_buffer)
+        if np.any(padded_areas[:, -1] != 0):  # pragma: no cover
+            raise TrackingError(
+                "Per-slice object-area buffer overflow during small-object filtering",
+                details={"area_buffer": area_buffer},
+                suggestions=["Increase 'area_buffer' in filter_small_objects (structured branch)"],
+            )
+        object_areas_np = padded_areas[padded_areas > 0]
 
-        # Calculate area threshold
-        if len(object_areas) == 0:  # pragma: no cover
+        N_objects_unfiltered = int(object_areas_np.size)
+        if N_objects_unfiltered == 0:  # pragma: no cover
             raise TrackingError(
                 "No objects found for area-based filtering",
                 details={
-                    "objects_count": len(object_areas),
+                    "objects_count": N_objects_unfiltered,
                     "area_filter_quartile": area_filter_quartile,
                     "grid_type": "structured",
                 },
@@ -489,20 +548,36 @@ def filter_small_objects(
                     "Consider lowering the extreme threshold percentile",
                 ],
             )
+
         if use_absolute_filtering:
             area_threshold = area_filter_absolute
         else:
-            area_threshold = np.percentile(object_areas, area_filter_quartile * 100.0)
+            area_threshold = np.percentile(object_areas_np, area_filter_quartile * 100.0)
+        N_objects_filtered = int(np.sum(object_areas_np >= area_threshold))
 
-        # Keep only objects above threshold
-        object_ids_keep = xr.where(object_areas >= area_threshold, object_ids, -1)
-        object_ids_keep[0] = -1  # Don't keep ID=0
+        keep_threshold = area_threshold
 
-        # Create filtered binary data
-        data_bin_filtered = object_id_field.isin(object_ids_keep)
+        def slice_filter(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.bool_]:
+            """Keep only objects whose pixel area is >= ``keep_threshold`` on one slice."""
+            labels, n_labels = scipy_label(bitmap_binary, structure=_EIGHT_CONNECTIVITY)
+            if not regional_mode:
+                labels = _merge_lon_seam(labels, n_labels)
+            counts = np.bincount(labels.ravel())
+            keep = counts >= keep_threshold
+            keep[0] = False  # Don't keep background (label 0)
+            return keep[labels]
 
-        # Count objects after filtering
-        N_objects_filtered = int(object_ids_keep.where(object_ids_keep > 0).count().item())
+        data_bin_filtered = xr.apply_ufunc(
+            slice_filter,
+            data_bin,
+            input_core_dims=[[ydim, xdim]],
+            output_core_dims=[[ydim, xdim]],
+            output_dtypes=[np.bool_],
+            vectorize=True,
+            dask="parallelized",
+        )
+
+        object_areas = xr.DataArray(object_areas_np, dims=["ID"])
 
     return (
         data_bin_filtered,
