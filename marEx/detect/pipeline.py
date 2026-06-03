@@ -608,9 +608,14 @@ def preprocess_data(
         ds["mask"] = ds.mask.compute()
         ds["dat_anomaly"] = fix_dask_tuple_array(ds.dat_anomaly)
 
-        # Patch for same dask-Zarr bug:
-        ds[coordinates["x"]] = ds[coordinates["x"]].compute()
-        ds[coordinates["y"]] = ds[coordinates["y"]].compute()
+        # Patch for same dask-Zarr bug: materialise *any* remaining Dask-backed coordinates.
+        # Auxiliary (non-index) coordinates (e.g. gridded `x`/`y` or unstructured `lon`/`lat`)
+        # become Dask-backed via `.chunk()` and otherwise retain tuple chunk references that
+        # break distributed serialisation on save. This is seen as an
+        # "AttributeError: 'tuple' object has no attribute 'size'" from dask.array.store.
+        for coord_name in list(ds.coords):
+            if is_dask_collection(ds[coord_name].data):
+                ds[coord_name] = ds[coord_name].compute()
         if "neighbours" in ds.data_vars:
             ds["neighbours"] = ds.neighbours.compute()
         if "cell_areas" in ds.data_vars:
