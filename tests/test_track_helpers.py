@@ -363,6 +363,64 @@ class TestPartitionNNValidation:
         # Should still assign to the only available parent (fallback to centroid)
         assert result[0] == 100
 
+    def test_partition_nn_grid_matches_legacy_gridsearch(self):
+        """The EDT partition_nn_grid is physically equivalent to the legacy grid search.
+
+        Both assign each child pixel to the parent owning the nearest pixel (within
+        max_distance, else nearest centroid), so over a randomized battery -- including
+        seam-straddling cases -- the assignments must agree everywhere except a small set
+        of (near-)equidistant boundary pixels, where scipy's feature-transform tie-break
+        differs from the grid search's first-parent-in-index-order. A large disagreement
+        would indicate a real bug, not a tie.
+        """
+        from marEx.track.partitioning import _partition_nn_grid_gridsearch as legacy
+
+        rng = np.random.default_rng(2024)
+        ny, nx = 50, 100
+
+        def make_blob(cy, cx, r):
+            yy, xx = np.ogrid[:ny, :nx]
+            dx = np.abs(xx - cx)
+            dx = np.minimum(dx, nx - dx)  # wrapped longitude distance
+            return ((yy - cy) ** 2 + dx**2) <= r * r
+
+        total = 0
+        diff = 0
+        trials = 0
+        for trial in range(60):
+            n_parents = int(rng.integers(2, 6))
+            # Half the trials place the child near the antimeridian seam.
+            seam = trial % 2 == 0
+            base_x = 0 if seam else int(rng.integers(20, 80))
+            centres, parent_masks = [], []
+            for _ in range(n_parents):
+                cy = int(rng.integers(8, ny - 8))
+                cx = int((base_x + rng.integers(-12, 13)) % nx)
+                centres.append((cy, cx))
+                parent_masks.append(make_blob(cy, cx, int(rng.integers(2, 5))))
+            parent_masks = np.array(parent_masks)
+            if not parent_masks.any(axis=(1, 2)).all():
+                continue  # skip trials with an empty parent (covered elsewhere)
+            parent_centroids = np.array([[float(c[0]), float(c[1])] for c in centres])
+            ccy = int(np.mean([c[0] for c in centres]))
+            child_mask = make_blob(ccy, base_x, int(rng.integers(8, 14)))
+            if not child_mask.any():
+                continue
+            child_ids = np.arange(100, 100 + n_parents, dtype=np.int32)
+            md = 60
+            new_edt = track.partition_nn_grid(
+                child_mask, parent_masks, child_ids, parent_centroids, Nx=nx, max_distance=md, wrap=True
+            )
+            new_leg = legacy(child_mask, parent_masks, child_ids, parent_centroids, nx, md, True)
+            assert new_edt.shape == new_leg.shape
+            total += new_edt.size
+            diff += int(np.sum(new_edt != new_leg))
+            trials += 1
+
+        assert trials >= 20, "Too few valid trials generated"
+        frac = diff / max(total, 1)
+        assert frac < 0.02, f"EDT vs grid-search disagreement {frac:.3%} exceeds 2% (only equidistant ties expected)"
+
 
 class TestDistanceCalculationValidation:
     """Test validation of distance calculation edge cases."""

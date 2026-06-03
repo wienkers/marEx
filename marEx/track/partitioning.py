@@ -12,6 +12,7 @@ from typing import Tuple
 import numpy as np
 from numba import jit, prange
 from numpy.typing import NDArray
+from scipy.ndimage import distance_transform_edt
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
@@ -161,7 +162,7 @@ def wrapped_euclidian_distance_points(
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def partition_nn_grid(
+def _partition_nn_grid_gridsearch(
     child_mask: NDArray[np.bool_],
     parent_masks: NDArray[np.bool_],
     child_ids: NDArray[np.int32],
@@ -171,7 +172,10 @@ def partition_nn_grid(
     wrap: bool = True,
 ) -> NDArray[np.int32]:  # pragma: no cover
     """
-    Partition a child object based on nearest parent object points.
+    Legacy grid-search nearest-parent partitioner (numba). Retained for A/B
+    equivalence testing against the EDT ``partition_nn_grid``; not used in production
+    (its O(n_child * n_parents * neighbourhood) cost blows up as ``max_distance`` grows
+    with parent size). See ``partition_nn_grid`` for the current implementation.
 
     This implementation uses spatial indexing and highly-threaded processing
     for efficient distance calculations. The algorithm assigns each point
@@ -302,6 +306,121 @@ def partition_nn_grid(
     new_labels = child_ids[parent_assignments]
 
     return new_labels
+
+
+def partition_nn_grid(
+    child_mask: NDArray[np.bool_],
+    parent_masks: NDArray[np.bool_],
+    child_ids: NDArray[np.int32],
+    parent_centroids: NDArray[np.float64],
+    Nx: int,
+    max_distance: int = 20,
+    wrap: bool = True,
+) -> NDArray[np.int32]:
+    """
+    Partition a child object among its parents by nearest parent *pixel*.
+
+    Distance-transform (feature-transform) implementation: each child pixel is assigned
+    to the parent that owns the nearest pixel, provided that pixel is within
+    ``max_distance`` (wrapped-Euclidean, periodic longitude when ``wrap``); child pixels
+    with no parent pixel within ``max_distance`` fall back to the nearest parent
+    *centroid*. Semantically equivalent to the legacy grid search
+    (``_partition_nn_grid_gridsearch``) but O(bounding-box area) regardless of
+    ``max_distance`` or the number of parents -- via a single
+    ``scipy.ndimage.distance_transform_edt(..., return_indices=True)`` over a sub-array.
+
+    Parameters
+    ----------
+    child_mask : np.ndarray
+        (ny, nx) boolean mask of the merged child object.
+    parent_masks : np.ndarray
+        (n_parents, ny, nx) boolean masks for each parent object at t-1.
+    child_ids : np.ndarray
+        (n_parents,) IDs to assign to each partition.
+    parent_centroids : np.ndarray
+        (n_parents, 2) parent (y, x) centroids (for the fallback).
+    Nx : int
+        Size of the x dimension (for periodic-longitude distances).
+    max_distance : int, default 20
+        Maximum nearest-parent-pixel search distance, in cells.
+    wrap : bool, default True
+        Apply periodic boundary conditions in the x (longitude) dimension.
+
+    Returns
+    -------
+    new_labels : np.ndarray
+        (n_child_pixels,) assigned ``child_ids``, ordered by ``np.nonzero(child_mask)``.
+
+    Notes
+    -----
+    Not bit-identical to the grid search at exactly-equidistant ties (``scipy``'s
+    feature-transform tie-break differs from the grid search's first-parent-in-index
+    order); it is physically equivalent (nearest parent = parent owning the nearest pixel).
+    """
+    ny, nx = child_mask.shape
+    y_idx, x_idx = np.nonzero(child_mask)
+    n_child = y_idx.size
+    if n_child == 0:
+        return np.empty(0, dtype=np.int32)
+
+    n_parents = len(parent_masks)
+    md = int(max_distance)
+    parent_assignments = np.zeros(n_child, dtype=np.int32)
+    assigned = np.zeros(n_child, dtype=bool)
+
+    # Union of all parent pixels.
+    any_parent = np.zeros((ny, nx), dtype=bool)
+    for p in range(n_parents):
+        any_parent |= parent_masks[p]
+
+    if any_parent.any():
+        # Restrict to a y bounding box (rows of child + parents) expanded by max_distance.
+        # Latitude is non-periodic, so a max_distance margin captures every parent that could
+        # be the nearest for any child pixel.
+        occupied = child_mask | any_parent
+        occ_rows = np.nonzero(occupied.any(axis=1))[0]
+        y0 = max(int(occ_rows[0]) - md, 0)
+        y1 = min(int(occ_rows[-1]) + md + 1, ny)
+        occ_cols = np.nonzero(occupied.any(axis=0))[0]
+        cmin, cmax = int(occ_cols[0]), int(occ_cols[-1])
+
+        # Wrap only matters when the object lies within max_distance of BOTH antimeridian
+        # edges (so a wrapped path could be the nearest). Otherwise -- the common case, and
+        # all regional/no-wrap cases -- a tight x bounding box + max_distance margin is exact
+        # and far cheaper than padding the full longitude width.
+        if wrap and cmin < md and cmax >= nx - md:
+            pad = min(md, nx // 2 + 1)
+            parent_label = np.zeros((y1 - y0, nx), dtype=np.int32)
+            for p in range(n_parents):
+                parent_label[parent_masks[p][y0:y1, :]] = p + 1
+            parent_label = np.pad(parent_label, ((0, 0), (pad, pad)), mode="wrap")
+            child_col = x_idx + pad
+        else:
+            x0 = max(cmin - md, 0)
+            x1 = min(cmax + md + 1, nx)
+            parent_label = np.zeros((y1 - y0, x1 - x0), dtype=np.int32)
+            for p in range(n_parents):
+                parent_label[parent_masks[p][y0:y1, x0:x1]] = p + 1
+            child_col = x_idx - x0
+
+        child_row = y_idx - y0
+        if parent_label.any():
+            # For every pixel: distance to, and index of, the nearest parent pixel.
+            dist, (iy, ix) = distance_transform_edt(parent_label == 0, return_distances=True, return_indices=True)
+            nearest_parent = parent_label[iy, ix] - 1  # parent index per sub-array pixel
+            child_dist = dist[child_row, child_col]
+            within = child_dist <= md
+            parent_assignments[within] = nearest_parent[child_row, child_col][within]
+            assigned[within] = True
+
+    # Centroid fall-back for child pixels with no parent pixel within max_distance
+    # (reuses the same wrapped distance-to-centroid kernel as the nn_partitioning=False path).
+    if not assigned.all():
+        centroid_dist = wrapped_euclidian_distance_mask_parallel(child_mask, parent_centroids, Nx, wrap)
+        fallback = np.argmin(centroid_dist, axis=1).astype(np.int32)
+        parent_assignments[~assigned] = fallback[~assigned]
+
+    return child_ids[parent_assignments].astype(np.int32)
 
 
 @jit(nopython=True, fastmath=True)

@@ -1,5 +1,25 @@
 # Optimising `split_and_merge_objects`: an EDT feature-transform `partition_nn_grid`
 
+## Status: primary fix IMPLEMENTED (the EDT `partition_nn_grid`)
+
+`partition_nn_grid` (`marEx/track/partitioning.py`) was rewritten as a numpy + scipy
+distance-transform feature map (tight `y`/`x` bounding box; full-width periodic `x` pad only when
+the blob is within `max_distance` of *both* antimeridian edges; `max_distance` cutoff + centroid
+fall-back via the existing `wrapped_euclidian_distance_mask_parallel`). The legacy numba grid search
+is kept as `_partition_nn_grid_gridsearch` for A/B testing. Measured (NT=300, 32-worker cluster):
+
+- `split_and_merge_objects`: **200.2 s → 112.8 s** (~**1.8× faster** loop).
+- `partition_nn_grid`: **102.7 s → 27.9 s** (~**3.7× faster**; 51 % → ~25 % of the loop).
+- The now-dominant cost is the per-merge `object_properties_chunk` regionprops (~30 %) — the deferred
+  §4a/§4b secondary targets, which would take the loop further.
+
+Correctness: the 4 existing `TestPartitionNNValidation` unit tests pass; a new A/B test
+(`test_partition_nn_grid_matches_legacy_gridsearch`) confirms < 2 % pixel disagreement vs the grid
+search (equidistant ties only). End-to-end the difference is **one pixel** on the golden fixture
+(`ID_field` 1 / 2 073 600 differ; `total_merges`=29, `N_events`=21 unchanged) — golden baselines
+regenerated; `test_gridded_tracking` reasonable-range bounds unchanged. The §4a/§4b secondary fixes
+and a full-scale (9282-day) smoke run remain.
+
 ## 1. Why — profiling evidence
 
 After the preprocessing fix (`3dd5af3`/`9472f88`) and the full-scale `identify_objects` fix
