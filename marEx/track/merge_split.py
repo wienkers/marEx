@@ -847,19 +847,29 @@ def split_and_merge_objects(
                     data_t = data_t.where(~child_mask_2d, temp)
                     chunk_data[{timedim: relative_t}] = data_t
 
-                    # Update the Properties of the N Children Objects
-                    new_child_props = _objects.calculate_object_properties(
-                        data_t,
-                        unstructured_grid,
-                        lat,
-                        lon,
-                        cell_area,
-                        timedim,
-                        regional_mode,
-                        ydim,
-                        xdim,
-                        properties=["area", "centroid"],
-                    )
+                    # Update the Properties of the N Children Objects.
+                    # The new child IDs exist only within this partitioned child blob, so their
+                    # area+centroid can be computed directly from the partition pixels in hand
+                    # (child_mask_2d + new_labels) instead of a full-slice regionprops_table per
+                    # merge. (Structured grids; the unstructured path keeps the full-slice call.)
+                    if unstructured_grid:
+                        new_child_props = _objects.calculate_object_properties(
+                            data_t,
+                            unstructured_grid,
+                            lat,
+                            lon,
+                            cell_area,
+                            timedim,
+                            regional_mode,
+                            ydim,
+                            xdim,
+                            properties=["area", "centroid"],
+                        )
+                    else:
+                        child_y_idx, child_x_idx = np.nonzero(child_mask_2d)
+                        new_child_props = _objects.calculate_partitioned_child_properties(
+                            child_y_idx, child_x_idx, new_labels, Nx, regional_mode
+                        )
 
                     # Update the object_props DataArray:  (but first, check if the original children still exists)
                     if child_id in new_child_props.ID:

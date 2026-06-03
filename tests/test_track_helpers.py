@@ -6,8 +6,10 @@ Focuses on testing individual function behaviour rather than full pipeline integ
 """
 
 import numpy as np
+import xarray as xr
 
 import marEx.track as track
+from marEx.track.objects import calculate_object_properties, calculate_partitioned_child_properties
 
 
 class TestWrappedEuclidianParallel:
@@ -469,3 +471,102 @@ class TestDistanceCalculationValidation:
         # Point at (0, 4) should be distance 4 from (0, 0) (not wrapped)
         dist = track.wrapped_euclidian_distance_points(0, 4, 0, 0, nx=10, half_nx=5.0, wrap=True)
         assert np.isclose(dist, 4.0, atol=1e-10)
+
+
+class TestPartitionedChildProperties:
+    """Test calculate_partitioned_child_properties against the full-slice regionprops oracle.
+
+    The helper must reproduce calculate_object_properties(..., properties=["area","centroid"]) on a
+    structured grid (unweighted pixel-count area + unweighted pixel-coordinate centroid with the same
+    antimeridian-wrap convention), but computed only from a label set's own pixels rather than a
+    full-slice regionprops_table per merge.
+    """
+
+    @staticmethod
+    def _oracle(ids):
+        """Full-slice structured calculate_object_properties for a 2D label array."""
+        field = xr.DataArray(ids, dims=["lat", "lon"])
+        ds = calculate_object_properties(
+            field,
+            unstructured_grid=False,
+            lat=None,
+            lon=None,
+            cell_area=None,
+            timedim="time",
+            regional_mode=False,
+            ydim="lat",
+            xdim="lon",
+            properties=["area", "centroid"],
+        )
+        return ds.sortby("ID")
+
+    @staticmethod
+    def _helper(ids, regional_mode=False):
+        y_idx, x_idx = np.nonzero(ids)
+        new_labels = ids[y_idx, x_idx]
+        ds = calculate_partitioned_child_properties(y_idx, x_idx, new_labels, Nx=ids.shape[1], regional_mode=regional_mode)
+        return ds.sortby("ID")
+
+    def _assert_matches_oracle(self, ids):
+        oracle = self._oracle(ids)
+        helper = self._helper(ids)
+        # Same set of IDs
+        np.testing.assert_array_equal(helper.ID.values, oracle.ID.values)
+        # Area: exact (pixel count)
+        np.testing.assert_array_equal(helper.area.values.astype(np.int64), oracle.area.values.astype(np.int64))
+        # Centroid: identical to floating-point tolerance (summation order)
+        max_diff = float(np.max(np.abs(helper.centroid.values - oracle.centroid.values)))
+        assert max_diff < 1e-6, f"centroid diff {max_diff}"
+
+    def test_simple_blobs(self):
+        """Interior blobs away from any edge."""
+        ids = np.zeros((30, 60), dtype=np.int32)
+        ids[5:10, 5:12] = 7
+        ids[20:25, 30:40] = 13
+        ids[15:18, 45:50] = 21
+        self._assert_matches_oracle(ids)
+
+    def test_edge_touching_blobs(self):
+        """Blobs touching only one x-edge must NOT trigger wrap adjustment."""
+        ids = np.zeros((30, 60), dtype=np.int32)
+        ids[5:10, 0:8] = 3  # left edge only
+        ids[20:25, 52:60] = 9  # right edge only
+        self._assert_matches_oracle(ids)
+
+    def test_antimeridian_straddling_blob(self):
+        """A blob with pixels near BOTH x-edges must wrap-adjust the x-centroid like the oracle."""
+        ids = np.zeros((20, 200), dtype=np.int32)
+        # Pixels in the first and last few columns (within the 100-col edge band) -> straddle
+        ids[8:12, 0:5] = 4
+        ids[8:12, 196:200] = 4
+        # An ordinary interior blob alongside it
+        ids[2:6, 90:100] = 8
+        self._assert_matches_oracle(ids)
+
+    def test_regional_mode_no_wrap(self):
+        """regional_mode=True: raw means, no antimeridian adjustment."""
+        ids = np.zeros((20, 200), dtype=np.int32)
+        ids[8:12, 0:5] = 4
+        ids[8:12, 196:200] = 4
+        oracle = self._oracle(ids)  # regional_mode handled below
+        # Oracle in regional mode:
+        field = xr.DataArray(ids, dims=["lat", "lon"])
+        oracle_reg = calculate_object_properties(
+            field,
+            unstructured_grid=False,
+            lat=None,
+            lon=None,
+            cell_area=None,
+            timedim="time",
+            regional_mode=True,
+            ydim="lat",
+            xdim="lon",
+            properties=["area", "centroid"],
+        ).sortby("ID")
+        helper_reg = self._helper(ids, regional_mode=True).sortby("ID")
+        np.testing.assert_array_equal(helper_reg.ID.values, oracle_reg.ID.values)
+        np.testing.assert_array_equal(helper_reg.area.values.astype(np.int64), oracle_reg.area.values.astype(np.int64))
+        max_diff = float(np.max(np.abs(helper_reg.centroid.values - oracle_reg.centroid.values)))
+        assert max_diff < 1e-6, f"regional centroid diff {max_diff}"
+        # Sanity: the straddling blob's raw x-mean is mid-grid (~100), not wrap-adjusted
+        assert abs(float(oracle.centroid.sel(ID=4).values[1]) - float(oracle_reg.centroid.sel(ID=4).values[1])) > 50

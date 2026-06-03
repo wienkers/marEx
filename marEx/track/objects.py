@@ -310,6 +310,72 @@ def calculate_centroid(
     return (y_centroid, x_centroid)
 
 
+def calculate_partitioned_child_properties(
+    y_idx: NDArray[np.intp],
+    x_idx: NDArray[np.intp],
+    new_labels: NDArray[np.int32],
+    Nx: int,
+    regional_mode: bool,
+) -> xr.Dataset:
+    """Area + wrap-aware centroid for each label in ``new_labels``, from the child blob's pixels.
+
+    Reproduces ``calculate_object_properties(..., properties=["area", "centroid"])`` on a structured
+    grid -- unweighted pixel-count area and unweighted pixel-coordinate centroid, with the same
+    antimeridian-wrap convention as :func:`calculate_centroid` -- but computed only from the supplied
+    pixels (global ``y_idx``/``x_idx`` coordinates labelled by ``new_labels``) rather than a
+    full-slice ``regionprops_table``. Used per merge in ``split_and_merge_objects`` where the freshly
+    minted child IDs exist only within the partitioned child blob, so their full-slice properties
+    equal these local ones.
+
+    Parameters
+    ----------
+    y_idx, x_idx : numpy.ndarray
+        Global pixel coordinates (rows, columns) of the partitioned child blob.
+    new_labels : numpy.ndarray
+        Object ID assigned to each pixel (same length and order as ``y_idx``/``x_idx``).
+    Nx : int
+        Global number of longitude points (slice width); used for the periodic x-wrap.
+    regional_mode : bool
+        If True, skip the antimeridian adjustment (raw means), matching :func:`calculate_centroid`.
+
+    Returns
+    -------
+    xarray.Dataset
+        ``area`` (dim ``ID``) and ``centroid`` (dims ``component``, ``ID``); ``ID`` is the index
+        coordinate. Matches the structure returned by :func:`calculate_object_properties`.
+    """
+    labels = np.unique(new_labels)
+    labels = labels[labels > 0]  # regionprops ignores background (0)
+    n = labels.size
+    areas = np.empty(n, dtype=np.int64)
+    cy = np.empty(n, dtype=np.float64)
+    cx = np.empty(n, dtype=np.float64)
+    half_Nx = Nx // 2
+    for i, lab in enumerate(labels):
+        sel = new_labels == lab
+        ys = y_idx[sel]
+        xs = x_idx[sel]
+        areas[i] = ys.size
+        cy[i] = ys.mean()
+        # Match calculate_centroid: only objects near BOTH x-edges get the wrap adjustment.
+        if not regional_mode and np.any(xs < 100) and np.any(xs >= Nx - 100):
+            xs_adj = xs.astype(np.float64)
+            xs_adj[xs > half_Nx] -= Nx
+            x_centroid = xs_adj.mean()
+            if x_centroid < 0:  # keep the centroid in [0, Nx)
+                x_centroid += Nx
+            cx[i] = x_centroid
+        else:
+            cx[i] = xs.mean()
+    return xr.Dataset(
+        {
+            "area": ("ID", areas),
+            "centroid": (("component", "ID"), np.stack([cy, cx])),
+        },
+        coords={"ID": labels.astype(np.int32)},
+    )
+
+
 def calculate_object_properties(
     object_id_field: xr.DataArray,
     unstructured_grid: bool,
