@@ -28,7 +28,7 @@ dynamic = ["version"]
 dependencies = [
     "numpy",
     "xarray[complete]",
-    "dask[complete]==2025.3.0",
+    "dask[complete]>=2025.9",
     "netcdf4",
     "scipy",
     "scikit-image",
