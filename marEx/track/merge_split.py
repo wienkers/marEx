@@ -25,6 +25,7 @@ import gc
 import os
 from typing import Any, Dict, Optional, Set, Tuple
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 from dask import persist
@@ -96,8 +97,12 @@ def cluster_rename_objects_and_props(
     else:
         overlap_ids = np.array([], dtype=np.int32)  # pragma: no cover
 
-    # Get unique IDs from object_id_field
-    field_ids = np.unique(object_id_field_unique.compute().values)
+    # Get unique IDs from object_id_field.
+    # Use dask.array.unique (distributed tree-reduction) rather than
+    # np.unique(object_id_field_unique.compute().values): the latter materialises the entire
+    # global ID field (e.g. ~36 GiB at 9282x720x1440) onto a single worker -> MemoryError at scale.
+    # da.unique reduces per-block and returns only the small array of unique IDs (bit-identical).
+    field_ids = da.unique(object_id_field_unique.data).compute()
     field_ids = field_ids[field_ids > 0]  # Remove 0 (background)
 
     # Combine and get all valid IDs
