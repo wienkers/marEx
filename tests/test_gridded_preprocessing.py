@@ -846,3 +846,61 @@ class TestGriddedPreprocessing:
                 dimensions=self.dimensions,
                 dask_chunks=self.dask_chunks,
             )
+
+    def test_auxiliary_coords_are_materialised(self, tmp_path):
+        """Regression: auxiliary (non-index) coordinates must not remain Dask-backed.
+
+        Datasets often carry auxiliary spatial coordinates (e.g. integer grid
+        indices ``x``/``y`` alongside ``lon``/``lat``). ``.chunk()`` turns these
+        into Dask arrays, and prior to the fix they survived ``preprocess_data``
+        un-materialised. Their lazy graphs retain tuple chunk references that
+        raise ``AttributeError: 'tuple' object has no attribute 'size'`` when the
+        result is written under a distributed scheduler (e.g. ``to_netcdf`` on a
+        ``LocalCluster``). ``preprocess_data`` must therefore compute every
+        remaining Dask-backed coordinate. This invariant is scheduler- and
+        Dask-version-independent, so it is checked directly here.
+        """
+        import dask
+        import pandas as pd
+
+        times = pd.date_range("2000-01-01", "2002-12-31", freq="D")
+        nlat, nlon = 4, 4
+        da = xr.DataArray(
+            np.random.default_rng(7).standard_normal((len(times), nlat, nlon)).astype(np.float32),
+            dims=["time", "lat", "lon"],
+            coords={
+                "time": times,
+                "lat": np.arange(nlat, dtype=np.float32),
+                "lon": np.arange(nlon, dtype=np.float32),
+                # Auxiliary, non-index coordinates that become Dask-backed via .chunk()
+                "x": ("lon", np.arange(nlon, dtype=np.int64)),
+                "y": ("lat", np.arange(nlat, dtype=np.int64)),
+            },
+        ).chunk({"time": -1})
+
+        # Sanity check: the aux coords are genuinely Dask-backed on the input
+        assert dask.base.is_dask_collection(da.coords["x"].data)
+        assert dask.base.is_dask_collection(da.coords["y"].data)
+
+        result = marEx.preprocess_data(
+            da,
+            method_anomaly="fixed_baseline",
+            method_extreme="global_extreme",
+            threshold_percentile=95,
+            dimensions={"time": "time", "x": "lon", "y": "lat"},
+            dask_chunks={"time": 25},
+        )
+
+        # No coordinate in the output may remain Dask-backed (the actual fix)
+        dask_coords = [name for name in result.coords if dask.base.is_dask_collection(result[name].data)]
+        assert dask_coords == [], f"Output coordinates still Dask-backed: {dask_coords}"
+
+        # The aux coords must still be present and carry the right values
+        assert "x" in result.coords and "y" in result.coords
+        np.testing.assert_array_equal(result["x"].values, np.arange(nlon, dtype=np.int64))
+        np.testing.assert_array_equal(result["y"].values, np.arange(nlat, dtype=np.int64))
+
+        # End-to-end: the result must be writable to NetCDF
+        out_path = tmp_path / "aux_coords_roundtrip.nc"
+        result.to_netcdf(out_path)
+        assert out_path.exists()
