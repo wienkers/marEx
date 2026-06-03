@@ -9,7 +9,7 @@ import numpy as np
 import xarray as xr
 
 import marEx.track as track
-from marEx.track.objects import calculate_object_properties, calculate_partitioned_child_properties
+from marEx.track.objects import ObjectPropsStore, calculate_object_properties, calculate_partitioned_child_properties
 
 
 class TestWrappedEuclidianParallel:
@@ -570,3 +570,54 @@ class TestPartitionedChildProperties:
         assert max_diff < 1e-6, f"regional centroid diff {max_diff}"
         # Sanity: the straddling blob's raw x-mean is mid-grid (~100), not wrap-adjusted
         assert abs(float(oracle.centroid.sel(ID=4).values[1]) - float(oracle_reg.centroid.sel(ID=4).values[1])) > 50
+
+
+class TestObjectPropsStore:
+    """Test the O(1) ObjectPropsStore that replaces the in-loop xarray object_props Dataset."""
+
+    @staticmethod
+    def _dataset(ids, areas, cys, cxs):
+        return xr.Dataset(
+            {
+                "area": ("ID", np.array(areas)),
+                "centroid": (("component", "ID"), np.array([cys, cxs], dtype=np.float64)),
+            },
+            coords={"ID": np.array(ids, dtype=np.int32)},
+        )
+
+    def test_roundtrip_dataset(self):
+        """from_dataset -> to_dataset preserves IDs (sorted), areas, centroids."""
+        ds = self._dataset([5, 2, 9], [100, 50, 7], [1.0, 2.0, 3.0], [10.0, 20.0, 30.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        out = store.to_dataset()
+        np.testing.assert_array_equal(out.ID.values, np.array([2, 5, 9], dtype=np.int32))
+        # Aligned by ID, values must match the input
+        ds_sorted = ds.sortby("ID")
+        np.testing.assert_array_equal(out.area.values.astype(np.int64), ds_sorted.area.values.astype(np.int64))
+        np.testing.assert_allclose(out.centroid.values, ds_sorted.centroid.values)
+
+    def test_lookups_match_sel(self):
+        """areas()/centroids()/centroid() match xarray .sel(ID=...) semantics (order-preserving)."""
+        ds = self._dataset([5, 2, 9], [100, 50, 7], [1.0, 2.0, 3.0], [10.0, 20.0, 30.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        ids = np.array([9, 5])
+        np.testing.assert_array_equal(store.areas(ids), ds["area"].sel(ID=ids).values)
+        # centroids() must equal object_props.sel(ID=ids).centroid.values.T  (shape (k, 2), [:,0]=y)
+        np.testing.assert_allclose(store.centroids(ids), ds["centroid"].sel(ID=ids).values.T)
+        np.testing.assert_allclose(store.centroid(2), ds["centroid"].sel(ID=2).values)
+        assert store.area(5) == 100
+        assert store.max_id() == 9
+        assert 2 in store and 999 not in store
+
+    def test_set_drop_add(self):
+        """set updates/inserts, drop removes; max_id and membership track correctly."""
+        ds = self._dataset([1, 2], [10, 20], [0.0, 0.0], [0.0, 0.0])
+        store = ObjectPropsStore.from_dataset(ds)
+        store.set(2, 99, 5.0, 6.0)  # update existing
+        assert store.area(2) == 99
+        np.testing.assert_allclose(store.centroid(2), [5.0, 6.0])
+        store.set(50, 7, 1.0, 2.0)  # insert new
+        assert 50 in store and store.max_id() == 50
+        store.drop(1)  # delete
+        assert 1 not in store
+        np.testing.assert_array_equal(store.to_dataset().ID.values, np.array([2, 50], dtype=np.int32))

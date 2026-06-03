@@ -619,6 +619,12 @@ def split_and_merge_objects(
     tuple
         (object_id_field, object_props, overlap_objects_list, merge_events)
     """
+    # Replace the ID-indexed object_props Dataset with an O(1) store for the per-timestep loop.
+    # The xarray .sel/.loc/.drop_sel/concat that previously mutated object_props per merge cost
+    # O(current size), so they grew O(N^2) as objects accumulated. The store makes them O(1); we
+    # convert back to a Dataset at the function boundary for cluster_rename_objects_and_props.
+    object_props = _objects.ObjectPropsStore.from_dataset(object_props)
+
     # Find overlapping objects
     overlap_objects_list = _overlap.find_overlapping_objects(
         object_id_field_unique,
@@ -638,7 +644,7 @@ def split_and_merge_objects(
     merge_child_ids = []  # Resulting child ID
     merge_parent_ids = []  # List of parent IDs that merged
     merge_areas = []  # Areas of overlap
-    next_new_id = int(object_props.ID.max().item()) + 1  # Start new IDs after highest existing ID
+    next_new_id = object_props.max_id() + 1  # Start new IDs after highest existing ID
 
     Nx = object_id_field_unique[xdim].size
     object_id_field_unique = object_id_field_unique.persist()
@@ -766,7 +772,7 @@ def split_and_merge_objects(
 
                     # Relabel the Original Child Object ID Field to account for the New ID:
                     # Get parent centroids for partitioning
-                    parent_centroids = object_props.sel(ID=parent_ids).centroid.values.T
+                    parent_centroids = object_props.centroids(parent_ids)
 
                     # Partition the child object based on parent associations
                     if nn_partitioning:
@@ -779,7 +785,7 @@ def split_and_merge_objects(
                                 parent_masks[idx] = (data_t_minus_1 == parent_id).values
 
                             # Calculate maximum search distance
-                            max_area = np.max(object_props.sel(ID=parent_ids).area.values) / mean_cell_area
+                            max_area = np.max(object_props.areas(parent_ids)) / mean_cell_area
                             max_distance = int(np.sqrt(max_area) * 2.0)
 
                             # Use optimised unstructured partitioning
@@ -807,7 +813,7 @@ def split_and_merge_objects(
                                 parent_masks[idx] = (data_t_minus_1 == parent_id).values
 
                             # Calculate maximum search distance
-                            max_area = np.max(object_props.sel(ID=parent_ids).area.values)
+                            max_area = np.max(object_props.areas(parent_ids))
                             max_distance = int(np.sqrt(max_area) * 3.0)  # Use 3x the max blob radius
 
                             # Use optimised structured grid partitioning
@@ -871,23 +877,21 @@ def split_and_merge_objects(
                             child_y_idx, child_x_idx, new_labels, Nx, regional_mode
                         )
 
-                    # Update the object_props DataArray:  (but first, check if the original children still exists)
+                    # Update the object_props store: (but first, check if the original child still exists)
                     if child_id in new_child_props.ID:
                         # Update existing entry
-                        object_props.loc[{"ID": child_id}] = new_child_props.sel(ID=child_id)
+                        cp = new_child_props.sel(ID=child_id)
+                        object_props.set(child_id, cp["area"].values.item(), cp["centroid"].values[0], cp["centroid"].values[1])
                     else:
                         # Delete child_id: The object has split/morphed such that it doesn't get a partition of this child...
-                        object_props = object_props.drop_sel(
-                            ID=child_id
-                        )  # N.B.: This means that the IDs are no longer continuous...
+                        object_props.drop(child_id)  # N.B.: This means that the IDs are no longer continuous...
                         logger.info(f"Deleted child_id {child_id} because parents have split/morphed")
 
                     # Add the properties for the N-1 other new child ID
                     new_object_ids_still = new_child_props.ID.where(new_child_props.ID.isin(new_object_id), drop=True).ID
-                    object_props = xr.concat(
-                        [object_props, new_child_props.sel(ID=new_object_ids_still)],
-                        dim="ID",
-                    )
+                    for new_id in new_object_ids_still.values:
+                        cp = new_child_props.sel(ID=new_id)
+                        object_props.set(int(new_id), cp["area"].values.item(), cp["centroid"].values[0], cp["centroid"].values[1])
 
                     missing_ids = set(new_object_id) - set(new_object_ids_still.values)
                     if len(missing_ids) > 0:
@@ -996,9 +1000,9 @@ def split_and_merge_objects(
 
                 # Get child object properties if available
                 try:
-                    if child_id in object_props.ID.values:
-                        child_area = object_props.sel(ID=child_id).area.values.item()
-                        child_centroid = object_props.sel(ID=child_id).centroid.values
+                    if child_id in object_props:
+                        child_area = object_props.area(child_id)
+                        child_centroid = object_props.centroid(child_id)
 
                         logger.warning(f"Child total area: {child_area}")
                         logger.warning(f"Child centroid: {child_centroid}")
@@ -1007,8 +1011,8 @@ def split_and_merge_objects(
                         overlap_fractions = []
                         parent_areas = []
                         for i, parent_id in enumerate(parent_ids):
-                            if parent_id in object_props.ID.values:
-                                parent_area = object_props.sel(ID=parent_id).area.values.item()
+                            if parent_id in object_props:
+                                parent_area = object_props.area(parent_id)
                                 parent_areas.append(parent_area)
 
                                 # Calculate overlap fraction based on smaller object
@@ -1116,6 +1120,8 @@ def split_and_merge_objects(
         attrs={"fill_value": -1},
     )
 
+    # Convert the O(1) store back to the ID-indexed Dataset expected by cluster_rename_objects_and_props.
+    object_props = object_props.to_dataset()
     object_props = object_props.persist()
 
     return (
@@ -2009,8 +2015,10 @@ def split_and_merge_objects_parallel(
     overlap_objects_list = _overlap.find_overlapping_objects(
         object_id_field_unique, timedim, unstructured_grid, ydim, xdim, cell_area
     )  # List object pairs that overlap by at least overlap_threshold percent
+    # enforce_overlap_threshold consumes an ObjectPropsStore; this (unstructured) path keeps
+    # object_props as a Dataset and recomputes it wholesale, so wrap it for the two enforce calls.
     overlap_objects_list = _overlap.enforce_overlap_threshold(
-        overlap_objects_list, object_props, unstructured_grid, overlap_threshold
+        overlap_objects_list, _objects.ObjectPropsStore.from_dataset(object_props), unstructured_grid, overlap_threshold
     )
     logger.info("Finished finding overlapping objects")
 
@@ -2159,7 +2167,7 @@ def split_and_merge_objects_parallel(
         object_id_field_unique, timedim, unstructured_grid, ydim, xdim, cell_area
     )
     overlap_objects_list = _overlap.enforce_overlap_threshold(
-        overlap_objects_list, object_props, unstructured_grid, overlap_threshold
+        overlap_objects_list, _objects.ObjectPropsStore.from_dataset(object_props), unstructured_grid, overlap_threshold
     )
     overlap_objects_list = overlap_objects_list[:, :2].astype(np.int32)
 
