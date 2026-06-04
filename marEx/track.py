@@ -1612,7 +1612,11 @@ class tracker:
             # Generate structuring element (disk-shaped)
             y, x = np.ogrid[-R_fill : R_fill + 1, -R_fill : R_fill + 1]
             r = x**2 + y**2
-            diameter = 2 * R_fill
+            # Pad/trim width for the closing+opening morphology. Closing has reach 2*R_fill and the
+            # subsequent opening another 2*R_fill, so the total reach is 4*R_fill. Padding by only
+            # 2*R_fill (the old value) leaves an under-padded artifact in the 2R-4R band around the
+            # periodic-longitude seam. (Matches the clean_up-branch EDT fill_holes, which pads 4*R_fill.)
+            diameter = 4 * R_fill
             se_kernel = r < (R_fill**2) + 1
             mode = "wrap" if not self.regional_mode else "edge"
 
