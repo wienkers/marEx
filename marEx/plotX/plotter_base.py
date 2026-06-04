@@ -21,6 +21,11 @@ from .validation import _validate_coordinates_exist, _validate_dimensions_exist
 # Get module logger
 logger = get_logger(__name__)
 
+# Element budget for the automatic colour-limit sample. Fields larger than this are
+# strided spatially before the percentiles are taken, so auto-clim never pulls more
+# than ~200 MB (float32) into driver memory.
+_CLIM_SAMPLE_BUDGET = 50_000_000
+
 # Handle optional dependencies for plotting
 try:
     import cartopy.crs as ccrs
@@ -121,6 +126,15 @@ class PlotterBase:
                     sampled_da = self.da.isel({time_dim: slice(None, None, 10)})
                 else:
                     sampled_da = self.da
+                # Every 10th timestep of a full-resolution field is still multi-GB pulled
+                # into driver memory for two percentiles (review finding 8.9). Stride the
+                # spatial dimensions as well once the sample would exceed the budget below.
+                # Fields under the budget -- which is every case the tests cover -- are
+                # sampled exactly as before, so their colour limits are unchanged.
+                if sampled_da.size > _CLIM_SAMPLE_BUDGET:
+                    spatial_dims = [d for d in sampled_da.dims if d != time_dim]
+                    stride = int(np.ceil((sampled_da.size / _CLIM_SAMPLE_BUDGET) ** (1.0 / max(1, len(spatial_dims)))))
+                    sampled_da = sampled_da.isel({d: slice(None, None, stride) for d in spatial_dims})
                 clim = self.clim_robust(sampled_da.values, config.issym, config.cperc)
             else:
                 clim = config.clim

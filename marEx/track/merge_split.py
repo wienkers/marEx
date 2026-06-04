@@ -23,7 +23,7 @@ method wrappers.
 
 import gc
 import os
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import dask.array as da
 import numpy as np
@@ -88,7 +88,8 @@ def cluster_rename_objects_and_props(
     # Cluster the overlap_pairs into groups of IDs that are actually the same object
     # Get IDs from overlap pairs
     # Step 1: Find all IDs that actually exist in the data
-    max_ID = int(object_id_field_unique.max().compute().values.item())
+    # (max_ID is taken from the sorted unique IDs computed below rather than from a
+    # separate .max() pass over the whole field -- review finding 5.8.)
 
     # Get unique IDs from overlap list
     if len(overlap_objects_list) > 0:
@@ -105,6 +106,11 @@ def cluster_rename_objects_and_props(
     field_ids = da.unique(object_id_field_unique.data).compute()
     field_ids = field_ids[field_ids > 0]  # Remove 0 (background)
 
+    # da.unique returns them sorted, so the largest ID present in the field is the last
+    # entry -- the same value the separate full-field .max() pass produced (0 for an
+    # empty field), for none of the cost.
+    max_ID = int(field_ids[-1]) if field_ids.size > 0 else 0
+
     # Combine and get all valid IDs
     all_valid_ids = np.unique(np.concatenate([overlap_ids, field_ids]))
 
@@ -119,14 +125,14 @@ def cluster_rename_objects_and_props(
 
     # Step 3: Convert overlap pairs to dense indices
     if len(overlap_objects_list) > 0:
-        # Map to dense indices
-        overlap_pairs_dense = np.array(
-            [
-                [original_to_dense[int(pair[0])], original_to_dense[int(pair[1])]]
-                for pair in overlap_objects_list
-                if int(pair[0]) in original_to_dense and int(pair[1]) in original_to_dense
-            ]
-        )
+        # Map to dense indices with one binary search over the sorted ID array instead of
+        # a per-pair Python dict lookup across a multi-million-row list (finding 5.9).
+        # all_valid_ids is the sorted union that includes every positive entry of this
+        # array, so the only rows the dict version dropped were those holding a
+        # non-positive (background) ID -- which is exactly what `keep` drops here.
+        pairs = overlap_objects_list[:, :2].astype(np.int64)
+        keep = (pairs > 0).all(axis=1)
+        overlap_pairs_dense = np.searchsorted(all_valid_ids, pairs[keep])
 
         # Create sparse graph with dense indices
         row_indices, col_indices = overlap_pairs_dense.T
@@ -416,6 +422,33 @@ def cluster_rename_objects_and_props(
             if len(present_indices) == 0:
                 return areas, centroid_lats, centroid_lons
 
+            # Group the slice's pixels by ID in one pass, instead of rebuilding a
+            # full-slice `slice_data == event_id` mask for every present ID -- that was
+            # O(n_present x ny x nx) per timestep, ~1e8-1e9 operations at scale
+            # (review finding 5.10).
+            #
+            # The segments are produced by a *stable* sort of the flat pixel positions, so
+            # each ID's pixels arrive in exactly the row-major order np.nonzero gave, and
+            # the reductions below run over identical arrays in an identical order. This
+            # rewrite is therefore bit-identical, not merely equivalent in real arithmetic:
+            # it does not need the Phase-2 float tolerance.
+            flat_ids = slice_data.ravel()
+            flat_areas = cell_areas_slice.ravel()
+            max_id_value = int(all_event_ids.max()) if n_ids > 0 else 0
+            id_lookup = np.full(max_id_value + 1, -1, dtype=np.int64)
+            in_range = (all_event_ids >= 0) & (all_event_ids <= max_id_value)
+            id_lookup[all_event_ids[in_range]] = np.flatnonzero(in_range)
+
+            codes = np.where(
+                (flat_ids > 0) & (flat_ids <= max_id_value),
+                id_lookup[np.clip(flat_ids, 0, max_id_value)],
+                -1,
+            )
+            pixel_positions = np.flatnonzero(codes >= 0)  # ascending, i.e. row-major
+            order = np.argsort(codes[pixel_positions], kind="stable")
+            pixel_positions = pixel_positions[order]
+            segment_bounds = np.concatenate(([0], np.cumsum(np.bincount(codes[codes >= 0], minlength=n_ids))))
+
             if is_unstructured:
                 # Unstructured grid: area-weighted centroid using spherical geometry
 
@@ -425,22 +458,21 @@ def cluster_rename_objects_and_props(
 
                 # Process each present ID
                 for id_idx in present_indices:
-                    event_id = all_event_ids[id_idx]
-                    mask = slice_data == event_id
+                    cells = pixel_positions[segment_bounds[id_idx] : segment_bounds[id_idx + 1]]
 
-                    if not np.any(mask):
+                    if cells.size == 0:
                         continue  # pragma: no cover
 
                     # Calculate physical area
-                    areas_masked = cell_areas_slice[mask]
+                    areas_masked = flat_areas[cells]
                     total_area = np.sum(areas_masked)
                     areas[id_idx] = total_area
 
                     # Calculate area-weighted centroid using spherical geometry
-                    cos_lat = np.cos(lat_rad[mask])
-                    x = cos_lat * np.cos(lon_rad[mask])
-                    y = cos_lat * np.sin(lon_rad[mask])
-                    z = np.sin(lat_rad[mask])
+                    cos_lat = np.cos(lat_rad[cells])
+                    x = cos_lat * np.cos(lon_rad[cells])
+                    y = cos_lat * np.sin(lon_rad[cells])
+                    z = np.sin(lat_rad[cells])
 
                     # Weighted average in Cartesian coordinates
                     weighted_x = np.sum(areas_masked * x)
@@ -472,19 +504,16 @@ def cluster_rename_objects_and_props(
 
                 # Process each present ID
                 for id_idx in present_indices:
-                    event_id = all_event_ids[id_idx]
+                    pixels = pixel_positions[segment_bounds[id_idx] : segment_bounds[id_idx + 1]]
 
-                    # Get binary mask for this event
-                    binary_mask = slice_data == event_id
-
-                    if not np.any(binary_mask):
+                    if pixels.size == 0:
                         continue  # pragma: no cover
 
-                    # Get indices where object exists
-                    y_indices, x_indices = np.nonzero(binary_mask)
+                    # Get indices where object exists (row-major, matching np.nonzero)
+                    y_indices, x_indices = pixels // nx, pixels % nx
 
                     # Get cell areas for these indices
-                    pixel_areas = cell_areas_slice[binary_mask]
+                    pixel_areas = flat_areas[pixels]
                     total_area = np.sum(pixel_areas)
                     areas[id_idx] = total_area
 
@@ -632,19 +661,10 @@ def split_and_merge_objects(
     # convert back to a Dataset at the function boundary for cluster_rename_objects_and_props.
     object_props = _objects.ObjectPropsStore.from_dataset(object_props)
 
-    # Find overlapping objects
-    overlap_objects_list = _overlap.find_overlapping_objects(
-        object_id_field_unique,
-        timedim,
-        unstructured_grid,
-        ydim,
-        xdim,
-        cell_area,
-    )  # List object pairs that overlap by at least overlap_threshold percent
-    overlap_objects_list = _overlap.enforce_overlap_threshold(
-        overlap_objects_list, object_props, unstructured_grid, overlap_threshold
-    )
-    logger.info("Finished finding overlapping objects")
+    # No up-front overlap pass here: the serial loop below computes overlaps per timestep
+    # from the consolidated field, and the full-run list is recomputed after the loop.
+    # The result of an up-front pass was persisted and then overwritten unread
+    # (review finding 5.7).
 
     # Initialise merge tracking lists
     merge_times = []  # When the merge occurred
@@ -786,10 +806,9 @@ def split_and_merge_objects(
                         # Nearest-neighbor partitioning
                         # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
                         if unstructured_grid:
-                            # Prepare parent masks
-                            parent_masks = np.zeros((len(parent_ids), data_t_minus_1.shape[0]), dtype=bool)
-                            for idx, parent_id in enumerate(parent_ids):
-                                parent_masks[idx] = (data_t_minus_1 == parent_id).values
+                            # Prepare parent masks (one broadcast comparison, see below)
+                            prev_values = data_t_minus_1.values
+                            parent_masks = prev_values[None, :] == np.asarray(parent_ids).reshape(-1, 1)
 
                             # Calculate maximum search distance
                             max_area = np.max(object_props.areas(parent_ids)) / mean_cell_area
@@ -807,17 +826,12 @@ def split_and_merge_objects(
                                 max_distance=max(max_distance, 20) * 2,  # Set minimum threshold, in cells
                             )
                         else:
-                            # Prepare parent masks for structured grid
-                            parent_masks = np.zeros(
-                                (
-                                    len(parent_ids),
-                                    data_t_minus_1.shape[0],
-                                    data_t_minus_1.shape[1],
-                                ),
-                                dtype=bool,
-                            )
-                            for idx, parent_id in enumerate(parent_ids):
-                                parent_masks[idx] = (data_t_minus_1 == parent_id).values
+                            # Prepare parent masks for structured grid. One broadcast
+                            # comparison against the raw values instead of a Python loop of
+                            # per-parent xarray comparisons, each of which built and
+                            # materialised its own full-slice DataArray (finding 5.15).
+                            prev_values = data_t_minus_1.values
+                            parent_masks = prev_values[None, :, :] == np.asarray(parent_ids).reshape(-1, 1, 1)
 
                             # Calculate maximum search distance
                             max_area = np.max(object_props.areas(parent_ids))
@@ -1790,14 +1804,26 @@ def split_and_merge_objects_parallel(
             unstructured_grid,
             ydim,
             xdim,
+            # Only the merging IDs are ever looked up below, so restrict the search
+            # instead of broadcasting a (time x buffer x max_objects) boolean over every
+            # possible ID -- multi-GB chunks for a map of a few hundred entries
+            # (review finding 6.8).
+            all_objects=False,
         )
         logger.debug("Finished Mapping Children to Time Indices")
 
+        # Bucket the merging objects by time index in a single pass. The previous form
+        # rescanned the whole merging set once per timestep, twice over (finding 5.12).
+        objects_by_time: List[List[int]] = [[] for _ in range(n_time)]
+        for merging_object in merging_objects:
+            t_idx = time_index_map.get(merging_object, -1)
+            if 0 <= t_idx < n_time:
+                objects_by_time[t_idx].append(merging_object)
+
         # Create uniform array of merging objects for each timestep
-        max_merges = max(len([b for b in merging_objects if time_index_map.get(b, -1) == t]) for t in range(n_time))
+        max_merges = max(len(objects_at_t) for objects_at_t in objects_by_time)
         uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int32)
-        for t in range(n_time):
-            objects_at_t = [b for b in merging_objects if time_index_map.get(b, -1) == t]
+        for t, objects_at_t in enumerate(objects_by_time):
             if objects_at_t:  # Only fill if there are objects at this time
                 uniform_merging_objects_array[t, : len(objects_at_t)] = np.array(objects_at_t, dtype=np.int32)
 
@@ -1982,6 +2008,12 @@ def split_and_merge_objects_parallel(
         # 3. Update merge events
         new_merging_objects = set()
         merge_counts = merge_counts.compute()
+        # Materialise the three small persisted ledgers once. Indexing them lazily inside
+        # the loop below cost a blocking scheduler round-trip per merge event -- thousands
+        # of them per merge-loop iteration for arrays of a few MB (review finding 5.11).
+        merge_child_ids_local = merge_child_ids.compute()
+        merge_parent_ids_local = merge_parent_ids.compute()
+        merge_areas_local = merge_areas.compute()
 
         for t in time_indices:
             count = int(merge_counts.isel({timedim: t}).item())
@@ -1991,12 +2023,12 @@ def split_and_merge_objects_parallel(
                 # Extract valid IDs and areas for each merge event
                 for merge_idx in range(count):
                     # Get child IDs
-                    child_ids = merge_child_ids.isel({timedim: t, "merge": merge_idx}).compute().values
+                    child_ids = merge_child_ids_local.isel({timedim: t, "merge": merge_idx}).values
                     child_ids = child_ids[child_ids >= 0]
 
                     # Get parent IDs and areas
-                    parent_ids = merge_parent_ids.isel({timedim: t, "merge": merge_idx}).compute().values
-                    areas = merge_areas.isel({timedim: t, "merge": merge_idx}).compute().values
+                    parent_ids = merge_parent_ids_local.isel({timedim: t, "merge": merge_idx}).values
+                    areas = merge_areas_local.isel({timedim: t, "merge": merge_idx}).values
                     valid_mask = parent_ids >= 0
                     parent_ids = parent_ids[valid_mask]
                     areas = areas[valid_mask]

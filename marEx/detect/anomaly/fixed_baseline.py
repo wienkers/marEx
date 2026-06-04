@@ -188,7 +188,7 @@ def _compute_anomaly_detrend_fixed_baseline(
         coordinates=coordinates,
         force_zero_mean=force_zero_mean,
         remove_harmonics=False,  # Only remove trends, not harmonics
-    )["dat_anomaly"].persist()
+    )["dat_anomaly"]
 
     # Step 2: Compute daily climatology and anomalies using _compute_anomaly_fixed_baseline
     logger.debug("Computing daily climatology and anomalies from detrended data")

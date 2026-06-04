@@ -9,6 +9,7 @@ logging utilities and never depends on sibling detect modules.
 
 from typing import Dict, Optional, Tuple
 
+import dask
 import numpy as np
 import xarray as xr
 
@@ -194,8 +195,21 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     # Create spatial mask from first time step (2D array)
     spatial_mask = np.isfinite(da.isel({dimensions["time"]: 0}))
 
+    # Reduce first, then mask (avoids broadcasting across time)
+    # Count invalid values at each spatial location across time dimension
+    # This produces a 2D spatial array instead of a 3D array
+    finite_mask = np.isfinite(da)
+    invalid_per_location = (~finite_mask).sum(dim=dimensions["time"])
+
+    # Now apply spatial mask to this 2D result (no broadcasting across time!)
+    invalid_in_valid_locations = invalid_per_location.where(spatial_mask, 0)
+
+    # One round-trip for both scans rather than two: they read the same input, so fusing
+    # them lets dask share that read instead of walking the array twice (finding 2.12).
+    has_valid_data, max_invalid = dask.compute(spatial_mask.any(), invalid_in_valid_locations.max())
+
     # Check if there's any valid data at all
-    if not spatial_mask.any().compute():
+    if not has_valid_data:
         raise create_data_validation_error(
             "Dataset contains no valid (finite) data",
             details="All values in the first time step are NaN or infinite",
@@ -210,22 +224,17 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
             },
         )
 
-    # Reduce first, then mask (avoids broadcasting across time)
-    # Count invalid values at each spatial location across time dimension
-    # This produces a 2D spatial array instead of a 3D array
-    finite_mask = np.isfinite(da)
-    invalid_per_location = (~finite_mask).sum(dim=dimensions["time"])
-
-    # Now apply spatial mask to this 2D result (no broadcasting across time!)
-    invalid_in_valid_locations = invalid_per_location.where(spatial_mask, 0)
-
-    # Check if any valid ocean location has invalid data
-    max_invalid = invalid_in_valid_locations.max().compute()
-
     if max_invalid > 0:
-        total_invalid_in_ocean = int(invalid_in_valid_locations.sum().compute())
-        total_ocean_locations = int(spatial_mask.sum().compute())
-        locations_affected = int((invalid_in_valid_locations > 0).sum().compute())
+        # Error path: three more reductions over the same arrays, batched into one
+        # round-trip rather than three sequential full re-scans.
+        total_invalid_in_ocean, total_ocean_locations, locations_affected = (
+            int(v)
+            for v in dask.compute(
+                invalid_in_valid_locations.sum(),
+                spatial_mask.sum(),
+                (invalid_in_valid_locations > 0).sum(),
+            )
+        )
         total_time_steps = int(da.sizes[dimensions["time"]])
 
         raise create_data_validation_error(

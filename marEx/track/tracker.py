@@ -30,7 +30,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
-from dask import persist
+from dask import is_dask_collection, persist
 from dask.distributed import wait
 from numpy.typing import NDArray
 
@@ -648,6 +648,29 @@ class tracker:
                 self.ycoord,
             )
 
+        # Materialise the small per-cell coordinate and area arrays rather than leaving them
+        # as persisted dask collections. persist() binds a collection to whichever client was
+        # active at construction AND replaces its graph with futures, so once that client is
+        # closed the data is orphaned with nothing left to recompute from. That is exactly
+        # what the documented two-cluster pattern does -- run_preprocess(checkpoint="save"),
+        # close the cluster, then run(checkpoint="load") on a differently-sized one -- and it
+        # died in calculate_object_properties with
+        # "FutureCancelledError: ... cancelled for reason: lost dependencies".
+        #
+        # It only ever bit unstructured grids, which is why nothing caught it: there these
+        # are genuinely dask-backed (14 886 338 elements each on ICON R02B09), whereas on a
+        # gridded store lat/lon are small numpy coords and persist() was a silent no-op.
+        #
+        # This removes work rather than adding it. Every consumer reads them as numpy:
+        # overlap.py already materialises cell_area for precisely this reason, and grid.py
+        # calls .compute() on lat_init/lon_init. The arrays also stop being pinned in worker
+        # memory for the whole run. Done here, at the end of __init__, because
+        # validate_inputs() and setup_unstructured_grid() both reassign self.lat/self.lon.
+        for _attr in ("lat", "lon", "lat_init", "lon_init", "cell_area"):
+            _value = getattr(self, _attr, None)
+            if _value is not None and is_dask_collection(getattr(_value, "data", None)):
+                setattr(self, _attr, _value.compute())
+
         self._configure_warnings()
 
     def _remap_coordinates(self, events_ds: xr.Dataset) -> xr.Dataset:
@@ -718,12 +741,21 @@ class tracker:
         merges_ds : xarray.Dataset, optional
             Dataset with merge event information (only if return_merges=True)
         """
-        if self.data_bin is None:
+        # The single-use guard must not fire when the preprocessed data is being reloaded
+        # from a checkpoint: run_preprocess(checkpoint="load") returns straight from the
+        # zarr store and never reads self.data_bin. That is exactly the documented
+        # two-cluster pattern -- run_preprocess(checkpoint="save") on a large cluster,
+        # close it, then run(checkpoint="load") on a differently-sized one -- and the
+        # unconditional guard made it impossible (the unstructured 02 notebook, which had
+        # never been executed, died here).
+        effective_checkpoint = checkpoint if checkpoint is not None else self.checkpoint
+        if self.data_bin is None and effective_checkpoint != "load":
             raise TrackingError(
                 "This tracker instance has already been run",
                 details="run() frees the binary input to save memory, so a tracker is single-use",
                 suggestions=[
                     "Construct a fresh instance for another run: tracker(data_bin, mask, ...)",
+                    "Or reuse the preprocessed result: run(checkpoint='load') after run_preprocess(checkpoint='save')",
                 ],
             )
 
@@ -832,7 +864,11 @@ class tracker:
         with log_timing(logger, "Spatial hole filling"):
             # Force compute here (persist + wait) so this step's time is attributed to it,
             # rather than being deferred into the later "Small object filtering" step.
-            data_bin_filled = self.fill_holes(self.data_bin).persist()
+            # raw_area rides along in the same persist: it is only consumed much later, for
+            # one scalar diagnostic, and by then self.data_bin has been released -- so on
+            # its own it forced a second full read of the entire raw input
+            # (review finding 4.3).
+            data_bin_filled, raw_area = persist(self.fill_holes(self.data_bin), raw_area)
             wait(data_bin_filled)
             self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
@@ -1486,9 +1522,11 @@ class tracker:
             object_id_field, object_props, overlap_objects_list, merge_events
         )
 
-        # Rechunk final output
+        # Rechunk final output. The time dimension is deliberately left alone here: run()
+        # rechunks the returned dataset to {time: 1} immediately afterwards, so setting it
+        # to timechunks first only layered a superseded rechunk over the graph
+        # (review finding 4.7).
         chunk_dict = {
-            self.timedim: self.timechunks,
             "ID": -1,
             "component": -1,
             "sibling_ID": -1,

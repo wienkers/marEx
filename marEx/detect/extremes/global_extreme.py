@@ -63,8 +63,12 @@ def _identify_extremes_constant(
         threshold = threshold.drop_vars("quantile")
 
     # Ensure spatial dimensions are fully loaded for efficient comparison
+    # Rechunk but do not persist: the pipeline persists (extremes, thresholds) together in
+    # one optimised graph, so the threshold sub-graph is still evaluated exactly once and
+    # shared. Persisting here forced materialisation on callers of identify_extremes who
+    # only wanted to stream the result to zarr (review finding 3.15).
     spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    threshold = threshold.chunk(spatial_chunks).persist()
+    threshold = threshold.chunk(spatial_chunks)
 
     # Create boolean mask for values exceeding threshold
     extremes = da >= threshold
@@ -73,6 +77,6 @@ def _identify_extremes_constant(
     if "quantile" in extremes.coords:
         extremes = extremes.drop_vars("quantile")
 
-    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks))).persist()
+    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks)))
 
     return extremes, threshold

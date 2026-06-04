@@ -422,7 +422,14 @@ def preprocess_data(
         time_sel = (ds[coordinates["time"]].dt.year >= start_year).compute()
         ds = ds.isel({dimensions["time"]: time_sel})
 
-    anomalies = ds.dat_anomaly
+    # Persist the anomaly exactly once, here, before anything consumes it. It is read two
+    # to three times downstream (the threshold reduction, the >= comparison, and again by
+    # the final ds.persist()), so without an anchor the whole anomaly graph re-executes
+    # each time -- for the default shifting_baseline that is the entire 15-year rolling
+    # climatology. The anomaly and extremes modules deliberately no longer persist their
+    # own full-size intermediates: this is the single full-size copy in the pipeline.
+    anomalies = ds.dat_anomaly.persist()
+    ds["dat_anomaly"] = anomalies
 
     # Step 2: Identify extreme events (both methods now return consistent tuple structures)
     with log_timing(
@@ -465,6 +472,9 @@ def preprocess_data(
             log_memory=True,
             show_progress=True,
         ):
+            # Same anchor for the standardised series -- it is consumed as many times as
+            # dat_anomaly is, so leaving it lazy re-runs the harmonic fit per consumer.
+            ds["dat_stn"] = ds.dat_stn.persist()
             extremes_stn, thresholds_stn = identify_extremes(
                 ds.dat_stn,
                 method_extreme,
