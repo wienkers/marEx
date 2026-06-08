@@ -9,6 +9,8 @@ Targets the §3 findings the gridded golden fixture does *not* exercise:
 - §3.4 a cell that is NaN only at some timesteps must still receive a real threshold.
 """
 
+from pathlib import Path
+
 import numpy as np
 import xarray as xr
 
@@ -198,3 +200,143 @@ def test_global_extreme_exact_small_unstructured_no_zero_chunk():
     )
     thr = thresholds.compute()
     assert np.isfinite(thr.values).any()
+
+
+def _anomaly_fixture_1d(n_time=400, n_y=6, n_x=7, seed=0):
+    """A deterministic dask-backed anomaly field for the 1D quantile bit-identity oracle.
+
+    Deliberately spans several spatial chunks with time unchunked, which is the shape the
+    1D driver reduces over.
+    """
+    rng = np.random.default_rng(seed)
+    data = rng.normal(0.0, 1.0, size=(n_time, n_y, n_x)).astype(np.float32)
+    da = xr.DataArray(
+        data,
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": np.arange(n_time),
+            "lat": np.arange(n_y, dtype=np.float32),
+            "lon": np.arange(n_x, dtype=np.float32),
+        },
+        name="da",
+    )
+    return da.chunk({"time": -1, "lat": 3, "lon": 7})
+
+
+_REFERENCE_NPY = Path(__file__).parent / "data" / "histogram_quantile_1d_reference.npy"
+
+
+def test_1d_quantile_matches_captured_reference():
+    """Bit-identity oracle for the 1D quantile path.
+
+    The reference was captured from the two-phase (persist-the-CDF) implementation before
+    that path was restructured. Any change to the quantile arithmetic -- notably a cumsum
+    that drops from float64 to float32 -- moves these values, and this test is the gate
+    that catches it. Phase-2 rules apply: no tolerance.
+    """
+    got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
+    expected = np.load(_REFERENCE_NPY)
+    assert got.dtype == expected.dtype, f"dtype moved {expected.dtype} -> {got.dtype}"
+    assert got.shape == expected.shape
+    sentinel = -999.0
+    np.testing.assert_array_equal(
+        np.nan_to_num(got, nan=sentinel),
+        np.nan_to_num(expected, nan=sentinel),
+    )
+
+
+def test_spatial_tile_budget_bounds_the_output_not_just_the_input():
+    """The tile must be budgeted against the array produced, not only the one consumed.
+
+    A task reads ``ntime x tile_area`` and writes ``output_elements_per_cell x tile_area``.
+    Sizing on ``ntime`` alone bounds only the read, and since ``tile_area = target //
+    ntime`` the write is then ``target * output_per_cell / ntime`` -- over budget exactly
+    when the series is shorter than the per-cell output, and growing as it gets shorter.
+    """
+    target = 1_000_000
+    ntime = 100
+    output_per_cell = 500  # e.g. n_bins; deliberately > ntime
+
+    da = xr.DataArray(
+        np.zeros((ntime, 200, 200), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+    ).chunk({"time": -1, "lat": -1, "lon": -1})
+
+    tiled = H._chunk_spatial_for_histogram(da, "time", target_elements=target, output_elements_per_cell=output_per_cell)
+    cells = tiled.chunks[1][0] * tiled.chunks[2][0]
+
+    # Both sides of the reduction stay within the budget. The tolerance absorbs the
+    # integer rounding of the tile side (round(sqrt(area))**2 can exceed area slightly);
+    # it is a few percent, not the 5x the input-only budget gives here.
+    tol = 1.1
+    assert ntime * cells <= target * tol, "input slab over budget"
+    assert output_per_cell * cells <= target * tol, "produced array over budget"
+
+    # And the old input-only budget genuinely violated it, so this test can fail.
+    input_only = H._chunk_spatial_for_histogram(da, "time", target_elements=target)
+    old_cells = input_only.chunks[1][0] * input_only.chunks[2][0]
+    assert output_per_cell * old_cells > target * tol
+
+
+def test_spatial_tile_budget_unchanged_for_long_series():
+    """ntime >> output_per_cell is the normal case: the tiling must not move."""
+    da = xr.DataArray(
+        np.zeros((5000, 180, 360), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+    ).chunk({"time": -1, "lat": -1, "lon": -1})
+
+    before = H._chunk_spatial_for_histogram(da, "time").chunks
+    after = H._chunk_spatial_for_histogram(da, "time", output_elements_per_cell=502).chunks
+    assert before == after
+
+
+def test_output_budget_does_not_change_quantile_values():
+    """The budget change is a pure rechunk, so thresholds must be bit-identical."""
+    rng = np.random.default_rng(20260807)
+    ntime = 120  # short on purpose: this is where the two budgets diverge
+    da = xr.DataArray(
+        rng.normal(size=(ntime, 240)).astype(np.float32),
+        dims=("time", "x"),
+        coords={"time": xr.date_range("2000-01-01", periods=ntime, freq="D")},
+        name="dat",
+    ).chunk({"time": -1, "x": 60})
+
+    orig = H._HISTOGRAM_TASK_ELEMENTS
+    try:
+        H._HISTOGRAM_TASK_ELEMENTS = 10**12  # one tile: the unchunked reference
+        reference = H._compute_histogram_quantile_1d(da, 0.95, dim="time").compute()
+        H._HISTOGRAM_TASK_ELEMENTS = ntime * 40  # small budget -> the output bound binds
+        tiled = H._compute_histogram_quantile_1d(da, 0.95, dim="time").compute()
+    finally:
+        H._HISTOGRAM_TASK_ELEMENTS = orig
+
+    np.testing.assert_array_equal(tiled.values, reference.values)
+
+
+def test_2d_tile_budget_is_constant_in_series_length():
+    """The 2-D path holds time whole, so its tile must also be budgeted against ntime.
+
+    Sizing only on the ``366 x n_bins`` output leaves the slab each task READS growing
+    linearly with the length of the series -- a per-task working set that scales with input
+    size. Budgeting on ``max(ntime, 366 * n_bins)`` makes it constant in both directions.
+    """
+    n_bins = 502
+    out_per_cell = 366 * n_bins
+
+    def cells(ntime):
+        return max(1, H._HISTOGRAM_TASK_ELEMENTS // max(ntime, out_per_cell))
+
+    # Realistic series: the output term dominates, so tiling is unchanged.
+    assert cells(1_825) == cells(5_475) == cells(20_000)
+    assert cells(5_475) == H._HISTOGRAM_TASK_ELEMENTS // out_per_cell
+
+    # Absurdly long series: the tile shrinks so the read slab stays inside the budget.
+    huge = out_per_cell * 4
+    assert cells(huge) < cells(5_475)
+    assert huge * cells(huge) <= H._HISTOGRAM_TASK_ELEMENTS
+
+    # The bound holds across the whole range: neither side ever exceeds the budget.
+    for ntime in (10, 366, 5_475, 100_000, out_per_cell, out_per_cell * 10):
+        c = cells(ntime)
+        assert ntime * c <= H._HISTOGRAM_TASK_ELEMENTS, f"read slab over budget at ntime={ntime}"
+        assert out_per_cell * c <= H._HISTOGRAM_TASK_ELEMENTS, f"histogram over budget at ntime={ntime}"

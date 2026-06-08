@@ -14,12 +14,12 @@ from typing import Dict, List, Literal, Optional, Tuple
 import dask
 import numpy as np
 import xarray as xr
-from dask import persist
 from dask.base import is_dask_collection
 
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from .anomaly.base import compute_normalised_anomaly
+from .compute_mode import Materialiser, create_staging_dir
 from .config import PreprocessConfig
 from .extremes.base import identify_extremes
 from .utils import make_netcdf_safe_attrs
@@ -48,6 +48,9 @@ def preprocess_data(
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     dask_chunks: Optional[Dict[str, int]] = None,
+    compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
+    scratch_dir: Optional[str] = None,
+    validate: bool = True,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     neighbours: Optional[xr.DataArray] = None,
@@ -115,6 +118,31 @@ def preprocess_data(
         Maximum anomaly value for histogram binning in the approximate percentile method.
     dask_chunks : dict, optional
         Chunking specification for distributed computation.
+    compute_mode : str, default='persist'
+        Materialisation policy: a choice on a trilemma -- low RAM, low recompute, low disk
+        I/O; pick two.
+
+        * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
+          whenever the data fits (peak pinned total ~0.6x input on unstructured meshes).
+        * 'lazy': materialises nothing and returns an unmaterialised Dataset for the caller
+          to write with ``.to_zarr()``. Bounded RAM, but every consumer re-executes the
+          upstream graph -- for the default shifting_baseline that is the whole rolling
+          climatology, 2-3 times.
+        * 'streaming': stages the shared anchors (the anomaly and the thresholds) to a zarr
+          under ``scratch_dir`` and re-opens them, so each stage computes exactly once with
+          only a few chunks resident. Requires ``scratch_dir``. Expected to be *slower*
+          than 'persist'; the point is that it finishes at a size where 'persist' cannot
+          start.
+    scratch_dir : str, optional
+        Directory for staged intermediates. Required when ``compute_mode='streaming'``; a
+        unique per-run subdirectory is created inside it. In streaming mode the returned
+        Dataset reads lazily from that directory, so it is **not** removed when this
+        function returns -- write your output first, then call ``marEx.clear_staging(ds)``.
+        It is also removed automatically at interpreter exit.
+    validate : bool, default=True
+        Whether to run the finite-value validation pass over the input. That pass is a full
+        read of the input array; set False when the data is known to be clean and the input
+        is large enough for the extra pass to matter.
     dimensions : dict, default={"time": "time", "x": "lon", "y": "lat"}
         Mapping of dimensions to names in the data.
     coordinates : dict, optional
@@ -294,6 +322,9 @@ def preprocess_data(
         precision=precision,
         max_anomaly=max_anomaly,
         dask_chunks=dask_chunks,
+        compute_mode=compute_mode,
+        scratch_dir=scratch_dir,
+        validate=validate,
     )
 
     # Unpack the validated config back into local names so the orchestration body
@@ -313,6 +344,9 @@ def preprocess_data(
     precision = config.precision
     max_anomaly = config.max_anomaly
     dask_chunks = config.dask_chunks
+    compute_mode = config.compute_mode
+    scratch_dir = config.scratch_dir
+    validate = config.validate
 
     # Configure logging if verbose/quiet parameters are provided
     if verbose is not None or quiet is not None:
@@ -358,9 +392,19 @@ def preprocess_data(
             ],
         )
 
+    # Resolve the materialisation policy once, before any computation: every persist site
+    # below routes through it, so this single object is what distinguishes the three
+    # compute modes. Constructing it here also means an invalid mode or a missing
+    # scratch_dir fails immediately rather than after a full validation pass.
+    staging_dir = create_staging_dir(scratch_dir) if compute_mode == "streaming" and scratch_dir else None
+    materialiser = Materialiser(compute_mode, staging_dir)
+
     # Validate that all unmasked data is valid (finite values only)
-    logger.debug("Validating data values for NaN/infinite values")
-    _validate_data_values(da, dimensions)
+    if validate:
+        logger.debug("Validating data values for NaN/infinite values")
+        _validate_data_values(da, dimensions)
+    else:
+        logger.debug("Skipping input finite-value validation (validate=False)")
 
     logger.debug("Enabling Dask large chunk splitting for preprocessing")
     # Capture the caller's value so we can restore it before returning rather than
@@ -390,6 +434,7 @@ def preprocess_data(
             detrend_orders,
             force_zero_mean,
             reference_period,
+            materialiser=materialiser,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
 
@@ -428,7 +473,7 @@ def preprocess_data(
     # each time -- for the default shifting_baseline that is the entire 15-year rolling
     # climatology. The anomaly and extremes modules deliberately no longer persist their
     # own full-size intermediates: this is the single full-size copy in the pipeline.
-    anomalies = ds.dat_anomaly.persist()
+    anomalies = materialiser.stage(ds.dat_anomaly, "dat_anomaly")
     ds["dat_anomaly"] = anomalies
 
     # Step 2: Identify extreme events (both methods now return consistent tuple structures)
@@ -453,12 +498,14 @@ def preprocess_data(
             method_percentile,
             precision,
             max_anomaly,
+            materialiser=materialiser,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
-    # Add extreme events and thresholds to dataset
-    ds_temp = persist(extremes, thresholds)
-    extremes, thresholds = ds_temp
+    # Add extreme events and thresholds to dataset. `thresholds` was already anchored
+    # inside the extremes module (before the comparison that builds `extremes` was
+    # constructed on top of it), so this pin only covers `extremes` itself in persist mode.
+    extremes, thresholds = materialiser.pin(extremes, thresholds)
 
     ds["extreme_events"] = extremes
     ds["thresholds"] = thresholds
@@ -474,7 +521,7 @@ def preprocess_data(
         ):
             # Same anchor for the standardised series -- it is consumed as many times as
             # dat_anomaly is, so leaving it lazy re-runs the harmonic fit per consumer.
-            ds["dat_stn"] = ds.dat_stn.persist()
+            ds["dat_stn"] = materialiser.stage(ds.dat_stn, "dat_stn")
             extremes_stn, thresholds_stn = identify_extremes(
                 ds.dat_stn,
                 method_extreme,
@@ -486,6 +533,7 @@ def preprocess_data(
                 method_percentile,
                 precision,
                 max_anomaly,
+                materialiser=materialiser,
             )
 
             ds["extreme_events_stn"] = extremes_stn
@@ -569,6 +617,12 @@ def preprocess_data(
 
     ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
+    # Record the staging directory so `marEx.clear_staging(ds)` can find it. In streaming
+    # mode the returned Dataset reads lazily from this directory, so it deliberately
+    # outlives this call; the caller clears it after writing their output.
+    if staging_dir is not None:
+        ds.attrs["marex_staging_dir"] = str(staging_dir)
+
     # Final rechunking. Fall back to the documented default time chunk (25), not 10,
     # so a partial dask_chunks dict does not silently get 10-step chunks.
     time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
@@ -602,17 +656,24 @@ def preprocess_data(
         log_memory=True,
         show_progress=True,
     ):
-        ds = ds.persist(optimize_graph=True)
+        if materialiser.mode == "persist":
+            ds = ds.persist(optimize_graph=True)
+        else:
+            logger.info(f"Skipping final dataset persistence (compute_mode='{materialiser.mode}')")
 
         log_memory_usage(logger, "After dataset persistence", logging.DEBUG)
 
-    # Final success reporting with summary. Only pay for the full reduction when the
-    # INFO line will actually be emitted (this sum is a pass over the whole field).
-    if logger.isEnabledFor(logging.INFO):
+    # Final success reporting with summary. Only pay for the full reduction when the INFO
+    # line will actually be emitted (this sum is a pass over the whole field) AND the field
+    # is already materialised. In lazy/streaming mode the sum would execute the entire
+    # graph, silently defeating the whole point of the mode for any INFO-level user.
+    if logger.isEnabledFor(logging.INFO) and materialiser.mode == "persist":
         extreme_count = ds.extreme_events.sum()
         if hasattr(extreme_count, "compute"):
             extreme_count = extreme_count.compute()
         logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
+    else:
+        logger.info(f"Preprocessing graph constructed (compute_mode='{materialiser.mode}')")
     logger.debug(f"Final dataset shape: {ds.dims}")
     log_dask_info(logger, ds, "Final preprocessed dataset")
 

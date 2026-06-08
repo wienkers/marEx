@@ -13,6 +13,7 @@ import xarray as xr
 
 from ...exceptions import ConfigurationError
 from ...logging_config import configure_logging, get_logger
+from ..compute_mode import Materialiser
 from ..validation import _infer_dims_coords
 from .fixed_baseline import _compute_anomaly_detrend_fixed_baseline, _compute_anomaly_fixed_baseline
 from .harmonic import _compute_anomaly_detrended
@@ -37,6 +38,7 @@ def compute_normalised_anomaly(
     reference_period: Optional[Tuple[int, int]] = None,  # for fixed_baseline & detrend_fixed_baseline
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.Dataset:
     """
     Generate normalised anomalies using specified methodology.
@@ -185,6 +187,11 @@ def compute_normalised_anomaly(
     ... )
     >>> # Combines trend removal with fixed climatology
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     # Set default values for mutable parameters
     if detrend_orders is None:
         detrend_orders = [1]
@@ -219,14 +226,14 @@ def compute_normalised_anomaly(
         return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
     elif method_anomaly == "fixed_baseline":
         logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
-        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period)
+        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser)
     elif method_anomaly == "detrend_fixed_baseline":
         logger.debug(
             f"Fixed detrended baseline parameters: orders={detrend_orders}, "
             f"zero_mean={force_zero_mean}, reference_period={reference_period}"
         )
         return _compute_anomaly_detrend_fixed_baseline(
-            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period
+            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser
         )
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")

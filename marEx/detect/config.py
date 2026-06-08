@@ -63,6 +63,12 @@ class PreprocessConfig:
         Maximum anomaly value for histogram binning in the approximate method.
     dask_chunks : dict
         Chunking specification for distributed computation.
+    compute_mode : str
+        Materialisation policy ('persist', 'lazy', or 'streaming').
+    scratch_dir : str, optional
+        Directory for staged intermediates (required by 'streaming').
+    validate : bool
+        Whether to run the full-input finite-value validation pass.
     """
 
     method_anomaly: Literal["detrend_harmonic", "shifting_baseline", "fixed_baseline", "detrend_fixed_baseline"]
@@ -80,3 +86,6 @@ class PreprocessConfig:
     precision: float
     max_anomaly: float
     dask_chunks: Dict[str, int]
+    compute_mode: Literal["persist", "lazy", "streaming"]
+    scratch_dir: Optional[str]
+    validate: bool

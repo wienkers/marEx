@@ -12,15 +12,16 @@ logging).
 import warnings
 from typing import Dict, Optional
 
+import dask
 import flox.xarray
 import numpy as np
 import xarray as xr
-from dask import persist
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 from ...logging_config import get_logger
+from ..compute_mode import Materialiser
 
 # Get module logger
 logger = get_logger(__name__)
@@ -32,7 +33,12 @@ logger = get_logger(__name__)
 _HISTOGRAM_TASK_ELEMENTS = 50_000_000
 
 
-def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: int = _HISTOGRAM_TASK_ELEMENTS) -> xr.DataArray:
+def _chunk_spatial_for_histogram(
+    da: xr.DataArray,
+    dim: str,
+    target_elements: int = _HISTOGRAM_TASK_ELEMENTS,
+    output_elements_per_cell: int = 1,
+) -> xr.DataArray:
     """Tile the non-reduced dimensions of ``da`` for memory-safe histogram reduction.
 
     The histogram-quantile kernels reduce over ``dim`` (typically time), which must stay
@@ -40,6 +46,10 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
     per-task element count stays near ``target_elements`` -- independent of the caller's
     chunking or the field resolution. This is a pure rechunk: every spatial cell's reduced
     axis lies wholly within one tile, so it changes only task granularity, never values.
+
+    Both sides of the reduction are budgeted. A task reads ``ntime x tile_area`` elements
+    and writes ``output_elements_per_cell x tile_area``; the tile is sized against whichever
+    is larger, so neither exceeds ``target_elements``.
 
     Parameters
     ----------
@@ -49,6 +59,10 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
         Name of the dimension that is reduced (kept unchunked).
     target_elements : int, optional
         Approximate number of array elements per spatial tile.
+    output_elements_per_cell : int, optional
+        Elements the reduction produces per spatial cell -- ``n_bins`` for a histogram,
+        ``366`` for a per-day-of-year percentile. Defaults to 1 (output no larger than the
+        input), which reproduces the previous, input-only budget.
 
     Returns
     -------
@@ -60,7 +74,24 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
         return da.chunk({dim: -1})
 
     ntime = max(int(da.sizes[dim]), 1)
-    tile_area = max(1, target_elements // ntime)
+
+    # Budget against BOTH the array consumed and the array produced.
+    #
+    # The reduction reads an `ntime x tile_area` slab and writes an
+    # `output_elements_per_cell x tile_area` result (n_bins for the 1-D histogram path, 366
+    # for the per-day-of-year percentile path). Sizing on `ntime` alone bounds only the
+    # slab, and because `tile_area = target // ntime` the OUTPUT is then
+    # `target * output_elements_per_cell / ntime` elements -- over budget exactly when
+    # `ntime < output_elements_per_cell`, and growing without bound as the series gets
+    # shorter. That is backwards: a shorter run would silently allocate a bigger task.
+    #
+    # Taking the max bounds both sides by `target_elements`. For the long series this path
+    # is normally used on (ntime >> n_bins) the tiling is unchanged.
+    #
+    # Pure rechunk: every cell's reduced axis stays wholly inside one tile, so this changes
+    # task granularity only, never values.
+    divisor = max(ntime, max(1, int(output_elements_per_cell)))
+    tile_area = max(1, target_elements // divisor)
     side = max(1, int(round(tile_area ** (1.0 / len(spatial_dims)))))
 
     chunks = {d: min(int(da.sizes[d]), side) for d in spatial_dims}
@@ -227,6 +258,58 @@ def _rolling_histogram_quantile(
     return threshold.astype(np.float32)
 
 
+def _histogram_quantile_block(
+    hist_block: NDArray[np.integer],
+    bin_edges: NDArray[np.float64],
+    q: float,
+) -> NDArray[np.float64]:
+    """Interpolate the q-th quantile from per-cell histogram counts.
+
+    ``hist_block`` has the bin axis last (``apply_ufunc`` moves core dimensions there) and
+    any number of leading spatial axes. Fully vectorised over those leading axes -- no
+    ``np.vectorize`` loop -- so this stays a single numpy pass per task.
+
+    A transcription of the two-phase dask expression it replaces, kept to the same
+    arithmetic in the same order and the same dtypes: ``hist_block`` is integer, so the PDF
+    and its cumulative sum are float64, ``bin_edges`` is float64, and the result is float64
+    (unlike the 2-D path, this one never casts down to float32). Doing the interpolation
+    per-cell removes the ``space x n_bins`` CDF that the two-phase version had to
+    materialise in order to index it with a concrete ``idx_upper``.
+    """
+    eps = 1e-10
+    total = hist_block.sum(axis=-1, keepdims=True)
+    pdf = hist_block / (total + eps)
+    cdf = np.cumsum(pdf, axis=-1)
+
+    # First bin whose cumulative CDF reaches q. ``cdf[i]`` is the fraction of samples <=
+    # the UPPER edge of bin i, so the quantile is interpolated WITHIN that bin between its
+    # histogram edges -- on edges, not bin centres, which removes a systematic
+    # half-bin-width low bias. argmax on an all-False row yields 0, which the clamp below
+    # maps to 1, exactly as the dask expression did.
+    n_bins = len(bin_edges) - 1
+    idx_upper = np.argmax(cdf >= (q - eps), axis=-1)
+    # Clamp so idx_upper-1 >= 0 and idx_upper+1 indexes a valid (finite) upper edge.
+    idx_upper = np.clip(idx_upper, 1, n_bins - 1)
+    idx_lower = idx_upper - 1
+
+    cdf_lower = np.take_along_axis(cdf, idx_lower[..., None], axis=-1)[..., 0]
+    cdf_upper = np.take_along_axis(cdf, idx_upper[..., None], axis=-1)[..., 0]
+    edge_lower = bin_edges[idx_upper]
+    edge_upper = bin_edges[idx_upper + 1]
+
+    # idx_upper is the FIRST bin to reach q, so cdf_upper >= q > cdf_lower and the
+    # denominator is strictly positive (guarded for degenerate all-NaN/constant cells,
+    # which are NaN-masked below anyway).
+    denom = cdf_upper - cdf_lower
+    frac = (q - cdf_lower) / np.where(denom > eps, denom, 1.0)
+    threshold = edge_lower + frac * (edge_upper - edge_lower)
+
+    # A zero total is exactly "NaN at every timestep": the histogram drops NaN and counts
+    # every finite sample (out-of-range-high values are clipped in by the caller). Cells
+    # valid for only part of the year still get a real threshold.
+    return np.where(total[..., 0] == 0, np.nan, threshold)
+
+
 def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
@@ -236,6 +319,7 @@ def _compute_histogram_quantile_2d(
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -265,6 +349,11 @@ def _compute_histogram_quantile_2d(
     xarray.DataArray
         Computed quantile value for each spatial location
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     if bin_edges is None:
         # Create optimised asymmetric bins
         bin_edges = np.concatenate(
@@ -289,7 +378,19 @@ def _compute_histogram_quantile_2d(
     # "hobday scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
     spatial_dims_present = [dimensions[d] for d in ("y", "x") if d in dimensions]
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // (366 * max(1, n_bins)))
+
+    # Budget against BOTH sides, as _chunk_spatial_for_histogram does. The output side is
+    # `366 x n_bins` elements per cell. The INPUT side is `ntime` per cell, because time is
+    # held whole below (chunk_dict sets it to -1) -- so sizing on the output alone leaves
+    # the slab this task reads growing linearly with the length of the series, i.e. with
+    # input size. Taking the max makes the per-task working set constant in both the
+    # spatial extent (already tiled) and the number of timesteps.
+    #
+    # For any realistic series this is a no-op: 366 * n_bins is ~183k at the default
+    # binning, so `ntime` only binds beyond ~500 years of daily data. It is a guarantee,
+    # not a retuning.
+    ntime_2d = max(1, int(da.sizes[dimensions["time"]]))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime_2d, 366 * max(1, n_bins)))
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
     # The spatial smoothing below rolls a window of `window_spatial_hobday` over each
     # spatial dim, which requires every chunk to be at least that wide; never tile below it.
@@ -399,27 +500,37 @@ def _compute_histogram_quantile_2d(
     # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
     # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
-    threshold = threshold.where(~nan_mask).persist()
+    threshold = materialiser.pin_one(threshold.where(~nan_mask))
 
     # Validate threshold values against bounds
     upper_bound = bin_edges[-2]
     lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
-    # Check if any values are too high (ignore NaN values)
+    # One scheduler round-trip for the whole bounds check. Each predicate used to be its
+    # own ``if ...any():`` -- DataArray.__bool__ computes -- plus a ``.max()``/``.min()``
+    # inside the warning body, so up to four traversals of a graph that re-executes the
+    # entire upstream anomaly whenever it is not pinned. The four reductions share their
+    # upstream, so computing them together costs a single pass. ``too_low`` stays lazy as
+    # an array: only its ``.any()`` becomes a scalar, because the clamp below still needs
+    # the elementwise mask.
+    #
+    # The predicates here deliberately lack the ``& notnull()`` guard the 1D path carries.
+    # NaN comparisons are False either way; adding it would alter the clamp mask.
     too_high = threshold > upper_bound
-    if too_high.any():
+    too_low = threshold < lower_bound
+    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
+
+    if bool(any_high):
         warnings.warn(
-            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
             f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
             UserWarning,
             stacklevel=2,
         )
 
-    # Check if any values are too low (ignore NaN values)
-    too_low = threshold < lower_bound
-    if too_low.any():
+    if bool(any_low):
         warnings.warn(
-            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
             "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
@@ -438,6 +549,7 @@ def _compute_histogram_quantile_1d(
     bin_edges: Optional[NDArray[np.float64]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -464,6 +576,11 @@ def _compute_histogram_quantile_1d(
     xarray.DataArray
         Computed quantile value for each spatial location
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     if bin_edges is None:
         # Create optimised asymmetric bins
         bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
@@ -476,7 +593,10 @@ def _compute_histogram_quantile_1d(
     # time series lies wholly within its own tile (time stays unchunked), the per-cell
     # histogram counts -- and therefore the resulting quantiles -- are independent of
     # this tiling: the operation is bit-for-bit identical to the unchunked computation.
-    da = _chunk_spatial_for_histogram(da, dim)
+    # Each cell yields n_bins counts, so budget the tile against that as well as against
+    # the time slab -- otherwise a series shorter than n_bins produces a tile whose
+    # histogram is larger than the budget it was sized by.
+    da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1)
 
     # Clip finite data into the last bin (its centre) so out-of-range-high values are
     # counted in the top bin instead of being dropped by xhistogram, which renormalised
@@ -487,75 +607,55 @@ def _compute_histogram_quantile_1d(
     # Compute histogram
     hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim])
 
-    # Convert to PDF and CDF. Only the CDF (and the tiny per-cell totals) are persisted:
-    # `hist` is an intermediate of the same graph and is never read once `cdf` exists, so
-    # persisting it too doubled the bin-resolved footprint (~4 GB each at 720x1440)
-    # (review finding 3.7).
-    total_counts = hist.sum(dim=f"{da.name}_bin")
-    pdf = hist / (total_counts + 1e-10)
-    cdf, total_counts = persist(pdf.cumsum(dim=f"{da.name}_bin"), total_counts)
-
-    eps = 1e-10
-
-    # Locate the bin containing the q-th quantile: the first bin whose cumulative CDF
-    # reaches q. ``cdf[i]`` is the fraction of samples <= the UPPER edge of bin i, so the
-    # quantile is interpolated WITHIN that bin between its histogram edges. Interpolating
-    # on edges (not bin centres) removes a systematic half-bin-width low bias: the earlier
-    # code interpolated between bin centres, which was ~precision/2 less accurate than the
-    # true percentile (and the previous strict-`>` variant degenerated to a bin centre).
-    n_bins = len(bin_edges) - 1
-    idx_upper = (cdf >= (q - eps)).argmax(dim=f"{da.name}_bin")
-    # Clamp so idx_upper-1 >= 0 and idx_upper+1 indexes a valid (finite) upper edge.
-    idx_upper = xr.where(idx_upper < 1, 1, xr.where(idx_upper > n_bins - 1, n_bins - 1, idx_upper)).compute()
-    idx_lower = idx_upper - 1
-
-    cdf_lower = cdf.isel({f"{da.name}_bin": idx_lower})  # CDF at the bin's lower edge
-    cdf_upper = cdf.isel({f"{da.name}_bin": idx_upper})  # CDF at the bin's upper edge
-    edge_lower = xr.DataArray(bin_edges[idx_upper.values], dims=idx_upper.dims, coords=idx_upper.coords)
-    edge_upper = xr.DataArray(bin_edges[idx_upper.values + 1], dims=idx_upper.dims, coords=idx_upper.coords)
-
-    # Within-bin linear interpolation of the inverse CDF. idx_upper is the FIRST bin to
-    # reach q, so cdf_upper >= q > cdf_lower and the denominator is strictly positive
-    # (guarded for degenerate all-NaN/constant cells, which are masked below anyway).
-    denom = cdf_upper - cdf_lower
-    frac = (q - cdf_lower) / xr.where(denom > eps, denom, 1.0)
-    threshold = edge_lower + frac * (edge_upper - edge_lower)
-
-    # Set threshold to NaN only for spatial points that are NaN at *every* timestep,
-    # so a cell that is valid for part of the year (e.g. seasonal sea ice) still gets a
-    # real threshold rather than a permanent NaN. (Consistent with the 2D path.)
-    # The mask comes free from the histogram totals: the histogram drops NaN and counts
-    # every finite sample (values above the range are clipped in, above), so a zero total
-    # is exactly "NaN at every timestep". Recomputing it from `da` re-ran the whole
-    # upstream anomaly graph plus this function's spatial re-tiling (review finding 3.8).
-    nan_mask = total_counts == 0
-    threshold = threshold.where(~nan_mask).drop_vars(f"{da.name}_bin").persist()
+    # Interpolate the quantile inside a single apply_ufunc over the bin dimension rather
+    # than materialising the CDF and indexing it with a concrete idx_upper. The CDF is
+    # space x n_bins -- ~30 GB on the 14.9 M-cell ICON mesh and independent of n_time --
+    # so the old two-phase shape put a space-scaled ceiling under every compute_mode, and
+    # forced a scheduler round-trip mid-function. The 2-D path in this module has always
+    # had this shape; this converges the 1-D path onto it. The NaN mask is folded into the
+    # kernel, so `hist` is traversed exactly once (review findings 3.7, 3.8).
+    threshold = xr.apply_ufunc(
+        _histogram_quantile_block,
+        hist,
+        kwargs={"bin_edges": bin_edges, "q": q},
+        input_core_dims=[[f"{da.name}_bin"]],
+        output_core_dims=[[]],
+        dask="parallelized",
+        output_dtypes=[np.float64],
+        keep_attrs=True,
+    )
+    if f"{da.name}_bin" in threshold.coords:
+        threshold = threshold.drop_vars(f"{da.name}_bin")
+    threshold = materialiser.pin_one(threshold)
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]
     lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
-    # Check if any values are too high (ignore NaN values)
+    # One scheduler round-trip for the whole bounds check -- see the matching comment in
+    # the 2D path. The four reductions share their upstream, so computing them together
+    # costs a single pass instead of one traversal per predicate.
     too_high = (threshold > upper_bound) & threshold.notnull()
-    if too_high.any():
+    too_low = (threshold < lower_bound) & threshold.notnull()
+    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
+
+    if bool(any_high):
         warnings.warn(
-            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
             f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
             UserWarning,
             stacklevel=2,
         )
 
-    # Check if any values are too low (ignore NaN values)
-    too_low = (threshold < lower_bound) & threshold.notnull()
-    if too_low.any():
+    if bool(any_low):
         warnings.warn(
-            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
             "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
             stacklevel=2,
         )
         # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = threshold.where(~too_low, lower_bound).persist()
+        threshold = materialiser.pin_one(threshold.where(~too_low, lower_bound))
 
     return threshold

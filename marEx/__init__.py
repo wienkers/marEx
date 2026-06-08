@@ -28,6 +28,8 @@ from ._dependencies import get_installation_profile, has_dependency, print_depen
 
 # Import core functionality
 from .detect import (
+    ComputeMode,
+    clear_staging,
     compute_normalised_anomaly,
     identify_extremes,
     preprocess_data,
@@ -81,6 +83,9 @@ __all__ = [
     "smoothed_rolling_climatology",
     "rolling_climatology",
     "identify_extremes",
+    # Materialisation policy (compute_mode)
+    "ComputeMode",
+    "clear_staging",
     # Tracking
     "tracker",
     "regional_tracker",

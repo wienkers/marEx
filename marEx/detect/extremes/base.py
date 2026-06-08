@@ -13,6 +13,7 @@ import xarray as xr
 
 from ...exceptions import ConfigurationError
 from ...logging_config import configure_logging, get_logger
+from ..compute_mode import Materialiser
 from ..validation import _infer_dims_coords
 from .global_extreme import _identify_extremes_constant
 from .hobday import _identify_extremes_hobday
@@ -34,6 +35,7 @@ def identify_extremes(
     max_anomaly: float = 5.0,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
+    materialiser: Optional[Materialiser] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -169,6 +171,11 @@ def identify_extremes(
     >>> std_31day = thresholds_smooth.std(dim='dayofyear').mean().compute()
     >>> print(f"Threshold variability: 11-day={std_11day:.3f}, 31-day={std_31day:.3f}")
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     # Configure logging if verbose/quiet parameters are provided
     if verbose is not None or quiet is not None:
         configure_logging(verbose=verbose, quiet=quiet)
@@ -384,7 +391,9 @@ def identify_extremes(
 
     if method_extreme == "global_extreme":
         logger.debug(f"Global extreme method - method_percentile={method_percentile}")
-        return _identify_extremes_constant(da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly)
+        return _identify_extremes_constant(
+            da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly, materialiser
+        )
     elif method_extreme == "hobday_extreme":
         logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, method_percentile={method_percentile}")
 
@@ -398,6 +407,7 @@ def identify_extremes(
             coordinates,
             precision,
             max_anomaly,
+            materialiser,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")

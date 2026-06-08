@@ -14,6 +14,7 @@ import numpy as np
 import xarray as xr
 
 from ...logging_config import get_logger
+from ..compute_mode import Materialiser
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
 
 # Get module logger
@@ -30,6 +31,7 @@ def _identify_extremes_hobday(
     coordinates: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -65,6 +67,11 @@ def _identify_extremes_hobday(
         thresholds : xarray.DataArray
             Threshold values with dimensions (dayofyear, lat, lon)
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     # Check if there is sufficient samples
     N_years = np.unique(da[coordinates["time"]].dt.year).size
     N_samples = N_years * window_days_hobday * (window_spatial_hobday if window_spatial_hobday is not None else 1) ** 2
@@ -92,7 +99,10 @@ def _identify_extremes_hobday(
         # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
         # for exactly this reason. Per-cell percentiles are independent of the tiling, so
         # this changes task granularity only (review finding 3.10).
-        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"])
+        # Each cell yields 366 day-of-year percentiles, so budget the tile against that as
+        # well as against the time slab: a series shorter than 366 days would otherwise get
+        # a tile whose output exceeds the budget the tile was sized by.
+        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=366)
         dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
         half_w = window_days_hobday // 2
 
@@ -135,6 +145,7 @@ def _identify_extremes_hobday(
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
+            materialiser=materialiser,
         )
 
     # Extract spatial chunk sizes from input data for alignment
@@ -168,6 +179,13 @@ def _identify_extremes_hobday(
     # Compare anomalies to day-of-year specific thresholds
     # Assign dayofyear coordinate and use UniqueGrouper for chunked arrays
     da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
+    # Anchor the thresholds BEFORE the comparison is built on top of them. `extremes` is
+    # a lazy expression over `thresholds`; anchoring after this line would leave it
+    # pointing at the original graph and the whole threshold reduction would run a second
+    # time. On an unstructured mesh `thresholds` is 366 x ncells x 4 B (21.8 GB at ICON
+    # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
+    # streaming mode stages it to disk rather than pinning it in RAM.
+    thresholds = materialiser.stage(thresholds, "thresholds")
     extremes = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) >= thresholds
 
     # Drop unnecessary dayofyear coordinate
