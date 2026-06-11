@@ -174,6 +174,11 @@ class Materialiser:
             )
         self.mode: ComputeMode = mode
         self.staging_dir = staging_dir
+        # Arrays this Materialiser has written to a staging store, keyed by the name they
+        # were staged under. Holds a strong reference deliberately: `stage`'s already-staged
+        # check is an identity test, and a dead weakref would let id() be reused. The values
+        # are lazy zarr-backed arrays (a task graph, not data), so the cost is negligible.
+        self._staged: dict = {}
 
     def __repr__(self) -> str:
         """Return an unambiguous representation naming the mode and staging directory."""
@@ -183,6 +188,11 @@ class Materialiser:
     def is_lazy(self) -> bool:
         """bool: True when this mode leaves intermediates unmaterialised in cluster RAM."""
         return self.mode != "persist"
+
+    @property
+    def is_streaming(self) -> bool:
+        """True when intermediates are staged to disk rather than pinned in RAM."""
+        return self.mode == "streaming"
 
     def pin(self, *objs: Any) -> Tuple[Any, ...]:
         """
@@ -219,7 +229,7 @@ class Materialiser:
         (out,) = self.pin(obj)
         return out
 
-    def stage(self, obj: xr.DataArray, label: str) -> xr.DataArray:
+    def stage(self, obj: xr.DataArray, label: str, preserve_chunks: bool = False) -> xr.DataArray:
         """
         Anchor an object that several downstream consumers read.
 
@@ -229,6 +239,12 @@ class Materialiser:
             The array to anchor.
         label : str
             Short identifier, used as the staged store's filename in streaming mode.
+        preserve_chunks : bool, default False
+            In ``streaming`` mode only, restore ``obj``'s chunk layout after staging if
+            ``_stage_to_zarr``'s uniform rechunk changed it. Default ``False`` leaves
+            detect's existing, documented behaviour (staging may change chunk layout)
+            completely unchanged; callers with downstream logic that depends on chunk
+            boundaries not moving (e.g. the tracker's merge loop) should pass ``True``.
 
         Returns
         -------
@@ -240,7 +256,97 @@ class Materialiser:
             return obj.persist()
         if self.mode == "lazy":
             return obj
-        return self._stage_to_zarr(obj, label)
+        if self._staged.get(label) is obj:
+            # `obj` IS the array this Materialiser wrote to `<label>.zarr` and re-opened.
+            # It is already disk-anchored, so re-staging would re-run the graph that
+            # reads the store only to write the same bytes back over it. Identity, not
+            # equality: a derived array must still be staged on its own.
+            return obj
+        self._reject_relabel(label, obj)
+        staged = self._stage_to_zarr(obj, label)
+        if preserve_chunks and obj.chunks is not None and staged.chunks is not None and staged.chunks != obj.chunks:
+            staged = staged.chunk(dict(zip(obj.dims, obj.chunks)))
+        self._staged[label] = staged
+        return staged
+
+    def _reject_relabel(self, label: str, obj: Any) -> None:
+        """
+        Refuse to stage a *different* array under a name already in use.
+
+        Staging writes ``<staging_dir>/<label>.zarr`` with ``mode="w"``. Doing that twice
+        under one label silently rewrites the store that the FIRST staged array is still
+        lazily reading, so that array starts returning the second one's bytes -- wrong
+        answers, no error. The registry makes this worse rather than better, because it
+        holds a strong reference that keeps the stale array alive to be read.
+
+        No caller does this today (every label is staged at exactly one site, and the two
+        `thresholds` sites are mutually exclusive methods). The hazard is real for any
+        caller that stages inside a loop -- e.g. the unstructured merge loop, which would
+        want a per-iteration array. Such a caller must pass a per-iteration label; this
+        turns the silent corruption into an immediate, explanatory failure.
+        """
+        previous = self._staged.get(label)
+        if previous is None or previous is obj:
+            return
+        raise ConfigurationError(
+            f"Materialiser.stage({label!r}) called with a different array than the one already staged",
+            details=(
+                "Staging writes <staging_dir>/<label>.zarr with mode='w'. Re-using a label for a "
+                "different array overwrites the store the earlier array still reads from, which "
+                "silently changes its values rather than raising."
+            ),
+            suggestions=[
+                "Give each staged array its own label, e.g. append a loop iteration index: "
+                f"'{label}_iter0', '{label}_iter1', ...",
+                "If the earlier array is genuinely dead, drop it from the registry before re-staging",
+            ],
+            context={"label": label},
+        )
+
+    def stage_many(self, objs: dict, label: str, preserve_chunks: bool = False) -> Tuple[xr.DataArray, ...]:
+        """
+        Anchor several arrays that **one graph** produces, in a single materialisation.
+
+        :meth:`stage` called once per array would execute that shared graph once per
+        array. The motivating case is ``marEx.track.morphology``'s absolute-threshold
+        filter, where a single per-slice labelling pass yields both the keep-mask and the
+        area census: staging them separately labels every slice twice.
+
+        Parameters
+        ----------
+        objs : dict of str to xarray.DataArray
+            Arrays to anchor together, keyed by the variable name to store them under.
+        label : str
+            Short identifier for the shared store, and the key each array is registered
+            under for :meth:`stage`'s already-staged check.
+        preserve_chunks : bool, default False
+            As :meth:`stage`, applied to each array independently.
+
+        Returns
+        -------
+        tuple of xarray.DataArray
+            The arrays in ``objs`` order, anchored per the mode.
+        """
+        if self.mode == "persist":
+            return dask.persist(*objs.values())
+        if self.mode == "lazy":
+            return tuple(objs.values())
+
+        logger.info(f"Staging {list(objs)} jointly as '{label}'")
+        reopened = self._write_and_reopen(xr.Dataset({name: obj.rename(name) for name, obj in objs.items()}), label)
+
+        out = []
+        for name, source in objs.items():
+            staged = self._restore(reopened[name], source)
+            if preserve_chunks and source.chunks is not None and staged.chunks is not None and staged.chunks != source.chunks:
+                staged = staged.chunk(dict(zip(source.dims, source.chunks)))
+            # Registered under the VARIABLE name, not `label`: the caller that re-anchors
+            # one of these (the tracker re-staging data_bin_filtered) names the array, not
+            # the joint store, so that call short-circuits instead of re-writing.
+            self._reject_relabel(name, staged)
+            self._staged[name] = staged
+            out.append(staged)
+        return tuple(out)
 
     def _stage_to_zarr(self, obj: xr.DataArray, label: str) -> xr.DataArray:
         """
@@ -257,10 +363,25 @@ class Materialiser:
             )
 
         name = obj.name or label
-        path = self.staging_dir / f"{label}.zarr"
+        logger.info(f"Staging '{label}' to {self.staging_dir / f'{label}.zarr'}")
+        return self._restore(self._write_and_reopen(obj.to_dataset(name=name), label)[name], obj)
 
-        logger.info(f"Staging '{label}' to {path}")
-        ds = obj.to_dataset(name=name)
+    def _write_and_reopen(self, ds: xr.Dataset, label: str) -> xr.Dataset:
+        """
+        Write ``ds`` to ``<staging_dir>/<label>.zarr`` and re-open it lazily.
+
+        Re-opening with ``chunks={}`` restores the on-disk chunking, which is the dask
+        chunking the dataset was written with, so downstream chunk assumptions still hold.
+        Writing every variable in ONE call is what makes :meth:`stage_many` execute a
+        shared upstream graph once rather than once per variable.
+        """
+        if self.staging_dir is None:  # pragma: no cover - guaranteed by __init__
+            raise ConfigurationError(
+                "Streaming materialiser has no staging directory",
+                details="Internal invariant violated: staging_dir is None in streaming mode",
+                suggestions=["Construct the Materialiser via preprocess_data(compute_mode='streaming', scratch_dir=...)"],
+            )
+        path = self.staging_dir / f"{label}.zarr"
 
         # Stale `chunks` encoding carried in from an upstream open_zarr conflicts with the
         # dask chunking now being written. The pipeline clears this on its own output for
@@ -285,9 +406,11 @@ class Materialiser:
             ds = ds.chunk(uniform)
 
         ds.to_zarr(path, mode="w", consolidated=True)
+        return xr.open_zarr(path, consolidated=True, chunks={})
 
-        reopened = xr.open_zarr(path, consolidated=True, chunks={})[name]
-
+    @staticmethod
+    def _restore(reopened: xr.DataArray, obj: xr.DataArray) -> xr.DataArray:
+        """Make a re-opened array substitutable for the one that was staged."""
         # Drop the round-tripped encoding: re-writing a coordinate that arrived with CF
         # encoding (notably `time`) otherwise conflicts when the caller saves the output.
         for coord in reopened.coords:
@@ -302,11 +425,11 @@ class Materialiser:
 
         reopened.attrs.update(obj.attrs)
 
-        # Restore the original name unconditionally. `name` above falls back to `label`
-        # when the array is unnamed, so an unnamed input would otherwise come back named
-        # "thresholds"/"dat_anomaly" -- a difference between streaming and the other two
-        # modes, since `persist` and `lazy` both preserve `name=None`. xarray's binary ops
-        # keep a name only when both operands agree, so a spurious name here can silently
-        # change the name of a downstream comparison result.
+        # Restore the original name unconditionally. The store's variable name falls back
+        # to the label when the array is unnamed, so an unnamed input would otherwise come
+        # back named "thresholds"/"dat_anomaly" -- a difference between streaming and the
+        # other two modes, since `persist` and `lazy` both preserve `name=None`. xarray's
+        # binary ops keep a name only when both operands agree, so a spurious name here can
+        # silently change the name of a downstream comparison result.
         reopened.name = obj.name
         return reopened

@@ -45,8 +45,22 @@ from .partitioning import (
     partition_nn_unstructured_optimised,
     wrapped_euclidian_distance_mask_parallel,
 )
+from .region_writer import ObjectIDRegionWriter
 
 logger = get_logger(__name__)
+
+
+def _anchor_field(obj, label, materialiser):
+    """Anchor a whole field read by two or more consumers.
+
+    ``materialiser is None`` keeps the previous behaviour exactly (a plain ``persist``),
+    which is what every caller that has not yet been threaded still gets.
+    ``preserve_chunks=True`` because the merge loop's end-of-chunk consolidation is
+    boundary-dependent, so staging must not move a chunk boundary.
+    """
+    if materialiser is None:
+        return obj.persist()
+    return materialiser.stage(obj, label, preserve_chunks=True)
 
 
 def cluster_rename_objects_and_props(
@@ -64,6 +78,8 @@ def cluster_rename_objects_and_props(
     lat: xr.DataArray,
     lon: xr.DataArray,
     regional_mode: bool,
+    *,
+    materialiser=None,
 ) -> xr.Dataset:
     """
     Cluster the object pairs and relabel to determine final event IDs.
@@ -185,7 +201,13 @@ def cluster_rename_objects_and_props(
         vectorize=True,
         dask="parallelized",
         output_dtypes=[np.int32],
-    ).persist()
+    )
+    if materialiser is None:
+        split_merged_relabeled_object_id_field = split_merged_relabeled_object_id_field.persist()
+    else:
+        split_merged_relabeled_object_id_field = materialiser.stage(
+            split_merged_relabeled_object_id_field, "relabeled_id_field", preserve_chunks=True
+        )
 
     # Relabel the object_props to match the new IDs (and add time dimension)
 
@@ -368,8 +390,24 @@ def cluster_rename_objects_and_props(
         template=merge_ledger,
     )
 
-    # Format merge ledger
-    merge_ledger = merge_ledger.rename("merge_ledger").transpose(timedim, "ID", "sibling_ID").persist()
+    # Format merge ledger. This is a returned data_var of shape (time, ID, sibling_ID), so
+    # it grows quadratically with the series length (1.135 GB at nt=3804, 77 % of everything
+    # streaming still pinned). Anchoring it puts those bytes on disk under streaming; in
+    # persist mode `stage` is `dask.persist`, byte for byte what this line did before.
+    # Staging costs approximately nothing in disk terms. The ledger is overwhelmingly -1
+    # fill, and blosc crushes a constant chunk to a few hundred bytes: at the nt=3804 shape,
+    # 1.135 GB dense writes as ~5.5 MB of zarr (0.49 %) with that run's real merge count of
+    # 18712. The same is true of any events_ds a caller saves. (That figure is modelled, not
+    # a du of the staged store -- streaming cleans its staging dir on normal exit, so the
+    # A/B could not measure it directly. Sub-1 % is the robust part: a 3000-entry sprinkle
+    # gave 8.96 MB, so the exact value moves with merge density and neither is worth quoting
+    # to three digits.)
+    #
+    # So this removes the PIN, not the quadratic growth -- and the growth is a RAM-only
+    # concern, confined to persist mode. Do not reach for a sparse representation on
+    # disk-size grounds; that was measured and the premise does not hold.
+    merge_ledger = merge_ledger.rename("merge_ledger").transpose(timedim, "ID", "sibling_ID")
+    merge_ledger = _anchor_field(merge_ledger, "merge_ledger", materialiser)
 
     # Add start and end time indices for each ID
     valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
@@ -636,6 +674,9 @@ def split_and_merge_objects(
     nn_partitioning: bool,
     overlap_threshold: float,
     regional_mode: bool,
+    *,
+    materialiser=None,
+    id_field_path=None,
 ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
     """
     Implement object splitting and merging logic.
@@ -674,7 +715,16 @@ def split_and_merge_objects(
     next_new_id = object_props.max_id() + 1  # Start new IDs after highest existing ID
 
     Nx = object_id_field_unique[xdim].size
-    object_id_field_unique = object_id_field_unique.persist()
+    # In streaming mode the accumulator lives on disk. The input field is NOT pinned:
+    # each chunk reads its own disjoint time slice, and the upstream object_id_field is
+    # already anchored (objects.py's _anchor helper, which calls materialiser.stage), so
+    # slice reads are cheap.
+    streaming = materialiser is not None and materialiser.is_streaming
+    if streaming:
+        writer = ObjectIDRegionWriter(object_id_field_unique, id_field_path, timedim)
+    else:
+        writer = None
+        object_id_field_unique = object_id_field_unique.persist()
     updated_chunks = []
 
     # Process each time chunk with timestep-first approach
@@ -971,17 +1021,29 @@ def split_and_merge_objects(
         if chunk_idx % 10 == 0:
             logger.info(f"Processing splitting and merging in chunk {chunk_idx} of {len(object_id_field_unique.chunks[0])}")
 
-            # Periodically update main array to manage memory
-            if len(updated_chunks) > 1:  # Keep the last chunk for potential reference
+            # Periodically flush finished chunks to manage memory. The LAST chunk is
+            # always retained: the next chunk reads its final two timesteps as t-1/t-2
+            # (see the invariant in region_writer.py). Do not flush it.
+            if len(updated_chunks) > 1:
                 for start, end, processed_chunk_data in updated_chunks[:-1]:
-                    object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+                    if writer is not None:
+                        writer.write(start, end, processed_chunk_data)
+                    else:
+                        object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
                 updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
-                object_id_field_unique = object_id_field_unique.persist()
+                if writer is None:
+                    object_id_field_unique = object_id_field_unique.persist()
 
     # Apply final chunk updates
     for start, end, processed_chunk_data in updated_chunks:
-        object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
-    object_id_field_unique = object_id_field_unique.persist()
+        if writer is not None:
+            writer.write(start, end, processed_chunk_data)
+        else:
+            object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+    if writer is not None:
+        object_id_field_unique = writer.finalise()
+    else:
+        object_id_field_unique = object_id_field_unique.persist()
 
     # Recompute final overlapping objects
     overlap_objects_list = _overlap.find_overlapping_objects(
@@ -1177,6 +1239,8 @@ def split_and_merge_objects_parallel(
     regional_mode: bool,
     max_iteration: int,
     temp_field_path: str,
+    *,
+    materialiser=None,
 ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
     """
     Optimised parallel implementation of object splitting and merging.
@@ -1658,12 +1722,33 @@ def split_and_merge_objects_parallel(
             object_id_field.name = "temp"
             object_id_field.to_zarr(zarr_path, mode="w")
 
+        def write_receipt(ds_chunk: xr.Dataset) -> xr.DataArray:
+            """One byte per timestep, standing in for the chunk this pass just wrote.
+
+            ``update_time_chunk`` is SIDE-EFFECTING: each chunk writes its own zarr region
+            and the returned array is thrown away (``del result`` below). Returning the
+            field itself made ``result.persist()`` materialise a whole int32 field purely
+            to force those writes -- measured at **19.1 GB, 54.8 % of everything this path
+            pins**, on the n_time=32 ICON slice. A receipt forces the writes identically,
+            because each output block still depends on its own input block, for n_time
+            bytes instead of n_time x ncells x 4.
+
+            Must be returned from EVERY branch, including the no-merge early return, or
+            ``map_blocks`` raises on a template mismatch for exactly the chunks that skip
+            the write.
+            """
+            return xr.DataArray(
+                np.zeros(ds_chunk.sizes[timedim], dtype=np.int8),
+                dims=[timedim],
+                coords={timecoord: ds_chunk[timecoord].values},
+            )
+
         def update_time_chunk(ds_chunk: xr.Dataset, lookup_dict: Dict[int, int]) -> xr.DataArray:
             """Process a single chunk with optimised memory usage."""
             # Skip processing if no merges in this chunk
             needs_update = bool(ds_chunk["has_merge"].any().compute().item())
             if not needs_update:
-                return ds_chunk["object_field"]
+                return write_receipt(ds_chunk)
 
             # Extract data from the chunk
             chunk_data = ds_chunk["object_field"]
@@ -1708,7 +1793,7 @@ def split_and_merge_objects_parallel(
                 region={timedim: slice(time_idx_start, time_idx_end)},
             )
 
-            return chunk_data  # Return original data for dask graph consistency
+            return write_receipt(ds_chunk)  # Not the field: see write_receipt's docstring
 
         # Create time indices for slicing
         time_coords = object_id_field[timecoord].values
@@ -1726,12 +1811,19 @@ def split_and_merge_objects_parallel(
             }
         ).chunk({timedim: timechunks})
 
-        # Process chunks in parallel
+        # Process chunks in parallel. The template is the RECEIPT shape, not the field --
+        # this pass exists for its zarr writes, not its return value.
+        receipt_template = xr.DataArray(
+            np.zeros(len(time_coords), dtype=np.int8),
+            dims=[timedim],
+            coords={timecoord: time_coords},
+        ).chunk({timedim: timechunks})
+
         result = xr.map_blocks(
             update_time_chunk,
             ds,
             kwargs={"lookup_dict": id_lookup},
-            template=object_id_field,
+            template=receipt_template,
         )
 
         # Force computation to ensure all writes complete
@@ -1751,6 +1843,7 @@ def split_and_merge_objects_parallel(
         object_id_field_unique: xr.DataArray,
         merging_objects: Set[int],
         global_id_counter: int,
+        iteration_index: int = 0,
     ) -> Tuple[
         xr.DataArray,  # updated_field
         Tuple[
@@ -1921,26 +2014,43 @@ def split_and_merge_objects_parallel(
             final_merging_objects,
         ) = results
 
-        results = persist(
-            merge_child_ids,
-            merge_parent_ids,
-            merge_areas,
-            merge_counts,
-            has_merge,
-            updates_array,
-            updates_ids,
-            final_merging_objects,
-        )
+        # This persist is LOAD-BEARING FOR CORRECTNESS, not just memory, and must stay
+        # unconditional in every mode. These arrays are lazy expressions over
+        # `object_id_field_unique`, and `update_object_id_field_zarr` below REWRITES the
+        # zarr store that field reads from. Leaving them lazy means they are recomputed
+        # after that rewrite, against updated IDs, and the merge ledgers silently change.
+        # Routing them through `Materialiser.pin` (a no-op outside persist mode) reproduced
+        # exactly that: streaming found 10 events where persist found 11 on the unstructured
+        # fixture. They are small -- per-timestep ledgers, a few MB -- so pinning them in
+        # every mode costs nothing.
+        #
+        # `updates_array` is the exception worth moving: a whole (time, ncells) uint8 field,
+        # 2.382 GB of the 34.8 GB this path pinned at n_time=32. Staging it is safe for the
+        # same reason the persist above is needed -- `stage` WRITES it to disk immediately,
+        # so it is materialised before the store rewrite, not left lazy over it.
+        #
+        # The label MUST carry the iteration index. This runs once per merge-loop iteration
+        # with a different array each time, and staging writes <label>.zarr with mode="w",
+        # so a fixed label would rewrite the store the previous iteration's array is still
+        # reading. Materialiser._reject_relabel turns that mistake into an immediate error.
         (
             merge_child_ids,
             merge_parent_ids,
             merge_areas,
             merge_counts,
             has_merge,
-            updates_array,
             updates_ids,
             final_merging_objects,
-        ) = results
+        ) = persist(
+            merge_child_ids,
+            merge_parent_ids,
+            merge_areas,
+            merge_counts,
+            has_merge,
+            updates_ids,
+            final_merging_objects,
+        )
+        updates_array = _anchor_field(updates_array, f"updates_array_iter{iteration_index}", materialiser)
 
         # Get time indices where merges occurred
         has_merge = has_merge.compute()
@@ -2099,7 +2209,7 @@ def split_and_merge_objects_parallel(
             merge_data_iter,
             new_merging_objects,
             global_id_counter,
-        ) = merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter)
+        ) = merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter, iteration)
         child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
 
         # Consolidate merge events from this iteration
@@ -2201,8 +2311,13 @@ def split_and_merge_objects_parallel(
         attrs={"fill_value": -1},
     )
 
-    # Recompute object properties and overlaps after all merging
-    object_id_field_unique = object_id_field_unique.persist(optimize_graph=True)
+    # Recompute object properties and overlaps after all merging. This field has TWO
+    # consumers below -- calculate_object_properties and find_overlapping_objects -- so it
+    # is an anchor, not a bounded intermediate: leaving it lazy would re-run the whole
+    # merge loop's output graph once per consumer. `stage` in persist mode is
+    # `obj.persist()`, and `optimize_graph=True` was already dask's default, so the default
+    # path is byte-for-byte unchanged.
+    object_id_field_unique = _anchor_field(object_id_field_unique, "merged_id_field", materialiser)
     object_props = _objects.calculate_object_properties(
         object_id_field_unique,
         unstructured_grid,

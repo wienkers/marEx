@@ -25,6 +25,18 @@ from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 
+
+def _anchor(obj, label, materialiser):
+    """Stage `obj` -- it has two or more consumers. Plain persist when unsupplied.
+
+    The `materialiser is None` default keeps every existing caller -- including the
+    unstructured path, which Phase 4 does not touch -- on exactly the previous behaviour.
+    """
+    if materialiser is None:
+        return obj.persist()
+    return materialiser.stage(obj, label, preserve_chunks=True)
+
+
 # 8-connectivity structuring element for per-2D-slice connected-component labelling.
 _EIGHT_CONNECTIVITY = np.ones((3, 3), dtype=int)
 
@@ -80,6 +92,9 @@ def identify_objects(
     neighbours_int: Optional[xr.DataArray],
     xdim: str,
     regional_mode: bool,
+    *,
+    materialiser=None,
+    stage_label: str = "object_id_field",
 ) -> Tuple[xr.DataArray, None, int]:
     """
     Identify connected regions in binary data.
@@ -174,8 +189,11 @@ def identify_objects(
 
         # Ensure ID = 0 on invalid regions
         object_id_field = object_id_field.where(mask, other=0)
-        object_id_field = object_id_field.persist()
-        object_id_field = object_id_field.rename("ID_field")
+        # _anchor, matching the structured branch: this whole field is read by the caller
+        # and, on the unstructured path, again by the merge loop. Staging it in streaming
+        # mode keeps it off the cluster instead of pinning n_time x ncells x 4 B. Renamed
+        # BEFORE anchoring so the staged store carries the same variable name in every mode.
+        object_id_field = _anchor(object_id_field.rename("ID_field"), stage_label, materialiser)
         N_objects = 1  # Placeholder (IDs aren't unique across time)
 
     elif time_connectivity:
@@ -188,20 +206,42 @@ def identify_objects(
             object_id_field, N_objects = label(data_bin, structure=neighbours)
         else:
             object_id_field, N_objects = label(data_bin, structure=neighbours, wrap_axes=(2,))  # Wrap in x-direction !
-        results = persist(object_id_field, N_objects)
-        object_id_field, N_objects = results
-        N_objects = N_objects.compute()
 
-        object_id_field = (
-            xr.DataArray(
-                object_id_field,
-                coords=data_bin.coords,
-                dims=data_bin.dims,
-                attrs=data_bin.attrs,
+        def _wrap(field):
+            return (
+                xr.DataArray(
+                    field,
+                    coords=data_bin.coords,
+                    dims=data_bin.dims,
+                    attrs=data_bin.attrs,
+                )
+                .rename("ID_field")
+                .astype(np.int32)
             )
-            .rename("ID_field")
-            .astype(np.int32)
-        )
+
+        if materialiser is not None and materialiser.is_streaming:
+            # Stage the whole labelled field to disk instead of pinning it in RAM. This
+            # is the branch reached only when allow_merging=False and the grid is
+            # structured -- the 13th pin site the original Phase 4 profile missed.
+            #
+            # Staging needs the wrapped DataArray, so wrap first. N_objects is then read
+            # back off the STAGED store rather than from `label`'s second return value:
+            # that value is a separate node over the same labelling graph, and with the
+            # field on disk rather than pinned, computing it would re-run the entire
+            # 3D relabel. dask_image.ndmeasure.label numbers objects 1..N contiguously,
+            # so max(labels) == N, and an empty field gives 0 == 0.
+            object_id_field = _anchor(_wrap(object_id_field), stage_label, materialiser)
+            N_objects = int(object_id_field.max().compute().item())
+        else:
+            # persist mode: pin the raw label output and its count together so the one
+            # labelling pass serves both, exactly as before Phase 4.
+            if materialiser is None:
+                results = persist(object_id_field, N_objects)
+            else:
+                results = materialiser.pin(object_id_field, N_objects)
+            object_id_field, N_objects = results
+            N_objects = N_objects.compute()
+            object_id_field = _wrap(object_id_field)
 
     else:
         # Structured grid, 2D-per-time-slice labelling (no time connectivity).
@@ -247,7 +287,10 @@ def identify_objects(
         offsets = per_slice_counts.cumsum(timedim).shift({timedim: 1}, fill_value=0)
         object_id_field = xr.where(local_ids > 0, local_ids + offsets, 0).rename("ID_field").astype(np.int32)
 
-        object_id_field = object_id_field.persist()
+        # _anchor, not _hold: this array is read TWICE -- by the .max().compute() on the
+        # next line and by the caller via the return. Leaving it unanchored in streaming
+        # mode would re-run the whole labelling graph for the second consumer.
+        object_id_field = _anchor(object_id_field, stage_label, materialiser)
         N_objects = int(object_id_field.max().compute().item())
 
     return object_id_field, None, N_objects

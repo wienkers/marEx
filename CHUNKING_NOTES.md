@@ -112,17 +112,75 @@ print(dict(ds.sst.sizes), [c[0] for c in ds.sst.chunks], [len(c) for c in ds.sst
 | --- | --- |
 | spatial (`lat`/`lon` or `ncells`) | **WHOLE — `-1`.** Non-negotiable; see §1. |
 | time | **This is your only knob.** Small: 4–25 timesteps. |
+| `compute_mode` | The lever for a **long** series (both grid types, §3.1, §5.2). Chunk time, not space. |
 
 *[reasoned]* Because space must stay whole, one chunk is `time_chunk × n_cells`. On a 14.9 M
 cell mesh a single timestep is ~60 MB as float32 and ~15 MB as the int32 ID field, so a time
 chunk of 4 is ~240 MB. That is why the unstructured example uses `{"time": 4, "ncells": -1}`
 while the gridded one can afford more.
 
-### 3.1 The tracker does not stream (yet)
+### 3.1 `tracker(compute_mode=...)`: streaming, for gridded, delivered
 
-It holds the whole `n_time × space` ID field in memory, so today `n_time` is bounded by RAM.
-The merge/split loop itself already works a window at a time, so this is a fixable ceiling
-rather than a property of the algorithm — see §5.2.
+`tracker(..., compute_mode="streaming", temp_dir=...)` stages every whole-field intermediate
+to zarr instead of pinning it in cluster RAM, so tracking scales with **series length** rather
+than cluster RAM — the ID field, the filled/filtered fields, and the merge-loop's output
+accumulator all go through the same `Materialiser` `detect`'s `compute_mode` uses (§5.1).
+`compute_mode="persist"` (default) is unchanged behaviour. `"lazy"` is deliberately not
+offered: the merge loop is sequential in time, so accepting recompute buys nothing.
+
+*[measured]* Full-scale gridded A/B (`n_time=3804`, 0.25° global): `ID_field` and every
+integer output are bit-identical between `persist`, `streaming`, and the pre-`compute_mode`
+baseline. See §5.2 for the numbers.
+
+**Disk cost.** Streaming writes roughly 5 stores of 2 bool + 3 int32 whole fields, about
+14 bytes per cell-timestep uncompressed — ~55 GB uncompressed at the A/B's
+`n_time=3804 x 720 x 1440`; less on disk, since the ID fields are mostly zeros.
+
+**`merge_ledger` is staged too, and it is not a whole field.** It is a *returned* data_var of
+shape `(time, ID, sibling_ID)`, so it grows with the series length independently of the fields
+above. It used to end on a bare `.persist()`, which pinned it in every mode — at `n_time=3804`
+that was 1,135,311,408 B, **77 % of everything `streaming` still held**, and by a wide margin
+the largest remaining pin (next largest: 200 MB). It now routes through the same
+`Materialiser`, taking streaming's pinned total from 1.47 GB to 0.340 GB (§5.2).
+
+Staging it costs approximately nothing on disk: the ledger is overwhelmingly `-1` fill and
+blosc reduces a constant chunk to a few hundred bytes, so the 1.135 GB dense array is a few MB
+of zarr — the same is true of any `events_ds` a caller writes out. That is *modelled*, not a
+`du` of the staged store: `streaming` cleans its staging directory on normal exit, so the A/B
+could not measure it after the fact. Sub-1 % is the robust part; do not quote a precise figure.
+
+The consequence worth stating plainly: this removed the **pin**, not the growth. The ledger
+still grows with series length, and that is now a RAM concern confined to `persist` mode. Do
+not reach for a sparse representation on disk-size grounds — that argument was checked and it
+does not hold.
+
+**Precondition, enforced at construction: `temp_dir` needs uniformly time-chunked input.**
+`.chunk({"time": k})` is always fine (the ragged final chunk zarr allows is fine too). A
+genuinely ragged chunking — reachable from a store with irregular on-disk chunks, or a
+`concat` — makes `ObjectIDRegionWriter._initialise` fail inside the zarr region write: it
+does not rechunk-to-uniform the way `detect`'s `_stage_to_zarr` deliberately does, so zarr
+rejects it. `persist` mode is unaffected. `tracker.__init__` now checks this upfront and
+raises `ConfigurationError` naming the offending chunk pattern, instead of letting the run
+reach a confusing low-level zarr `ValueError` after potentially hours of earlier work.
+
+**Scope: unstructured tracking is now SUPPORTED.** It was previously rejected outright,
+because the merge/split loop (`split_and_merge_objects_parallel`) kept its own
+`update_object_id_field_zarr` closure outside the `Materialiser` while the *shared*
+preprocessing stages did stage — so the combination would have streamed only part of the
+pipeline. That loop is threaded now: its labelled field, its per-iteration `updates_array`,
+and the post-merge ID field all route through the `Materialiser`, and
+`compute_mode="streaming"` accepts `unstructured_grid=True`.
+
+**One thing to know if you touch that loop.** The merge iteration's eight-array `persist()`
+is **load-bearing for correctness, not memory**, and must stay unconditional. Those arrays
+are lazy expressions over the ID field, and `update_object_id_field_zarr` *rewrites the zarr
+store that field reads from*; left lazy they are recomputed after the rewrite, against
+updated IDs, and the merge ledgers change. Routing them through `Materialiser.pin` (a no-op
+outside `persist`) produced 10 events where `persist` produced 11 on the unstructured
+fixture. The general rule: **`pin` is only safe when the expression's inputs are
+immutable.** `stage` is safe in the same position, because it writes the array out
+immediately rather than leaving it lazy over a mutating store — which is why
+`updates_array` could move to `stage` and the other seven could not.
 
 ---
 
@@ -148,8 +206,8 @@ e.g. `(30, 30, …, 6, 24, 30, …)` along time — and `to_zarr` rejects that o
 
 | | `detect` (`preprocess_data`) | `track` (`tracker`) |
 | --- | --- | --- |
-| **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **Not yet** — see §5.2 |
-| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **Not yet** |
+| **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **Yes** — `compute_mode="streaming"` *[measured]* — see §5.2 |
+| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **Yes** — `compute_mode="streaming"` *[measured at `n_time=32` on ICON R02B09; no full-length run]* — see §3.1, §5.2 |
 
 For `track`, "larger-than-memory" means **long in time**, not large in space: one spatial
 field is always held whole, deliberately (§5.2).
@@ -177,7 +235,7 @@ and is identical in every mode. If your per-worker `memory_limit` is below that 
 mode dies and no setting helps. Size workers against the per-task working set (§2.1) first,
 then choose a mode.
 
-### 5.2 `track`: not solved today, but less structural than it looks
+### 5.2 `track`: DELIVERED for both grid types (`compute_mode="streaming"`)
 
 **Scope first: space stays whole, by design.** Chunking the spatial dimension in `track`
 would mean reworking connected-component labelling and the dilation matrix, and it is not
@@ -186,31 +244,85 @@ cells ≈ 4 MB as int32; ICON R02B09 = 14.9 M cells ≈ 60 MB). So the target fo
 **arbitrarily long in time**, at whatever resolution fits one field. That is the case that
 matters in practice.
 
-**The sequential-in-time loop is not the obstacle it appears to be.** A time-sequential
+**The sequential-in-time loop was not the obstacle it appeared to be.** A time-sequential
 algorithm streams perfectly well provided it holds only a window, and the gridded loop
-already does:
+already did:
 
 - it loads **one time chunk at a time** and processes timesteps within it;
 - its scratch list of processed chunks is **flushed and truncated periodically**;
 - the state carried between timesteps is the `t-1`/`t-2` slices plus per-event lists that
   grow with the **number of merge events**, not with `n_time × n_cells`.
 
-**What actually caps it is the output accumulator.** Results are written back into a
-whole-`n_time × space` dask array that is held in memory and re-persisted as the loop
-proceeds. That is a ceiling in `n_time`, and it is a bounded piece of work to replace with
-incremental writes to disk — the mechanism already exists in the sibling code path
-(`update_object_id_field_zarr`), currently used only on unstructured grids.
+**What actually capped it was the output accumulator.** Results were written back into a
+whole-`n_time × space` dask array held in memory and re-persisted as the loop proceeded. That
+ceiling is now removed for gridded input: `ObjectIDRegionWriter` (§3.1) writes the ID field
+incrementally to a zarr region instead, reusing the mechanism the sibling unstructured code
+path (`update_object_id_field_zarr`) already had. The remaining input-sized pins — the
+preprocessed binary field, the filled/filtered fields — go through the same `Materialiser`
+`detect`'s `compute_mode` introduced (§5.1): `pin()` in `persist` mode, staged to zarr and
+re-opened in `streaming` mode.
 
-Alongside it sit the same input-sized pins `detect` had before `compute_mode`: the
-preprocessed binary field, the filled/filtered fields, and the ID field.
+*[measured]* Full-scale gridded A/B, `n_time=3804` (0.25° global, ~10.5 years):
+`ID_field` and every integer output (event count, merge count, per-event `global_ID`,
+`presence`, the merge ledger's `parent_IDs`/`child_IDs`/`n_parents`/`n_children`) are
+**bit-identical** across `persist` (new code), `streaming` (new code), and the pre-`compute_mode`
+baseline captured before this work started.
 
-So the realistic goal is **"ID field on disk with windowed access"** plus the `compute_mode`
-treatment for the remaining pins — not a rewrite of the algorithm.
+| side | wall | peak | spill | marEx-attributable pinned |
+| --- | --- | --- | --- | --- |
+| baseline | 1093.7 s | 57.85 GB | 0.00 GB | 352.75 GB (33 calls, 19 sites) |
+| persist (first pass) | 1081.7 s | 56.99 GB | 0.00 GB | 336.97 GB (33 calls, 12 sites) |
+| streaming (first pass) | 1082.1 s | 20.43 GB | 0.00 GB | 1.47 GB (8 calls, 8 sites) |
+| persist (current) | 1103.8 s | 56.66 GB | 0.00 GB | 336.97 GB (33 calls, 12 sites) |
+| streaming (current) | 1099.5 s | 19.09 GB | 0.00 GB | **0.340 GB** (7 calls, 7 sites) |
 
-*[measured]* The practical limit today: unstructured tracking of a 1096-timestep ICON run did
-not complete on a single node — merge iteration 1 with 681 objects ran 4 h 22 m and had
-processed 256 of 1096 timesteps. Note that run used the *parallel* path, so the existence of
-a parallel/zarr code path does **not** by itself mean tracking is larger-than-memory.
+**Peak dropped 57.0 → 19.1 GB, a 66 % reduction — that is the headline, backed by pinned bytes
+falling ~990x (336.97 → 0.340 GB).** Spill was 0.00 GB on every side throughout, so here the
+peak drop *is* the memory story (§6's "peak and pinned are different quantities" rule still
+holds in general: the ~990x pin reduction does not translate 1:1 into the 66 % peak reduction,
+because peak also carries mode-independent working-set terms). **No wall-clock change in any
+direction** — every delta sits inside the ~5 % noise floor; do not read any of it as a speed
+win or loss.
+
+The last two rows are the `merge_ledger` fix (§3.1). It is the one place in this table where a
+pinned-byte change is visible in peak at roughly the right magnitude: pinned fell 1.135 GB and
+peak fell 1.34 GB (20.43 → 19.09). Treat that as *consistent*, not as a measurement — it is a
+single run against a ~5 % noise floor, and the two quantities are not the same thing.
+
+**`persist` is byte-identical across both passes — 336,970,337,552 B, to the byte.** That is
+the control for the `merge_ledger` change: the ledger's 1,135,311,408 B did not disappear in
+`persist` mode, it moved from a bare `.persist()` site to the `Materialiser`'s `stage` path,
+which in `persist` mode *is* `dask.persist`. The default path did not move.
+
+`persist(new)` matching the baseline call-for-call (33 = 33 `persist()` calls) and closely
+site-for-site is the **graph-level** proof that the default path did not move at scale —
+stronger evidence than the wall-clock match. The 352.75 → 336.97 GB gap (15.78 GB) is exactly
+one whole int32 field at `n_time=3804`: the one pin deliberately dropped from the tracker's
+final `pin()` call because `split_and_merge` already anchors that field elsewhere, not
+unexplained drift.
+
+**Two known gaps this profiling pass surfaced, both recorded rather than fixed:**
+- `objects.py`'s `elif time_connectivity:` branch holds a whole-field pin that was not
+  threaded through the `Materialiser` — a 13th pin site the original 12-site profile missed.
+  Reached only when `allow_merging=False and not unstructured_grid`.
+- `morphology.py`'s joint `persist(data_bin_filtered, padded_areas)` becomes a no-op `pin` in
+  streaming mode, so the shared labelling pass its in-code comment calls load-bearing is no
+  longer actually shared there under streaming. This is a streaming-only performance cost
+  (extra recompute), not a correctness issue — the A/B above is bit-identical regardless.
+
+**Unstructured tracking is unaffected — still not solved, and now rejected rather than
+silently partial.** It keeps its own `update_object_id_field_zarr` closure outside the
+`Materialiser`, so `compute_mode="streaming"` with `unstructured_grid=True` is rejected at
+construction time with `ConfigurationError` (see §3.1): the shared preprocessing stages
+would stream but the unstructured merge/split core would not, and that combination has zero
+coverage. Unifying the two writers is separate, unstarted work, deliberately out of scope
+for this effort (see NEXT.md).
+
+*[measured]* The practical limit for unstructured today, unchanged by this work: tracking of a
+1096-timestep ICON run did not complete on a single node — merge iteration 1 with 681 objects
+ran 4 h 22 m and had processed 256 of 1096 timesteps. That run used the *parallel* path, so the
+existence of a parallel/zarr code path does **not** by itself mean tracking is
+larger-than-memory — see §3.1's scope note.
 
 ### 5.3 How to scale today
 

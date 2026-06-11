@@ -33,6 +33,17 @@ from .overlap import sparse_bool_power
 logger = get_logger(__name__)
 
 
+def _hold(obj, materialiser):
+    """Pin `obj` -- single consumer, or already anchored upstream.
+
+    A no-op in streaming mode; that is the point. Staging here would write a second
+    copy of an array that is already on disk.
+    """
+    if materialiser is None:
+        return obj.persist()
+    return materialiser.pin_one(obj)
+
+
 def compute_area(
     data_bin: xr.DataArray,
     unstructured_grid: bool,
@@ -225,6 +236,8 @@ def fill_time_gaps(
     xdim: str,
     mask: xr.DataArray,
     regional_mode: bool,
+    *,
+    materialiser=None,
 ) -> xr.DataArray:
     """
     Fill temporal gaps between objects.
@@ -271,7 +284,13 @@ def fill_time_gaps(
     )
 
     # Remove padding
-    data_bin_filled = data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)}).persist()
+    # _hold, not _anchor: the only consumer is the fill_holes call immediately below,
+    # and the caller stages the RESULT (tracker.py:879). Staging here too would write
+    # the whole field to zarr twice.
+    data_bin_filled = _hold(
+        data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)}),
+        materialiser,
+    )
 
     # Fill newly-created spatial holes
     data_bin_filled = fill_holes(
@@ -336,6 +355,8 @@ def filter_small_objects(
     cell_area: xr.DataArray,
     timedim: str,
     ydim: Optional[str],
+    *,
+    materialiser=None,
 ) -> Tuple[xr.DataArray, float, xr.DataArray, int, int]:
     """
     Remove objects smaller than a threshold area.
@@ -368,6 +389,12 @@ def filter_small_objects(
             neighbours_int=neighbours_int,
             xdim=xdim,
             regional_mode=regional_mode,
+            materialiser=materialiser,
+            # A DISTINCT label: tracker.run_tracking() also calls identify_objects, and on
+            # the unstructured path both run in one job. Sharing "object_id_field" would
+            # make the second stage overwrite the first's store -- Materialiser now raises
+            # on that rather than corrupting, so a shared label would fail the run outright.
+            stage_label="filter_object_id_field",
         )
 
         # Get the maximum ID to dimension arrays
@@ -516,7 +543,22 @@ def filter_small_objects(
                 vectorize=True,
                 dask="parallelized",
             )
-            data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
+            # ONE materialisation for both outputs, so the shared labelling pass really is
+            # shared. `pin` was wrong here under streaming, where it is a no-op: the
+            # census's .compute() below then ran the pass, and the caller's stage of
+            # data_bin_filtered ran it a second time over the whole field (measured on the
+            # 32-step fixture: 64 slice labellings against persist's 32). `stage_many`
+            # writes both into one zarr in a single graph execution, and registers
+            # data_bin_filtered under its own name so the caller's stage short-circuits.
+            # In persist mode this is dask.persist of the pair -- exactly as before.
+            if materialiser is None:
+                data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
+            else:
+                data_bin_filtered, padded_areas = materialiser.stage_many(
+                    {"data_bin_filtered": data_bin_filtered, "padded_areas": padded_areas},
+                    "small_object_filter",
+                    preserve_chunks=True,
+                )
         else:
             padded_areas = xr.apply_ufunc(
                 slice_object_areas,

@@ -30,11 +30,12 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
-from dask import is_dask_collection, persist
+from dask import is_dask_collection
 from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
+from ..detect.compute_mode import Materialiser, create_staging_dir
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
@@ -77,6 +78,36 @@ def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_A
                 logger.debug(f"Pruned stale temp store {path}")
         except OSError:
             continue
+
+
+def _is_uniform_time_chunking(chunks: Tuple[int, ...]) -> bool:
+    """Check that a chunk tuple is uniform except for a possibly-smaller final chunk.
+
+    This is exactly the shape ``.chunk({"time": k})`` always produces: ``(k, k, ..., k, r)``
+    with ``r <= k``. :class:`~marEx.track.region_writer.ObjectIDRegionWriter` requires this
+    for the zarr region writes streaming mode relies on. A genuinely ragged chunking --
+    e.g. from ``open_mfdataset`` over uneven per-year files, giving ``(365, 365, 366, 365)``
+    -- reaches the zarr write intact and fails there with a low-level ``ValueError``,
+    possibly after hours of earlier processing.
+    """
+    if len(chunks) <= 1:
+        return True
+    first = chunks[0]
+    if any(c != first for c in chunks[:-1]):
+        return False
+    return chunks[-1] <= first
+
+
+def _format_chunk_pattern(chunks: Tuple[int, ...], max_show: int = 10) -> str:
+    """Render a chunk tuple for an error message, truncated so it never dumps thousands
+    of numbers into an exception.
+    """
+    if len(chunks) <= max_show:
+        return str(tuple(chunks))
+    half = max_show // 2
+    head = ", ".join(str(c) for c in chunks[:half])
+    tail = ", ".join(str(c) for c in chunks[-half:])
+    return f"({head}, ..., {tail}) [{len(chunks)} chunks total]"
 
 
 # Module-level state for the distributed.scheduler warning filter. The filter is
@@ -158,6 +189,35 @@ class tracker:
         Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
+    compute_mode : {'persist', 'streaming'}, default='persist'
+        Materialisation policy for whole-field intermediates during tracking.
+
+        * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
+          whenever the run fits (measured peak ~57 GB at n_time=3804, 0.25 deg global).
+        * 'streaming': stages the ID field, the filled/filtered fields, the merge loop's
+          output accumulator and the merge ledger to zarr under ``temp_dir`` instead of
+          pinning them, so memory scales with cluster size rather than series length
+          (measured peak 19.1 GB on the same run, bytes pinned 337 -> 0.34 GB). Requires
+          ``temp_dir``. Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields,
+          ~14 bytes per cell-timestep uncompressed (~55 GB uncompressed at that same
+          n_time=3804 x 720 x 1440 run; less on disk, since the ID fields are mostly
+          zeros). The merge ledger adds a sixth store but negligible disk: it is nearly
+          all ``-1`` fill and compresses to a few MB.
+
+          **Restrictions**: requires the input's time chunking to be uniform (every chunk
+          equal except a possibly-smaller last one, exactly what ``.chunk({'time': k})``
+          always produces); a genuinely ragged chunking is rejected at construction time
+          rather than failing inside the zarr write. Both gridded and unstructured grids
+          are supported.
+
+          **Staging-lifetime contract**: the returned dataset reads *lazily* from the
+          staged zarr store, so the staging directory deliberately **outlives**
+          ``run()``. Write your output first, then call
+          ``marEx.clear_staging(events_ds)`` -- the path is on
+          ``events_ds.attrs["marex_staging_dir"]``. An ``atexit`` hook cleans up on
+          normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
+          wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
+          §3.1/§5.2 for the full contract and measurements.
     T_fill : int, default=2
         The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
     allow_merging : bool, default=True
@@ -405,6 +465,8 @@ class tracker:
         quiet: Optional[bool] = None,
         regional_mode: bool = False,
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
+        *,
+        compute_mode: Literal["persist", "streaming"] = "persist",
     ) -> None:
         """Initialise the tracker with parameters and data."""
         # Configure logging if verbose/quiet parameters are provided
@@ -513,6 +575,75 @@ class tracker:
         if temp_dir:
             os.makedirs(temp_dir, exist_ok=True)
         self.scratch_dir = temp_dir
+
+        # compute_mode: two modes only. `lazy` is rejected rather than silently
+        # accepted -- the merge loop is inherently sequential, so accepting recompute
+        # buys nothing there, and detect's lazy performance figures were never
+        # measured at scale.
+        if compute_mode == "lazy":
+            raise ConfigurationError(
+                "compute_mode='lazy' is not supported by the tracker",
+                details="The merge/split loop is sequential in time; recompute buys nothing",
+                suggestions=[
+                    "Use compute_mode='persist' (default) when the run fits in cluster RAM",
+                    "Use compute_mode='streaming' with temp_dir for long time series",
+                ],
+                context={"provided_mode": compute_mode},
+            )
+        if compute_mode not in ("persist", "streaming"):
+            raise ConfigurationError(
+                f"Unknown compute_mode '{compute_mode}'",
+                details="Invalid compute_mode parameter",
+                suggestions=[
+                    "Use 'persist' (default) or 'streaming'",
+                ],
+                context={"provided_mode": str(compute_mode), "valid_modes": ["persist", "streaming"]},
+            )
+        if compute_mode == "streaming" and not temp_dir:
+            raise ConfigurationError(
+                "compute_mode='streaming' requires temp_dir",
+                details="Streaming mode stages the whole-field intermediates to zarr on disk",
+                suggestions=[
+                    "Pass temp_dir pointing at large transient storage, e.g. tracker(..., temp_dir='/scratch/user/marex')",
+                    "Use compute_mode='persist' if no scratch space is available",
+                ],
+                context={"provided_mode": compute_mode},
+            )
+
+        # streaming previously covered the gridded path only, and unstructured input was
+        # rejected here: the merge/split loop was not wired through the Materialiser, so the
+        # combination would have streamed only PART of the pipeline. The unstructured merge
+        # core is now threaded too -- its whole-field pins (the labelled field, the merge
+        # loop's `updates_array`, and the post-merge field) all route through the
+        # Materialiser -- so the rejection is gone and unstructured input is accepted.
+        #
+        # The ragged-time-chunk precondition below still applies to BOTH grid types.
+
+        # streaming's zarr region writer (ObjectIDRegionWriter) requires uniform chunking
+        # along the time dimension: every chunk equal except possibly a smaller final one.
+        # `.chunk({"time": k})` always produces exactly that shape, so this never rejects the
+        # common case. A genuinely ragged chunking (e.g. open_mfdataset over uneven per-year
+        # files) would otherwise reach the zarr write intact and fail there with a confusing
+        # low-level zarr ValueError, after potentially hours of earlier processing.
+        if compute_mode == "streaming":
+            time_chunks = data_bin.chunks[data_bin.dims.index(self.timedim)]
+            if not _is_uniform_time_chunking(time_chunks):
+                raise ConfigurationError(
+                    "compute_mode='streaming' requires uniform time chunking",
+                    details=(
+                        f"Every chunk along {self.timedim!r} must be equal except the last, which "
+                        f"may be smaller. Got: {_format_chunk_pattern(time_chunks)}"
+                    ),
+                    suggestions=[
+                        f"Rechunk uniformly, e.g. data_bin.chunk({{'{self.timedim}': k}})",
+                        "Use compute_mode='persist' if the input cannot be rechunked uniformly",
+                    ],
+                    context={"provided_mode": compute_mode, "time_chunks": _format_chunk_pattern(time_chunks)},
+                )
+
+        self.compute_mode = compute_mode
+        self.staging_dir = create_staging_dir(temp_dir) if compute_mode == "streaming" else None
+        self.materialiser = Materialiser(compute_mode, self.staging_dir)
 
         # Per-run temp stores. These used to share one fixed path
         # ({scratch_dir}/marEx_temp_field.zarr) between refresh_dask_graph and the merge
@@ -798,6 +929,14 @@ class tracker:
         logger.debug(f"Final dataset dimensions: {events_ds.dims}")
         log_memory_usage(logger, "Pipeline completion")
 
+        # Streaming mode returns a dataset that reads lazily from the staged zarr stores,
+        # so the staging directory deliberately OUTLIVES this call. The caller writes its
+        # output first, then calls marEx.clear_staging(events_ds). Note the atexit backstop
+        # does NOT survive SIGKILL -- a wall-clock kill leaves the directory behind -- so
+        # sweep temp_dir periodically.
+        if self.staging_dir is not None:
+            events_ds.attrs["marex_staging_dir"] = str(self.staging_dir)
+
         if self.allow_merging and return_merges:
             logger.debug("Returning both events and merge datasets")
             return events_ds, merges_ds
@@ -868,7 +1007,13 @@ class tracker:
             # one scalar diagnostic, and by then self.data_bin has been released -- so on
             # its own it forced a second full read of the entire raw input
             # (review finding 4.3).
-            data_bin_filled, raw_area = persist(self.fill_holes(self.data_bin), raw_area)
+            data_bin_filled, raw_area = self.materialiser.pin(self.fill_holes(self.data_bin), raw_area)
+            if self.materialiser.is_streaming:
+                # pin is a no-op in streaming, which would leave raw_area lazy and force the
+                # second full read of the raw input that the comment above says was removed.
+                # raw_area is tiny (a per-timestep reduction, shape (n_time,)), so pinning it
+                # costs nothing.
+                raw_area = raw_area.persist()
             wait(data_bin_filled)
             self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
@@ -876,7 +1021,7 @@ class tracker:
         # Fill small time-gaps between objects
         logger.info(f"Filling temporal gaps with T_fill={self.T_fill}")
         with log_timing(logger, "Temporal gap filling"):
-            data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
+            data_bin_filled = self.materialiser.stage(self.fill_time_gaps(data_bin_filled), "data_bin_filled", preserve_chunks=True)
             wait(data_bin_filled)  # Force compute so this step's time is attributed correctly
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
@@ -905,7 +1050,7 @@ class tracker:
                 data_bin_filtered = load_data_from_checkpoint()
         else:
             logger.debug("Persisting preprocessed data in memory")
-            data_bin_filtered = data_bin_filtered.persist()
+            data_bin_filtered = self.materialiser.stage(data_bin_filtered, "data_bin_filtered", preserve_chunks=True)
             wait(data_bin_filtered)
 
         # Compute area of processed data
@@ -1154,6 +1299,7 @@ class tracker:
             self.xdim,
             self.mask,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     def refresh_dask_graph(self, data_bin: xr.DataArray) -> xr.DataArray:
@@ -1212,6 +1358,7 @@ class tracker:
             self.cell_area,
             self.timedim,
             self.ydim,
+            materialiser=self.materialiser,
         )
 
     # ============================
@@ -1246,6 +1393,7 @@ class tracker:
             getattr(self, "neighbours_int", None),
             self.xdim,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     def calculate_centroid(
@@ -1489,7 +1637,11 @@ class tracker:
         """
         # Identify objects at each time step
         object_id_field, _, _ = self.identify_objects(data_bin, time_connectivity=False)
-        object_id_field = object_id_field.persist()
+        # pin, NOT stage: this is the same array identify_objects already anchored
+        # (objects.py:250, Task 5). Staging it again would write a second copy of the
+        # whole field to zarr. In persist mode dask.persist on an already-persisted
+        # collection returns the same futures, so the default is unchanged.
+        object_id_field = self.materialiser.pin_one(object_id_field)
         del data_bin
         logger.info("Finished object identification")
 
@@ -1514,8 +1666,12 @@ class tracker:
         logger.info("Finished splitting and merging objects")
 
         # Persist results (This helps avoid block-wise task fusion run_spec issues with dask)
-        results = persist(object_id_field, object_props, overlap_objects_list, merge_events)
-        object_id_field, object_props, overlap_objects_list, merge_events = results
+        # object_id_field is deliberately excluded: it is already anchored by
+        # split_and_merge (Tasks 6/7), so pinning it again here would be redundant. The
+        # other three are small. NOTE: if the golden or graph-structure test moves,
+        # restore object_id_field to this call.
+        results = self.materialiser.pin(object_props, overlap_objects_list, merge_events)
+        object_props, overlap_objects_list, merge_events = results
 
         # Cluster & rename objects to get globally unique event IDs
         split_merged_events_ds = self.cluster_rename_objects_and_props(
@@ -1585,6 +1741,7 @@ class tracker:
             self.lat,
             self.lon,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     # ============================
@@ -1630,6 +1787,8 @@ class tracker:
             self.nn_partitioning,
             self.overlap_threshold,
             self.regional_mode,
+            materialiser=self.materialiser,
+            id_field_path=(os.path.join(str(self.staging_dir), "merge_id_field.zarr") if self.staging_dir else None),
         )
 
     def split_and_merge_objects_parallel(
@@ -1674,4 +1833,5 @@ class tracker:
             self.regional_mode,
             self.max_iteration,
             self.temp_merge_path,
+            materialiser=self.materialiser,
         )

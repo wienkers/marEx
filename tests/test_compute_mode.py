@@ -119,6 +119,66 @@ class TestMaterialiserValidation:
         assert m.is_lazy is True
 
 
+def _ragged_time_da(name="x"):
+    """A (time, space) DataArray with a ragged final time chunk, e.g. (2, 2, 2, 3).
+
+    Built the way ``fill_time_gaps`` produces one in practice: concatenating two
+    differently-chunked pieces leaves the boundary between them, rather than trying to
+    force ragged chunks through ``dask.array``'s chunk-spec syntax directly.
+    """
+    first = xr.DataArray(np.ones((6, 4), dtype=np.float32), dims=("time", "space")).chunk({"time": 2})
+    second = xr.DataArray(np.ones((3, 4), dtype=np.float32), dims=("time", "space")).chunk({"time": 3})
+    combined = xr.concat([first, second], dim="time")
+    combined.name = name
+    combined.coords["time"] = np.arange(9)
+    combined.coords["space"] = np.arange(4)
+    return combined
+
+
+class TestMaterialiserStagePreserveChunks:
+    """``stage(..., preserve_chunks=True)`` restores chunk boundaries streaming moved.
+
+    Streaming staging rechunks to the largest chunk per dimension before writing (zarr
+    rejects ragged chunks), so a ragged input can come back with different chunk
+    boundaries after ``_stage_to_zarr``. ``preserve_chunks`` is opt-in and defaults to
+    False so detect's existing, documented staged-chunk-layout difference is untouched;
+    only callers that need boundaries to hold (the tracker's merge loop) pass True.
+    """
+
+    def test_ragged_input_is_restored_to_its_original_chunks(self, tmp_path):
+        obj = _ragged_time_da()
+        assert obj.chunks[0] == (2, 2, 2, 3)  # sanity: the fixture really is ragged
+
+        m = Materialiser("streaming", staging_dir=tmp_path)
+        staged = m.stage(obj, "ragged", preserve_chunks=True)
+
+        assert staged.chunks == obj.chunks
+
+    def test_default_preserve_chunks_false_leaves_detect_behaviour_unchanged(self, tmp_path):
+        obj = _ragged_time_da()
+
+        m = Materialiser("streaming", staging_dir=tmp_path)
+        staged = m.stage(obj, "ragged")  # preserve_chunks defaults to False
+
+        # This is the pre-existing, documented behaviour: staging is allowed to move
+        # chunk boundaries when preserve_chunks is not requested.
+        assert staged.chunks != obj.chunks
+        assert staged.chunks[0] == (3, 3, 3)
+
+    def test_uniform_input_is_a_noop_regardless_of_the_flag(self, tmp_path):
+        uniform = xr.DataArray(np.ones((9, 4), dtype=np.float32), dims=("time", "space")).chunk({"time": 3})
+        uniform.name = "u"
+        uniform.coords["time"] = np.arange(9)
+        uniform.coords["space"] = np.arange(4)
+
+        m = Materialiser("streaming", staging_dir=tmp_path)
+        staged_preserved = m.stage(uniform, "uniform_a", preserve_chunks=True)
+        staged_default = m.stage(uniform, "uniform_b", preserve_chunks=False)
+
+        assert staged_preserved.chunks == uniform.chunks
+        assert staged_default.chunks == uniform.chunks
+
+
 class TestStagingDir:
     def test_create_staging_dir_is_unique_and_nested(self, tmp_path):
         a = create_staging_dir(tmp_path)

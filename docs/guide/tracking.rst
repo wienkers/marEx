@@ -483,6 +483,21 @@ Core Tracking Parameters
   * **Higher threshold** (e.g., 0.7): More conservative, stricter continuity requirement
   * **Default** (0.5): Balanced approach for most applications
 
+Memory Parameters
+-----------------
+
+**compute_mode** : {'persist', 'streaming'}, default='persist'
+  Materialisation policy for whole-field intermediates. ``'persist'`` pins them in cluster
+  RAM and is the fastest option whenever the run fits. ``'streaming'`` stages them to Zarr
+  under ``temp_dir``, so memory scales with cluster size rather than series length; it
+  requires ``temp_dir`` and uniformly time-chunked input. Outputs are bit-identical between
+  the two modes. See :ref:`Larger-Than-Memory Tracking <larger-than-memory-tracking>` below.
+
+**temp_dir** : str, optional
+  Scratch directory for ``compute_mode='streaming'``. Required in that mode. The staging
+  directory deliberately outlives ``run()`` because the returned dataset reads from it
+  lazily; release it with :func:`marEx.clear_staging` once your output is written.
+
 Grid Configuration Parameters
 -----------------------------
 
@@ -691,6 +706,70 @@ Memory Management
        T_fill=1,                    # Reduce temporal gap filling
        allow_merging=False          # Disable merge tracking for speed
    )
+
+.. _larger-than-memory-tracking:
+
+Larger-Than-Memory Tracking (``compute_mode``)
+-----------------------------------------------
+
+By default the tracker pins its whole-field intermediates in cluster RAM, so the longest
+series you can track is bounded by cluster size. ``compute_mode='streaming'`` stages those
+intermediates to Zarr under ``temp_dir`` instead, so memory scales with **cluster size**
+rather than **series length**. Both structured and unstructured grids are supported.
+
+.. code-block:: python
+
+   event_tracker = marEx.tracker(
+       extremes_ds.extreme_events.chunk({'time': 25, 'lat': -1, 'lon': -1}),
+       extremes_ds.mask,
+       R_fill=8,
+       area_filter_quartile=0.5,
+       compute_mode='streaming',
+       temp_dir='/scratch/your_user/marex_staging',
+   )
+   events_ds = event_tracker.run()
+
+   # The returned dataset reads LAZILY from the staged store, so write your
+   # output BEFORE releasing the staging directory.
+   events_ds.to_zarr('tracked_events.zarr')
+   marEx.clear_staging(events_ds)
+
+Measured on a 0.25° global run of 3804 timesteps (~10.5 years), against the default mode:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Mode
+     - Peak cluster memory
+     - Bytes pinned
+   * - ``'persist'`` (default)
+     - 56.7 GB
+     - 337 GB
+   * - ``'streaming'``
+     - 19.1 GB
+     - 0.34 GB
+
+Every integer and label output — ``ID_field`` and all event properties — is bit-identical
+between the two modes. Wall-clock time is unchanged within run-to-run noise, so the trade is
+disk for memory, not speed for memory.
+
+Three things to know before using it:
+
+* **Disk cost.** Roughly 5 whole-field stores (2 boolean + 3 int32), about 14 bytes per
+  cell-timestep uncompressed — around 55 GB for the run above, less once written, since the
+  ID fields are mostly zeros. Size ``temp_dir`` accordingly.
+* **The staging directory outlives** ``run()``, by design, because the returned dataset is
+  lazy. Call :func:`marEx.clear_staging` once your output is written; the path is also on
+  ``events_ds.attrs['marex_staging_dir']``. Cleanup runs automatically on normal interpreter
+  exit but **cannot** run after a ``SIGKILL`` (a wall-clock kill on a batch system is the
+  usual case), so sweep ``temp_dir`` periodically.
+* **Input time chunking must be uniform.** ``.chunk({'time': k})`` always satisfies this (a
+  smaller final chunk is fine). Genuinely ragged chunking — from a store with irregular
+  on-disk chunks, or from a ``concat`` — is rejected at construction with a
+  ``ConfigurationError`` rather than failing deep inside the Zarr write.
+
+``compute_mode='lazy'`` is deliberately not offered: the merge loop is sequential in time, so
+accepting recomputation would buy nothing.
 
 Algorithm Details
 =================
