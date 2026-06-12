@@ -1,4 +1,4 @@
-<img src="https://github.com/user-attachments/assets/55eab465-9aca-4754-a981-e26a36f7d045" alt="marEx_animated" width="100%">
+<img src="media/logo.png" alt="marEx logo" width="100%">
 
 [![CI](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)

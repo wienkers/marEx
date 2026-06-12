@@ -1263,8 +1263,27 @@ def split_and_merge_objects_parallel(
         (object_id_field, object_props, overlap_objects_list, merge_events)
     """
     # Constants for memory allocation
-    MAX_MERGES = 20  # Maximum number of merges per timestep
-    MAX_PARENTS = 10  # Maximum number of parents per merge
+    # Sized from measurement, not judgement: job 27105655 instrumented 5 x 24-timestep
+    # windows of the ICON R02B09 store (MAX_PARENTS=100/MAX_MERGES=200 so nothing capped)
+    # and saw, over 707 real merges, max n_parents = 10 (99th pct 7) and max merges/timestep
+    # = 8 (99th pct 6). Both constants are bounded together by the per-timestep update-id
+    # space -- `updates_array` is uint8 with 255 as its "no update" sentinel and
+    # `updates_ids` has exactly 255 slots -- giving
+    #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
+    # 16 x 15 = 240 fits. MAX_MERGES comes DOWN 20 -> 16 (still 2x the measured max of 8)
+    # to buy parent slots, because the parent tail is what actually failed: run 27098021
+    # died at global t~767 on a 10-parent child. The windowed histogram is a LOWER BOUND on
+    # that tail -- a 24-step window restarts the merge loop from a clean `data_m1`, so
+    # build-up across a 1096-step run is not reproduced -- which is why the margin over the
+    # observed 10 is deliberately wide rather than one or two slots.
+    # If a full run still exceeds these, the fix is NOT another bump: it is widening
+    # updates_array/updates_ids to uint16, or lowering R_fill.
+    # See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
+    MAX_MERGES = 16  # Maximum number of merges per timestep (measured max 8)
+    MAX_PARENTS = 16  # Maximum number of parents per merge (measured max 10)
+    # NOTE: this also sets MAX_CHILDREN, the width of `child_ids_iter`. Children-per-split
+    # was NOT measured; 10 -> 16 only widens that array, so it can add headroom but never
+    # remove any.
     MAX_CHILDREN = MAX_PARENTS
 
     def process_chunk(
@@ -1326,10 +1345,21 @@ def split_and_merge_objects_parallel(
         # merges in that chunk are silently dropped or crash. Target shape is (2, time, ncells).
         while chunk_data_m1_full.ndim > 3:
             chunk_data_m1_full = chunk_data_m1_full.squeeze(axis=-1)
-        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32).copy()
-        chunk_data = chunk_data_m1_full[1].astype(np.int32).copy()
+        # `.astype()` already returns a fresh, writable buffer that does not alias the task
+        # input (numpy's `copy` argument defaults to True, even when the dtype is unchanged),
+        # so the trailing `.copy()` these three lines used to carry was a second full
+        # duplicate of each array, purely transient: two single time slices and one whole
+        # chunk, ~358 MB per task on the ICON mesh at timechunks=4. The no-aliasing property
+        # the merge loop relies on (it mutates `data_t` in place) is a property of `astype`,
+        # not of the dropped copy.
+        #
+        # `chunk_data_m1_full` is the field shifted forward one step, so its first two TIME
+        # entries are (field[t-1], field[t]) for this chunk's first timestep -- which is why
+        # both come from the m1 argument and are single slices, not whole chunks.
+        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32)
+        chunk_data = chunk_data_m1_full[1].astype(np.int32)
         del chunk_data_m1_full  # Free memory immediately
-        chunk_data_p1 = chunk_data_p1_full.astype(np.int32).copy()
+        chunk_data_p1 = chunk_data_p1_full.astype(np.int32)
         # Remove any singleton dimensions except time and space
         while chunk_data_p1.ndim > 2:
             chunk_data_p1 = chunk_data_p1.squeeze(axis=-1)
@@ -1395,9 +1425,18 @@ def split_and_merge_objects_parallel(
 
                 # Get child mask and identify overlapping parents
                 child_mask = data_t == child_id
+                # Ascending cell indices of the child. Hoisted here from after the
+                # partitioning step, where it used to be recomputed; child_mask is not
+                # modified in between. Objects are tiny next to the mesh, so testing a
+                # candidate parent AT these indices costs O(child) where intersecting two
+                # whole-field boolean masks costs O(ncells).
+                child_cells = np.where(child_mask)[0].astype(np.int32)
 
                 # Find parent objects that overlap with this child
                 potential_parents = np.unique(data_m1[child_mask])
+                # Loop-invariant: the child's own area was recomputed once per candidate
+                # parent inside the scan below.
+                child_area = area[child_mask].sum()
                 parent_iterator = 0
                 parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
                 parent_centroids = np.full((MAX_PARENTS, 2), -1.0e10, dtype=np.float32)
@@ -1408,33 +1447,51 @@ def split_and_merge_objects_parallel(
 
                 # Find all unique parent IDs with significant overlap
                 for parent_id in potential_parents[potential_parents > 0]:
-                    if n_parents >= MAX_PARENTS:  # pragma: no cover
-                        raise TrackingError(
-                            "Too many parent objects for tracking",
-                            details=f"Child {child_id} at timestep {t} has {n_parents} parents (limit: {MAX_PARENTS})",
-                            suggestions=[
-                                "Increase overlap_threshold to reduce fragmentation",
-                                "Apply stronger area filtering",
-                            ],
-                            context={
-                                "child_id": child_id,
-                                "timestep": t,
-                                "n_parents": n_parents,
-                                "limit": MAX_PARENTS,
-                            },
-                        )
-
                     parent_mask = data_m1 == parent_id
-                    if np.any(parent_mask & child_mask):
+                    # Ascending, and exactly `np.where(parent_mask & child_mask)[0]` -- but
+                    # evaluated only at the child's own cells, so it replaces two whole-mesh
+                    # boolean intersections (the `any` test and the overlap gather) with two
+                    # O(child) lookups.
+                    overlap_cells = child_cells[parent_mask[child_cells]]
+                    if overlap_cells.size:
                         # Calculate overlap area and check if it's large enough
                         area_0 = area[parent_mask].sum()  # Parent area
-                        area_1 = area[child_mask].sum()  # Child area
+                        area_1 = child_area  # Child area
                         min_area = np.minimum(area_0, area_1)
-                        overlap_area = area[parent_mask & child_mask].sum()
+                        overlap_area = area[overlap_cells].sum()
 
                         # Skip if overlap is below threshold
                         if overlap_area / min_area < overlap_threshold:
                             continue
+
+                        # Only now is this candidate an ACCEPTED parent, so only now can it
+                        # exhaust the fixed-width arrays. Checking at the top of the loop
+                        # instead -- as this did until 2026-08-20 -- raises whenever
+                        # MAX_PARENTS are accepted and ANY further candidate id remains in
+                        # `potential_parents`, even though every one of those may be about to
+                        # fail the overlap threshold above and the arrays hold indices
+                        # 0..MAX_PARENTS-1 exactly. On a basin-scale child `potential_parents`
+                        # is mostly such rejects, so that fired on merges the arrays could
+                        # hold. See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
+                        if n_parents >= MAX_PARENTS:  # pragma: no cover
+                            raise TrackingError(
+                                "Too many parent objects for tracking",
+                                details=(
+                                    f"Child {child_id} at timestep {t} has more than "
+                                    f"{MAX_PARENTS} parents (limit: {MAX_PARENTS})"
+                                ),
+                                suggestions=[
+                                    "Raise MAX_PARENTS, honouring MAX_MERGES * (MAX_PARENTS - 1) <= 255",
+                                    "Increase overlap_threshold (weak: wholly-absorbed parents score ~1.0)",
+                                    "Apply stronger area filtering",
+                                ],
+                                context={
+                                    "child_id": child_id,
+                                    "timestep": t,
+                                    "n_parents": n_parents,
+                                    "limit": MAX_PARENTS,
+                                },
+                            )
 
                         # Record parent information
                         parent_masks_uint[parent_mask] = parent_iterator
@@ -1505,12 +1562,18 @@ def split_and_merge_objects_parallel(
                     max_area = parent_areas.max() / mean_cell_area
                     max_distance = int(np.sqrt(max_area) * 2.0)
 
-                    # Use optimised nearest-neighbor partitioning
+                    # Use optimised nearest-neighbor partitioning.
+                    #
+                    # No defensive copies here: the kernel makes its own working copy of
+                    # parent_frontiers (the only array it writes) and merely reads
+                    # child_mask and neighbours_int. Copying neighbours_int was by far the
+                    # worst of the three -- (3, ncells) int32 is 178 MB on the ICON mesh,
+                    # allocated and thrown away on EVERY merge event.
                     new_labels_uint = partition_nn_unstructured_optimised(
-                        child_mask.copy(),
-                        parent_masks_uint.copy(),
+                        child_mask,
+                        parent_masks_uint,
                         parent_centroids,
-                        neighbours_int.copy(),
+                        neighbours_int,
                         lat,
                         lon,
                         max_distance=max(max_distance, 20) * 2,
@@ -1529,15 +1592,46 @@ def split_and_merge_objects_parallel(
                 data_t[child_mask] = new_labels
 
                 # Record which cells get which new IDs for later updates
-                spatial_indices_all = np.where(child_mask)[0].astype(np.int32)
+                spatial_indices_all = child_cells
                 child_mask = None  # Free memory
-                gc.collect()
+                # No gc.collect() here. CPython frees these arrays by refcount the moment
+                # the last name is rebound; a full collection only breaks reference
+                # CYCLES, of which this loop creates none. It ran once per merge event and
+                # walks the WHOLE process heap each time, so its cost grows with the
+                # worker's live object count rather than with anything this loop does.
 
                 # Record update information for each new ID
                 for new_id in child_ids[1:]:
-                    update_idx = np.where(updates_ids[t] == -1)[0].astype(np.int32)[
-                        0
-                    ]  # Find next non-negative index in updates_ids
+                    free_slots = np.where(updates_ids[t] == -1)[0].astype(np.int32)
+                    if free_slots.size == 0:  # pragma: no cover
+                        # `updates_array` is uint8 with 255 as its "no update" sentinel, so
+                        # `updates_ids` has exactly 255 slots per timestep and every new id
+                        # minted at this timestep consumes one. Each merge mints
+                        # `n_parents - 1`, giving the joint invariant
+                        #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
+                        # which the two constants must be raised together under. Without
+                        # this branch the loop indexes an empty array and dies on a bare
+                        # IndexError hours into a run.
+                        raise TrackingError(
+                            "Exhausted the per-timestep update-id space",
+                            details=(
+                                f"Timestep {t} minted more than {updates_ids.shape[1]} new IDs; "
+                                f"MAX_MERGES={MAX_MERGES} x (MAX_PARENTS-1)={MAX_PARENTS - 1} "
+                                f"= {MAX_MERGES * (MAX_PARENTS - 1)}"
+                            ),
+                            suggestions=[
+                                "Lower MAX_MERGES or MAX_PARENTS so their product stays within the slot count",
+                                "Widen updates_array to uint16 and updates_ids to match (costs a whole extra "
+                                "(time, ncells) byte-field per iteration)",
+                            ],
+                            context={
+                                "timestep": t,
+                                "slots": int(updates_ids.shape[1]),
+                                "max_merges": MAX_MERGES,
+                                "max_parents": MAX_PARENTS,
+                            },
+                        )
+                    update_idx = free_slots[0]  # Next free index in updates_ids
                     updates_ids[t, update_idx] = new_id
                     updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
 
@@ -1546,16 +1640,23 @@ def split_and_merge_objects_parallel(
                 # Find all child objects in the next timestep that overlap with our newly labeled regions
                 new_merging_list = []
                 for new_id in child_ids:
-                    parent_mask = data_t == new_id
-                    if np.any(parent_mask):
-                        area_0 = area[parent_mask].sum()
-                        potential_children = np.unique(data_p1[parent_mask])
+                    # Every cell holding new_id is a cell of the child just partitioned:
+                    # the new ids are freshly minted, and all cells that held child_id were
+                    # in child_mask by construction. So this is the same set `data_t ==
+                    # new_id` would find, ascending, without touching the whole field.
+                    parent_cells = spatial_indices_all[new_labels == new_id]
+                    if parent_cells.size:
+                        area_0 = area[parent_cells].sum()
+                        potential_children = np.unique(data_p1[parent_cells])
 
                         for potential_child in potential_children[potential_children > 0]:
                             potential_child_mask = data_p1 == potential_child
                             area_1 = area[potential_child_mask].sum()
                             min_area = min(area_0, area_1)
-                            overlap_area = area[parent_mask & potential_child_mask].sum()
+                            # Ascending, and exactly the cells the whole-mesh
+                            # `parent_mask & potential_child_mask` would have selected.
+                            overlap_cells = parent_cells[potential_child_mask[parent_cells]]
+                            overlap_area = area[overlap_cells].sum()
 
                             if overlap_area / min_area > overlap_threshold:
                                 new_merging_list.append(potential_child)
@@ -2024,10 +2125,29 @@ def split_and_merge_objects_parallel(
         # fixture. They are small -- per-timestep ledgers, a few MB -- so pinning them in
         # every mode costs nothing.
         #
-        # `updates_array` is the exception worth moving: a whole (time, ncells) uint8 field,
-        # 2.382 GB of the 34.8 GB this path pinned at n_time=32. Staging it is safe for the
-        # same reason the persist above is needed -- `stage` WRITES it to disk immediately,
-        # so it is materialised before the store rewrite, not left lazy over it.
+        # `updates_array` is a whole (time, ncells) uint8 field -- 2.382 GB of the 34.8 GB
+        # this path pinned at n_time=32 -- so it is ANCHORED separately below, to disk under
+        # streaming. Staging it is safe for the same reason the persist is needed: `stage`
+        # WRITES it immediately, so it is materialised before the store rewrite, not left
+        # lazy over it.
+        #
+        # It must nonetheless be named in THIS persist call, even though the very next line
+        # anchors it again. All eight arrays are `getitem`s on ONE shared blockwise task --
+        # the `process_chunk` call. Materialising seven of them lets the scheduler release
+        # that shared task, so anchoring the eighth afterwards RE-RUNS `process_chunk` over
+        # every time chunk: the whole merge kernel, including the BFS partitioner that is
+        # 93 % of this stage's CPU, executed a second time per iteration. Measured, exactly
+        # 2x and not a scheduling race: the instrumented ICON runs logged 80 invocations at
+        # n_time=32 (5 iterations x 8 time chunks = 40) and 160 at n_time=64 (5 x 16 = 80).
+        # Naming it here computes the shared task once and hands `stage` a materialised
+        # array to write, which costs one transient whole-field pin (uint8, ~1 GB/worker
+        # spread over 16 workers at n_time=1096) and saves an entire second execution.
+        #
+        # Anchoring inside this call instead is NOT an alternative: `to_zarr(compute=False)`
+        # re-optimises its source graph and renames the shared keys, so a deferred write
+        # submitted alongside the seven does not share them and still costs 2x. Verified
+        # against a counting kernel: persist-seven-then-write 20 calls for 10 chunks,
+        # deferred-write-in-one-submission 20, persist-all-then-write 10.
         #
         # The label MUST carry the iteration index. This runs once per merge-loop iteration
         # with a different array each time, and staging writes <label>.zarr with mode="w",
@@ -2039,6 +2159,7 @@ def split_and_merge_objects_parallel(
             merge_areas,
             merge_counts,
             has_merge,
+            updates_array,
             updates_ids,
             final_merging_objects,
         ) = persist(
@@ -2047,6 +2168,7 @@ def split_and_merge_objects_parallel(
             merge_areas,
             merge_counts,
             has_merge,
+            updates_array,
             updates_ids,
             final_merging_objects,
         )

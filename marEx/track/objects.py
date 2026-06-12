@@ -580,14 +580,20 @@ def calculate_object_properties(
     if unstructured_grid:
         # Compute properties on unstructured grid
 
-        # Convert lat/lon to radians
-        lat_rad = np.radians(lat)
-        lon_rad = np.radians(lon)
-
-        # Broadcast coordinate arrays to match object_id_field shape for vectorisation
-        lat_rad_broadcast, _ = xr.broadcast(lat_rad, object_id_field)
-        lon_rad_broadcast, _ = xr.broadcast(lon_rad, object_id_field)
-        cell_area_broadcast, _ = xr.broadcast(cell_area, object_id_field)
+        # Convert lat/lon to radians. These stay 1-D over `xdim` and are handed to
+        # apply_ufunc un-broadcast -- it broadcasts the loop (time) dimension itself, lazily.
+        #
+        # They must NOT be pre-broadcast against object_id_field. `xr.broadcast` of a numpy
+        # DataArray against a dask one returns a *numpy* zero-stride view, and dask's
+        # `from_array` does an unconditional `x.copy()` on any array-like, so `apply_gufunc`'s
+        # `asarray` densifies that view to (n_time, n_cells) float64 -- 122 GiB on the ICON
+        # R02B09 mesh at n_time=1096, allocated in the CLIENT process at graph-build time.
+        # Chunked explicitly rather than left to `asarray`'s chunks="auto": a core dimension
+        # split across chunks makes apply_gufunc raise, and the ICON geometry arrays sit only
+        # 7% under dask's 128 MiB auto-chunk threshold.
+        lat_rad = np.radians(lat).chunk({xdim: -1})
+        lon_rad = np.radians(lon).chunk({xdim: -1})
+        cell_area_core = cell_area.chunk({xdim: -1})
 
         # Calculate buffer size for IDs in chunks
         max_ID = int(object_id_field.max().compute().item()) + 1
@@ -704,12 +710,15 @@ def calculate_object_properties(
 
         # Process single time or multiple times
         # If time dimension doesn't exist, treat as single time slice
-        if timedim not in object_id_field.dims or object_id_field.sizes[timedim] == 1:  # pragma: no cover
+        if timedim not in object_id_field.dims or object_id_field.sizes[timedim] == 1:
+            # Drop a size-1 time axis so the field is 1-D over `xdim`, matching the geometry
+            # arrays -- the same thing the structured branch does at its equivalent site.
+            field_slice = object_id_field.isel({timedim: 0}) if timedim in object_id_field.dims else object_id_field
             props_np, ids = object_properties_chunk(
-                object_id_field.values,
-                lat_rad_broadcast.values,
-                lon_rad_broadcast.values,
-                cell_area_broadcast.values,
+                field_slice.values,
+                lat_rad.values,
+                lon_rad.values,
+                cell_area_core.values,
                 buffer_IDs=False,
             )
             props = xr.DataArray(props_np, dims=["prop", "out_id"])
@@ -719,9 +728,9 @@ def calculate_object_properties(
             props_buffer, ids_buffer = xr.apply_ufunc(
                 object_properties_chunk,
                 object_id_field,
-                lat_rad_broadcast,
-                lon_rad_broadcast,
-                cell_area_broadcast,
+                lat_rad,
+                lon_rad,
+                cell_area_core,
                 input_core_dims=[
                     [xdim],
                     [xdim],

@@ -609,12 +609,12 @@ def partition_nn_unstructured_optimised(
     result : np.ndarray
         1D array containing the assigned parent indices for points in child_mask
     """
-    # Create working copies to ensure memory cleanup
+    # parent_frontiers IS written below, so it still needs a working copy. child_mask is
+    # only ever read, so it does not -- and the caller no longer copies it either.
     parent_frontiers_working = parent_frontiers.copy()
-    child_mask_working = child_mask.copy()
 
-    n_points = len(child_mask_working)
-    n_parents = np.max(parent_frontiers_working[parent_frontiers_working < 255]) + 1
+    n_points = len(child_mask)
+    n_parents = int(np.max(parent_frontiers_working[parent_frontiers_working < 255])) + 1
 
     # Explicit BFS frontier queue. Every point is claimed at most once (a claimed point
     # is never revisited), so a single queue of length n_points holds the entire
@@ -623,22 +623,42 @@ def partition_nn_unstructured_optimised(
     # max_distance x n_points) -- ~1e9 operations per merge event at ICON scale
     # (review finding 5.16).
     queue = np.empty(n_points, dtype=np.int32)
-    n_queued = 0
     # Seed in parent-major order so that, within a level, a lower parent index still
     # claims a contested point first -- the tie-break the scan-based version had.
+    #
+    # Counting sort, NOT a scan per parent. The previous form ran the full n_points scan
+    # once for every parent, i.e. O(n_parents x n_points) -- up to ~149 M iterations per
+    # merge event on the 14.9 M-cell ICON mesh. Two linear passes produce a byte-identical
+    # queue: parent-major, ascending point within each parent.
+    seed_offsets = np.zeros(n_parents + 1, dtype=np.int64)
+    for point in range(n_points):
+        frontier = parent_frontiers_working[point]
+        if frontier < n_parents:
+            seed_offsets[frontier + 1] += 1
     for parent_idx in range(n_parents):
-        for point in range(n_points):
-            if parent_frontiers_working[point] == parent_idx:
-                queue[n_queued] = point
-                n_queued += 1
+        seed_offsets[parent_idx + 1] += seed_offsets[parent_idx]
+    cursor = seed_offsets[:n_parents].copy()
+    for point in range(n_points):
+        frontier = parent_frontiers_working[point]
+        if frontier < n_parents:
+            queue[cursor[frontier]] = point
+            cursor[frontier] += 1
+    n_queued = int(seed_offsets[n_parents])
 
     # Graph traversal - expanding frontiers
     current_distance = 0
-    any_unassigned = np.any(child_mask_working & (parent_frontiers_working == 255))
+    # Exact running count of still-unassigned CHILD points, maintained incrementally.
+    # A frontier entry only ever goes 255 -> parent index and never back, so this is
+    # equivalent at every point to the `np.any(child_mask & (frontiers == 255))` it
+    # replaces -- but O(1) per level instead of two full-field temporaries per level.
+    n_child_unassigned = 0
+    for point in range(n_points):
+        if child_mask[point] and parent_frontiers_working[point] == 255:
+            n_child_unassigned += 1
     level_start = 0
     level_end = n_queued
 
-    while current_distance < max_distance and any_unassigned:
+    while current_distance < max_distance and n_child_unassigned > 0:
         current_distance += 1
         updates_made = False
 
@@ -653,8 +673,9 @@ def partition_nn_unstructured_optimised(
                 parent_frontiers_working[neighbour] = parent_idx
                 queue[new_end] = neighbour
                 new_end += 1
-                if child_mask_working[neighbour]:
+                if child_mask[neighbour]:
                     updates_made = True
+                    n_child_unassigned -= 1
 
         level_start = level_end
         level_end = new_end
@@ -662,10 +683,8 @@ def partition_nn_unstructured_optimised(
         if not updates_made:
             break
 
-        any_unassigned = np.any(child_mask_working & (parent_frontiers_working == 255))
-
     # Handle remaining unassigned points using great circle distances
-    unassigned_mask = child_mask_working & (parent_frontiers_working == 255)
+    unassigned_mask = child_mask & (parent_frontiers_working == 255)
     if np.any(unassigned_mask):
         # Pre-compute parent coordinates in radians
         parent_lat_rad = np.deg2rad(parent_centroids[:, 0])
@@ -684,11 +703,10 @@ def partition_nn_unstructured_optimised(
             parent_frontiers_working[point] = np.int32(np.argmin(dist))
 
     # Extract result for child points only
-    result = parent_frontiers_working[child_mask_working].copy()
+    result = parent_frontiers_working[child_mask].copy()
 
     # Explicitly clear working arrays to help with memory management
     parent_frontiers_working = None
-    child_mask_working = None
 
     return result
 
