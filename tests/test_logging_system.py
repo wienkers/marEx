@@ -128,7 +128,7 @@ class TestLoggingConfiguration:
 
         lc._logger_configured = False
         logging.getLogger("marEx").handlers.clear()
-        get_logger("marEx.detect.pipeline")
+        get_logger("marEx.pipeline")
         assert lc._logger_configured is True
         assert len(logging.getLogger("marEx").handlers) > 0
 
@@ -189,7 +189,7 @@ class TestFunctionLevelVerbosity:
 
     def test_compute_normalised_anomaly_verbose(self, sample_data):
         """Test verbose mode in compute_normalised_anomaly."""
-        result = marEx.compute_normalised_anomaly(sample_data, method_anomaly="detrend_harmonic", verbose=True)
+        result = marEx.anomaly.compute_normalised_anomaly(sample_data, method_anomaly="detrend_harmonic", verbose=True)
 
         # Verify the function runs successfully and returns expected structure
         assert isinstance(result, xr.Dataset)
@@ -200,11 +200,11 @@ class TestFunctionLevelVerbosity:
     def test_identify_extremes_verbose(self, sample_data):
         """Test verbose mode in identify_extremes."""
         # First create anomalies
-        anomalies_ds = marEx.compute_normalised_anomaly(sample_data)
+        anomalies_ds = marEx.anomaly.compute_normalised_anomaly(sample_data)
 
-        extremes, thresholds = marEx.identify_extremes(
+        extremes, thresholds = marEx.extremes.identify_extremes(
             anomalies_ds.dat_anomaly,
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=90,
             verbose=True,
         )

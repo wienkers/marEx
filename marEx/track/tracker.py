@@ -35,7 +35,7 @@ from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
-from ..detect.compute_mode import Materialiser, create_staging_dir
+from ..core.compute_mode import Materialiser, create_staging_dir
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
@@ -514,6 +514,11 @@ class tracker:
             self.timecoord = coordinates.get("time", self.timedim)
             self.xcoord = coordinates.get("x", self.xdim)
             self.ycoord = coordinates.get("y", self.ydim)
+
+        # Reject an untrackable rank before anything reads the coordinates. A
+        # (time, depth, lat, lon) field would otherwise fail inside coordinate
+        # unification, which reports a coordinate range and names the wrong problem.
+        _validation.validate_rank(data_bin, unstructured_grid, self.timedim, self.xdim, self.ydim)
 
         # Validate coordinate presence before touching them, so a missing coordinate raises
         # the descriptive error rather than a bare KeyError from the indexing below (§4.4).

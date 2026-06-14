@@ -207,7 +207,7 @@ Special Configuration for Event IDs
 
    # For plotting tracked event IDs
    config = marEx.PlotConfig(
-       title='Marine Heatwave Events',
+       title='Extreme Events',
        plot_IDs=True,  # Special handling for event IDs
        cmap='tab20'    # Discrete colormap for IDs
    )

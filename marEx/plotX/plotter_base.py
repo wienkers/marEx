@@ -12,6 +12,7 @@ import numpy as np
 import xarray as xr
 from numpy.typing import NDArray
 
+from ..exceptions import VisualisationError
 from ..logging_config import get_logger
 from .animation import _animate
 from .config import PlotConfig
@@ -97,6 +98,40 @@ class PlotterBase:
         # Cache common features
         self._land = cfeature.LAND.with_scale("50m")
         self._coastlines = cfeature.COASTLINE.with_scale("50m")
+
+    def _reject_extra_dims(self) -> None:
+        """Rank guard for the rendering paths.
+
+        Every renderer draws one horizontal field: ``pcolormesh`` takes a 2-D
+        array, the unstructured ``tripcolor`` path a 1-D one, and the animation
+        writer one frame per timestep. A field carrying a further dimension --
+        depth, level, member, or a day-of-year threshold axis -- reaches
+        matplotlib at the wrong rank, so say so here with the fix rather than
+        failing deep inside a draw call.
+
+        Deliberately not in ``__init__``: constructing a plotter is also how grid
+        type is detected and how titles are generated, neither of which renders
+        anything.
+        """
+        recognised = set(self.dimensions.values())
+        unexpected = [str(d) for d in self.da.dims if str(d) not in recognised]
+        if unexpected:
+            raise VisualisationError(
+                f"Cannot plot a field with the extra dimension(s) {unexpected}",
+                details=(
+                    f"Plotting draws a single horizontal field. Recognised dimensions are "
+                    f"{sorted(recognised)}, but the data has {[str(d) for d in self.da.dims]}."
+                ),
+                suggestions=[
+                    f"Select a single value first, e.g. da.isel({unexpected[0]}=0)",
+                    "Pass a dimensions mapping naming the horizontal dimensions of this field",
+                ],
+                context={
+                    "unexpected_dimensions": unexpected,
+                    "data_dims": [str(d) for d in self.da.dims],
+                    "recognised_dimensions": sorted(recognised),
+                },
+            )
 
     def _setup_common_params(self, config: PlotConfig) -> Tuple[
         Union[str, ListedColormap],
@@ -208,6 +243,7 @@ class PlotterBase:
 
     def single_plot(self, config: PlotConfig, ax: Optional[Axes] = None) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
+        self._reject_extra_dims()
         # _setup_common_params may replace self.da (e.g. plot_IDs masks it, promoting int IDs
         # to float64). Restore the original afterwards so later plots from the same instance
         # see unaltered data.
@@ -309,6 +345,7 @@ class PlotterBase:
             centroids: Optional DataArray containing centroid data with dimensions (component, time, ID)
             object_ids: Optional DataArray containing object ID field with integers > 0 for drawing contour outlines
         """
+        self._reject_extra_dims()
         return _animate(self, config, plot_dir, file_name, centroids, object_ids)
 
     def clim_robust(self, data: NDArray[Any], issym: bool, percentiles: Optional[List[int]] = None) -> NDArray[np.float64]:

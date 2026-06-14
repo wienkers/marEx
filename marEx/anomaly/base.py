@@ -10,11 +10,13 @@ shifting baseline, fixed baseline, or detrended fixed baseline) based on the
 from typing import Dict, List, Literal, Optional, Tuple
 
 import xarray as xr
+from dask.base import is_dask_collection
 
-from ...exceptions import ConfigurationError
-from ...logging_config import configure_logging, get_logger
-from ..compute_mode import Materialiser
-from ..validation import _infer_dims_coords
+from ..core.compute_mode import Materialiser
+from ..core.time_axis import SeasonalCycle
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError, create_data_validation_error
+from ..logging_config import configure_logging, get_logger
 from .fixed_baseline import _compute_anomaly_detrend_fixed_baseline, _compute_anomaly_fixed_baseline
 from .harmonic import _compute_anomaly_detrended
 from .shifting_baseline import _compute_anomaly_shifting_baseline
@@ -30,15 +32,16 @@ def compute_normalised_anomaly(
     ] = "shifting_baseline",
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
-    window_year_baseline: int = 15,  # for shifting_baseline
-    smooth_days_baseline: int = 21,  # "
-    std_normalise: bool = False,  # for detrend_harmonic
+    window_years: int = 15,  # for shifting_baseline
+    smooth_days: int = 21,  # "
+    standardise: bool = False,  # for detrend_harmonic
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     reference_period: Optional[Tuple[int, int]] = None,  # for fixed_baseline & detrend_fixed_baseline
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Generate normalised anomalies using specified methodology.
@@ -58,11 +61,11 @@ def compute_normalised_anomaly(
         Mapping of conceptual dimensions to actual dimension names in the data
     coordinates : dict, optional
         Mapping of conceptual coordinates to actual coordinate names in the data
-    window_year_baseline : int, default=15
+    window_years : int, default=15
         Number of years for rolling climatology (shifting_baseline only)
-    smooth_days_baseline : int, default=21
+    smooth_days : int, default=21
         Days for smoothing rolling climatology (shifting_baseline only)
-    std_normalise : bool, default=False
+    standardise : bool, default=False
         Whether to normalise by 30-day rolling standard deviation (detrend_harmonic only)
     detrend_orders : list, default=[1]
         Polynomial orders for trend removal (detrend_harmonic and detrend_fixed_baseline only)
@@ -106,7 +109,7 @@ def compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="detrend_harmonic",
     ...     detrend_orders=[1, 2, 3],  # Linear, quadratic, cubic trends
-    ...     std_normalise=True,        # Add standardised anomalies
+    ...     standardise=True,        # Add standardised anomalies
     ...     force_zero_mean=True
     ... )
     >>> print(result_advanced.data_vars)
@@ -124,8 +127,8 @@ def compute_normalised_anomaly(
     >>> result_shifting = marEx.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="shifting_baseline",
-    ...     window_year_baseline=10,   # Use 10-year rolling climatology
-    ...     smooth_days_baseline=31    # 31-day smoothing window
+    ...     window_years=10,   # Use 10-year rolling climatology
+    ...     smooth_days=31    # 31-day smoothing window
     ... )
     >>> # Anomalies computed relative to recent past climatology
 
@@ -151,7 +154,7 @@ def compute_normalised_anomaly(
     >>> # Shifting baseline - slower, more accurate
     >>> shifting = marEx.compute_normalised_anomaly(
     ...     sst, method_anomaly="shifting_baseline",
-    ...     window_year_baseline=15
+    ...     window_years=15
     ... )
     >>>
     >>> # Compare anomaly magnitudes
@@ -205,6 +208,22 @@ def compute_normalised_anomaly(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
+    # Same guard as the ``anomaly.compute`` stage entry point. This function is a public
+    # entry point in its own right, and without the check a numpy-backed array fails deep
+    # inside a method-specific chunking call with an incidental KeyError/TypeError that
+    # names neither the input nor the fix.
+    if not is_dask_collection(da.data):
+        logger.error("Input DataArray is not Dask-backed - anomaly computation requires chunked data")
+        raise create_data_validation_error(
+            "Input DataArray must be Dask-backed",
+            details="Anomaly computation requires chunked data for efficient computation",
+            suggestions=[
+                "Convert to Dask array: da = da.chunk({'time': 30})",
+                "Load with chunking: xr.open_dataset('file.nc', chunks={'time': 30})",
+            ],
+            data_info={"data_type": type(da.data).__name__, "shape": da.shape},
+        )
+
     # Validate reference_period is only used with compatible methods
     if reference_period is not None and method_anomaly not in ("fixed_baseline", "detrend_fixed_baseline"):
         raise ConfigurationError(
@@ -218,22 +237,22 @@ def compute_normalised_anomaly(
 
     if method_anomaly == "detrend_harmonic":
         logger.debug(
-            f"Detrended baseline parameters: std_normalise={std_normalise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
+            f"Detrended baseline parameters: standardise={standardise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
         )
-        return _compute_anomaly_detrended(da, std_normalise, detrend_orders, dimensions, coordinates, force_zero_mean)
+        return _compute_anomaly_detrended(da, standardise, detrend_orders, dimensions, coordinates, force_zero_mean, cycle=cycle)
     elif method_anomaly == "shifting_baseline":
-        logger.debug(f"Shifting baseline parameters: window_years={window_year_baseline}, smooth_days={smooth_days_baseline}")
-        return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
+        logger.debug(f"Shifting baseline parameters: window_years={window_years}, smooth_days={smooth_days}")
+        return _compute_anomaly_shifting_baseline(da, window_years, smooth_days, dimensions, coordinates, cycle)
     elif method_anomaly == "fixed_baseline":
         logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
-        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser)
+        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser, cycle)
     elif method_anomaly == "detrend_fixed_baseline":
         logger.debug(
             f"Fixed detrended baseline parameters: orders={detrend_orders}, "
             f"zero_mean={force_zero_mean}, reference_period={reference_period}"
         )
         return _compute_anomaly_detrend_fixed_baseline(
-            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser
+            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser, cycle
         )
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")

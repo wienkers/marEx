@@ -61,11 +61,11 @@ def main():
     extremes_ds = marEx.preprocess_data(
         sst,
         method_anomaly="shifting_baseline",  # Anomalies from a rolling climatology using previous window_year years
-        method_extreme="hobday_extreme",  # Local day-of-year specific thresholds with windowing
+        method_extreme="seasonal_percentile",  # Local day-of-year specific thresholds with windowing
         threshold_percentile=95,  # Use the 95th percentile as the extremes threshold
-        window_year_baseline=15,
-        smooth_days_baseline=21,  # Defines the rolling climatology window (15 years) and smoothing window (21 days)
-        window_days_hobday=11,  # Defines the window (11 days) of compiled samples collected for extremes detection
+        window_years=15,
+        smooth_days=21,  # Defines the rolling climatology window (15 years) and smoothing window (21 days)
+        window_days=11,  # Defines the window (11 days) of compiled samples collected for extremes detection
         dimensions={
             "time": "time",
             "x": "lon",

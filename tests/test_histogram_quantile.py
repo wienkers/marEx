@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-import marEx.detect.extremes.histogram as H
-from marEx.detect.extremes.base import identify_extremes
+import marEx.extremes.histogram as H
+from marEx.extremes.base import identify_extremes
 
 DIMENSIONS = {"time": "time", "x": "x"}
 PRECISION = 0.01
@@ -141,8 +141,8 @@ def test_2d_quantile_tiling_value_neutral_with_smoothing():
             return H._compute_histogram_quantile_2d(
                 da,
                 0.9,
-                window_days_hobday=3,
-                window_spatial_hobday=3,
+                window_steps=3,
+                window_spatial=3,
                 dimensions=dims,
                 precision=PRECISION,
                 max_anomaly=MAX_ANOMALY,
@@ -179,7 +179,7 @@ def test_1d_quantile_real_chunker_multitile_matches_single():
 
 
 # ── §3.9 small unstructured grid + exact global must not crash ───────────────
-def test_global_extreme_exact_small_unstructured_no_zero_chunk():
+def test_global_percentile_exact_small_unstructured_no_zero_chunk():
     """§3.9: for a small unstructured grid (< ~4445 cells) the exact-path rechunk size must
     be clamped to >= 1 (was 0 -> invalid zero-size chunk)."""
     rng = np.random.default_rng(5)
@@ -193,7 +193,7 @@ def test_global_extreme_exact_small_unstructured_no_zero_chunk():
 
     extremes, thresholds = identify_extremes(
         anom,
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         method_percentile="exact",
         dimensions={"time": "time", "x": "cell"},
         coordinates={"time": "time", "x": "cell"},
@@ -226,14 +226,25 @@ def _anomaly_fixture_1d(n_time=400, n_y=6, n_x=7, seed=0):
 _REFERENCE_NPY = Path(__file__).parent / "data" / "histogram_quantile_1d_reference.npy"
 
 
-def test_1d_quantile_matches_captured_reference():
-    """Bit-identity oracle for the 1D quantile path.
+def _legacy_bin_edges(precision, max_anomaly, dtype=np.float64):
+    """The pre-Phase-D asymmetric edges: one bin for every negative value."""
+    if dtype == np.float32:
+        return np.concatenate(
+            [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
+        )
+    return np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+
+
+def test_1d_quantile_matches_captured_reference_under_the_legacy_bins(monkeypatch):
+    """Bit-identity oracle for the 1D quantile ARITHMETIC. No tolerance.
 
     The reference was captured from the two-phase (persist-the-CDF) implementation before
-    that path was restructured. Any change to the quantile arithmetic -- notably a cumsum
-    that drops from float64 to float32 -- moves these values, and this test is the gate
-    that catches it. Phase-2 rules apply: no tolerance.
+    that path was restructured, and with the pre-Phase-D asymmetric bins. Forcing those
+    bins back in isolates the arithmetic from the binning: any change to the quantile
+    computation -- notably a cumsum that drops from float64 to float32 -- moves these
+    values, and this is the gate that catches it.
     """
+    monkeypatch.setattr(H, "_symmetric_bin_edges", _legacy_bin_edges)
     got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
     expected = np.load(_REFERENCE_NPY)
     assert got.dtype == expected.dtype, f"dtype moved {expected.dtype} -> {got.dtype}"
@@ -243,6 +254,20 @@ def test_1d_quantile_matches_captured_reference():
         np.nan_to_num(got, nan=sentinel),
         np.nan_to_num(expected, nan=sentinel),
     )
+
+
+def test_1d_quantile_symmetric_bins_move_the_reference_only_by_round_off():
+    """Phase D's symmetric bins accumulate the CDF over twice as many bins.
+
+    That reorders a float64 cumulative sum, so the same quantiles come back with
+    last-bit differences and nothing more: MEASURED at 28 of 42 cells, max 1.33e-15,
+    against a method whose own bin precision is 0.01. The bound here is the entire
+    observable effect of the bin change on this path -- if it grows, something other
+    than summation order moved.
+    """
+    got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
+    expected = np.load(_REFERENCE_NPY)
+    np.testing.assert_allclose(got, expected, atol=2e-14, rtol=0, equal_nan=True)
 
 
 def test_spatial_tile_budget_bounds_the_output_not_just_the_input():
@@ -340,3 +365,26 @@ def test_2d_tile_budget_is_constant_in_series_length():
         c = cells(ntime)
         assert ntime * c <= H._HISTOGRAM_TASK_ELEMENTS, f"read slab over budget at ntime={ntime}"
         assert out_per_cell * c <= H._HISTOGRAM_TASK_ELEMENTS, f"histogram over budget at ntime={ntime}"
+
+
+def test_single_step_window_does_not_duplicate_the_cycle():
+    """A one-step window must be a no-op smoothing, not a wrap-pad of the whole array.
+
+    ``pad_size = window_steps // 2`` is 0 there, and ``hist[-0:]`` is ``hist[0:]`` -- the
+    WHOLE array, not an empty one -- so the naive concatenate returns ``2 x n_slots``
+    rows and the downstream fancy-indexing raises. Unreachable on daily data (the
+    smallest legal ``window_days`` is 1 day and any larger odd window pads by at least
+    1), but it is the normal case on a monthly axis, where any ``window_days`` under
+    ~45 clamps to a single month.
+    """
+    rng = np.random.default_rng(7)
+    hist = rng.integers(0, 50, size=(12, 40)).astype(np.int32)
+    centers = np.linspace(-1.0, 5.0, 40)
+
+    out = H._rolling_histogram_quantile(hist, 1, 0.9, centers)
+    assert out.shape == (12,), "a one-step window changed the number of cycle slots"
+
+    # With no smoothing, each slot's threshold depends on that slot's counts alone.
+    for slot in range(12):
+        one_row = H._rolling_histogram_quantile(hist[slot : slot + 1], 1, 0.9, centers)
+        np.testing.assert_array_equal(out[slot : slot + 1], one_row)

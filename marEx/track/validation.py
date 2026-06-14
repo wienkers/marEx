@@ -15,10 +15,61 @@ from typing import Optional, Tuple
 import xarray as xr
 from dask.base import is_dask_collection
 
-from ..exceptions import ConfigurationError, create_data_validation_error
+from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def validate_rank(
+    data_bin: xr.DataArray,
+    unstructured_grid: bool,
+    timedim: str,
+    xdim: str,
+    ydim: Optional[str],
+) -> None:
+    """Reject a field carrying a dimension beyond time and the horizontal ones.
+
+    Tracking operates on a single horizontal level: connected-component labelling,
+    the dilation matrix and the merge ledger are all defined on one 2-D field per
+    timestep. A field with an extra dimension -- depth, level, member -- is a stack
+    of independent tracking problems, not one.
+
+    Called early in ``tracker.__init__`` as well as from :func:`validate_inputs`,
+    so the rank error arrives before coordinate unification rather than after a
+    confusing failure about coordinate ranges.
+    """
+    expected = (timedim, xdim) if unstructured_grid else (timedim, ydim, xdim)
+
+    # A dimension the mapping names but the data does not carry is a *mapping* error,
+    # not an extra-dimension one. Every dim of the field then looks "unexpected", so
+    # reporting them as extra levels names the wrong problem -- exactly the failure
+    # this guard exists to avoid, in the other direction. Defer to the dimension
+    # validation downstream, which reports the bad mapping precisely.
+    if any(d is not None and d not in data_bin.dims for d in expected):
+        return
+
+    unexpected = [str(d) for d in data_bin.dims if d not in expected]
+    if not unexpected:
+        return
+
+    raise TrackingError(
+        f"Tracking does not support the extra dimension(s) {unexpected}",
+        details=(
+            f"Tracking operates on a single horizontal level. Expected dimensions "
+            f"{[d for d in expected if d is not None]}, got {list(data_bin.dims)}."
+        ),
+        suggestions=[
+            f"Select one level first, e.g. ds.isel({unexpected[0]}=0)",
+            "Loop over the extra dimension and track each level separately",
+            "Check the dimension mapping passed to the tracker",
+        ],
+        context={
+            "unexpected_dimensions": unexpected,
+            "actual_dims": [str(d) for d in data_bin.dims],
+            "expected_dims": [d for d in expected if d is not None],
+        },
+    )
 
 
 def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord: str, ycoord: str) -> None:
@@ -73,6 +124,10 @@ def validate_inputs(
     """
     if regional_mode and unstructured_grid:
         raise NotImplementedError("regional_mode is not yet implemented for unstructured grids")
+
+    # Rank guard, before the transpose below, which would otherwise reject an extra
+    # dimension with a confusing "expected 3D array" naming the wrong problem.
+    validate_rank(data_bin, unstructured_grid, timedim, xdim, ydim)
 
     # For unstructured grids, adjust dimensions
     if unstructured_grid:

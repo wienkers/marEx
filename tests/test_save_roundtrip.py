@@ -48,7 +48,7 @@ def gridded_extremes_lazy(dask_client_gridded):
     return marEx.preprocess_data(
         sst,
         method_anomaly="detrend_harmonic",
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         dimensions={"time": "time", "x": "lon", "y": "lat"},
         dask_chunks={"time": 25},
     )
@@ -69,7 +69,7 @@ def unstructured_extremes_lazy(dask_client_gridded):
     return marEx.preprocess_data(
         sst,
         method_anomaly="detrend_harmonic",
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         dimensions={"time": "time", "x": "ncells"},
         coordinates={"time": "time", "x": "lon", "y": "lat"},
         dask_chunks={"time": 25},

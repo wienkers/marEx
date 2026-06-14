@@ -2,7 +2,7 @@
 Histogram-based quantile estimation kernels for extreme detection.
 
 Provides approximate quantile computation from precomputed histograms, used by
-the ``approximate`` percentile branches of both the global and Hobday extreme
+the ``approximate`` percentile branches of both the global and seasonal extreme
 methods. Contains a pure NumPy stride-tricks kernel plus 1-D and 2-D
 (day-of-year resolved) histogram-quantile drivers. This module is a leaf in the
 detect package dependency graph (it imports only package-level helpers and
@@ -10,7 +10,7 @@ logging).
 """
 
 import warnings
-from typing import Dict, Optional
+from typing import Callable, Dict, Literal, Optional
 
 import dask
 import flox.xarray
@@ -20,8 +20,10 @@ from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
+from ..core.compute_mode import Materialiser
+from ..core.dimensions import horizontal_dims, spatial_dims
+from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -31,6 +33,149 @@ logger = get_logger(__name__)
 # float32) regardless of field resolution or input chunking, which is what allows the
 # histogram-quantile path to run at full resolution without exhausting worker memory.
 _HISTOGRAM_TASK_ELEMENTS = 50_000_000
+
+
+def _symmetric_bin_edges(precision: float, max_anomaly: float, dtype: type = np.float64) -> NDArray[np.floating]:
+    """Finite histogram bins, symmetric about zero, resolving BOTH tails.
+
+    The legacy binning was ``[-inf, -precision, 0, precision, ..., max_anomaly]``:
+    a single bin holding every negative value, which makes a low-tail percentile
+    unresolvable by construction. These edges keep the positive half unchanged and
+    mirror it, so an upper-tail threshold moves only where the old scheme's one
+    negative bin actually mattered.
+
+    Two construction details are load-bearing:
+
+    * **The positive half is built from the legacy ``arange`` expression**, not from
+      ``precision * arange(-n, n + 1)``. ``arange`` evaluates ``start + i * step``,
+      and ``-precision + i * precision`` is not the same float as
+      ``precision * (i - 1)``: measured, the two differ by up to 8.9e-16 in float64
+      and 4.8e-7 in float32. A float32 edge shifted by 5e-7 moves a float32
+      threshold by a ULP, which flips ``>=`` at cells sitting exactly on it. Keeping
+      the old edges bit-for-bit is what lets the symmetric-bin change be attributed
+      to the bins alone.
+    * **No trailing ``+inf``.** Both drivers derive their end clip as the midpoint of
+      the outermost bin, so an infinite edge would make that clip a no-op, let
+      out-of-range samples land in an infinitely wide bin, and give the outermost
+      bin an infinite centre. The correct symmetrisation drops the LEADING ``-inf``
+      and keeps finite edges at both ends.
+    """
+    legacy = np.arange(-precision, max_anomaly + precision, precision, dtype=dtype)
+    positive = legacy[1:]  # 0, precision, ..., max_anomaly
+    negative = -positive[:0:-1]  # -max_anomaly, ..., -precision
+    return np.concatenate([negative, positive]).astype(dtype)
+
+
+def _zero_bin_edges(bin_edges: NDArray[np.floating]) -> tuple:
+    """Return the guard rails: the outer edges of the bins flanking zero.
+
+    A cell whose anomaly is constant at zero must never be "extreme", in either
+    tail, so a threshold is clamped away from zero by one bin. Expressed as an
+    edge lookup rather than as ``+/- precision`` so that it is **exactly** the value
+    the legacy code used: ``bin_edges[3]`` on the old asymmetric edges is the upper
+    edge of the bin containing zero, which is what ``searchsorted`` returns here,
+    and on symmetric edges it is the same ``arange`` element. That equality is what
+    makes the clamped cells keep their clamped VALUES across the bin change, not
+    just their identity as a set.
+    """
+    k = int(np.searchsorted(bin_edges, 0.0, side="right"))
+    upper = bin_edges[min(k, len(bin_edges) - 1)]
+    lower = bin_edges[max(k - 2, 0)]
+    return float(upper), float(lower)
+
+
+def _end_clips(bin_edges: NDArray[np.floating]) -> tuple:
+    """Midpoints of the outermost bins, used to clip out-of-range samples inwards.
+
+    Values beyond the outermost edge are otherwise dropped by the histogram, which
+    renormalises the CDF over a truncated total and biases the threshold inwards.
+    The bottom clip is ``-inf`` (a no-op) on the legacy edges, so it costs nothing
+    there and is only real once the bottom of the range is finite.
+    """
+    bottom = (bin_edges[0] + bin_edges[1]) / 2
+    top = (bin_edges[-2] + bin_edges[-1]) / 2
+    return bottom, top
+
+
+def _apply_threshold_bounds(
+    threshold: xr.DataArray,
+    bin_edges: NDArray[np.floating],
+    max_anomaly: float,
+    tail: Literal["upper", "lower"],
+    guard_notnull: bool,
+    clamp: Optional[Callable[[xr.DataArray], xr.DataArray]] = None,
+) -> xr.DataArray:
+    """Warn on out-of-range thresholds and clamp them off the zero guard rail.
+
+    Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
+    the top bin (the range check) nor fall below ``+one bin`` (the guard); for
+    ``tail='lower'`` both are mirrored. The two checks keep their original wording
+    per direction, so the upper-tail messages -- the ones existing tests match on --
+    are unchanged.
+
+    One fused ``dask.compute`` for all four reductions, as before: they share their
+    upstream, so computing them together costs a single pass instead of one
+    traversal per predicate over a graph that re-executes the whole anomaly
+    whenever it is not pinned.
+
+    ``guard_notnull`` reproduces a pre-existing difference between the two drivers:
+    the 1-D path ANDs its predicates with ``notnull()`` and the 2-D path does not.
+    ``clamp`` lets the 1-D path pin the clamped result, which only it does.
+    """
+    if tail == "upper":
+        range_bound, guard = float(bin_edges[-2]), _zero_bin_edges(bin_edges)[0]
+    else:
+        range_bound, guard = float(bin_edges[1]), _zero_bin_edges(bin_edges)[1]
+
+    # `out_of_range` is "past the end of the binned range"; `on_guard` is "inside the
+    # bin pair flanking zero". Which comparison is which flips with the tail.
+    if tail == "upper":
+        out_of_range = threshold > range_bound
+        on_guard = threshold < guard
+    else:
+        out_of_range = threshold < range_bound
+        on_guard = threshold > guard
+    if guard_notnull:
+        out_of_range = out_of_range & threshold.notnull()
+        on_guard = on_guard & threshold.notnull()
+
+    any_range, any_guard, thr_max, thr_min = dask.compute(out_of_range.any(), on_guard.any(), threshold.max(), threshold.min())
+
+    if bool(any_range):
+        if tail == "upper":
+            message = (
+                f"Quantile values exceed expected range: max={float(thr_max):.4f} > {range_bound:.4f}. "
+                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
+                "or using a lower percentile threshold."
+            )
+        else:
+            message = (
+                f"Quantile values below expected range: min={float(thr_min):.4f} < {range_bound:.4f}. "
+                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
+                "or using a higher percentile threshold."
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
+
+    if bool(any_guard):
+        if tail == "upper":
+            message = (
+                f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {guard:.4f}. "
+                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
+                "Double check the computed threshold values are correct."
+            )
+        else:
+            message = (
+                f"Quantile values above expected range in some locations: max={float(thr_max):.4f} > {guard:.4f}. "
+                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
+                "Double check the computed threshold values are correct."
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
+        # Clamp onto the guard rail so a constant-zero anomaly is never "extreme".
+        threshold = threshold.where(~on_guard, guard)
+        if clamp is not None:
+            threshold = clamp(threshold)
+
+    return threshold
 
 
 def _chunk_spatial_for_histogram(
@@ -99,6 +244,54 @@ def _chunk_spatial_for_histogram(
     return da.chunk(chunks)
 
 
+def _histogram_tile_chunks(
+    da: xr.DataArray,
+    dimensions: Dict[str, str],
+    n_bins: int,
+    window_spatial: Optional[int],
+    cycle_length: int = 366,
+) -> Dict[str, int]:
+    """Spatial tiling for the day-of-year resolved histogram, plus a whole time axis.
+
+    Sized from the histogram OUTPUT budget rather than a hardcoded 16 cells. Each
+    spatial cell yields a ``(cycle_length, n_bins)`` histogram -- 366 slots on daily
+    data, 12 monthly, ``366 * steps_per_day`` sub-daily -- so the cells per tile are
+    capped to keep the per-task output near the element budget. On a gridded field
+    this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
+    uses ~256 cells/chunk instead of 16, avoiding the task-graph explosion behind
+    the "seasonal scheduler OOM on unstructured" failure.
+
+    Both sides of the reduction are budgeted, as ``_chunk_spatial_for_histogram``
+    does. The output side is ``cycle_length x n_bins`` per cell; the INPUT side is ``ntime``
+    per cell, because time is held whole. Sizing on the output alone would leave the
+    slab a task reads growing with the length of the series. Taking the max makes the
+    per-task working set constant in the spatial extent and in the number of
+    timesteps. For any realistic series this is a no-op: ``366 * n_bins`` is ~183k at
+    the default daily binning, so ``ntime`` only binds beyond ~500 years of daily data.
+    A sub-daily cycle multiplies the output side by ``steps_per_day``, which shrinks the
+    tile in proportion -- expensive, but bounded, which is the point.
+
+    **Every** spatial dimension is tiled, extra dims (depth, level) included, and the
+    side is the rank-th root of the cell budget -- so an extra dimension shrinks each
+    side rather than multiplying the task. The ``window_spatial`` floor applies to the
+    HORIZONTAL dims alone: the spatial window never rolls over an extra dimension, so
+    widening a depth chunk to the window width would buy nothing.
+    """
+    spatial_dims_present = list(spatial_dims(da, dimensions))
+    ntime = max(1, int(da.sizes[dimensions["time"]]))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, cycle_length * max(1, n_bins)))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
+
+    horizontal_present = set(horizontal_dims(dimensions))
+    chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    for dim in spatial_dims_present:
+        side = tile_side
+        if window_spatial is not None and window_spatial > 1 and dim in horizontal_present:
+            side = max(side, int(window_spatial))
+        chunk_dict[dim] = min(int(da.sizes[dim]), side)
+    return chunk_dict
+
+
 def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
     """Centred window sum along ``dim`` that preserves the input's integer dtype.
 
@@ -118,7 +311,7 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
     # `window` boundary sets, which shreds the tiling into width-1 slivers (measured: at
     # window=5 over two spatial dims, 2654 tasks and 1783 rechunk keys where the tiled
     # input had 6 chunks, output chunks (1,1,16,1,1,...)). That all-to-all rechunk is what
-    # OOM-killed the full-scale gridded hobday run. Putting every slice back on the input's
+    # OOM-killed the full-scale gridded seasonal run. Putting every slice back on the input's
     # own boundaries first keeps each add chunk-aligned: the shift becomes a local overlap
     # (each output chunk draws on at most two input chunks) and the tiling survives
     # -- 274 tasks / 104 rechunk keys for the same window=5 case, values bit-identical.
@@ -153,7 +346,7 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
 
 def _rolling_histogram_quantile(
     hist_chunk: NDArray[np.int32],
-    window_days_hobday: int,
+    window_steps: int,
     q: float,
     bin_centers: NDArray[np.float64],
 ) -> NDArray[np.float32]:
@@ -164,9 +357,9 @@ def _rolling_histogram_quantile(
     Parameters
     ----------
     hist_chunk : numpy.ndarray
-        Histogram data with shape (dayofyear, da_bin)
-    window_days_hobday : int
-        Rolling window size for day-of-year smoothing
+        Histogram data with shape (cycle index, da_bin)
+    window_steps : int
+        Rolling window size, in cycle steps (11 for an 11-day window on daily data)
     q : float
         Quantile to compute (0-1)
     bin_centers : numpy.ndarray
@@ -175,17 +368,28 @@ def _rolling_histogram_quantile(
     Returns
     -------
     numpy.ndarray
-        Quantile thresholds with shape (dayofyear,)
+        Quantile thresholds with shape (cycle index,)
     """
     n_doy, n_bins = hist_chunk.shape
     eps = 1e-10
 
-    # Pad histogram with wrap mode for day-of-year cycling
-    pad_size = window_days_hobday // 2
-    hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
+    # Pad histogram with wrap mode for cycling across the year boundary.
+    #
+    # The `pad_size == 0` branch is load-bearing, not defensive. `hist_chunk[-0:]` is
+    # `hist_chunk[0:]` -- the WHOLE array, not an empty one -- so the naive concatenate
+    # would triple-count the first copy and return 2 x n_slots rows, which then fails to
+    # broadcast against `doy_indices`. A one-step window is unreachable on daily data
+    # (`window_days` is validated odd and >= 1, so `pad_size >= 1` whenever the window
+    # exceeds one day), but it is the NORMAL case on a monthly axis, where any
+    # `window_days` under ~45 clamps to a single month.
+    pad_size = window_steps // 2
+    if pad_size > 0:
+        hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
+    else:
+        hist_pad = hist_chunk
 
     # Apply rolling sum using stride tricks FTW
-    windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
+    windowed_view = sliding_window_view(hist_pad, window_steps, axis=0)
     hist_windowed = np.sum(windowed_view, axis=-1)
 
     # Apply gaussian smoothing along bin dimension
@@ -206,7 +410,7 @@ def _rolling_histogram_quantile(
 
     # Vectorised search for the bins containing the quantile position.
     # ``searchsorted(row, v, side="right")`` on a non-decreasing row is exactly the count
-    # of entries <= v, so the whole 366-iteration Python loop of searchsorted calls (run
+    # of entries <= v, so the whole per-slot Python loop of searchsorted calls (run
     # once per cell inside an apply_ufunc(vectorize=True)) collapses to one comparison
     # against the broadcast quantile positions (review finding 3.13).
     idx_upper = (cumsum <= quantile_position[:, None]).sum(axis=1).astype(np.int32)
@@ -313,17 +517,19 @@ def _histogram_quantile_block(
 def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
-    window_days_hobday: int = 11,
-    window_spatial_hobday: Optional[int] = None,
+    window_steps: int = 11,
+    window_spatial: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
-    Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
 
     Parameters
     ----------
@@ -331,10 +537,10 @@ def _compute_histogram_quantile_2d(
         Input data array
     q : float
         Quantile to compute (0-1)
-    window_days_hobday : int, default=11
-        Rolling window size for day-of-year quantiles
-    window_spatial_hobday : int, default=None
-        Spatial window size for day-of-year quantiles
+    window_steps : int, default=11
+        Rolling window size along the cycle axis, in timesteps
+    window_spatial : int, default=None
+        Spatial window size for the per-cycle-slot quantiles
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
     dimensions : dict, optional
@@ -343,6 +549,12 @@ def _compute_histogram_quantile_2d(
         Precision for positive anomaly bins
     max_anomaly : float, default=5.0
         Maximum anomaly value for binnin
+    cycle : SeasonalCycle, optional
+        Within-year axis the histogram is resolved on. Defaults to the daily cycle,
+        which is what the caller's ``dayofyear`` coordinate implies.
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. Only the sign of the guard rail and of the
+        range check depend on it -- the quantile itself is ``q`` either way.
 
     Returns
     -------
@@ -353,15 +565,22 @@ def _compute_histogram_quantile_2d(
     # caller, doctest and test working unchanged.
     if materialiser is None:
         materialiser = Materialiser("persist")
+    if cycle is None:
+        cycle = DAILY_CYCLE
+    cycle_dim = cycle.index_name
 
     if bin_edges is None:
-        # Create optimised asymmetric bins
-        bin_edges = np.concatenate(
-            [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
-        )
+        # Bins symmetric about zero, in float32 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float32)
 
     bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
-    bin_centers_array[0] = 0.0
+    if not np.isfinite(bin_centers_array[0]):
+        # Legacy asymmetric edges open at -inf, so the first "centre" is -inf and
+        # would poison the interpolation below. Symmetric edges are finite at both
+        # ends and their first centre (-max_anomaly + precision/2) is already the
+        # right answer, so nothing is substituted there.
+        bin_centers_array[0] = 0.0
+    bottom_clip, top_clip = _end_clips(bin_edges)
 
     bin_centers = xr.DataArray(
         bin_centers_array.astype(np.float32),
@@ -370,50 +589,25 @@ def _compute_histogram_quantile_2d(
         name="bin_centers",
     )
 
-    # Size the spatial tiles from the histogram OUTPUT budget rather than a hardcoded
-    # 16 cells. Each spatial cell yields a (366, n_bins) histogram, so cap the cells
-    # per tile to keep the per-task output near the element budget. On a gridded grid
-    # this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
-    # uses ~256 cells/chunk instead of 16, avoiding a task-graph explosion (the
-    # "hobday scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
-    spatial_dims_present = [dimensions[d] for d in ("y", "x") if d in dimensions]
-
-    # Budget against BOTH sides, as _chunk_spatial_for_histogram does. The output side is
-    # `366 x n_bins` elements per cell. The INPUT side is `ntime` per cell, because time is
-    # held whole below (chunk_dict sets it to -1) -- so sizing on the output alone leaves
-    # the slab this task reads growing linearly with the length of the series, i.e. with
-    # input size. Taking the max makes the per-task working set constant in both the
-    # spatial extent (already tiled) and the number of timesteps.
-    #
-    # For any realistic series this is a no-op: 366 * n_bins is ~183k at the default
-    # binning, so `ntime` only binds beyond ~500 years of daily data. It is a guarantee,
-    # not a retuning.
-    ntime_2d = max(1, int(da.sizes[dimensions["time"]]))
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime_2d, 366 * max(1, n_bins)))
-    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
-    # The spatial smoothing below rolls a window of `window_spatial_hobday` over each
-    # spatial dim, which requires every chunk to be at least that wide; never tile below it.
-    if window_spatial_hobday is not None and window_spatial_hobday > 1:
-        tile_side = max(tile_side, int(window_spatial_hobday))
-    chunk_dict = {dimensions["time"]: -1}
-    for d in spatial_dims_present:
-        chunk_dict[d] = min(int(da.sizes[d]), tile_side)
+    spatial_dims_present = list(spatial_dims(da, dimensions))
+    chunk_dict = _histogram_tile_chunks(da, dimensions, n_bins, window_spatial, cycle.length)
 
     da_bin = (
         xr.DataArray(
-            # Clip finite data into the last bin (its centre) before digitizing so
-            # out-of-range-high values are counted in the top bin rather than silently
+            # Clip finite data into the outermost bins (at their centres) before
+            # digitizing so out-of-range values are counted there rather than silently
             # dropped by the flox expected_groups (which biased every approximate
-            # threshold low). Clipping the data (not the index) preserves NaN, which
-            # still digitizes out of range and is correctly dropped.
-            np.digitize(np.clip(da.data, None, bin_centers_array[-1]), bin_edges) - 1,
+            # threshold inwards). Clipping the data (not the index) preserves NaN, which
+            # still digitizes out of range and is correctly dropped. The bottom clip is
+            # -inf, hence skipped, on the legacy asymmetric edges.
+            np.digitize(np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip), bin_edges) - 1,
             dims=da.dims,
             coords=da.coords,
             name="da_bin",
         )
         # Cast BEFORE the rechunk. np.digitize returns int64, and the rechunk below is the
-        # all-to-all shuffle of the hobday path, so casting afterwards moved 4x the bytes
+        # all-to-all shuffle of the seasonal path, so casting afterwards moved 4x the bytes
         # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
         # indices are small non-negative integers (review finding 3.5).
         .astype(np.uint16).chunk(chunk_dict)
@@ -422,11 +616,11 @@ def _compute_histogram_quantile_2d(
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
         da_bin,
-        da_bin.dayofyear,
+        da_bin[cycle_dim],
         da_bin,
         dim=[dimensions["time"]],
         func="count",
-        expected_groups=(np.arange(1, 367, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
+        expected_groups=(np.arange(1, cycle.length + 1, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
         isbin=(False, False),
         dtype=np.uint16,
         fill_value=0,
@@ -434,47 +628,47 @@ def _compute_histogram_quantile_2d(
     hist_raw.name = None
 
     # Apply spatial-kernel smoothing to the histogram
-    if window_spatial_hobday is not None and window_spatial_hobday > 1:
-        pad_size = window_spatial_hobday // 2
+    if window_spatial is not None and window_spatial > 1:
+        pad_size = window_spatial // 2
         lon_dim, lat_dim = dimensions.get("x"), dimensions.get("y")
 
         # Integer-preserving window sums. xarray's .rolling().sum() goes through
         # bottleneck, which promotes these uint16 chunks to float64 and carries a halo
         # overlap -- ~0.4-0.8 GB transient per task over the (y, x, 366, ~502) histogram,
-        # the dominant memory spike of the default gridded hobday path (review finding
+        # the dominant memory spike of the default gridded seasonal path (review finding
         # 3.6). Summing explicit shifted views keeps the counts in an integer dtype and
         # is exactly equal to the rolling sum for odd windows: a zero-padded full window
         # equals a min_periods=1 partial window, and a wrap-padded one equals the periodic
         # case. Even windows keep the old path, whose centre alignment they depend on.
-        use_integer_window = window_spatial_hobday % 2 == 1
+        use_integer_window = window_spatial % 2 == 1
         hist_rolled = hist_raw.astype(np.uint32) if use_integer_window else hist_raw
 
         # Periodic padding in longitude, rolling mean in both dimensions, then trim
         if lon_dim in hist_raw.dims:
             if use_integer_window:
-                hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial_hobday, periodic=True)
+                hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=True)
             else:
                 hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
-                hist_rolled = hist_rolled.rolling({lon_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+                hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
                 hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
 
         # Standard rolling in latitude
         if lat_dim in hist_raw.dims:
             if use_integer_window:
-                hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial_hobday, periodic=False)
+                hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial, periodic=False)
             else:
-                hist_rolled = hist_rolled.rolling({lat_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+                hist_rolled = hist_rolled.rolling({lat_dim: window_spatial}, center=True, min_periods=1).sum()
 
         hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
+        return _rolling_histogram_quantile(hist_chunk, window_steps, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time
-    hist_chunk_dict = {dimensions["x"]: chunk_dict.get(dimensions["x"], 16), "dayofyear": -1, "da_bin": -1}
-    if "y" in dimensions:
-        hist_chunk_dict[dimensions["y"]] = chunk_dict.get(dimensions["y"], 16)
+    hist_chunk_dict = {cycle_dim: -1, "da_bin": -1}
+    for d in spatial_dims_present:
+        hist_chunk_dict[d] = chunk_dict.get(d, 16)
 
     hist_raw = hist_raw.chunk(hist_chunk_dict)
 
@@ -483,16 +677,16 @@ def _compute_histogram_quantile_2d(
         _compute_quantile_with_params,
         hist_raw,
         bin_centers,
-        input_core_dims=[["dayofyear", "da_bin"], ["da_bin"]],
-        output_core_dims=[["dayofyear"]],
+        input_core_dims=[[cycle_dim, "da_bin"], ["da_bin"]],
+        output_core_dims=[[cycle_dim]],
         dask="parallelized",
         vectorize=True,
         output_dtypes=[np.float32],
-        dask_gufunc_kwargs={"output_sizes": {"dayofyear": 366}},
+        dask_gufunc_kwargs={"output_sizes": {cycle_dim: cycle.length}},
         keep_attrs=True,
     )
 
-    # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
+    # Drop time coordinate to avoid conflicts when comparing with data grouped by cycle slot
     if dimensions["time"] in threshold.coords:
         threshold = threshold.drop_vars(dimensions["time"])
 
@@ -502,42 +696,12 @@ def _compute_histogram_quantile_2d(
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
     threshold = materialiser.pin_one(threshold.where(~nan_mask))
 
-    # Validate threshold values against bounds
-    upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
-
-    # One scheduler round-trip for the whole bounds check. Each predicate used to be its
-    # own ``if ...any():`` -- DataArray.__bool__ computes -- plus a ``.max()``/``.min()``
-    # inside the warning body, so up to four traversals of a graph that re-executes the
-    # entire upstream anomaly whenever it is not pinned. The four reductions share their
-    # upstream, so computing them together costs a single pass. ``too_low`` stays lazy as
-    # an array: only its ``.any()`` becomes a scalar, because the clamp below still needs
-    # the elementwise mask.
-    #
-    # The predicates here deliberately lack the ``& notnull()`` guard the 1D path carries.
-    # NaN comparisons are False either way; adding it would alter the clamp mask.
-    too_high = threshold > upper_bound
-    too_low = threshold < lower_bound
-    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
-
-    if bool(any_high):
-        warnings.warn(
-            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
-            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
-            UserWarning,
-            stacklevel=2,
-        )
-
-    if bool(any_low):
-        warnings.warn(
-            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-            "Double check the computed threshold values are correct.",
-            UserWarning,
-            stacklevel=2,
-        )
-        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = threshold.where(~too_low, lower_bound)
+    # Validate threshold values against the sign-aware bounds. One scheduler round-trip
+    # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.
+    # The predicates there deliberately lack the ``& notnull()`` guard the 1D path
+    # carries: NaN comparisons are False either way, but adding it would alter the
+    # clamp mask.
+    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=False)
 
     return threshold
 
@@ -550,10 +714,11 @@ def _compute_histogram_quantile_1d(
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
-    Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
     Improved robust interpolation handles empty bins in the tails.
 
     Parameters
@@ -570,6 +735,9 @@ def _compute_histogram_quantile_1d(
         Precision for positive anomaly bins
     max_anomaly : float, default=5.0
         Maximum anomaly value for binning
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. Only the sign of the guard rail and of the
+        range check depend on it -- the quantile itself is ``q`` either way.
 
     Returns
     -------
@@ -582,8 +750,8 @@ def _compute_histogram_quantile_1d(
         materialiser = Materialiser("persist")
 
     if bin_edges is None:
-        # Create optimised asymmetric bins
-        bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+        # Bins symmetric about zero, in float64 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float64)
 
     # Tile the non-reduced (spatial) dimensions so each histogram task processes a
     # bounded working set, independent of how the caller chunked the input. Without
@@ -598,14 +766,17 @@ def _compute_histogram_quantile_1d(
     # histogram is larger than the budget it was sized by.
     da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1)
 
-    # Clip finite data into the last bin (its centre) so out-of-range-high values are
-    # counted in the top bin instead of being dropped by xhistogram, which renormalised
-    # the CDF over a truncated total and biased the threshold low. NaN is preserved by
-    # clip and is still dropped by the histogram, so the mask below is unaffected.
-    top_clip = float((bin_edges[-2] + bin_edges[-1]) / 2)
+    # Clip finite data into the outermost bins (at their centres) so out-of-range values
+    # are counted there instead of being dropped by xhistogram, which renormalised the
+    # CDF over a truncated total and biased the threshold inwards. NaN is preserved by
+    # clip and is still dropped by the histogram, so the mask below is unaffected. The
+    # bottom clip is -inf on the legacy asymmetric edges, where it is skipped entirely so
+    # the graph is unchanged there.
+    bottom_clip, top_clip = (float(v) for v in _end_clips(bin_edges))
 
     # Compute histogram
-    hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim])
+    da_clipped = da.clip(min=bottom_clip, max=top_clip) if np.isfinite(bottom_clip) else da.clip(max=top_clip)
+    hist = histogram(da_clipped, bins=[bin_edges], dim=[dim])
 
     # Interpolate the quantile inside a single apply_ufunc over the bin dimension rather
     # than materialising the CDF and indexing it with a concrete idx_upper. The CDF is
@@ -628,34 +799,8 @@ def _compute_histogram_quantile_1d(
         threshold = threshold.drop_vars(f"{da.name}_bin")
     threshold = materialiser.pin_one(threshold)
 
-    # Validate threshold against bounds
-    upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
-
-    # One scheduler round-trip for the whole bounds check -- see the matching comment in
-    # the 2D path. The four reductions share their upstream, so computing them together
-    # costs a single pass instead of one traversal per predicate.
-    too_high = (threshold > upper_bound) & threshold.notnull()
-    too_low = (threshold < lower_bound) & threshold.notnull()
-    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
-
-    if bool(any_high):
-        warnings.warn(
-            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
-            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
-            UserWarning,
-            stacklevel=2,
-        )
-
-    if bool(any_low):
-        warnings.warn(
-            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-            "Double check the computed threshold values are correct.",
-            UserWarning,
-            stacklevel=2,
-        )
-        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = materialiser.pin_one(threshold.where(~too_low, lower_bound))
+    # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
+    # with the 2D path.
+    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one)
 
     return threshold

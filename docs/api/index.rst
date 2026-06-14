@@ -16,11 +16,15 @@ linked below):
 .. autosummary::
    :nosignatures:
 
+   anomaly.compute
+   extremes.identify
    preprocess_data
    tracker
    regional_tracker
    specify_grid
    PlotConfig
+   SeasonalCycle
+   infer_cycle
 
 Module reference
 ================
@@ -28,10 +32,26 @@ Module reference
 .. toctree::
    :maxdepth: 2
 
-   detect
+   anomaly
+   extremes
    track
    plotx
    helper
+
+Time resolution
+===============
+
+The within-year cycle a climatology or seasonal threshold is resolved on. Inferred
+from the median spacing of the time coordinate -- ``dayofyear`` for daily data,
+``month`` for monthly, ``hourofyear`` for sub-daily -- and overridable via the
+``cycle=`` parameter on :func:`preprocess_data`, :func:`marEx.anomaly.compute` and
+:func:`marEx.extremes.identify`. See :doc:`../guide/detection` for the durations table
+and the sub-daily caveats.
+
+.. autoclass:: SeasonalCycle
+   :members:
+
+.. autofunction:: infer_cycle
 
 Exception hierarchy
 ===================

@@ -6,7 +6,7 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.detect.compute_mode import Materialiser
+from marEx.core.compute_mode import Materialiser
 from marEx.exceptions import ConfigurationError
 
 TEST_DATA_DIR = Path(__file__).parent / "data"

@@ -54,16 +54,16 @@ class TestUnstructuredPreprocessing:
         lon_coords = xr.DataArray(np.linspace(-180, 180, ncells), dims=["ncells"], name="lon")
         cls.sst_data = cls.sst_data.assign_coords(lat=lat_coords, lon=lon_coords)
 
-    def test_shifting_baseline_hobday_extreme_unstructured(self):
-        """Test preprocessing with shifting_baseline + hobday_extreme for unstructured grid."""
+    def test_shifting_baseline_seasonal_percentile_unstructured(self):
+        """Test preprocessing with shifting_baseline + seasonal_percentile for unstructured grid."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=5,  # Reduced for test data
-            window_days_hobday=3,  # Reduced for test data
+            window_years=5,  # Reduced for test data
+            smooth_days=5,  # Reduced for test data
+            window_days=3,  # Reduced for test data
             dimensions=self.dimensions,
             coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
@@ -84,7 +84,7 @@ class TestUnstructuredPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
-        assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "seasonal_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
         # Verify data types
@@ -104,19 +104,19 @@ class TestUnstructuredPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (unstructured): {extreme_frequency}")
+        print(f"Exact extreme_frequency for shifting_baseline + seasonal_percentile (unstructured): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
-            description="shifting_baseline + hobday_extreme (unstructured)",
+            description="shifting_baseline + seasonal_percentile (unstructured)",
         )
 
-    def test_detrend_harmonic_global_extreme_unstructured(self):
-        """Test preprocessing with detrend_harmonic + global_extreme for unstructured grid."""
+    def test_detrend_harmonic_global_percentile_unstructured(self):
+        """Test preprocessing with detrend_harmonic + global_percentile for unstructured grid."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
@@ -139,7 +139,7 @@ class TestUnstructuredPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "global_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
         # Verify data types
@@ -151,17 +151,17 @@ class TestUnstructuredPreprocessing:
         assert "time" in extremes_ds.extreme_events.dims
         assert cell_dim in extremes_ds.extreme_events.dims
 
-        # For global_extreme, thresholds should be 1D (cells) not 2D with dayofyear
+        # For global_percentile, thresholds should be 1D (cells) not 2D with dayofyear
         assert "dayofyear" not in extremes_ds.thresholds.dims
         assert cell_dim in extremes_ds.thresholds.dims
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrend_harmonic + global_extreme (unstructured): {extreme_frequency}")
+        print(f"Exact extreme_frequency for detrend_harmonic + global_percentile (unstructured): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
-            description="detrend_harmonic + global_extreme (unstructured)",
+            description="detrend_harmonic + global_percentile (unstructured)",
         )
 
     def test_fixed_baseline_unstructured(self):
@@ -169,7 +169,7 @@ class TestUnstructuredPreprocessing:
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="fixed_baseline",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             dimensions=self.dimensions,
             coordinates=self.coordinates,
@@ -197,10 +197,10 @@ class TestUnstructuredPreprocessing:
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
-            window_days_hobday=5,
+            window_days=5,
             dimensions=self.dimensions,
             coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
@@ -222,14 +222,14 @@ class TestUnstructuredPreprocessing:
         """Test that anomaly methods work with both extreme detection methods for unstructured data."""
         # Test all combinations
         combinations = [
-            ("fixed_baseline", "global_extreme"),
-            ("fixed_baseline", "hobday_extreme"),
-            ("detrend_fixed_baseline", "global_extreme"),
-            ("detrend_fixed_baseline", "hobday_extreme"),
-            ("shifting_baseline", "global_extreme"),
-            ("shifting_baseline", "hobday_extreme"),
-            ("detrend_harmonic", "global_extreme"),
-            ("detrend_harmonic", "hobday_extreme"),
+            ("fixed_baseline", "global_percentile"),
+            ("fixed_baseline", "seasonal_percentile"),
+            ("detrend_fixed_baseline", "global_percentile"),
+            ("detrend_fixed_baseline", "seasonal_percentile"),
+            ("shifting_baseline", "global_percentile"),
+            ("shifting_baseline", "seasonal_percentile"),
+            ("detrend_harmonic", "global_percentile"),
+            ("detrend_harmonic", "seasonal_percentile"),
         ]
 
         for method_anomaly, method_extreme in combinations:
@@ -239,7 +239,7 @@ class TestUnstructuredPreprocessing:
                 method_extreme=method_extreme,
                 threshold_percentile=95,
                 detrend_orders=[1] if "detrended" in method_anomaly else None,
-                window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
+                window_days=11 if method_extreme == "seasonal_percentile" else None,
                 dimensions=self.dimensions,
                 coordinates=self.coordinates,
                 dask_chunks=self.dask_chunks,
@@ -266,7 +266,7 @@ class TestUnstructuredPreprocessing:
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             dimensions=unstructured_dims,
             coordinates=self.coordinates,
@@ -290,11 +290,11 @@ class TestUnstructuredPreprocessing:
         shifting_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_years=5,  # Reduced for test data
+            smooth_days=11,  # Reduced for test data
+            window_days=5,  # Reduced for test data
             dimensions=self.dimensions,
             coordinates=self.coordinates,
             dask_chunks=self.dask_chunks,
@@ -305,7 +305,7 @@ class TestUnstructuredPreprocessing:
         detrended_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
@@ -353,11 +353,11 @@ class TestUnstructuredPreprocessing:
         custom_dimensions = {"time": "t", "x": "cell"}
         custom_coordinates = {"time": "t", "x": "longitude", "y": "latitude"}
 
-        # Test 1: detrend_harmonic + global_extreme
+        # Test 1: detrend_harmonic + global_percentile
         extremes_ds_detrended = marEx.preprocess_data(
             renamed_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=custom_dimensions,
@@ -392,9 +392,9 @@ class TestUnstructuredPreprocessing:
 
         # Verify attributes for detrend_harmonic
         assert extremes_ds_detrended.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds_detrended.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds_detrended.attrs["method_extreme"] == "global_percentile"
 
-        # For global_extreme, thresholds should be 1D (cells) not 2D with dayofyear
+        # For global_percentile, thresholds should be 1D (cells) not 2D with dayofyear
         assert "dayofyear" not in extremes_ds_detrended.thresholds.dims
         assert "cell" in extremes_ds_detrended.thresholds.dims
 
@@ -403,18 +403,18 @@ class TestUnstructuredPreprocessing:
         assert_percentile_frequency(
             extreme_frequency_detrended,
             95,
-            description="Custom dimensions (unstructured): detrend_harmonic + global_extreme",
+            description="Custom dimensions (unstructured): detrend_harmonic + global_percentile",
         )
 
-        # Test 2: shifting_baseline + hobday_extreme
+        # Test 2: shifting_baseline + seasonal_percentile
         extremes_ds_shifting = marEx.preprocess_data(
             renamed_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=5,  # Reduced for test data
+            window_years=5,  # Reduced for test data
+            smooth_days=11,  # Reduced for test data
+            window_days=5,  # Reduced for test data
             dimensions=custom_dimensions,
             coordinates=custom_coordinates,
             dask_chunks={"t": 25},
@@ -447,9 +447,9 @@ class TestUnstructuredPreprocessing:
 
         # Verify attributes for shifting_baseline
         assert extremes_ds_shifting.attrs["method_anomaly"] == "shifting_baseline"
-        assert extremes_ds_shifting.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds_shifting.attrs["method_extreme"] == "seasonal_percentile"
 
-        # For hobday_extreme, thresholds should have dayofyear dimension
+        # For seasonal_percentile, thresholds should have dayofyear dimension
         assert "dayofyear" in extremes_ds_shifting.thresholds.dims
         assert "cell" in extremes_ds_shifting.thresholds.dims
 
@@ -463,7 +463,7 @@ class TestUnstructuredPreprocessing:
         assert_percentile_frequency(
             extreme_frequency_shifting,
             95,
-            description="Custom dimensions (unstructured): shifting_baseline + hobday_extreme",
+            description="Custom dimensions (unstructured): shifting_baseline + seasonal_percentile",
         )
 
         # Test 3: Verify both methods produce consistent core structure
@@ -518,7 +518,7 @@ class TestUnstructuredGridEdgeCases:
             coordinates=self.coordinates_unstructured,
             dask_chunks={"time": 50},
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             method_percentile="approximate",  # Triggers the rechunking path
             threshold_percentile=95,
         )
@@ -537,7 +537,7 @@ class TestUnstructuredGridEdgeCases:
             coordinates=self.coordinates_unstructured,
             dask_chunks={"time": 50},
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
         )
 
@@ -548,9 +548,9 @@ class TestUnstructuredGridEdgeCases:
     def test_unstructured_grid_with_approximate_percentile(self):
         """Test approximate percentile method with unstructured grid."""
         # Test with both extreme methods to ensure rechunking works correctly
-        for method_extreme in ["global_extreme", "hobday_extreme"]:
-            if method_extreme == "hobday_extreme":
-                extra_kwargs = {"window_days_hobday": 5}
+        for method_extreme in ["global_percentile", "seasonal_percentile"]:
+            if method_extreme == "seasonal_percentile":
+                extra_kwargs = {"window_days": 5}
             else:
                 extra_kwargs = {}
 

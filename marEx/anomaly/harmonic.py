@@ -12,10 +12,11 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..utils import add_decimal_year
-from ..validation import _infer_dims_coords
+from ..core.dimensions import spatial_dims
+from ..core.time_axis import SeasonalCycle, _median_step_days, add_decimal_year, is_subdaily_axis, resolve_cycle
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -23,12 +24,13 @@ logger = get_logger(__name__)
 
 def _compute_anomaly_detrended(
     da: xr.DataArray,
-    std_normalise: bool = False,
+    standardise: bool = False,
     detrend_orders: Optional[List[int]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     force_zero_mean: bool = True,
     remove_harmonics: bool = True,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Generate normalised anomalies by removing trends, seasonal cycles, and optionally
@@ -38,7 +40,7 @@ def _compute_anomaly_detrended(
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    std_normalise : bool, default=False
+    standardise : bool, default=False
         Whether to standardise anomalies by temporal variability
     detrend_orders : list, optional
         Polynomial orders for trend removal (default: [1] for linear)
@@ -50,6 +52,9 @@ def _compute_anomaly_detrended(
         Whether to enforce zero mean in detrended data
     remove_harmonics : bool, default=True
         Whether to remove seasonal harmonics (annual and semi-annual cycles)
+    cycle : SeasonalCycle, optional
+        Within-year axis the standardisation climatology is resolved on. Inferred
+        from the time coordinate's cadence when omitted.
 
     Returns
     -------
@@ -98,6 +103,42 @@ def _compute_anomaly_detrended(
     if 1 not in detrend_orders and len(detrend_orders) > 1:
         print("Warning: Higher-order detrending without linear term may be unstable")
 
+    # The harmonic basis below is annual + semi-annual only. On a sub-daily axis the
+    # entire diurnal cycle therefore survives into `dat_anomaly` -- silently wrong
+    # rather than slow, which is the worst failure mode available. Reject it and steer
+    # to the group-based methods, whose climatology is resolved on the `hourofyear`
+    # cycle and so removes the diurnal cycle for free.
+    #
+    # Only `remove_harmonics=True` is affected: `detrend_fixed_baseline` calls this
+    # function with harmonics off and then subtracts a cycle-resolved climatology, which
+    # handles a sub-daily cycle correctly.
+    #
+    # `is_subdaily_axis`, not `resolve_cycle`: this guard only needs to know whether the
+    # axis is finer than daily, and `infer_cycle` raises on a mixed-cadence axis. Making
+    # a harmonic run fail there would be the same "names the wrong problem" bug the
+    # guard itself exists to prevent.
+    if remove_harmonics and is_subdaily_axis(da, coordinates["time"], cycle):
+        step_days = _median_step_days(da[coordinates["time"]]) if cycle is None else cycle.step_days
+        raise ConfigurationError(
+            "method_anomaly='detrend_harmonic' does not support sub-daily data",
+            details=(
+                f"The harmonic basis removes annual and semi-annual cycles only, so on a "
+                f"{step_days * 24:g}-hour time axis the diurnal cycle would remain in "
+                "the anomaly. That is a silently wrong result rather than a slow one, so it is "
+                "rejected rather than computed."
+            ),
+            suggestions=[
+                "Use method_anomaly='shifting_baseline' or 'fixed_baseline', whose climatology is "
+                "resolved on the sub-daily cycle and removes the diurnal cycle",
+                "Use method_anomaly='detrend_fixed_baseline' if a trend must also be removed",
+                "Resample the data to daily before calling marEx",
+            ],
+            context={
+                "method_anomaly": "detrend_harmonic",
+                "step_days": step_days,
+            },
+        )
+
     # Add decimal year for trend modelling
     da = add_decimal_year(da, dim=dimensions["time"], coord=coordinates["time"])
     dy = da.decimal_year.compute()
@@ -140,7 +181,7 @@ def _compute_anomaly_detrended(
             dimensions["time"]: da[coordinates["time"]].values,
             "coeff": np.arange(1, n_coeffs + 1),
         },
-    ).chunk({dimensions["time"]: da.chunks[0]})
+    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
 
     pmodel_da = xr.DataArray(
         pmodel.T,
@@ -149,7 +190,7 @@ def _compute_anomaly_detrended(
             "coeff": np.arange(1, n_coeffs + 1),
             dimensions["time"]: da[coordinates["time"]].values,
         },
-    ).chunk({dimensions["time"]: da.chunks[0]})
+    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
 
     # Prepare dimensions for model coefficients based on data structure
     dims = ["coeff"]
@@ -168,12 +209,12 @@ def _compute_anomaly_detrended(
     # Fit model to data - use the actual dimensions of the result
     dot_result = pmodel_da.dot(da)
     # For dot product result, dimensions match input data's spatial dimensions
-    spatial_dims = [dim for dim in da.dims if dim != dimensions["time"]]
-    result_dims = ["coeff"] + spatial_dims
+    fit_dims = [dim for dim in da.dims if dim != dimensions["time"]]
+    result_dims = ["coeff"] + fit_dims
 
     # Build coordinates for the result
     result_coords = {"coeff": np.arange(1, n_coeffs + 1)}
-    for dim in spatial_dims:
+    for dim in fit_dims:
         if dim in da.coords:
             result_coords[dim] = da.coords[dim]
 
@@ -193,10 +234,11 @@ def _compute_anomaly_detrended(
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
-    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
-    if spatial_dims:
+    # Every spatial dim is made whole, extra dims (depth, level) included.
+    mask_dims = spatial_dims(da, dimensions)
+    if mask_dims:
         # Spatial data - create 2D/3D mask
-        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        chunk_dict_mask = {dim: -1 for dim in mask_dims}
         mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
         # Drop time-related coordinates to create spatial mask
         vars_to_drop = []
@@ -222,12 +264,14 @@ def _compute_anomaly_detrended(
             coords_to_preserve[coord_name] = da.coords[coord_name]
 
     # Standardise anomalies by temporal variability if requested
-    if std_normalise:
+    if standardise:
+        cycle = resolve_cycle(da, coordinates["time"], cycle)
+        cycle_dim = cycle.index_name
 
-        # Calculate day-of-year standard deviation using cohorts
+        # Calculate per-cycle-slot standard deviation using cohorts
         std_day = flox.xarray.xarray_reduce(
             da_detrend,
-            da_detrend[coordinates["time"]].dt.dayofyear,
+            cycle.index_of(da_detrend[coordinates["time"]]),
             dim=dimensions["time"],
             func="std",
             isbin=False,
@@ -236,27 +280,46 @@ def _compute_anomaly_detrended(
         )
 
         # Calculate 30-day rolling standard deviation with annual wrapped padding.
-        # Slice/label by the actual number of day-of-year groups: a span with no
+        # Slice/label by the actual number of cycle groups: a span with no
         # leap year yields 365 groups, and hardcoding 366 produced a duplicate wrap
         # label and an align error. The common (leap-containing) case is 366, so this
         # is behaviour-preserving there.
-        n_doy = std_day.sizes["dayofyear"]
-        std_day_wrap = std_day.pad(dayofyear=16, mode="wrap")
-        std_rolling = np.sqrt((std_day_wrap**2).rolling(dayofyear=30, center=True).mean()).isel(dayofyear=slice(16, n_doy + 16))
+        #
+        # The 30 days and the padding width are physical, so they are converted through
+        # the cycle. `steps_for_days` deliberately does NOT force the result odd: on
+        # daily data 30 days is 30 steps and the pad is 16, exactly what this code has
+        # always used, and forcing it odd would move every standardised result.
+        std_steps = cycle.steps_for_days(30, name="standardisation window")
+        if std_steps == 1:
+            # Same reasoning as `smoothed_rolling_climatology`'s degenerate case: on a
+            # monthly axis 30 days rounds to one step, which is INSIDE `steps_for_days`'
+            # half-step rule so it warns about nothing -- yet the rolling smoothing of
+            # the per-slot standard deviation disappears entirely. Say so.
+            logger.warning(
+                "The 30-day standardisation window resolves to a single timestep on this %g-day axis: "
+                "the per-slot standard deviation is used unsmoothed.",
+                cycle.step_days,
+            )
+        pad_size = std_steps // 2 + 1
+        n_doy = std_day.sizes[cycle_dim]
+        std_day_wrap = std_day.pad({cycle_dim: pad_size}, mode="wrap")
+        std_rolling = np.sqrt((std_day_wrap**2).rolling({cycle_dim: std_steps}, center=True).mean()).isel(
+            {cycle_dim: slice(pad_size, n_doy + pad_size)}
+        )
 
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings
         std_rolling_safe = std_rolling.where(std_rolling > 1e-10, np.nan)
-        da_detrend = da_detrend.assign_coords(dayofyear=da_detrend[coordinates["time"]].dt.dayofyear)
-        da_stn = da_detrend.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, n_doy + 1))) / std_rolling_safe
+        da_detrend = da_detrend.assign_coords({cycle_dim: cycle.index_of(da_detrend[coordinates["time"]])})
+        da_stn = da_detrend.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, n_doy + 1))}) / std_rolling_safe
 
-        # Drop dayofyear coordinate to avoid merge conflicts
-        if "dayofyear" in da_stn.coords:
-            da_stn = da_stn.drop_vars("dayofyear")
+        # Drop the cycle-index coordinate to avoid merge conflicts
+        if cycle_dim in da_stn.coords:
+            da_stn = da_stn.drop_vars(cycle_dim)
 
         # Rechunk data for efficient processing
         chunk_dict_std = chunk_dict_mask.copy()
-        chunk_dict_std["dayofyear"] = -1
+        chunk_dict_std[cycle_dim] = -1
 
         da_stn = da_stn.chunk(chunk_dict_mask)
         std_rolling = std_rolling.chunk(chunk_dict_std)

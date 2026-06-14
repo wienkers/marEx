@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "MarEx: Marine Extremes Detection and Tracking"
-abstract: "Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data. A high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets."
+title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
+abstract: "A high-performance Python framework for computing climatologies and anomalies, identifying extremes, and tracking them through time in exascale weather and climate datasets. The anomaly and climatology stage is usable on its own, and every stage applies equally to ocean, atmosphere, land surface, and biogeochemical variables on regular grids and unstructured meshes."
 authors:
   - family-names: "Wienkers"
     given-names: "Aaron"
@@ -16,12 +16,16 @@ identifiers:
     value: "10.5281/zenodo.16922881"
     description: "DOI for this software"
 keywords:
-  - "marine heatwaves"
+  - "climate extremes"
+  - "weather extremes"
   - "extreme events"
-  - "oceanography"
+  - "anomalies"
+  - "climatology"
+  - "detrending"
   - "extremes tracking"
-  - "ocean extremes"
-  - "marine extremes"
+  - "heatwaves"
+  - "marine heatwaves"
+  - "drought"
   - "climate data"
   - "distributed computing"
   - "dask"
@@ -30,7 +34,7 @@ version: "3.1"
 date-released: "2025-08-22"
 preferred-citation:
   type: software
-  title: "MarEx: Marine Extremes Detection and Tracking"
+  title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
   authors:
     - family-names: "Wienkers"
       given-names: "Aaron"

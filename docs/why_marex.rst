@@ -31,7 +31,7 @@ The video below demonstrates why marEx's selective merging with overlap threshol
 
 * Full parent/child ID tracking in ``merge_ledger`` dataset
 * Overlap requirement for each merge/split event
-* Enables reconstruction of complex event dynamics (e.g., fusion of two smaller marine heatwaves into one larger event)
+* Enables reconstruction of complex event dynamics (e.g., fusion of two smaller events into one larger event)
 
 **Code reference:** :mod:`marEx.track.tracker` with ``allow_merging=True`` parameter
 
@@ -107,12 +107,12 @@ marEx provides **four** scientifically rigorous anomaly calculation methods with
 * Accommodate analyses that need to include/exclude long-term trends
 * Account for shifting seasonal cycles or maintain stationary baselines
 
-**Code reference:** :mod:`marEx.detect.preprocess_data` with ``method_anomaly`` parameter
+**Code reference:** :mod:`marEx.anomaly.preprocess_data` with ``method_anomaly`` parameter
 
 Hobday Spatial Window Extension
 --------------------------------
 
-marEx extends/generalises the standard Hobday et al. (2016) temporal window by adding a spatial dimension (``window_spatial_hobday``). This creates a spatio-temporal cube of data points for calculating percentile thresholds (e.g., 5×5 spatial × 11 days = 275 samples per year), resulting in more robust and spatially coherent statistics. This is a major methodological advancement over the original Hobday definition.
+marEx extends/generalises the standard Hobday et al. (2016) temporal window by adding a spatial dimension (``window_spatial``). This creates a spatio-temporal cube of data points for calculating percentile thresholds (e.g., 5×5 spatial × 11 days = 275 samples per year), resulting in more robust and spatially coherent statistics. This is a major methodological advancement over the original Hobday definition.
 
 **Key benefits:**
 
@@ -125,7 +125,7 @@ marEx extends/generalises the standard Hobday et al. (2016) temporal window by a
 * Structured grids only (not supported for unstructured/irregular grids)
 * Requires ``method_percentile='approximate'``
 
-**Code reference:** :mod:`marEx.detect.preprocess_data` with ``window_spatial_hobday`` parameter (default=5)
+**Code reference:** :mod:`marEx.anomaly.preprocess_data` with ``window_spatial`` parameter (default=5)
 
 Histogram-Based Approximate Percentiles
 ----------------------------------------
@@ -135,10 +135,10 @@ marEx implements a clever 2D histogram approach for percentile calculation that 
 **Key benefits:**
 
 * Enables global-in-time calculations on massive datasets
-* ~0.01°C precision adequate for marine heatwave studies
+* ~0.01 K precision adequate for temperature-extreme studies
 * Overcomes the memory bottleneck of exact percentiles (which require loading entire time series)
 
-**Code reference:** :mod:`marEx.detect.preprocess_data` with ``method_percentile='approximate'`` (default)
+**Code reference:** :mod:`marEx.anomaly.preprocess_data` with ``method_percentile='approximate'`` (default)
 
 Extreme Scale & Performance
 ============================
@@ -153,7 +153,7 @@ marEx features a "Dask-first" architecture with mandatory Dask validation that p
 * Process massive climate datasets efficiently with intelligent chunking
 * Explicit chunking control via ``dask_chunks`` parameter throughout pipeline
 
-**Code reference:** All functions in :mod:`marEx.detect` and :mod:`marEx.track` require Dask-backed arrays
+**Code reference:** All functions in :mod:`marEx.anomaly` and :mod:`marEx.track` require Dask-backed arrays
 
 HPC/SLURM Integration
 ---------------------

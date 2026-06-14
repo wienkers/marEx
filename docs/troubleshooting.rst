@@ -2,7 +2,7 @@
 Troubleshooting
 ===============
 
-This guide helps you diagnose and resolve common issues when using marEx for marine extreme event analysis.
+This guide helps you diagnose and resolve common issues when using marEx for extreme-event analysis.
 
 Quick Diagnostic Checklist
 ===========================

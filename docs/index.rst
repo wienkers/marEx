@@ -1,5 +1,5 @@
 =============================================
-marEx — Marine Extremes Detection & Tracking
+marEx — Weather & Climate Extremes Detection & Tracking
 =============================================
 
 .. image:: https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg
@@ -19,7 +19,7 @@ marEx — Marine Extremes Detection & Tracking
    :alt: DOI
 
 **marEx** is a high-performance Python framework for identifying and tracking
-marine extremes — such as Marine Heatwaves — in massive oceanographic datasets.
+extremes — in the ocean, the atmosphere, or on land — in massive climate datasets.
 It provides a complete, grid-agnostic pipeline from raw data preprocessing to
 tracked-event visualisation, and scales identically from a laptop to a
 1000-core supercomputer.
@@ -67,7 +67,7 @@ Quick example
    # 1. Detect extremes
    extremes = marEx.preprocess_data(
        sst, threshold_percentile=95,
-       method_anomaly="shifting_baseline", method_extreme="hobday_extreme",
+       method_anomaly="shifting_baseline", method_extreme="seasonal_percentile",
    )
 
    # 2. Track events through time

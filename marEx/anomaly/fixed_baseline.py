@@ -13,10 +13,12 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
-from ..validation import _infer_dims_coords
+from ..core.compute_mode import Materialiser
+from ..core.dimensions import spatial_dims
+from ..core.time_axis import SeasonalCycle, resolve_cycle
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 from .harmonic import _compute_anomaly_detrended
 
 # Get module logger
@@ -29,6 +31,7 @@ def _compute_anomaly_fixed_baseline(
     coordinates: Optional[Dict[str, str]] = None,
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed baseline method with full time series climatology.
@@ -62,6 +65,8 @@ def _compute_anomaly_fixed_baseline(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    cycle = resolve_cycle(da, coordinates["time"], cycle)
+    cycle_dim = cycle.index_name
 
     # Select data for climatology computation (optionally restricted to reference period)
     if reference_period is not None:
@@ -97,7 +102,7 @@ def _compute_anomaly_fixed_baseline(
     logger.debug("Computing daily climatology across %s", "reference period" if reference_period else "all years")
     daily_climatology = flox.xarray.xarray_reduce(
         da_for_clim,
-        da_for_clim[coordinates["time"]].dt.dayofyear,
+        cycle.index_of(da_for_clim[coordinates["time"]]),
         dim=dimensions["time"],
         func="nanmean",
         isbin=False,
@@ -111,30 +116,34 @@ def _compute_anomaly_fixed_baseline(
     # such day. Reindex to 366 and forward-fill the missing tail group from day 365.
     # In the common (leap-containing) case both operations are no-ops. The dayofyear
     # dim is rechunked to a single chunk so the dask ffill is valid.
-    daily_climatology = daily_climatology.reindex(dayofyear=np.arange(1, 367)).chunk({"dayofyear": -1}).ffill("dayofyear")
+    daily_climatology = (
+        daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
+    )
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
-    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
-    anomalies = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) - daily_climatology
+    da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]])})
+    anomalies = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))}) - daily_climatology
     anomalies = anomalies.astype(np.float32)
 
-    # Drop dayofyear coordinate to avoid merge conflicts
-    if "dayofyear" in anomalies.coords:
-        anomalies = anomalies.drop_vars("dayofyear")
+    # Drop the cycle-index coordinate to avoid merge conflicts
+    if cycle_dim in anomalies.coords:
+        anomalies = anomalies.drop_vars(cycle_dim)
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
-    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
-    if spatial_dims:
+    mask_dims = spatial_dims(da, dimensions)
+    if mask_dims:
         # Spatial data - create 2D/3D mask.
         # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
         # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
         # under global_extreme). Drop both.
-        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        # Extra (non-horizontal) spatial dims such as depth are made whole alongside
+        # the horizontal ones, so the mask keeps the field's full spatial shape.
+        chunk_dict_mask = {dim: -1 for dim in mask_dims}
         coords_to_drop = [coordinates["time"]]
-        if "dayofyear" in da.coords:
-            coords_to_drop.append("dayofyear")
+        if cycle_dim in da.coords:
+            coords_to_drop.append(cycle_dim)
         mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars(coords_to_drop).chunk(chunk_dict_mask)
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
@@ -152,6 +161,7 @@ def _compute_anomaly_detrend_fixed_baseline(
     force_zero_mean: bool = True,
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed detrended baseline method.
@@ -195,12 +205,13 @@ def _compute_anomaly_detrend_fixed_baseline(
     # Step 1: Remove polynomial trends (without harmonics) using _compute_anomaly_detrended
     detrended_result = _compute_anomaly_detrended(
         da=da,
-        std_normalise=False,
+        standardise=False,
         detrend_orders=detrend_orders,
         dimensions=dimensions,
         coordinates=coordinates,
         force_zero_mean=force_zero_mean,
         remove_harmonics=False,  # Only remove trends, not harmonics
+        cycle=cycle,
     )["dat_anomaly"]
 
     # Step 2: Compute daily climatology and anomalies using _compute_anomaly_fixed_baseline
@@ -211,6 +222,7 @@ def _compute_anomaly_detrend_fixed_baseline(
         coordinates=coordinates,
         reference_period=reference_period,
         materialiser=materialiser,
+        cycle=cycle,
     )
 
     return final_result

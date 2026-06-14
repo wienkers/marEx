@@ -15,15 +15,19 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.detect.compute_mode import Materialiser, clear_staging, create_staging_dir
+from marEx.core.compute_mode import Materialiser, clear_staging, create_staging_dir
 from marEx.exceptions import ConfigurationError
 
+# The pipeline's INFO output is emitted by whichever stage produced the line, so a
+# capture that watches only the chainer misses the extremes stage's event-count summary.
+PIPELINE_LOGGERS = ("marEx.pipeline", "marEx.anomaly.api", "marEx.extremes.api")
 
-def _capture_pipeline_log(fn, logger_name="marEx.detect.pipeline", level=logging.INFO):
-    """Run ``fn`` and return the messages its pipeline logger emitted.
+
+def _capture_pipeline_log(fn, logger_names=PIPELINE_LOGGERS, level=logging.INFO):
+    """Run ``fn`` and return the messages the pipeline's loggers emitted.
 
     marEx configures its own logging handler, so pytest's ``caplog`` fixture captures
-    nothing from it. Attaching a handler to the named logger is independent of both
+    nothing from it. Attaching a handler to the named loggers is independent of both
     propagation and handler configuration.
     """
 
@@ -35,16 +39,21 @@ def _capture_pipeline_log(fn, logger_name="marEx.detect.pipeline", level=logging
         def emit(self, record):
             self.messages.append(record.getMessage())
 
-    logger = logging.getLogger(logger_name)
+    if isinstance(logger_names, str):
+        logger_names = (logger_names,)
+
     collector = _Collector()
-    previous_level = logger.level
-    logger.addHandler(collector)
-    logger.setLevel(level)
+    loggers = [logging.getLogger(name) for name in logger_names]
+    previous_levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.addHandler(collector)
+        logger.setLevel(level)
     try:
         fn()
     finally:
-        logger.removeHandler(collector)
-        logger.setLevel(previous_level)
+        for logger, previous in zip(loggers, previous_levels):
+            logger.removeHandler(collector)
+            logger.setLevel(previous)
     return collector.messages
 
 
@@ -219,7 +228,7 @@ class TestPipelinePlumbing:
     def _run(self, **overrides):
         kwargs = {
             "method_anomaly": "detrend_harmonic",
-            "method_extreme": "global_extreme",
+            "method_extreme": "global_percentile",
             "dimensions": self.dimensions,
             "dask_chunks": {"time": 25},
         }
@@ -312,10 +321,10 @@ class TestLazyMode:
     def _run(self, **overrides):
         kwargs = {
             "method_anomaly": "shifting_baseline",
-            "method_extreme": "hobday_extreme",
-            "window_year_baseline": 5,
-            "smooth_days_baseline": 11,
-            "window_days_hobday": 3,
+            "method_extreme": "seasonal_percentile",
+            "window_years": 5,
+            "smooth_days": 11,
+            "window_days": 3,
             "dimensions": self.dimensions,
             "dask_chunks": {"time": 25},
         }
@@ -381,14 +390,14 @@ class TestValidateFlag:
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     def _run(self, monkeypatch, validate):
-        import marEx.detect.pipeline as pipeline_mod
+        import marEx.anomaly.api as anomaly_api
 
         called = []
-        monkeypatch.setattr(pipeline_mod, "_validate_data_values", lambda *a, **k: called.append(True))
+        monkeypatch.setattr(anomaly_api, "_validate_data_values", lambda *a, **k: called.append(True))
         marEx.preprocess_data(
             self.sst,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             validate=validate,
             dimensions=self.dimensions,
             dask_chunks={"time": 25},
@@ -412,7 +421,7 @@ class TestStreamingMode:
     def _run(self, tmp_path, **overrides):
         kwargs = {
             "method_anomaly": "detrend_harmonic",
-            "method_extreme": "global_extreme",
+            "method_extreme": "global_percentile",
             "compute_mode": "streaming",
             "scratch_dir": str(tmp_path),
             "dimensions": self.dimensions,

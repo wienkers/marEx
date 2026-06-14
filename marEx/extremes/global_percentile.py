@@ -3,7 +3,7 @@ Global (constant-in-time) extreme identification.
 
 Provides :func:`_identify_extremes_constant`, which applies a single
 time-invariant percentile threshold to identify extreme events. This backs the
-``global_extreme`` extreme-detection method.
+``global_percentile`` extreme-detection method.
 """
 
 from typing import Dict, Literal, Optional, Tuple
@@ -11,8 +11,9 @@ from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import xarray as xr
 
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
+from ..core.compute_mode import Materialiser
+from ..core.dimensions import spatial_chunks, spatial_dims
+from ..logging_config import get_logger
 from .histogram import _compute_histogram_quantile_1d
 
 # Get module logger
@@ -27,10 +28,19 @@ def _identify_extremes_constant(
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    threshold_label: str = "thresholds",
+    tail: Literal["upper", "lower"] = "upper",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
-    Identify extreme events exceeding a constant (in time) percentile threshold.
+    Identify extreme events beyond a constant (in time) percentile threshold.
     i.e. There is 1 threshold for each spatial point, computed across all time.
+
+    ``tail`` selects which side of the distribution counts as extreme. The
+    threshold is the ``threshold_percentile``-th percentile either way -- the tail
+    changes only the comparison, so ``threshold_percentile=5, tail='lower'`` gives
+    the coldest 5 %. The lower tail is NOT implemented by negating the data: that
+    would add a full-size lazy op and make the returned thresholds mean something
+    other than what the caller asked for.
 
     Returns both the extreme events boolean mask and the thresholds used.
     """
@@ -53,7 +63,10 @@ def _identify_extremes_constant(
             n_cells = da[dimensions["x"]].size
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
-        chunk_dict = {dimensions[dim]: rechunk_size for dim in ["x", "y"] if dim in dimensions}
+        # Every spatial dim is tiled the same way, extra dims (depth, level) included:
+        # the exact quantile is a per-cell reduction over time, so how the spatial axes
+        # are split cannot change the result, only the task count.
+        chunk_dict = {dim: rechunk_size for dim in spatial_dims(da, dimensions)}
         chunk_dict[dimensions["time"]] = -1
         da_rechunk = da.chunk(chunk_dict)
 
@@ -68,6 +81,7 @@ def _identify_extremes_constant(
             precision=precision,
             max_anomaly=max_anomaly,
             materialiser=materialiser,
+            tail=tail,
         )
 
     # Clean up coordinates if needed
@@ -78,14 +92,13 @@ def _identify_extremes_constant(
     # Rechunk only -- whether the threshold is materialised at all is the materialiser's
     # decision, not this function's. An unconditional persist here forced materialisation
     # on callers who only wanted to stream the result to zarr (review finding 3.15).
-    spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    threshold = threshold.chunk(spatial_chunks)
+    threshold = threshold.chunk(spatial_chunks(threshold, dimensions))
 
     # Create boolean mask for values exceeding threshold
     # Anchor the threshold before the comparison builds on it -- see the matching
-    # comment in the hobday path.
-    threshold = materialiser.stage(threshold, "thresholds")
-    extremes = da >= threshold
+    # comment in the seasonal path.
+    threshold = materialiser.stage(threshold, threshold_label)
+    extremes = (da >= threshold) if tail == "upper" else (da <= threshold)
 
     # Clean up coordinates if needed
     if "quantile" in extremes.coords:

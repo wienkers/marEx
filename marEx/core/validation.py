@@ -1,10 +1,10 @@
 """
-Input validation helpers for the marEx detection pipeline.
+Input validation helpers shared across marEx.
 
-Provides dimension, coordinate, and data-value validators used throughout the
-preprocessing and extreme-identification routines. This module is a leaf in the
-detect package dependency graph: it imports only the package-level exception and
-logging utilities and never depends on sibling detect modules.
+Provides dimension, coordinate, and data-value validators used by the anomaly and
+extremes packages. This module is a leaf in the dependency graph: it imports only
+the package-level exception and logging utilities and never depends on a sibling
+analysis package.
 """
 
 from typing import Dict, Optional, Tuple
@@ -15,6 +15,7 @@ import xarray as xr
 
 from ..exceptions import create_data_validation_error
 from ..logging_config import get_logger
+from .dimensions import COORDINATE_KEYS
 
 # Get module logger
 logger = get_logger(__name__)
@@ -134,10 +135,42 @@ def _infer_dims_coords(
     if "time" not in dimensions:
         dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
 
-    # Handle coordinates parameter based on data structure
+    # A partial ``dimensions`` mapping must still name the horizontal axis, unless the
+    # field is a bare 1-D time series and has none to name. Without this check a mapping
+    # that omits 'x' -- a typo, or {"y": "lat"} -- is not an error at all: every unnamed
+    # dimension is picked up as an *extra* dim by ``core.dimensions.extra_dims`` and
+    # carried through as a broadcast axis, so the run completes with the horizontal axis
+    # silently demoted to a depth-like one. Checked before the coordinates branch below,
+    # which already assumes dimensions['x'] when it is present.
+    non_time_dims = [str(d) for d in da.dims if str(d) != dimensions["time"]]
+    if "x" not in dimensions and non_time_dims:
+        logger.error("Dimensions mapping does not name the horizontal 'x' dimension")
+        raise create_data_validation_error(
+            "Dimensions mapping is missing the required 'x' entry",
+            details=(
+                "'x' names the horizontal dimension (the cell dimension of an unstructured "
+                f"mesh, or the longitude axis of a grid). The data carries {non_time_dims} "
+                "beyond time, so one of them must be named as 'x'; the rest are detected "
+                "automatically and carried through as extra broadcast axes."
+            ),
+            suggestions=[
+                f"Add an 'x' entry, e.g. dimensions={{'time': '{dimensions['time']}', 'x': '{non_time_dims[-1]}'}}",
+                "For gridded data name both, e.g. dimensions={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                "Omit the dimensions parameter entirely to use the defaults",
+            ],
+            data_info={"dimensions": dimensions, "unnamed_dimensions": non_time_dims},
+        )
+
+    # Handle coordinates parameter based on data structure.
+    #
+    # Gridded iff BOTH x and y are named. Testing "x present, y absent" instead would be
+    # the same condition today but says the wrong thing: it reads as "malformed gridded
+    # config", when the layout it actually describes -- a single horizontal dimension --
+    # is the legitimate unstructured one, with or without extra dims such as depth.
+    is_gridded = "x" in dimensions and "y" in dimensions
     if coordinates is None:
-        if "x" in dimensions and "y" not in dimensions:
-            # Unstructured (2D) data (an x dimension but no y) - requires explicit
+        if "x" in dimensions and not is_gridded:
+            # Unstructured data (one horizontal dimension) - requires explicit
             # coordinate specification. Only reachable when 'x' is present, so the
             # message below can safely reference dimensions['x'].
             logger.error("Coordinates parameter required for unstructured data")
@@ -149,6 +182,8 @@ def _infer_dims_coords(
                     "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
                     f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
                     "If data is gridded, ensure 'y' dimension is also specified",
+                    "Extra dimensions such as depth or level need no entry here - they are "
+                    "detected automatically and carried through as broadcast axes",
                 ],
                 data_info={
                     "data_structure": "unstructured (2D)",
@@ -157,10 +192,14 @@ def _infer_dims_coords(
                 },
             )
         else:
-            # Gridded (3D, has y) or 1D time series (no x and no y): copy dimensions
-            # to coordinates. This keeps the 1D-harmonic path reachable with defaults
-            # instead of raising a bare KeyError on dimensions['x'].
-            coordinates = dimensions.copy()
+            # Gridded (has both x and y) or 1D time series (no x and no y): copy the
+            # dimension names to coordinates. This keeps the 1D-harmonic path reachable
+            # with defaults instead of raising a bare KeyError on dimensions['x'].
+            #
+            # Only the coordinate-bearing keys are copied. An optional 'z' entry names a
+            # dimension, not a coordinate, and copying it would demand a coordinate the
+            # data need not carry.
+            coordinates = {key: value for key, value in dimensions.items() if key in COORDINATE_KEYS}
             logger.debug("Copying dimensions to coordinates (gridded or 1D time series)")
     else:
         # Coordinates provided but ensure time coordinate is included if missing
@@ -227,7 +266,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     if max_invalid > 0:
         # Error path: three more reductions over the same arrays, batched into one
         # round-trip rather than three sequential full re-scans.
-        total_invalid_in_ocean, total_ocean_locations, locations_affected = (
+        total_invalid_in_valid_region, total_valid_locations, locations_affected = (
             int(v)
             for v in dask.compute(
                 invalid_in_valid_locations.sum(),
@@ -238,7 +277,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
         total_time_steps = int(da.sizes[dimensions["time"]])
 
         raise create_data_validation_error(
-            f"Dataset contains {total_invalid_in_ocean} invalid values in {locations_affected} ocean locations",
+            f"Dataset contains {total_invalid_in_valid_region} invalid values at {locations_affected} locations",
             details=(
                 f"Found invalid data across time series. Worst location has {int(max_invalid)} "
                 f"invalid time steps out of {total_time_steps}."
@@ -248,14 +287,15 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
                 "Check data quality and loading procedures",
                 "Consider using data.fillna() or data.interpolate_na() methods",
                 "Verify coordinate/dimension alignment in your dataset",
-                "For ocean data, ensure land mask is properly applied before preprocessing",
+                "If your field carries a land/sea or missing-data mask, ensure it is "
+                "applied consistently across every time step",
             ],
             data_info={
-                "total_invalid_values_in_ocean": total_invalid_in_ocean,
+                "total_invalid_values": total_invalid_in_valid_region,
                 "locations_affected": locations_affected,
-                "total_ocean_locations": total_ocean_locations,
+                "total_valid_locations": total_valid_locations,
                 "max_invalid_at_one_location": int(max_invalid),
                 "total_time_steps": total_time_steps,
-                "percentage_affected": f"{100.0 * locations_affected / total_ocean_locations:.2f}%",
+                "percentage_affected": f"{100.0 * locations_affected / total_valid_locations:.2f}%",
             },
         )

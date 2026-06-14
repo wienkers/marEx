@@ -14,9 +14,11 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..validation import _infer_dims_coords
+from ..core.dimensions import spatial_dims, tile_spatial_chunks
+from ..core.time_axis import SeasonalCycle, resolve_cycle
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -24,25 +26,29 @@ logger = get_logger(__name__)
 
 def rolling_climatology(
     da: xr.DataArray,
-    window_year_baseline: int = 15,
+    window_years: int = 15,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
-    Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
+    Uses the previous `window_years` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
 
     Parameters
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    window_year_baseline : int, default=15
+    window_years : int, default=15
         Number of years to include in each climatology window
     dimensions : dict, optional
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Mapping of coordinates to names in the data
+    cycle : SeasonalCycle, optional
+        Within-year axis the climatology is resolved on. Inferred from the time
+        coordinate's cadence when omitted (``dayofyear`` for daily data).
 
     Returns
     -------
@@ -60,7 +66,7 @@ def rolling_climatology(
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
     >>> # Compute 15-year rolling climatology
-    >>> climatology = marEx.rolling_climatology(sst, window_year_baseline=15)
+    >>> climatology = marEx.rolling_climatology(sst, window_years=15)
     >>> print(climatology.shape)
     (7305, 180, 360)  # Same as input
     >>>
@@ -72,7 +78,7 @@ def rolling_climatology(
 
     >>> # For datasets with only 10 years, use shorter window
     >>> short_climatology = marEx.rolling_climatology(
-    ...     sst, window_year_baseline=5
+    ...     sst, window_years=5
     ... )
     >>> # First 5 years will be NaN instead of 15
 
@@ -112,12 +118,14 @@ def rolling_climatology(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
     time_coord = coordinates["time"]
+    cycle = resolve_cycle(da, time_coord, cycle)
+    cycle_dim = cycle.index_name
     original_chunk_dict = dict(zip(da.dims, da.chunks))
 
     # Add temporal coordinates
     years = da[time_coord].dt.year
-    doys = da[time_coord].dt.dayofyear
-    da = da.assign_coords({"year": years, "dayofyear": doys})
+    doys = cycle.index_of(da[time_coord])
+    da = da.assign_coords({"year": years, cycle_dim: doys})
 
     # Get temporal bounds
     years, doys = persist(years, doys)
@@ -130,7 +138,7 @@ def rolling_climatology(
     # For each time point, determine which target years it contributes to
     contributing_time_indices = []
     contributing_target_years = []
-    contributing_dayofyears = []
+    contributing_cycle_indices = []
 
     for t_idx, (year_val, doy_val) in enumerate(zip(year_vals, doy_vals)):
         # Convert numpy scalars to Python ints to avoid dtype issues
@@ -139,23 +147,53 @@ def rolling_climatology(
 
         # Find target years this time point contributes to
         # A time point from year Y contributes to target years where:
-        # target_year - window_year_baseline <= Y < target_year
-        # Which means: Y < target_year <= Y + window_year_baseline
-        candidate_targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_year_baseline)]
+        # target_year - window_years <= Y < target_year
+        # Which means: Y < target_year <= Y + window_years
+        candidate_targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_years)]
 
         # Only include target years that have sufficient history
-        valid_targets = candidate_targets[candidate_targets >= min_year + window_year_baseline]
+        valid_targets = candidate_targets[candidate_targets >= min_year + window_years]
 
         # Add entries for each valid target year
         n_targets = len(valid_targets)
         contributing_time_indices.extend([t_idx] * n_targets)
         contributing_target_years.extend(valid_targets.tolist())
-        contributing_dayofyears.extend([doy_val] * n_targets)
+        contributing_cycle_indices.extend([doy_val] * n_targets)
 
     # Convert to numpy arrays with explicit dtypes
     time_indices = np.array(contributing_time_indices, dtype=np.int32)
     target_year_groups = np.array(contributing_target_years, dtype=np.int32)
-    dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int32)
+    cycle_groups = np.array(contributing_cycle_indices, dtype=np.int32)
+
+    # Bound the long-form expansion before building it.
+    #
+    # The `isel` below materialises roughly `window_years` times the input along time,
+    # and the flox reduction after it writes an `(n_years, cycle)` block per spatial
+    # cell, which `.chunk({"dayofyear": -1})` then forces whole. Neither side had a
+    # budget: on a field left spatially whole one task is the entire array (174 GB on
+    # the ICON mesh, where it thrashed rather than failing), and an extra dimension
+    # such as depth multiplies that directly.
+    #
+    # Tiling the spatial dims -- every one of them, so depth is tiled exactly like
+    # latitude -- bounds both sides. It is a pure rechunk of SPATIAL dims only: the
+    # reduction is independent per cell and each cell's reduced axis stays whole inside
+    # its tile, so flox's ordering along that axis is unchanged and the result is
+    # bit-identical (verified against both goldens and pinned by
+    # tests/test_climatology_tiling.py).
+    #
+    # The time chunking is deliberately untouched. Changing it WOULD move values: the
+    # smoothing in `smoothed_rolling_climatology` runs through bottleneck's move_mean,
+    # whose running sum restarts at every dask block boundary. `original_chunk_dict` was
+    # captured before this point, so the restore at the end of this function returns the
+    # caller's own layout regardless.
+    spatial_tile = tile_spatial_chunks(
+        da,
+        spatial_dims(da, dimensions),
+        input_elements_per_cell=len(time_indices),
+        output_elements_per_cell=len(unique_years) * cycle.length,
+    )
+    if spatial_tile:
+        da = da.chunk(spatial_tile)
 
     # Create long-form dataset by selecting the contributing time points
     long_form_data = da.isel({timedim: time_indices})
@@ -166,20 +204,20 @@ def rolling_climatology(
 
     # Convert grouping arrays to DataArrays with the correct dimension
     target_year_da = xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year")
-    dayofyear_da = xr.DataArray(dayofyear_groups, dims=[long_timedim], name="dayofyear")
+    cycle_da = xr.DataArray(cycle_groups, dims=[long_timedim], name=cycle_dim)
 
     # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
         target_year_da,
-        dayofyear_da,
+        cycle_da,
         dim=long_timedim,
         func="nanmean",
-        expected_groups=(unique_years, np.arange(1, 367, dtype=np.int32)),
+        expected_groups=(unique_years, cycle.labels),
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
-    ).chunk({"dayofyear": -1})
+    ).chunk({cycle_dim: -1})
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
@@ -187,25 +225,28 @@ def rolling_climatology(
 
     # Select appropriate climatology for each time point
     result = climatologies.isel(
-        target_year=xr.DataArray(year_indices, dims=[timedim]),
-        dayofyear=xr.DataArray(doy_vals - 1, dims=[timedim]),
+        {
+            "target_year": xr.DataArray(year_indices, dims=[timedim]),
+            cycle_dim: xr.DataArray(doy_vals - 1, dims=[timedim]),
+        }
     )
 
     # Clean up dimensions and coordinates
-    result = result.drop_vars(["target_year", "dayofyear"])
+    result = result.drop_vars(["target_year", cycle_dim])
 
     return result.chunk(original_chunk_dict)
 
 
 def smoothed_rolling_climatology(
     da: xr.DataArray,
-    window_year_baseline: int = 15,
-    smooth_days_baseline: int = 21,
+    window_years: int = 15,
+    smooth_days: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.DataArray:
     """
-    Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data
+    Compute a smoothed rolling climatology using the previous `window_years` years of data
     and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
 
@@ -213,9 +254,9 @@ def smoothed_rolling_climatology(
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    window_year_baseline : int, default=15
+    window_years : int, default=15
         Number of years to include in each climatology window
-    smooth_days_baseline : int, default=21
+    smooth_days : int, default=21
         Number of days for temporal smoothing window
     dimensions : dict, optional
         Mapping of dimensions to names in the data
@@ -240,8 +281,8 @@ def smoothed_rolling_climatology(
     >>> # Compute smoothed rolling climatology
     >>> smooth_clim = marEx.smoothed_rolling_climatology(
     ...     sst,
-    ...     window_year_baseline=15,
-    ...     smooth_days_baseline=21
+    ...     window_years=15,
+    ...     smooth_days=21
     ... )
     >>> print(smooth_clim.shape)
     (7305, 180, 360)
@@ -250,12 +291,12 @@ def smoothed_rolling_climatology(
 
     >>> # Short smoothing - more day-to-day variability
     >>> clim_short = marEx.smoothed_rolling_climatology(
-    ...     sst, smooth_days_baseline=7
+    ...     sst, smooth_days=7
     ... )
     >>>
     >>> # Long smoothing - smoother seasonal cycle
     >>> clim_long = marEx.smoothed_rolling_climatology(
-    ...     sst, smooth_days_baseline=61
+    ...     sst, smooth_days=61
     ... )
     >>>
     >>> # Compare variability
@@ -281,18 +322,18 @@ def smoothed_rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
-    ...     window_year_baseline=10,
-    ...     smooth_days_baseline=31
+    ...     window_years=10,
+    ...     smooth_days=31
     ... )
 
     Effect of smoothing on seasonal cycle:
 
     >>> # Raw rolling climatology (no temporal smoothing)
-    >>> raw_clim = marEx.rolling_climatology(sst, window_year_baseline=15)
+    >>> raw_clim = marEx.rolling_climatology(sst, window_years=15)
     >>>
     >>> # Smoothed rolling climatology
     >>> smooth_clim = marEx.smoothed_rolling_climatology(
-    ...     sst, window_year_baseline=15, smooth_days_baseline=21
+    ...     sst, window_years=15, smooth_days=21
     ... )
     >>>
     >>> # Compare seasonal cycle smoothness
@@ -313,10 +354,31 @@ def smoothed_rolling_climatology(
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
+    cycle = resolve_cycle(da, coordinates["time"], cycle)
+
+    # `smooth_days` is a physical duration, so convert it to whole timesteps. On daily
+    # data this is the identity (21 days -> 21 steps) and every existing result is
+    # unchanged. It is deliberately NOT forced odd: an even smoothing window is legal
+    # here and forcing it would move existing daily output. On a monthly axis it
+    # collapses to 1 step, which `steps_for_days` warns about -- the smoothing then
+    # degenerates to `rolling_climatology`, which is correct but worth saying out loud.
+    smooth_steps = cycle.steps_for_days(smooth_days, name="smooth_days")
+    if smooth_steps == 1:
+        # Warning, not info. `steps_for_days` only warns when the realised duration is
+        # more than half a step from the request, and a 21-day ask on a 31-day axis is
+        # inside that -- 31 days genuinely is the closest representable window. But the
+        # user asked for smoothing and is getting none, which is a different method from
+        # the one they requested, so it is said out loud regardless.
+        logger.warning(
+            "smooth_days=%s resolves to a single timestep on this %g-day axis: no smoothing "
+            "is applied and smoothed_rolling_climatology reduces to rolling_climatology.",
+            smooth_days,
+            cycle.step_days,
+        )
 
     # Whether a given (length, chunking, window) combination can actually be reduced is a
     # property of the xarray -> dask.overlap -> bottleneck chain, and it is not a simple
-    # one. It has at least three regimes: chunks that divide smooth_days_baseline - 1 leave
+    # one. It has at least three regimes: chunks that divide smooth_days - 1 leave
     # a block one element short of the window; arrays shorter than the overlap depth are
     # rejected outright; and a window longer than the whole series is fine and yields NaN.
     # Modelling that here would hard-code one version's behaviour and go stale silently.
@@ -329,23 +391,23 @@ def smoothed_rolling_climatology(
     if time_chunks:
         probe = xr.DataArray(np.zeros(sum(time_chunks), dtype=np.float32), dims=[timedim]).chunk({timedim: time_chunks})
         try:
-            probe.rolling({timedim: smooth_days_baseline}, center=True).mean().compute()
+            probe.rolling({timedim: smooth_steps}, center=True).mean().compute()
         except ValueError as exc:
             raise ConfigurationError(
-                f"Time chunking cannot support a {smooth_days_baseline}-day centred rolling mean",
+                f"Time chunking cannot support a {smooth_days}-day centred rolling mean",
                 details=(
-                    f"Reducing a {smooth_days_baseline}-day window over time chunks "
+                    f"Reducing a {smooth_steps}-step ({smooth_days}-day) window over time chunks "
                     f"{sorted(set(time_chunks))} failed with: {exc}"
                 ),
                 suggestions=[
-                    f"Rechunk the time dimension to at least smooth_days_baseline: "
-                    f"da.chunk({{'{timedim}': {smooth_days_baseline}}})",
+                    f"Rechunk the time dimension to at least the window length: " f"da.chunk({{'{timedim}': {smooth_steps}}})",
                     "Chunk the spatial dimension instead, to keep chunk sizes manageable",
-                    "Reduce smooth_days_baseline",
+                    "Reduce smooth_days",
                 ],
                 context={
                     "time_chunks": sorted(set(time_chunks)),
-                    "smooth_days_baseline": smooth_days_baseline,
+                    "smooth_days": smooth_days,
+                    "smooth_steps": smooth_steps,
                     "upstream_error": str(exc),
                 },
             ) from exc
@@ -359,10 +421,8 @@ def smoothed_rolling_climatology(
     # was enough to exhaust the workers and take down a distributed run. Forcing xarray off
     # bottleneck also removes it, at 33x the cost. A spread at float32 precision is the
     # accepted trade -- see the tolerance in tests/test_climatology_chunking.py.
-    da_smoothed = (
-        da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
-    )
+    da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
+    clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates, cycle)
 
     return clim

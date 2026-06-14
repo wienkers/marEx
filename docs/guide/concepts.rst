@@ -7,7 +7,7 @@ This guide provides a foundational understanding of marEx's design philosophy an
 Why marEx? The Challenge of Tracking Ocean Extremes
 ====================================================
 
-Modern oceanography generates massive datasets from satellites, ocean models, and observational networks. Within these datasets, extreme events like marine heatwaves represent critical phenomena affecting marine ecosystems, fisheries, and climate systems. However, identifying and tracking these events presents significant challenges:
+Modern weather and climate science generates massive datasets from satellites, models, and observational networks. Within these datasets, extreme events -- heatwaves in the ocean or the atmosphere, droughts, and their biogeochemical counterparts -- represent critical phenomena affecting ecosystems, infrastructure, and the climate system. However, identifying and tracking these events presents significant challenges:
 
 * **Scale**: Datasets often exceed hundreds of gigabytes or terabytes
 * **Complexity**: Events move, grow, shrink, merge, and split over time
@@ -17,12 +17,12 @@ Modern oceanography generates massive datasets from satellites, ocean models, an
 The Goal of marEx
 -----------------
 
-**marEx** (**Mar**\ ine **Ex**\ tremes) provides a scalable, flexible, and scientifically rigorous toolkit to automate the detection and tracking of marine extreme events. It handles the computational complexity so researchers can focus on scientific questions rather than implementation details.
+**marEx** provides a scalable, flexible, and scientifically rigorous toolkit to automate the computation of anomalies and the detection and tracking of extreme events. It handles the computational complexity so researchers can focus on scientific questions rather than implementation details.
 
-What is a Marine Extreme Event?
+What is an Extreme Event?
 ================================
 
-Understanding marine extremes requires four foundational concepts:
+Understanding extreme-event detection requires four foundational concepts:
 
 Climatology
 -----------
@@ -47,7 +47,7 @@ marEx provides multiple methods for calculating anomalies, each with different a
 Extreme Event
 -------------
 
-An **extreme event** is an anomaly that exceeds a statistical threshold, typically defined as a percentile of the anomaly distribution. For marine heatwaves, the standard definition uses the 95th percentile (Hobday et al. 2016):
+An **extreme event** is an anomaly that exceeds a statistical threshold, typically defined as a percentile of the anomaly distribution. For temperature extremes, a common definition uses the 95th percentile (Hobday et al. 2016):
 
 .. code-block:: text
 
@@ -92,7 +92,7 @@ Step 1: Detect Extremes
 
 **Output**: An xarray Dataset containing anomalies, binary extreme events, thresholds, and a data mask.
 
-**See**: :doc:`../api/detect` for detailed algorithm descriptions and :doc:`detection` for method selection guidance.
+**See**: :doc:`../api/anomaly` and :doc:`../api/extremes` for detailed algorithm descriptions and :doc:`detection` for method selection guidance.
 
 Step 2: Track Events
 --------------------
@@ -257,7 +257,7 @@ The scientific methods in marEx are based on established literature:
 
 * **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves" *Progress in Oceanography* 141, 227-238. `doi:10.1016/j.pocean.2015.12.014 <https://doi.org/10.1016/j.pocean.2015.12.014>`_
 
-  * Defines the standard marine heatwave detection methodology using day-of-year specific percentile thresholds
+  * Defines the day-of-year specific percentile threshold methodology that marEx generalises beyond the ocean
 
 * **Sun et al. (2023)**: "Marine heatwaves in the Arctic Region: Variation in Different Ice Covers" *Progress in Oceanography* 203, 102947. `doi:10.1016/j.pocean.2022.102947 <https://doi.org/10.1016/j.pocean.2022.102947>`_
 
