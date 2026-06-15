@@ -175,11 +175,16 @@ class tracker:
     data_bin : xarray.DataArray
         Binary field of extreme points to group, label, and track (True = object, False = background)
         Must represent and underlying `dask` array.
-    mask : xarray.DataArray
-        Binary mask indicating valid regions (True = valid, False = invalid)
+    mask : xarray.DataArray, optional
+        Binary mask indicating valid regions (True = valid, False = invalid). Omit it
+        for a field with no invalid region -- an atmospheric variable has no land mask
+        the way SST does -- and every cell is treated as valid. Defaulting it here is
+        not the same as passing an all-True mask by hand only in that it costs nothing
+        to write; the tracking result is identical either way.
     R_fill : int
         The radius of the kernel used in morphological opening & closing, relating to the largest hole/gap that can be filled.
-        In units of grid cells.
+        In units of grid cells. Required: it carries a default in the signature only so
+        that ``mask`` can be omitted, and is rejected when left unset.
     area_filter_quartile : float, optional
         The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
         Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%). Mutually exclusive with area_filter_absolute.
@@ -443,8 +448,8 @@ class tracker:
     def __init__(
         self,
         data_bin: xr.DataArray,
-        mask: xr.DataArray,
-        R_fill: Union[int, float],
+        mask: Optional[xr.DataArray] = None,
+        R_fill: Optional[Union[int, float]] = None,
         area_filter_quartile: Optional[float] = None,
         area_filter_absolute: Optional[int] = None,
         temp_dir: Optional[str] = None,
@@ -469,6 +474,28 @@ class tracker:
         compute_mode: Literal["persist", "streaming"] = "persist",
     ) -> None:
         """Initialise the tracker with parameters and data."""
+        # Both checks come FIRST, ahead of logging and every coordinate read. `mask` is
+        # optional and `R_fill` is not, but `mask` precedes `R_fill` positionally, so
+        # `R_fill` needs a signature default it must never actually use. Left to run
+        # later, a positional `tracker(data_bin, 8)` reaches coordinate unification and
+        # is reported as an undetectable coordinate range -- a symptom, not the mistake.
+        if mask is not None and not isinstance(mask, xr.DataArray):
+            raise ConfigurationError(
+                f"mask must be an xarray.DataArray, got {type(mask).__name__}",
+                details="`mask` is the second positional parameter and `R_fill` the third, so a positional "
+                "tracker(data_bin, 8) binds 8 to `mask` and leaves `R_fill` unset",
+                suggestions=[
+                    "Pass R_fill by keyword: tracker(data_bin, R_fill=8)",
+                    "Pass both positionally: tracker(data_bin, mask, 8)",
+                ],
+            )
+        if R_fill is None:
+            raise ConfigurationError(
+                "R_fill is required",
+                details="R_fill sets the morphological kernel radius, in grid cells; there is no sensible default",
+                suggestions=["Pass R_fill explicitly, e.g. tracker(data_bin, mask, R_fill=8)"],
+            )
+
         # Configure logging if verbose/quiet parameters are provided
         if verbose is not None or quiet is not None:
             configure_logging(verbose=verbose, quiet=quiet)
@@ -533,6 +560,18 @@ class tracker:
             self.xcoord,
             self.ycoord,
         )
+
+        # No mask supplied: every cell is valid. Built from the coordinate-unified
+        # `self.data_bin` so it inherits that array's spatial dims, coords and chunking,
+        # which is what `validate_spatial_chunking` below compares against.
+        if mask is None:
+            template = self.data_bin.isel({self.timedim: 0}, drop=True)
+            leftover = [c for c in (self.timedim, self.timecoord) if c in template.coords]
+            if leftover:
+                template = template.drop_vars(leftover)
+            mask = xr.ones_like(template, dtype=bool)
+            mask.attrs = {"description": "All-valid mask (no mask supplied)"}
+            logger.info("No mask supplied; treating every cell as valid")
 
         self.mask = mask
         self.R_fill = int(R_fill)

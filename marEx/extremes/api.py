@@ -19,11 +19,11 @@ import xarray as xr
 from ..core.compute_mode import Materialiser, create_staging_dir
 from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
-from ..core.time_axis import SeasonalCycle
+from ..core.time_axis import SeasonalCycle, cadence_index_name
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
-from .base import identify_extremes, resolve_bin_spec, resolve_window_spatial
+from .base import identify_extremes, reject_empty_series, resolve_bin_spec, resolve_window_spatial
 
 # Get module logger
 logger = get_logger(__name__)
@@ -31,21 +31,47 @@ logger = get_logger(__name__)
 METHODS = ("seasonal_percentile", "global_percentile")
 
 
+# How each within-year index reads in `preprocessing_steps`. "Day-of-year" is the
+# pre-Phase-C wording and must stay exactly that, because it is what every daily run
+# ever recorded and what `tests/test_stage_helpers.py` pins.
+_CADENCE_LABELS = {
+    "month": "Monthly",
+    "dayofyear": "Day-of-year",
+    "hourofyear": "Hour-of-year",
+}
+
+
 def _extreme_steps(
     method: str,
     window_days: int,
     window_spatial: Optional[int],
+    index_name: str = "dayofyear",
+    tail: str = "upper",
 ) -> List[str]:
-    """Describe the extremes stage for ``ds.attrs["preprocessing_steps"]``."""
+    """Describe the extremes stage for ``ds.attrs["preprocessing_steps"]``.
+
+    ``index_name`` and ``tail`` default to the pre-Phase-C/D behaviour, so a daily
+    upper-tail run produces the identical string it always has -- character for
+    character. Only a non-daily cadence or a lower tail changes the wording, and
+    those runs previously described themselves wrongly ("Day-of-year thresholds" on a
+    monthly axis, no mention of the tail at all).
+    """
     steps: List[str] = []
+    tail_phrase = "lower-tail " if tail == "lower" else ""
 
     if method == "global_percentile":
-        steps.append("Global percentile threshold applied to all days")
+        # `global_percentile` resolves no cycle, so "days" is only defensible on a
+        # daily axis; anywhere else the threshold is applied to every time STEP.
+        span = "days" if index_name == "dayofyear" else "steps"
+        steps.append(f"Global {tail_phrase}percentile threshold applied to all {span}")
     elif method == "seasonal_percentile":
+        label = _CADENCE_LABELS.get(index_name, _CADENCE_LABELS["dayofyear"])
+        # `window_days` stays a duration in DAYS on every cadence (spec 7.2), so the
+        # window half of the sentence is cadence-independent.
+        window = f"{label} {tail_phrase}thresholds with {window_days} day window"
         if window_spatial is not None:
-            steps.append(f"Day-of-year thresholds with {window_days} day window & {window_spatial} spatial neighbours")
-        else:
-            steps.append(f"Day-of-year thresholds with {window_days} day window")
+            window += f" & {window_spatial} spatial neighbours"
+        steps.append(window)
 
     return steps
 
@@ -113,6 +139,9 @@ def _extremes_core(
     # anomaly, so it must not happen twice -- `identify_extremes` re-resolves, but by
     # then both are concrete and the call is a no-op. Skipped for the exact path, which
     # builds no histogram.
+    # Checked here rather than only inside `resolve_bin_spec`, which the exact path
+    # skips: an empty series otherwise reached a bare ZeroDivisionError there.
+    reject_empty_series(anomalies)
     bin_spec = (None, None) if method_percentile == "exact" else resolve_bin_spec(anomalies, precision, max_anomaly, n_bins)
     precision, max_anomaly = bin_spec
 
@@ -324,10 +353,19 @@ def identify(
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
 
-        effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds)
+        # `method_percentile` is threaded rather than left to the helper's own default:
+        # the exact path ignores `window_spatial` entirely, so defaulting it there would
+        # record a 5x5 window the run never used.
+        effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds, method_percentile)
         ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
-            method, window_days, effective_window_spatial
+            method,
+            window_days,
+            effective_window_spatial,
+            # `cadence_index_name`, not `resolve_cycle`: it never raises, so wording an
+            # attribute cannot fail a `global_percentile` run on a mixed-cadence axis.
+            cadence_index_name(anomalies, coordinates["time"], cycle),
+            tail,
         )
         if method == "seasonal_percentile":
             ds.attrs.update({"window_days": window_days})

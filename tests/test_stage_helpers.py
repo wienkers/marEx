@@ -758,3 +758,63 @@ class TestComputeHistogramQuantile2D:
         assert np.all(
             (unique_values < 0.1) | (np.abs(unique_values - 1.0) < 0.1)
         ), f"Unexpected values in constant data result: {unique_values}"
+
+
+class TestExtremeStepsCadenceAndTail:
+    """`preprocessing_steps` describes the cadence it ran on and the tail it took.
+
+    Before this, `_extreme_steps` said "Day-of-year thresholds" on a monthly and a
+    6-hourly axis alike and never mentioned the tail, so a `tail="lower"` monthly run
+    described itself as a daily upper-tail one. The parameters carry defaults matching
+    the old behaviour, which is why `TestPreprocessingSteps` above still calls it with
+    three positional arguments and still passes: the daily upper-tail string is
+    unchanged, character for character.
+    """
+
+    def test_the_daily_upper_tail_string_is_unchanged(self):
+        """The wording every daily run has ever recorded. Not a formatting preference."""
+        assert _extreme_steps("seasonal_percentile", 11, None) == ["Day-of-year thresholds with 11 day window"]
+        assert _extreme_steps("seasonal_percentile", 11, None, "dayofyear", "upper") == [
+            "Day-of-year thresholds with 11 day window"
+        ]
+        assert _extreme_steps("global_percentile", 11, None) == ["Global percentile threshold applied to all days"]
+        assert _extreme_steps("global_percentile", 11, None, "dayofyear", "upper") == [
+            "Global percentile threshold applied to all days"
+        ]
+
+    @pytest.mark.parametrize(
+        "index_name,label",
+        [("month", "Monthly"), ("dayofyear", "Day-of-year"), ("hourofyear", "Hour-of-year")],
+    )
+    def test_the_cadence_names_the_within_year_index(self, index_name, label):
+        (step,) = _extreme_steps("seasonal_percentile", 11, None, index_name, "upper")
+        assert step == f"{label} thresholds with 11 day window"
+
+    def test_window_days_stays_a_duration_in_days_on_every_cadence(self):
+        """Spec 7.2: `window_days` is physical, so the window half never changes units."""
+        for index_name in ("month", "dayofyear", "hourofyear"):
+            (step,) = _extreme_steps("seasonal_percentile", 11, None, index_name, "upper")
+            assert "11 day window" in step
+
+    def test_the_lower_tail_is_named(self):
+        assert _extreme_steps("seasonal_percentile", 11, None, "dayofyear", "lower") == [
+            "Day-of-year lower-tail thresholds with 11 day window"
+        ]
+        assert _extreme_steps("global_percentile", 11, None, "dayofyear", "lower") == [
+            "Global lower-tail percentile threshold applied to all days"
+        ]
+
+    def test_cadence_and_tail_and_spatial_window_compose(self):
+        assert _extreme_steps("seasonal_percentile", 11, 5, "month", "lower") == [
+            "Monthly lower-tail thresholds with 11 day window & 5 spatial neighbours"
+        ]
+
+    def test_global_percentile_says_steps_off_a_daily_axis(self):
+        """ "applied to all days" is only defensible on a daily axis."""
+        (step,) = _extreme_steps("global_percentile", 11, None, "hourofyear", "upper")
+        assert step == "Global percentile threshold applied to all steps"
+
+    def test_an_unknown_index_name_falls_back_to_the_daily_label(self):
+        """Wording must never be the thing that raises. Worst case it says what it always did."""
+        (step,) = _extreme_steps("seasonal_percentile", 11, None, "not-a-cycle", "upper")
+        assert step == "Day-of-year thresholds with 11 day window"

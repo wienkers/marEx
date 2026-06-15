@@ -211,3 +211,72 @@ class TestSampleCountWarning:
         assert any("Not enough samples" in m for m in messages), messages
         # 5 % of 550 samples, not 95 % of them.
         assert any("27.5 < 50" in m for m in messages), messages
+
+
+class TestPreprocessingStepsNameTheTail:
+    """`ds.attrs["tail"]` recorded the tail; `preprocessing_steps` did not.
+
+    A lower-tail run described itself in prose as an upper-tail one, which is the half
+    of the metadata a reader actually reads.
+    """
+
+    def test_a_lower_tail_seasonal_run_says_so(self):
+        da = _anomaly(n_time=1200, n_y=2, n_x=2)
+        ds = marEx.extremes.identify(
+            da, method="seasonal_percentile", threshold_percentile=5, tail="lower", window_days=11, dimensions=DIMENSIONS
+        )
+        step = ds.attrs["preprocessing_steps"][-1]
+        assert step.startswith("Day-of-year lower-tail thresholds")
+
+    def test_a_lower_tail_global_run_says_so(self):
+        da = _anomaly(n_time=400, n_y=2, n_x=2)
+        ds = marEx.extremes.identify(da, method="global_percentile", threshold_percentile=5, tail="lower", dimensions=DIMENSIONS)
+        assert ds.attrs["preprocessing_steps"][-1] == "Global lower-tail percentile threshold applied to all days"
+
+    def test_an_upper_tail_run_is_worded_exactly_as_before(self):
+        da = _anomaly(n_time=400, n_y=2, n_x=2)
+        ds = marEx.extremes.identify(da, method="global_percentile", dimensions=DIMENSIONS)
+        assert ds.attrs["preprocessing_steps"][-1] == "Global percentile threshold applied to all days"
+
+
+class TestTheExactPathReportsWhatItActuallyUsed:
+    """Two things the exact percentile path got wrong about itself.
+
+    Neither changes a number the pipeline computes; both change what the output claims
+    about how it was computed, and one turned a configuration mistake into a bare
+    `ZeroDivisionError`.
+    """
+
+    def test_the_exact_path_records_no_spatial_window(self):
+        """`resolve_window_spatial` defaults a gridded seasonal run to 5x5 -- but only on
+        the approximate path, which is the only one that uses `window_spatial` at all.
+        The attribute site did not thread `method_percentile`, so it took the helper's
+        own "approximate" default and recorded a 5x5 window an exact run never applied.
+        """
+        da = _anomaly(n_time=1200, n_y=4, n_x=5)
+        exact = marEx.extremes.identify(
+            da, method="seasonal_percentile", method_percentile="exact", window_days=11, dimensions=DIMENSIONS
+        )
+        approximate = marEx.extremes.identify(
+            da, method="seasonal_percentile", method_percentile="approximate", window_days=11, dimensions=DIMENSIONS
+        )
+        assert "window_spatial" not in exact.attrs
+        assert "spatial neighbours" not in exact.attrs["preprocessing_steps"][-1]
+        # The approximate path is the one that genuinely applies the default, unchanged.
+        assert approximate.attrs["window_spatial"] == 5
+        assert "5 spatial neighbours" in approximate.attrs["preprocessing_steps"][-1]
+
+    @pytest.mark.parametrize("method_percentile", ["approximate", "exact"])
+    def test_an_empty_series_is_rejected_the_same_way_on_both_paths(self, method_percentile):
+        """The exact path builds no histogram, so it never reached `resolve_bin_spec`,
+        where the empty-series check lived -- and died on a bare `ZeroDivisionError`
+        instead. The check now sits outside it, so both paths name the cause.
+        """
+        time = pd.date_range("2000-01-01", periods=0, freq="D")
+        empty = xr.DataArray(
+            np.zeros((0, 2, 2), np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": time, "lat": np.arange(2.0), "lon": np.arange(2.0)},
+        ).chunk({"time": 1})
+        with pytest.raises(ConfigurationError, match="anomaly series is empty"):
+            marEx.extremes.identify(empty, method="global_percentile", method_percentile=method_percentile, dimensions=DIMENSIONS)
