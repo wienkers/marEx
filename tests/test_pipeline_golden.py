@@ -22,7 +22,7 @@ threshold mean error ~0.0017 vs the true per-cell percentile. The input is the l
 ``N_GOLDEN_STEPS`` of the deterministic ``sst_gridded.zarr`` fixture (kept short so the golden
 stores stay small), with the same masked-NaN injection as ``test_gridded_preprocessing.py``.
 
-Determinism note: the detect pipeline is deterministic for a fixed input chunking;
+Determinism note: the detect pipeline is independent of the input chunking (D-091);
 the histogram counts are exact integers and the quantile interpolation is a pure
 function of the histogram, so the outputs are bit-reproducible across processes.
 """
@@ -63,8 +63,12 @@ CONFIGS = {
     },
 }
 
-# The golden zarr stores keep their original names, and -- through Phase D -- have still
-# never been regenerated. That is what makes these comparisons mean anything.
+# The golden zarr stores keep their original names. Config A has never been regenerated.
+# Config B's arrays were rewritten ONCE, 2026-09-16 (D-091): the old values encoded the input's
+# time chunk boundaries, and detect is now chunk-invariant. Only B moved (dat_anomaly max 7.6e-4
+# at 543,528 of 585,600; extreme_events 59 of 585,600; thresholds one 0.01 bin at 9,493 of
+# 292,800), and the rewritten values are bit-identical to the PRE-fix code run on a time-whole
+# input, so the change is the chunk dependence and nothing else. Never regenerate again.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # Phase D replaced the asymmetric histogram bins with symmetric ones, so the 1-D path now

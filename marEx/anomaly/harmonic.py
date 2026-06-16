@@ -12,7 +12,7 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
-from ..core.dimensions import spatial_dims
+from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_dims
 from ..core.time_axis import SeasonalCycle, _median_step_days, add_decimal_year, is_subdaily_axis, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -317,11 +317,32 @@ def _compute_anomaly_detrended(
         if cycle_dim in da_stn.coords:
             da_stn = da_stn.drop_vars(cycle_dim)
 
-        # Rechunk data for efficient processing
-        chunk_dict_std = chunk_dict_mask.copy()
+        # Rechunk data for efficient processing: horizontal whole, extra dims (depth, level)
+        # per level unless a small grid leaves budget to stack them -- the layout `finalise`
+        # gives the output (D-128). Holding depth whole here made each chunk depth-times
+        # its 2-D size before finalise split it again.
+        horizontal = [dim for dim in chunk_dict_mask if dim in horizontal_dims(dimensions)]
+        extra = [dim for dim in chunk_dict_mask if dim not in horizontal]
+        horizontal_cells = int(np.prod([da_stn.sizes[dim] for dim in horizontal]))
+
+        def _field_chunks(per_cell: int) -> Dict[str, int]:
+            chunks = {dim: -1 for dim in horizontal}
+            chunks.update(
+                extra_dim_chunks(
+                    da_stn.sizes,
+                    extra,
+                    horizontal_tile_cells=horizontal_cells,
+                    horizontal_cells=horizontal_cells,
+                    budget_cells=TASK_ELEMENTS // max(1, per_cell),
+                )
+            )
+            return chunks
+
+        chunk_dict_field = _field_chunks(max(da_stn.chunksizes[dimensions["time"]]))
+        chunk_dict_std = _field_chunks(n_doy)
         chunk_dict_std[cycle_dim] = -1
 
-        da_stn = da_stn.chunk(chunk_dict_mask)
+        da_stn = da_stn.chunk(chunk_dict_field)
         std_rolling = std_rolling.chunk(chunk_dict_std)
 
         # Add standardised data to output

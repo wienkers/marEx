@@ -23,7 +23,6 @@ to sort first.
 See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
 """
 
-import re
 from pathlib import Path
 
 import pytest
@@ -126,37 +125,43 @@ class TestSourceStructure:
         assert guard < write, "The guard must still run before any write at index n_parents."
 
 
-class TestUpdateIdSpaceInvariant:
-    """`updates_array` is uint8 with 255 as its sentinel, which bounds BOTH constants.
+class TestRecordWidthGuards:
+    """The kernel's record widths and the two guards that protect them, exercised on a real run.
 
-    Every new id minted at a timestep consumes one `updates_ids` slot, and each merge mints
-    `n_parents - 1` of them. So MAX_MERGES and MAX_PARENTS are not independently tunable:
-    raising either without checking this product overflows the slot table. Before the
-    accompanying guard, that overflow died on a bare IndexError from an empty
-    `np.where(updates_ids[t] == -1)[0][0]`, hours into a run.
+    Design R (D-084) removed the uint8 ``updates_array`` and its 255-slot table, so the old
+    ``MAX_MERGES * (MAX_PARENTS - 1) <= 255`` coupling is gone. What remains: ``parent_masks_uint``
+    is still uint8 with 255 as "no parent", and a child with more accepted parents than
+    ``MAX_PARENTS``, or a timestep with more merges than ``MAX_MERGES``, raises TrackingError.
     """
 
-    @staticmethod
-    def _constants():
-        src = SOURCE.read_text()
-        max_merges = int(re.search(r"^\s*MAX_MERGES = (\d+)", src, re.M).group(1))
-        max_parents = int(re.search(r"^\s*MAX_PARENTS = (\d+)", src, re.M).group(1))
-        slots = int(re.search(r"updates_ids = np\.full\(\(n_time, (\d+)\)", src).group(1))
-        return max_merges, max_parents, slots
-
-    def test_worst_case_new_ids_fit_the_slot_table(self):
-        max_merges, max_parents, slots = self._constants()
-        worst_case = max_merges * (max_parents - 1)
-        assert worst_case <= slots, (
-            f"MAX_MERGES({max_merges}) * (MAX_PARENTS-1)({max_parents - 1}) = {worst_case} "
-            f"exceeds the {slots} per-timestep update slots. Raise these two together, or "
-            f"widen updates_array to uint16 and updates_ids to match."
-        )
-
     def test_max_parents_fits_the_uint8_parent_mask(self):
-        _, max_parents, _ = self._constants()
-        # parent_masks_uint is uint8 holding the parent index, with 255 as "unvisited".
-        assert max_parents <= 255
+        from marEx.track import merge_split
 
-    def test_the_slot_exhaustion_guard_exists(self):
-        assert "Exhausted the per-timestep update-id space" in SOURCE.read_text()
+        # parent_masks_uint is uint8 holding the parent index, with 255 as "unvisited".
+        assert merge_split.MAX_PARENTS <= 255
+
+    @staticmethod
+    def _run_s2(tmp_path):
+        from .mre_mesh import NT, render, scenarios
+        from .test_merge_chunk_invariance import _track
+
+        sc = scenarios()["S2"]
+        binary, _, _ = render(sc["nrow"], sc["ncol"], NT, sc["blobs"], sc["bridges"])
+        return _track(binary, sc["nrow"], sc["ncol"], 5, tmp_path)
+
+    @pytest.mark.parametrize(
+        "limit, match",
+        [("MAX_PARENTS", "Too many parent objects"), ("MAX_MERGES", "Too many merge operations")],
+    )
+    def test_guard_raises_when_the_width_is_exceeded(self, limit, match, monkeypatch, dask_client_unstructured, tmp_path):
+        from marEx.exceptions import TrackingError
+        from marEx.track import merge_split
+
+        # S2 has two-parent merges, so a width of one parent (or zero merges) must trip the guard.
+        monkeypatch.setattr(merge_split, limit, 1 if limit == "MAX_PARENTS" else 0)
+        with pytest.raises(TrackingError, match=match):
+            self._run_s2(tmp_path)
+
+    def test_default_widths_do_not_raise(self, dask_client_unstructured, tmp_path):
+        _, _, n_merges = self._run_s2(tmp_path)
+        assert n_merges > 0

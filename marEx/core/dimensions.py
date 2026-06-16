@@ -20,7 +20,7 @@ dropped any dimension the ``dimensions`` mapping did not name.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 import xarray as xr
 
@@ -37,6 +37,10 @@ COORDINATE_KEYS: Tuple[str, ...] = ("time",) + HORIZONTAL_KEYS
 # Target number of array elements one task may touch. Shared by every spatial
 # tiling decision so a single number governs the per-task working set.
 TASK_ELEMENTS = 50_000_000
+
+# Stable substring of the fit warning, so a caller (or a test) can recognise one
+# without matching the whole sentence.
+FIT_WARNING_MARKER = "exceeds the per-task element budget"
 
 
 def horizontal_dims(dimensions: Dict[str, str]) -> Tuple[str, ...]:
@@ -88,6 +92,167 @@ def spatial_chunks(
 ) -> Dict[str, Union[int, str]]:
     """Chunk dict setting every spatial dimension of ``obj`` to ``size``."""
     return {dim: size for dim in spatial_dims(obj, dimensions, exclude)}
+
+
+def extra_dim_chunks(
+    sizes: Mapping[str, int],
+    extra: Iterable[str],
+    horizontal_tile_cells: int,
+    horizontal_cells: int,
+    budget_cells: int,
+) -> Dict[str, int]:
+    """Chunk sizes for the extra dims (depth, level, member) of one tile.
+
+    One level per chunk while the horizontal tile is smaller than the whole
+    horizontal slice, so each level of a large field gets exactly its 2-D slice's
+    tiling at any extra-dim length (D-127). Spreading the budget over depth as well
+    gave tiles spanning several levels and peaked at the node's memory cap on the
+    slice_3d oracle.
+
+    Once a whole horizontal slice fits, the leftover budget stacks levels, shortest
+    extra dim first (D-128). Without that, a small horizontal extent -- a mooring, a
+    station mesh, an ensemble ``member`` axis -- became one tiny task per level:
+    5000 tasks of ~1.5e4 elements where 8 would do, and at the output 25-element
+    chunks. A tile the ``window_spatial`` floor already pushed over budget stacks
+    nothing.
+
+    Parameters
+    ----------
+    sizes
+        Dimension lengths of the array being tiled.
+    extra
+        The extra dims to chunk; names absent from ``sizes`` are skipped.
+    horizontal_tile_cells, horizontal_cells
+        Cells in one horizontal tile, and in the whole horizontal slice.
+    budget_cells
+        Cells one task may hold (the per-task element budget over the per-cell
+        cost).
+
+    Returns
+    -------
+    dict
+        ``{dim: chunk}`` for every extra dim present; empty for a 2-D field.
+    """
+    present = [d for d in extra if d in sizes]
+    chunks = {d: 1 for d in present}
+    if not present or horizontal_tile_cells < horizontal_cells:
+        return chunks
+    remaining = int(budget_cells) // max(1, int(horizontal_tile_cells))
+    for dim in sorted(present, key=lambda d: int(sizes[d])):
+        if remaining <= 1:
+            break
+        chunks[dim] = min(int(sizes[dim]), remaining)
+        remaining //= chunks[dim]
+    return chunks
+
+
+def check_tile_fit(
+    chunks: Dict[str, int],
+    tiled_dims: Sequence[str],
+    elements_per_cell: int,
+    target_elements: int,
+    *,
+    floor_bound_dims: Sequence[str] = (),
+    floor: int = 1,
+    stage: str = "Canonical rechunk",
+    itemsize: Optional[int] = None,
+) -> Optional[str]:
+    """Warn when a tile could not be brought under its per-task element budget.
+
+    The design behind the canonical layout was "time-whole spatial
+    tiles **plus a fit warning**": warn, with the remedy named, before a rechunk
+    that cannot fit crashes the run. The tiles shipped; this is the warning.
+
+    A tile is normally brought under budget by shrinking it, and that is not a
+    misfit however small the budget -- the tiler did its job. Only two things make
+    the budget unreachable, and only they fire here:
+
+    * **a spatial-window floor.** ``window_spatial`` needs every horizontal chunk
+      at least as wide as the window, so a window wider than the tile the budget
+      allows overrides the budget. Reachable today through
+      :func:`marEx.extremes.histogram._histogram_tile_chunks`, where a sub-daily
+      cycle shrinks the cell budget into single figures while the window does not
+      move.
+    * **a single cell over budget.** When one spatial cell alone reads or writes
+      more than ``target_elements``, no tile is small enough.
+
+    Deliberately NOT a trigger: a tile a little above the cell budget because the
+    tile side was rounded up. That is a property of the tiler, not of the caller's
+    configuration, it is bounded by the rounding, and warning on it would put a
+    warning on the ordinary path -- which is worse than no warning at all.
+
+    This is **observation only**. It never changes a chunk: the tile a caller gets
+    is the same whether or not this fires, so a warning can never move a result
+    (the standing rule that bit-identity is blind to the graph cuts both ways).
+
+    Parameters
+    ----------
+    chunks
+        The tile that was decided, as ``{dim: size}``.
+    tiled_dims
+        The spatial dimensions of ``chunks`` that make up one task's tile. Any
+        held-whole axis in ``chunks`` (time, typically) is excluded by leaving it
+        out of this list; its length belongs in ``elements_per_cell``.
+    elements_per_cell
+        Elements one spatial cell costs -- the larger of the read and written
+        sides, as the tiling itself budgets it.
+    target_elements
+        The per-task element budget the tile was sized against.
+    floor_bound_dims
+        Dimensions whose chunk was raised to a floor **above** what the budget
+        allowed. Empty when no floor bound anything.
+    floor
+        The floor that bound them, reported so the user can recognise it as their
+        own ``window_spatial``.
+    stage
+        Human-readable name of the rechunk, used to open the message.
+    itemsize
+        Bytes per element, when known, so the message can carry a size in bytes
+        as well as in elements.
+
+    Returns
+    -------
+    str or None
+        The message that was logged, or ``None`` when the tile fits.
+    """
+    cells = 1
+    for dim in tiled_dims:
+        cells *= max(1, int(chunks[dim]))
+    estimate = cells * max(1, int(elements_per_cell))
+    if estimate <= int(target_elements):
+        return None
+
+    floor_bound = list(floor_bound_dims)
+    single_cell_over = int(elements_per_cell) > int(target_elements)
+    if not (floor_bound or single_cell_over):
+        return None
+
+    size = ""
+    if itemsize:
+        size = f", ~{estimate * int(itemsize) / 1e6:.0f} MB at {int(itemsize)} B/element"
+    message = (
+        f"{stage}: one task would touch {estimate:,} elements{size}, which {FIT_WARNING_MARKER} "
+        f"of {int(target_elements):,} ({estimate / max(1, int(target_elements)):.1f}x)."
+    )
+    if floor_bound:
+        widths = ", ".join(f"{d}={int(chunks[d])}" for d in floor_bound)
+        message += (
+            f" The {int(floor)}-cell spatial window holds {widths}, wider than the tile the budget allows"
+            f" -- a rolling window may not cross a chunk boundary, so the floor wins over the budget."
+        )
+    if single_cell_over:
+        message += (
+            f" A single spatial cell alone touches {int(elements_per_cell):,} elements, more than the "
+            f"whole budget, so no tile is small enough."
+        )
+    message += (
+        " The tile is used as it stands -- this warning changes nothing. If the run then dies on memory,"
+        " the levers are: a narrower window_spatial, a shorter window_years, or fewer histogram bins"
+        " (each cuts the per-cell element count); fewer threads per worker, so one task gets more of the"
+        " worker's memory; or compute_mode='streaming'."
+    )
+    logger.warning(message)
+    return message
 
 
 def tile_spatial_chunks(
@@ -157,22 +322,79 @@ def tile_spatial_chunks(
     # leaves the tile 11x smaller than it may be, which is 11x the tasks for nothing.
     # Taking the short dimensions whole first hands their unused share to the long
     # ones, and reduces to exactly `budget ** (1/rank)` when all dims are long.
-    current = obj.chunksizes
+    # The array's own chunks, not `obj.chunksizes`: that unifies across dask-backed coordinates
+    # too, and raises when a coordinate on the time axis is chunked differently from the data
+    # (a centred rolling mean splits the data's last time block but not its coordinates).
+    if isinstance(obj, xr.DataArray):
+        current = dict(zip(obj.dims, obj.chunks)) if obj.chunks else {}
+    else:
+        current = {d: c for v in obj.data_vars.values() if v.chunks for d, c in zip(v.dims, v.chunks)}
     remaining_cells = cells_per_tile
     chunks: Dict[str, int] = {}
+    floor_bound: list = []
     ordered = sorted(present, key=lambda d: int(obj.sizes[d]))
     for position, dim in enumerate(ordered):
         side = max(1, int(round(remaining_cells ** (1.0 / (len(ordered) - position)))))
+        budget_side = side
         if dim in floor_dims:
             side = max(side, int(floor))
         existing = current.get(dim)
         existing_max = max(existing) if existing else int(obj.sizes[dim])
         chunks[dim] = max(1, min(side, int(existing_max), int(obj.sizes[dim])))
+        # Record only a floor that actually widened this chunk past what the budget
+        # allowed: a floor the tile was already above binds nothing.
+        if dim in floor_dims and chunks[dim] > budget_side:
+            floor_bound.append(dim)
         remaining_cells = max(1, remaining_cells // chunks[dim])
 
     logger.debug(
         f"Spatial tiling: {cells_per_tile} cells/task over {len(present)} dims "
         f"(input {input_elements_per_cell}, output {output_elements_per_cell} per cell) -> {chunks}"
+    )
+    check_tile_fit(
+        chunks,
+        ordered,
+        divisor,
+        target_elements,
+        floor_bound_dims=floor_bound,
+        floor=floor,
+        stage="Canonical rechunk",
+        itemsize=obj.dtype.itemsize if isinstance(obj, xr.DataArray) else None,
+    )
+    return chunks
+
+
+def canonical_time_chunks(
+    obj: Union[xr.DataArray, xr.Dataset],
+    dimensions: Dict[str, str],
+    input_elements_per_cell: Optional[int] = None,
+    output_elements_per_cell: int = 1,
+) -> Dict[str, int]:
+    """Chunk dict holding the time axis whole inside bounded spatial tiles.
+
+    Every reduction along time in the anomaly stage (a rolling mean, a flox
+    group mean, a harmonic fit) accumulates block by block, so its floating-point
+    result depends on where the time chunk boundaries fall: ~1e-4 K on SST, enough
+    to move a threshold across a 0.01 bin (D-091). Holding time whole makes the
+    answer a property of the data alone. It also keeps the graph small: flox's
+    task count scales with tiles x time chunks, and a 27-year daily input at
+    30-day chunks never finished building (D-090).
+
+    The spatial side is capped with :func:`tile_spatial_chunks`, so one task's
+    working set stays near :data:`TASK_ELEMENTS` whatever the caller passed in.
+    Each cell is reduced independently, so the spatial layout never moves values.
+    """
+    timedim = dimensions["time"]
+    if input_elements_per_cell is None:
+        input_elements_per_cell = int(obj.sizes[timedim])
+    chunks: Dict[str, int] = {timedim: -1}
+    chunks.update(
+        tile_spatial_chunks(
+            obj,
+            spatial_dims(obj, dimensions),
+            input_elements_per_cell=input_elements_per_cell,
+            output_elements_per_cell=output_elements_per_cell,
+        )
     )
     return chunks
 

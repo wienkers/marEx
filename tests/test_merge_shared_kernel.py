@@ -1,27 +1,21 @@
 """
-The unstructured merge loop executes ``process_chunk`` ONCE per time chunk per iteration.
+The unstructured merge loop executes ``process_chunk`` ONCE per dirty time chunk per iteration.
 
-``merge_objects_parallel_iteration`` derives eight arrays from a single ``apply_ufunc``
-call. All eight are ``getitem``s on one shared blockwise task -- the ``process_chunk``
-invocation -- so materialising a strict subset of them lets the scheduler release that
-shared task, and anchoring the remaining one afterwards re-runs the whole merge kernel.
+History. The loop used to derive eight arrays from a single ``apply_ufunc`` call; all eight were
+``getitem``s on one shared blockwise task, so materialising a strict subset let the scheduler
+release that task and anchoring the remaining one re-ran the whole kernel (80 invocations where
+40 were expected in the instrumented ICON runs). That wiring is gone: design R (2026-09, D-084)
+runs one ``dask.delayed`` task per dirty chunk and writes each chunk's labels to a zarr region.
 
-That is what the loop used to do: seven arrays went through ``persist`` and
-``updates_array`` was anchored on the line below. The cost is not marginal. ``process_chunk``
-contains the BFS partitioner that instrumentation measured at 93 % of this stage's CPU, so
-the loop was doing exactly twice the necessary work in its dominant stage. It was visible in
-the instrumented ICON runs all along and read as normal: 80 invocations at n_time=32
-(5 iterations x 8 time chunks = 40 expected) and 160 at n_time=64 (5 x 16 = 80).
+The tests are in two layers:
 
-The tests are in two layers, because the call-site fix depends on a dask behaviour that is
-not obvious and that a future dask release could change:
-
-* :class:`TestSharedTaskSemantics` pins the dask semantics themselves on a toy kernel,
-  including the near-miss: routing the eighth array through a deferred
+* :class:`TestSharedTaskSemantics` pins the dask semantics behind the old hazard on a toy
+  kernel, including the near-miss: routing an output through a deferred
   ``to_zarr(compute=False)`` submitted in the SAME call does not share the task either,
-  because ``to_zarr`` re-optimises its source graph and renames the shared keys.
-* :class:`TestMergeLoopSharesKernel` measures the real call site against a control that
-  restores the old wiring, and gates the outputs as bit-identical.
+  because ``to_zarr`` re-optimises its source graph and renames the shared keys. Kept so the
+  multi-output wiring is not rebuilt.
+* :class:`TestMergeLoopSharesKernel` counts the real call site's kernel tasks, built and
+  executed, and checks the batch structure of the loop.
 """
 
 from pathlib import Path
@@ -33,6 +27,8 @@ from dask import persist as dask_persist
 
 import marEx
 from marEx.track import merge_split
+
+from .mre_mesh import same_partition
 
 
 @pytest.fixture(scope="module")
@@ -184,50 +180,77 @@ class TestSharedTaskSemantics:
         )
 
 
+class _CountingDask:
+    """Stand-in for the ``dask`` module as ``merge_split`` sees it.
+
+    Only ``merge_split``'s own name is replaced, so nothing else in the process is touched.
+    Every ``dask.compute`` call is recorded as one batch, and every ``process_chunk`` task
+    records the chunk's first timestep twice: on the client when the task is BUILT, and
+    through a file when the task EXECUTES. ``process_chunk`` is a closure shipped to the
+    workers by value, so a list-held execution counter would be pickled and stay empty on
+    the client; a path pickles fine and the file is shared under threads and processes.
+    """
+
+    def __init__(self, real, counter_path):
+        self._real = real
+        self._counter_path = str(counter_path)
+        self._pending = []
+        self.batches = []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def delayed(self, func, *args, **kwargs):
+        if getattr(func, "__name__", None) != "process_chunk":
+            return self._real.delayed(func, *args, **kwargs)
+        counter_path = self._counter_path
+
+        def process_chunk(*call_args, **call_kwargs):
+            with open(counter_path, "a") as handle:
+                handle.write(f"{int(call_args[5])}\n")
+            return func(*call_args, **call_kwargs)
+
+        real_delayed = self._real.delayed(process_chunk)
+
+        def build(*call_args, **call_kwargs):
+            self._pending.append(int(call_args[5]))
+            return real_delayed(*call_args, **call_kwargs)
+
+        return build
+
+    def compute(self, *args, **kwargs):
+        if self._pending:
+            self.batches.append(self._pending)
+            self._pending = []
+        return self._real.compute(*args, **kwargs)
+
+    def executed(self):
+        path = Path(self._counter_path)
+        if not path.exists():
+            return []
+        return [int(line) for line in path.read_text().split()]
+
+
 @pytest.mark.slow
 class TestMergeLoopSharesKernel:
-    """The real call site, against a control that restores the pre-fix wiring."""
+    """The real call site: every submitted chunk task executes exactly once.
 
-    @staticmethod
-    def _count_partition_calls(monkeypatch, counter_path):
-        """Count partitioner calls THROUGH A FILE.
+    The merge loop (design R, 2026-09, D-084) runs ``process_chunk`` as one ``dask.delayed``
+    task per DIRTY time chunk, in two batches per iteration (even chunks, then odd chunks,
+    so no chunk reads a boundary slice that its own batch writes). Iteration 1 runs every
+    chunk; a later iteration runs only chunks whose predecessor's last slice or forwarded
+    queue changed. The previous wiring (eight arrays off one ``apply_ufunc``, where
+    persisting a subset re-ran the kernel) no longer exists; ``TestSharedTaskSemantics``
+    stays as the record of why that hazard is not to be rebuilt.
+    """
 
-        ``process_chunk`` is a closure shipped to the workers by value, so a counter held in
-        a list would be pickled by value too and the client would see zero. A path pickles
-        fine and the file is shared, under threads and processes alike -- the same reason
-        ``TestSharedLabellingPass`` counts this way.
+    # The fixture is one 100-step chunk on disk. At 20 chunks of 5 a boundary changes and the loop
+    # reruns two chunks in iteration 2 (observed 2026-09-13: batches 10, 10, 1, 1); at 10 or 20
+    # steps it converges in one iteration and the rerun path would go unexercised.
+    TIME_CHUNK = 5
 
-        Both partitioners are wrapped, so the count does not depend on ``nn_partitioning``.
-        """
-        for name in ("partition_nn_unstructured_optimised", "partition_centroid_unstructured"):
-            original = getattr(merge_split, name)
-
-            def counting(*args, _original=original, **kwargs):
-                with open(counter_path, "ab") as handle:
-                    handle.write(b"x")
-                return _original(*args, **kwargs)
-
-            monkeypatch.setattr(merge_split, name, counting)
-
-    @staticmethod
-    def _restore_old_wiring(monkeypatch):
-        """Reproduce the pre-fix call exactly: persist seven of the eight, leave the sixth.
-
-        The sixth positional argument is ``updates_array``, which the shipped code names in
-        the persist call and the old code did not.
-        """
-
-        def persist_all_but_updates_array(*objs, **kwargs):
-            if len(objs) != 8:
-                return dask_persist(*objs, **kwargs)
-            kept = objs[5]
-            persisted = list(dask_persist(*(objs[:5] + objs[6:]), **kwargs))
-            persisted.insert(5, kept)
-            return tuple(persisted)
-
-        monkeypatch.setattr(merge_split, "persist", persist_all_but_updates_array)
-
-    def _run(self, data, temp_dir):
+    def _run(self, data, temp_dir, time_chunk):
+        data = data.chunk({"time": time_chunk})
         tracker = marEx.tracker(
             data.extreme_events,
             data.mask,
@@ -245,14 +268,12 @@ class TestMergeLoopSharesKernel:
         A persisted collection carries ``distributed.Future`` objects in its graph, and a
         future is only meaningful to the scheduler that minted it. That is the whole
         mechanism behind the ``lost dependencies`` cancellation documented on the fixture,
-        and it is invisible to every value-based assertion in this module -- the outputs are
-        identical right up until the client changes underneath them.
+        and it is invisible to every value-based assertion in this module.
 
         ``futures_of`` is the predicate, deliberately, rather than scanning graph values for
         ``Future`` instances: where futures sit in a materialised graph is a dask
         representation detail that has already moved once inside this package's supported
-        dask range, and a scan that stops matching would leave a tripwire that passes on
-        exactly what it exists to catch.
+        dask range.
         """
         from distributed.client import futures_of
 
@@ -263,42 +284,50 @@ class TestMergeLoopSharesKernel:
             f"fixture docstring."
         )
 
-    def test_kernel_runs_once_per_chunk_and_output_is_unchanged(
-        self, unstructured_merging_data, tmp_path, dask_client_unstructured, monkeypatch
-    ):
-        counter = tmp_path / "partition.count"
+    def test_kernel_runs_once_per_dirty_chunk(self, unstructured_merging_data, tmp_path, dask_client_unstructured, monkeypatch):
+        n_time = unstructured_merging_data.sizes["time"]
+        chunk_starts = list(range(0, n_time, self.TIME_CHUNK))
+        n_chunks = len(chunk_starts)
 
+        counting = _CountingDask(merge_split.dask, tmp_path / "kernel.count")
         with monkeypatch.context() as patched:
-            self._count_partition_calls(patched, counter)
-            shipped_events, shipped_merges = self._run(unstructured_merging_data, tmp_path / "shipped")
-        shipped_calls = counter.stat().st_size if counter.exists() else 0
+            patched.setattr(merge_split, "dask", counting)
+            chunked_events, chunked_merges = self._run(unstructured_merging_data, tmp_path / "chunked", self.TIME_CHUNK)
+        batches = counting.batches
+        executed = counting.executed()
+        built = [t0 for batch in batches for t0 in batch]
 
-        # Control for the control: a patch that reached nothing would make the bound vacuous.
-        # Checked BEFORE the control leg runs, so a dead monkeypatch fails in one run's time
-        # rather than two.
-        assert shipped_calls > 0, (
-            "the counter saw no partitioner calls at all, so the monkeypatch is not reaching "
-            "the merge kernel and the ratio below proves nothing"
-        )
+        # Visible under `pytest -s`: the shape of the loop on this fixture.
+        print(f"\nkernel batches (chunk first timesteps): {batches}; executions: {len(executed)}")
 
-        counter.unlink(missing_ok=True)
-        with monkeypatch.context() as patched:
-            self._count_partition_calls(patched, counter)
-            self._restore_old_wiring(patched)
-            control_events, control_merges = self._run(unstructured_merging_data, tmp_path / "control")
-        control_calls = counter.stat().st_size if counter.exists() else 0
+        # Control for the control: a patch that reached nothing would make every bound vacuous.
+        assert built, "no process_chunk task was built through the patched dask; the patch is not reaching the loop"
+        assert chunked_merges.sizes.get("merge_ID", 0) > 0, "the fixture produced no merge, so the kernel was never exercised"
 
-        # Absolute counts, not just their ratio: the ratio is what is asserted, but a change
-        # in `shipped_calls` itself means the graph feeding the merge kernel moved, which is
-        # worth seeing even on a green run. Visible under `pytest -s`.
-        print(f"\npartitioner calls: shipped={shipped_calls} control={control_calls}")
+        # Every task that was built ran exactly once: no re-execution, no dropped task.
+        assert sorted(executed) == sorted(built), f"executions {sorted(executed)} != submitted tasks {sorted(built)}"
 
-        assert control_calls == 2 * shipped_calls, (
-            f"expected the pre-fix wiring to run the merge kernel exactly twice "
-            f"({2 * shipped_calls} calls against the shipped {shipped_calls}), saw {control_calls}. "
-            f"The shared-task hazard this guards may have changed shape."
-        )
+        # Iteration 1 is the first two batches and covers every chunk once, by parity.
+        assert len(batches) >= 2, f"expected at least the two parity batches of iteration 1, saw {batches}"
+        assert batches[0] == chunk_starts[0::2] and batches[1] == chunk_starts[1::2], batches[:2]
 
-        # The fix is a materialisation change only: no value may move.
-        xr.testing.assert_identical(shipped_events, control_events)
-        xr.testing.assert_identical(shipped_merges, control_merges)
+        # No batch runs a chunk twice, and no batch mixes parities (a chunk would then read a
+        # boundary slice written by its own batch).
+        for batch in batches:
+            assert len(batch) == len(set(batch)), f"a chunk ran twice in one batch: {batch}"
+            parities = {chunk_starts.index(t0) % 2 for t0 in batch}
+            assert len(parities) == 1, f"batch mixes chunk parities: {batch}"
+
+        # The rerun path must be exercised, and a rerun is a strict subset of the chunks.
+        assert len(batches) > 2, f"the loop converged in one iteration, so no rerun was exercised: {batches}"
+        assert all(len(batch) < n_chunks // 2 + 1 for batch in batches[2:]), batches
+
+        # The loop is not a fixed n_iterations x n_chunks sweep: beyond iteration 1 it only
+        # reruns chunks downstream of a change, so the total is bounded by a serial cascade.
+        assert len(built) <= n_chunks * n_chunks, f"{len(built)} kernel runs for {n_chunks} chunks"
+
+        # Chunking must not move the result (the invariance itself is pinned in
+        # test_merge_chunk_invariance.py; this checks the fixture the count ran on).
+        single_events, single_merges = self._run(unstructured_merging_data, tmp_path / "single", n_time)
+        assert int(chunked_merges.sizes["merge_ID"]) == int(single_merges.sizes["merge_ID"])
+        assert same_partition(np.asarray(chunked_events.ID_field.values), np.asarray(single_events.ID_field.values))

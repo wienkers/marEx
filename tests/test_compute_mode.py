@@ -432,14 +432,14 @@ class TestStreamingMode:
 
     def test_staging_dir_is_created_and_recorded(self, tmp_path):
         ds = self._run(tmp_path)
-        recorded = ds.attrs["marex_staging_dir"]
+        recorded = ds.encoding["marex_staging_dir"]
         assert Path(recorded).is_dir()
         assert Path(recorded).parent == tmp_path
         clear_staging(ds)
 
     def test_anomaly_and_thresholds_are_staged_to_zarr(self, tmp_path):
         ds = self._run(tmp_path)
-        staged = Path(ds.attrs["marex_staging_dir"])
+        staged = Path(ds.encoding["marex_staging_dir"])
         names = {p.name for p in staged.iterdir()}
         assert "dat_anomaly.zarr" in names
         assert "thresholds.zarr" in names
@@ -455,14 +455,27 @@ class TestStreamingMode:
 
     def test_clear_staging_removes_the_directory(self, tmp_path):
         ds = self._run(tmp_path)
-        staged = Path(ds.attrs["marex_staging_dir"])
+        staged = Path(ds.encoding["marex_staging_dir"])
         clear_staging(ds)
         assert not staged.exists()
+
+    def test_written_output_does_not_carry_a_dead_staging_dir(self, tmp_path):
+        """The on-disk store must not record marex_staging_dir: clear_staging deletes that
+        path right after the write, so persisted attrs carrying it would point at a
+        directory that no longer exists (D-118 falsifier finding 6)."""
+        ds = self._run(tmp_path)
+        staged = Path(ds.encoding["marex_staging_dir"])
+        out = tmp_path / "out.zarr"
+        ds.to_zarr(out, mode="w")
+        clear_staging(ds)
+        assert not staged.exists(), "clear_staging must actually remove the directory"
+        reopened = xr.open_zarr(out)
+        assert "marex_staging_dir" not in reopened.attrs
 
     def test_two_runs_do_not_collide(self, tmp_path):
         a = self._run(tmp_path)
         b = self._run(tmp_path)
-        assert a.attrs["marex_staging_dir"] != b.attrs["marex_staging_dir"]
+        assert a.encoding["marex_staging_dir"] != b.encoding["marex_staging_dir"]
         clear_staging(a)
         clear_staging(b)
 

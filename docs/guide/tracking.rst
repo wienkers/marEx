@@ -785,9 +785,11 @@ Three things to know before using it:
   ID fields are mostly zeros. Size ``temp_dir`` accordingly.
 * **The staging directory outlives** ``run()``, by design, because the returned dataset is
   lazy. Call :func:`marEx.clear_staging` once your output is written; the path is also on
-  ``events_ds.attrs['marex_staging_dir']``. Cleanup runs automatically on normal interpreter
-  exit but **cannot** run after a ``SIGKILL`` (a wall-clock kill on a batch system is the
-  usual case), so sweep ``temp_dir`` periodically.
+  ``events_ds.encoding['marex_staging_dir']`` (deliberately not ``attrs``, which would be
+  copied into your written output and left pointing at a directory ``clear_staging`` has
+  just deleted). Cleanup runs automatically on normal interpreter exit but **cannot** run
+  after a ``SIGKILL`` (a wall-clock kill on a batch system is the usual case), so sweep
+  ``temp_dir`` periodically.
 * **Input time chunking must be uniform.** ``.chunk({'time': k})`` always satisfies this (a
   smaller final chunk is fine). Genuinely ragged chunking — from a store with irregular
   on-disk chunks, or from a ``concat`` — is rejected at construction with a

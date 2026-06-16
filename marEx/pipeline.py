@@ -113,6 +113,15 @@ def preprocess_data(
         alone reproduces the historical ``+/-5.0`` range exactly.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
+        An integer time entry is a step count, and with one, extra dimensions on
+        time-indexed variables are sized so a chunk stays within 50 million
+        elements where one level allows it. ``"auto"`` hands the time chunk to
+        dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
+        default), not elements: a 1-byte boolean variable gets more elements per
+        chunk than a float32 one, and can exceed 50 million. A seasonal
+        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
+        chunked from the same entry, capped at the cycle length, and is not held
+        to the element budget.
     compute_mode, scratch_dir
         Materialisation policy and its staging directory.
     validate

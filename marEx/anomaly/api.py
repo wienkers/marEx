@@ -343,8 +343,19 @@ def compute(
         period. Anomalies are still returned for the full series. Supported for
         the two fixed-baseline methods only.
     dask_chunks
-        Output chunking. Only the time entry is honoured; spatial dimensions are
-        made whole. Defaults to ``{"time": 25}``.
+        Output chunking. Only the time entry is honoured; horizontal dimensions
+        are made whole, and extra dimensions (depth, level) are chunked one level
+        at a time on a large grid, stacked on a small one. Defaults to
+        ``{"time": 25}``.
+        An integer time entry is a step count, and with one, extra dimensions on
+        time-indexed variables are sized so a chunk stays within 50 million
+        elements where one level allows it. ``"auto"`` hands the time chunk to
+        dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
+        default), not elements: a 1-byte boolean variable gets more elements per
+        chunk than a float32 one, and can exceed 50 million. A seasonal
+        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
+        chunked from the same entry, capped at the cycle length, and is not held
+        to the element budget.
     compute_mode
         Materialisation policy. ``'persist'`` holds the anomaly in cluster
         memory (fastest, needs it to fit); ``'lazy'`` holds nothing and accepts

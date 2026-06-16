@@ -222,9 +222,12 @@ field is always held whole, deliberately (§5.2).
 | `lazy` | a few chunks *[reasoned]* | *[struck — see below]* | none |
 | `streaming` | a few chunks *[measured]* | once | ~2 × input |
 
-*[measured]* `persist` spilled **9.2–10.5 GB** to disk while `streaming` spilled **0.00 GB**,
-in three independent runs across a 5.3× range of per-worker RAM — including one where
-`streaming` ran **7× longer** and still spilled nothing.
+*[measured, residual]* In three independent runs across a 5.3× range of per-worker RAM,
+`persist` left **9.2–10.5 GB** of spill on disk while `streaming` left **0.00 GB**. Read both
+qualifiers: it is *residual* spill, an end-of-run `du` of the spill directory and so a lower
+bound rather than a peak; and every one of those runs FAILED (`KilledWorker` or
+`P2PConsistencyError`), the `streaming` comparators included, so the figures describe how the
+two modes fail, not what a completing run spills.
 
 *[measured]* Output is **bit-identical** between `persist` and `streaming`: `extreme_events`
 0 of 354,715,200 elements differing; `thresholds` `max_abs_diff` 0.0 including its NaN mask.
@@ -374,9 +377,21 @@ for a large problem can need 10+ GB in the client alone, and that cost is the sa
 `compute_mode`. If a job is OOM-killed, check `sacct MaxRSS` against `ReqMem` before blaming
 the thing you were testing.
 
-**Time chunks smaller than `smooth_days_baseline` break the climatology's centred rolling
-mean.** `smoothed_rolling_climatology` probes this up front and raises `ConfigurationError`
-rather than dying mid-graph.
+**Time chunks smaller than `smooth_days_baseline` used to break the climatology's centred
+rolling mean.** No longer: the smoothing is done on the canonical layout with time held whole,
+so a short time chunk is neither an error nor a source of drift. The up-front
+`ConfigurationError` probe that guarded it was removed with the rechunk.
+
+**A tile the budget cannot pay for now warns.** The internal canonical rechunk holds time whole
+and caps the spatial tile near 50 M elements per task, but a `window_spatial` floor *overrides*
+that cap: a rolling window may not cross a chunk boundary, so the floor wins. *[measured]* On a
+**sub-daily** cadence the day-of-year histogram's per-cell output grows with the steps per day, so
+the cell budget collapses while the window does not -- at an hourly cycle with 1000 bins and the
+default `window_spatial=5`, one task touches **219,600,000 elements (~878 MB)**, 4.4x the budget.
+marEx logs a WARNING naming the estimate, the budget, the window that forced it, and the levers: a
+narrower `window_spatial`, a shorter `window_years`, fewer bins, fewer threads per worker, or
+`compute_mode="streaming"`. It never resizes the tile -- the warning is an observation, so it can
+never move a result.
 
 **Staging survives the call deliberately.** In `streaming` mode the returned Dataset reads
 from the staged zarr, so it cannot be deleted on return. Write your output, then

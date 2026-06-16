@@ -37,6 +37,18 @@ from marEx.logging_config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _normal_verbosity():
+    """Start every test here at normal verbosity.
+
+    The verbosity level is module-global, and ``tracker(quiet=True)`` elsewhere in the
+    suite leaves it at "quiet". Under ``pytest -n`` a test here that expects INFO output
+    then sees nothing whenever it lands on the same worker after such a test.
+    """
+    set_normal_logging()
+    yield
+
+
 @pytest.fixture
 def sample_data():
     """Create sample data for testing."""

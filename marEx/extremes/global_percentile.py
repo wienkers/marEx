@@ -12,7 +12,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import spatial_chunks, spatial_dims
+from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_chunks, spatial_dims
 from ..logging_config import get_logger
 from .histogram import _compute_histogram_quantile_1d
 
@@ -63,10 +63,29 @@ def _identify_extremes_constant(
             n_cells = da[dimensions["x"]].size
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
-        # Every spatial dim is tiled the same way, extra dims (depth, level) included:
-        # the exact quantile is a per-cell reduction over time, so how the spatial axes
-        # are split cannot change the result, only the task count.
-        chunk_dict = {dim: rechunk_size for dim in spatial_dims(da, dimensions)}
+        # Gridded: "auto" on every spatial dim, extra dims included -- dask bounds the bytes per
+        # chunk, measured at 3.3e7 elements per task at depth 50 on 720x1440. On a mesh the
+        # cells take `rechunk_size` and extra dims (depth, level) go one level per chunk until a
+        # whole mesh fits, then stack with the leftover (D-128): sizing depth like the cell axis
+        # put up to `rechunk_size` levels in one task, 1.16e9 elements at depth 50 on 5e6 cells
+        # vs 2.3e7 in 2-D. The exact quantile is a per-cell reduction over time, so how the
+        # spatial axes are split cannot change the result, only the task layout.
+        if "y" in dimensions:
+            chunk_dict = {dim: rechunk_size for dim in spatial_dims(da, dimensions)}
+        else:
+            cell_dim = dimensions["x"]
+            chunk_dict = {cell_dim: rechunk_size}
+            chunk_dict.update(
+                extra_dim_chunks(
+                    da.sizes,
+                    [d for d in spatial_dims(da, dimensions) if d != cell_dim],
+                    horizontal_tile_cells=min(n_cells, rechunk_size),
+                    horizontal_cells=n_cells,
+                    # Each cell holds its whole series, so the element budget over the
+                    # series length -- not `rechunk_size`, which on a tiny mesh is the mesh.
+                    budget_cells=max(rechunk_size, TASK_ELEMENTS // max(1, int(da.sizes[dimensions["time"]]))),
+                )
+            )
         chunk_dict[dimensions["time"]] = -1
         da_rechunk = da.chunk(chunk_dict)
 
@@ -82,6 +101,7 @@ def _identify_extremes_constant(
             max_anomaly=max_anomaly,
             materialiser=materialiser,
             tail=tail,
+            horizontal=horizontal_dims(dimensions),
         )
 
     # Clean up coordinates if needed

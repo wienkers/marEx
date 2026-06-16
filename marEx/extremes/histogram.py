@@ -10,7 +10,7 @@ logging).
 """
 
 import warnings
-from typing import Callable, Dict, Literal, Optional
+from typing import Callable, Dict, List, Literal, Optional, Sequence
 
 import dask
 import flox.xarray
@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import horizontal_dims, spatial_dims
+from ..core.dimensions import check_tile_fit, extra_dim_chunks, horizontal_dims, spatial_dims
 from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
 from ..logging_config import get_logger
 
@@ -183,6 +183,7 @@ def _chunk_spatial_for_histogram(
     dim: str,
     target_elements: int = _HISTOGRAM_TASK_ELEMENTS,
     output_elements_per_cell: int = 1,
+    horizontal: Optional[Sequence[str]] = None,
 ) -> xr.DataArray:
     """Tile the non-reduced dimensions of ``da`` for memory-safe histogram reduction.
 
@@ -208,6 +209,16 @@ def _chunk_spatial_for_histogram(
         Elements the reduction produces per spatial cell -- ``n_bins`` for a histogram,
         ``366`` for a per-day-of-year percentile. Defaults to 1 (output no larger than the
         input), which reproduces the previous, input-only budget.
+    horizontal : sequence of str, optional
+        The horizontal dimension names. When given, every other non-reduced dim (depth,
+        level) is chunked at 1 and the budget's root is taken over the horizontal dims
+        only, so each level gets exactly its 2-D slice's tiling at any extra-dim length
+        -- the layout ``_histogram_tile_chunks`` uses (D-127). Spreading the budget over
+        depth too shrank the horizontal side to a cube root: a depth-1 field on a
+        720x1440 grid got 19x19 tiles (2888 tasks) where its 2-D slice got 85x85 (153).
+        Once a whole horizontal slice fits, the leftover budget stacks levels
+        (:func:`~marEx.core.dimensions.extra_dim_chunks`, D-128). ``None``, or a
+        mapping missing one of ``da``'s horizontal dims, keeps the old every-dim root.
 
     Returns
     -------
@@ -237,10 +248,35 @@ def _chunk_spatial_for_histogram(
     # task granularity only, never values.
     divisor = max(ntime, max(1, int(output_elements_per_cell)))
     tile_area = max(1, target_elements // divisor)
-    side = max(1, int(round(tile_area ** (1.0 / len(spatial_dims)))))
+    # Per level only when EVERY horizontal dim is on `da`: a mapping that names just one
+    # of them would give that one a 1-D root side and chunk the other at 1 (720 x 1).
+    per_level = bool(horizontal) and set(horizontal) <= set(spatial_dims)
+    tiled = [d for d in spatial_dims if d in horizontal] if per_level else spatial_dims
+    side = max(1, int(round(tile_area ** (1.0 / len(tiled)))))
 
-    chunks = {d: min(int(da.sizes[d]), side) for d in spatial_dims}
+    chunks = {d: min(int(da.sizes[d]), side) for d in tiled}
+    if per_level:
+        chunks.update(
+            extra_dim_chunks(
+                da.sizes,
+                [d for d in spatial_dims if d not in tiled],
+                horizontal_tile_cells=int(np.prod([chunks[d] for d in tiled])),
+                horizontal_cells=int(np.prod([da.sizes[d] for d in tiled])),
+                budget_cells=tile_area,
+            )
+        )
     chunks[dim] = -1
+    # No spatial-window floor on this path, so the only way the budget goes unmet is a
+    # single cell costing more than the whole of it -- which a caller-supplied
+    # `target_elements` can produce even though the default never does.
+    check_tile_fit(
+        chunks,
+        spatial_dims,
+        divisor,
+        target_elements,
+        stage="Histogram spatial tiling",
+        itemsize=da.dtype.itemsize,
+    )
     return da.chunk(chunks)
 
 
@@ -271,24 +307,62 @@ def _histogram_tile_chunks(
     A sub-daily cycle multiplies the output side by ``steps_per_day``, which shrinks the
     tile in proportion -- expensive, but bounded, which is the point.
 
-    **Every** spatial dimension is tiled, extra dims (depth, level) included, and the
-    side is the rank-th root of the cell budget -- so an extra dimension shrinks each
-    side rather than multiplying the task. The ``window_spatial`` floor applies to the
-    HORIZONTAL dims alone: the spatial window never rolls over an extra dimension, so
-    widening a depth chunk to the window width would buy nothing.
+    Extra dims (depth, level) are chunked at 1 and the horizontal side is the
+    root of the cell budget over the HORIZONTAL dims only, so each level of a 3-D
+    field gets exactly the tiling its 2-D slice would, whatever the extra dim's
+    length. Only once a whole horizontal slice fits the budget does the leftover
+    stack levels (:func:`~marEx.core.dimensions.extra_dim_chunks`, D-128). The
+    spatial window never rolls over an extra dim, so a level needs nothing from its
+    neighbours. Spreading the budget over depth as well (the
+    previous rank-th root) gave (3, 5, 5) tiles on a depth-3 field and peaked at
+    ~1.8x the RSS of the per-level (1, 12, 12) layout on a crop (n=3), and on the
+    full slice_3d oracle sat at the node's memory cap where this layout peaked
+    3.2x lower (n=1), values bit-identical (the
+    mechanism was not isolated; depth-1 5x5 tiles were NOT the cost). The
+    ``window_spatial`` floor applies to the horizontal dims alone.
     """
     spatial_dims_present = list(spatial_dims(da, dimensions))
+    horizontal_present = set(horizontal_dims(dimensions))
+    n_horizontal = sum(1 for dim in spatial_dims_present if dim in horizontal_present)
     ntime = max(1, int(da.sizes[dimensions["time"]]))
     cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, cycle_length * max(1, n_bins)))
-    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, n_horizontal)))))
 
-    horizontal_present = set(horizontal_dims(dimensions))
     chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    floor_bound: List[str] = []
     for dim in spatial_dims_present:
+        if dim not in horizontal_present:
+            continue
         side = tile_side
-        if window_spatial is not None and window_spatial > 1 and dim in horizontal_present:
+        if window_spatial is not None and window_spatial > 1:
             side = max(side, int(window_spatial))
         chunk_dict[dim] = min(int(da.sizes[dim]), side)
+        if side > tile_side and chunk_dict[dim] > tile_side:
+            floor_bound.append(dim)
+    horizontal_tiled = [dim for dim in spatial_dims_present if dim in horizontal_present]
+    chunk_dict.update(
+        extra_dim_chunks(
+            da.sizes,
+            [dim for dim in spatial_dims_present if dim not in horizontal_present],
+            horizontal_tile_cells=int(np.prod([chunk_dict[dim] for dim in horizontal_tiled])),
+            horizontal_cells=int(np.prod([da.sizes[dim] for dim in horizontal_tiled])),
+            budget_cells=cells_per_tile,
+        )
+    )
+
+    # A sub-daily cycle shrinks the cell budget in proportion while `window_spatial`
+    # does not move, so this is the one shipped path where the window can force a tile
+    # the budget cannot pay for. Warn; never resize.
+    check_tile_fit(
+        chunk_dict,
+        spatial_dims_present,
+        max(ntime, cycle_length * max(1, n_bins)),
+        _HISTOGRAM_TASK_ELEMENTS,
+        floor_bound_dims=floor_bound,
+        floor=int(window_spatial) if window_spatial else 1,
+        stage="Day-of-year histogram tiling",
+        itemsize=da.dtype.itemsize,
+    )
     return chunk_dict
 
 
@@ -694,7 +768,12 @@ def _compute_histogram_quantile_2d(
     # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
     # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
-    threshold = materialiser.pin_one(threshold.where(~nan_mask))
+    # Pin BEFORE the bounds check computes on it, in streaming mode too: the threshold is
+    # bounded by cycle x space, not by time. `pin_one` (a no-op in streaming) left that
+    # eager compute running the whole histogram graph, and the caller's `stage` running it
+    # again. Writing it to zarr here instead still crashed at 731 x 120 x 1440 on
+    # 16 x 14 GB (2/2), where persisting the same graph completed 2/2 (D-125).
+    threshold = materialiser.pin_bounded(threshold.where(~nan_mask))
 
     # Validate threshold values against the sign-aware bounds. One scheduler round-trip
     # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.
@@ -715,6 +794,7 @@ def _compute_histogram_quantile_1d(
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
     tail: Literal["upper", "lower"] = "upper",
+    horizontal: Optional[Sequence[str]] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -738,6 +818,9 @@ def _compute_histogram_quantile_1d(
     tail : {'upper', 'lower'}, default='upper'
         Which tail the threshold guards. Only the sign of the guard rail and of the
         range check depend on it -- the quantile itself is ``q`` either way.
+    horizontal : sequence of str, optional
+        Horizontal dimension names, passed to ``_chunk_spatial_for_histogram`` so an
+        extra dim tiles per level.
 
     Returns
     -------
@@ -764,7 +847,7 @@ def _compute_histogram_quantile_1d(
     # Each cell yields n_bins counts, so budget the tile against that as well as against
     # the time slab -- otherwise a series shorter than n_bins produces a tile whose
     # histogram is larger than the budget it was sized by.
-    da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1)
+    da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1, horizontal=horizontal)
 
     # Clip finite data into the outermost bins (at their centres) so out-of-range values
     # are counted there instead of being dropped by xhistogram, which renormalised the
@@ -797,7 +880,8 @@ def _compute_histogram_quantile_1d(
     )
     if f"{da.name}_bin" in threshold.coords:
         threshold = threshold.drop_vars(f"{da.name}_bin")
-    threshold = materialiser.pin_one(threshold)
+    # Pin before the bounds check -- see the matching comment in the 2D path (D-125).
+    threshold = materialiser.pin_bounded(threshold)
 
     # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
     # with the 2D path.

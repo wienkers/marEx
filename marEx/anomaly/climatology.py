@@ -14,10 +14,9 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
-from ..core.dimensions import spatial_dims, tile_spatial_chunks
+from ..core.dimensions import canonical_time_chunks, spatial_dims, tile_spatial_chunks
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
-from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
 # Get module logger
@@ -181,19 +180,17 @@ def rolling_climatology(
     # bit-identical (verified against both goldens and pinned by
     # tests/test_climatology_tiling.py).
     #
-    # The time chunking is deliberately untouched. Changing it WOULD move values: the
-    # smoothing in `smoothed_rolling_climatology` runs through bottleneck's move_mean,
-    # whose running sum restarts at every dask block boundary. `original_chunk_dict` was
-    # captured before this point, so the restore at the end of this function returns the
-    # caller's own layout regardless.
+    # The time axis is held whole in the same rechunk. Flox's grouped mean and the rolling mean
+    # before it accumulate block by block, so a time chunk boundary moves the result (D-091),
+    # and flox's task count scales with tiles x time chunks (D-090). `original_chunk_dict` was
+    # captured before this point, so the restore at the end returns the caller's own layout.
     spatial_tile = tile_spatial_chunks(
         da,
         spatial_dims(da, dimensions),
         input_elements_per_cell=len(time_indices),
         output_elements_per_cell=len(unique_years) * cycle.length,
     )
-    if spatial_tile:
-        da = da.chunk(spatial_tile)
+    da = da.chunk({timedim: -1, **spatial_tile})
 
     # Create long-form dataset by selecting the contributing time points
     long_form_data = da.isel({timedim: time_indices})
@@ -376,53 +373,17 @@ def smoothed_rolling_climatology(
             cycle.step_days,
         )
 
-    # Whether a given (length, chunking, window) combination can actually be reduced is a
-    # property of the xarray -> dask.overlap -> bottleneck chain, and it is not a simple
-    # one. It has at least three regimes: chunks that divide smooth_days - 1 leave
-    # a block one element short of the window; arrays shorter than the overlap depth are
-    # rejected outright; and a window longer than the whole series is fine and yields NaN.
-    # Modelling that here would hard-code one version's behaviour and go stale silently.
-    #
-    # Instead, ask the real stack. The probe reproduces the exact time geometry on a 1-D
-    # zero array -- a few KB and a few ms even for decades of daily data -- so whatever
-    # upstream does, the user gets a clear error here instead of a cryptic one from
-    # bottleneck after the pipeline has been running for half an hour.
-    time_chunks = da.chunksizes.get(timedim, ())
-    if time_chunks:
-        probe = xr.DataArray(np.zeros(sum(time_chunks), dtype=np.float32), dims=[timedim]).chunk({timedim: time_chunks})
-        try:
-            probe.rolling({timedim: smooth_steps}, center=True).mean().compute()
-        except ValueError as exc:
-            raise ConfigurationError(
-                f"Time chunking cannot support a {smooth_days}-day centred rolling mean",
-                details=(
-                    f"Reducing a {smooth_steps}-step ({smooth_days}-day) window over time chunks "
-                    f"{sorted(set(time_chunks))} failed with: {exc}"
-                ),
-                suggestions=[
-                    f"Rechunk the time dimension to at least the window length: " f"da.chunk({{'{timedim}': {smooth_steps}}})",
-                    "Chunk the spatial dimension instead, to keep chunk sizes manageable",
-                    "Reduce smooth_days",
-                ],
-                context={
-                    "time_chunks": sorted(set(time_chunks)),
-                    "smooth_days": smooth_days,
-                    "smooth_steps": smooth_steps,
-                    "upstream_error": str(exc),
-                },
-            ) from exc
+    # Smooth on a canonical layout: bottleneck's move_mean restarts its running sum at every dask
+    # block boundary, so a chunked time axis shifts the smoothed field by a few float32 ULP, enough
+    # to move a 0.01 threshold bin (D-091). With time whole the only boundary left is the one xarray's
+    # centred padding adds near the end of the series, which depends on its length alone, so the result
+    # does not depend on the caller's chunking, and a time chunk shorter than the window is no longer an error.
+    caller_chunks = dict(zip(da.dims, da.chunks))
+    da = da.chunk(canonical_time_chunks(da, dimensions))
 
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    #
-    # Kept in float32 deliberately. bottleneck's move_mean carries a running sum that
-    # restarts at each dask block boundary, so the result shifts slightly with the chunk
-    # layout: ~1e-4 for a 21-day window on SST, i.e. a few float32 ULP at 280 K. Accumulating
-    # in float64 removes that exactly, but doubles the working set of this reduction, which
-    # was enough to exhaust the workers and take down a distributed run. Forcing xarray off
-    # bottleneck also removes it, at 33x the cost. A spread at float32 precision is the
-    # accepted trade -- see the tolerance in tests/test_climatology_chunking.py.
-    da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
+    da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().astype(np.float32)
 
     clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates, cycle)
 
-    return clim
+    return clim.chunk(caller_chunks)

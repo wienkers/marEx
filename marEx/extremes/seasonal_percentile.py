@@ -20,7 +20,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import spatial_dims
+from ..core.dimensions import horizontal_dims, spatial_dims
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
@@ -131,7 +131,9 @@ def _identify_extremes_seasonal(
         # Each cell yields one percentile per cycle slot (366 on daily data), so budget
         # the tile against that as well as against the time slab: a series shorter than
         # the cycle would otherwise get a tile whose output exceeds its own budget.
-        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=cycle.length)
+        da_ufunc = _chunk_spatial_for_histogram(
+            da, dimensions["time"], output_elements_per_cell=cycle.length, horizontal=horizontal_dims(dimensions)
+        )
         cycle_vals = cycle.index_of(da_ufunc[coordinates["time"]]).values
         half_w = window_steps // 2
 
@@ -214,8 +216,10 @@ def _identify_extremes_seasonal(
     # a lazy expression over `thresholds`; anchoring after this line would leave it
     # pointing at the original graph and the whole threshold reduction would run a second
     # time. On an unstructured mesh `thresholds` is 366 x ncells x 4 B (21.8 GB at ICON
-    # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
-    # streaming mode stages it to disk rather than pinning it in RAM.
+    # R02B09) -- space-scaled, so no amount of time-chunking shrinks it. In streaming mode
+    # the histogram driver has already pinned it in cluster RAM for the bounds check
+    # (`pin_bounded`, D-125); staging it here writes it to disk so the pin is released and
+    # every downstream consumer reads the store.
     thresholds = materialiser.stage(thresholds, threshold_label)
     grouped = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))})
     extremes = (grouped >= thresholds) if tail == "upper" else (grouped <= thresholds)
