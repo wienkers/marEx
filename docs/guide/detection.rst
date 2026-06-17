@@ -182,6 +182,7 @@ Anomaly Detection Methods
 
 **Characteristics:**
   * Anomaly relative to the daily climatology using full time series (or a specified ``reference_period``)
+  * Climatology smoothed with a ``smooth_days`` (default 21) moving average that wraps the year, as in Hobday et al. (2016)
   * Preserves long-term / climate trends
   * Simple interpretation and fast computation
   * Best for: Baseline comparison studies, trend-inclusive analysis, public outreach
@@ -259,7 +260,7 @@ Extreme Event Detection Methods
        method_extreme='seasonal_percentile',
        threshold_percentile=95,
        window_days=11,        # 11-day window
-       window_spatial=None    # No spatial clustering (default)
+       window_spatial=None    # Default: 5x5 pooling on gridded data (approximate method), none otherwise
    )
 
 **Characteristics:**
@@ -271,6 +272,14 @@ Spatial Window Enhancement (``window_spatial``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **New in v3.0+**: The Hobday extreme method supports optional spatial pooling window for more robust, spatially coherent thresholds.
+
+**Default**: ``window_spatial=None`` resolves to **5** (a 5×5 window) for
+``method_extreme='seasonal_percentile'`` with ``method_percentile='approximate'`` on
+gridded (lat/lon) data, and to no pooling everywhere else. The value actually used is
+recorded in the output's ``window_spatial`` attribute. Passing a value explicitly is an
+error on unstructured meshes, with ``global_percentile`` and with
+``method_percentile='exact'``. For traditional single-cell Hobday thresholds on a grid,
+pass ``window_spatial=1``.
 
 **Algorithm Details**:
 
@@ -316,7 +325,7 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
        sst_0.1deg,
        method_extreme='seasonal_percentile',
        window_days=11,
-       window_spatial=None
+       window_spatial=1         # Single cell (None would default to 5x5 here)
    )
 
    # Short time-series: use spatial pooling to increase robustness of threshold calculation
@@ -424,8 +433,12 @@ Anomaly Method Parameters
 
 **Fixed Baseline Parameters:**
 
-**smooth_days** : int, default=11
-  Number of days for smoothing the daily climatology
+**smooth_days** : int, default=21
+  Number of days for smoothing the daily climatology, as in Hobday et al. (2016): a
+  centred moving average over the day-of-year climatology that wraps the year, so
+  31 December is averaged with 1 January. ``smooth_days=1`` disables it. Converted to
+  slots of the within-year cycle (one per day on daily data); on a
+  monthly axis 21 days is under one slot and no smoothing is applied, which is logged.
 
 **reference_period** : tuple of (int, int), optional
   Year range ``(start_year, end_year)`` inclusive for computing the daily climatology.
@@ -437,8 +450,9 @@ Anomaly Method Parameters
 **detrend_orders** : list of int, default=[1]
   Polynomial orders for detrending (e.g., [1, 2] for linear + quadratic)
 
-**smooth_days** : int, default=11
-  Number of days for smoothing the daily climatology after detrending
+**smooth_days** : int, default=21
+  Number of days for smoothing the daily climatology after detrending (same circular
+  smoothing as ``fixed_baseline``; ``smooth_days=1`` disables it)
 
 **force_zero_mean** : bool, default=True
   Whether to explicitly enforce zero mean in final anomalies
@@ -475,16 +489,15 @@ Extreme Detection Parameters
   Method for percentile calculation
 
 **precision** : float, optional
-  Histogram bin width for the approximate percentile calculation. Derived from
-  ``max_anomaly`` and ``n_bins`` when omitted.
+  Histogram bin width for the approximate percentile calculation, in the units of your
+  data. Omitted, it gives 3000 bins over the range marEx derives from the data (see
+  `Bin Geometry and Non-SST Variables`_). Given, the bin count follows that range: a
+  warning above 10,000 bins, an error above 65,000.
 
-**max_anomaly** : float, optional
-  Half-width of the binned range, in the units of your data. Derived from the data
-  itself when omitted.
-
-**n_bins** : int, default=1000
-  Number of histogram bins spanning ``[-max_anomaly, +max_anomaly]``. Used to derive
-  whichever of ``precision`` and ``max_anomaly`` was not supplied.
+**max_anomaly**, **n_bins** : deprecated
+  Still accepted, with a ``FutureWarning``. ``max_anomaly`` pins the half-width of the
+  binned range (a threshold reaching its edge then raises); ``n_bins`` replaces the
+  3000-bin target.
 
 Which Tail
 ----------
@@ -515,7 +528,11 @@ Two consequences worth knowing:
   rejected outright. That restriction is gone.
 * The guard rail that keeps a constant-zero anomaly (sea ice, a permanently masked
   cell) from being flagged as extreme is applied on **both** sides. A flat-zero cell is
-  never a cold extreme either.
+  never a cold extreme either. ``method_percentile='exact'`` has no bins, so it applies
+  the same rule with the smallest normal float32 as the rail: a threshold at zero or on
+  the wrong side of it is moved to ``±1.18e-38``. Without that, a near-constant cell's
+  exact threshold equals its own value and every tie counts as extreme (at 0.25° global
+  this tripled the exact path's flagged fraction, almost all of it poleward of 60°).
 
 ``tail='both'`` is not supported: it would need a second threshold array and an extra
 output dimension. Run the two tails separately if you need both.
@@ -523,35 +540,125 @@ output dimension. Run the two tails separately if you need both.
 Bin Geometry and Non-SST Variables
 ----------------------------------
 
-``precision=0.01`` and ``max_anomaly=5.0`` are calibrated for **SST anomalies in
-kelvin**. On precipitation in mm/day, with anomalies of tens, that range clips almost
-everything into the end bins; on pressure in Pa it is off by three orders of magnitude.
+The old defaults, ``precision=0.01`` and ``max_anomaly=5.0``, were calibrated for **SST
+anomalies in kelvin**. On precipitation in mm/day, with anomalies of tens, that range
+clips almost everything into the end bins; on pressure in Pa it is off by three orders
+of magnitude. So only ``precision`` is a parameter now, and the range is derived from
+your data in its own units, in three steps:
 
-So when neither is supplied, marEx derives the range from your data -- one fused
-min/max pass, then ``max(|min|, |max|)`` -- and sets ``precision = 2 * max_anomaly /
-n_bins``. Both resolved values are logged at INFO and recorded in the output attributes.
+1. **The tail's own extreme is a hard cap.** A threshold is a percentile of the samples,
+   so it can never pass the largest anomaly (``tail='upper'``) or the most negative one
+   (``tail='lower'``). The other side of the distribution may be clipped freely: those
+   samples still count towards the percentile.
+2. **A per-cell estimate lowers it when that extreme is an outlier.** marEx takes each
+   cell's mean and standard deviation along time and estimates its threshold as
+   ``mean + z_p * std``, with ``z_p`` the normal quantile of ``threshold_percentile``
+   (1.645 at the 95th). The range is three times the largest of these, if that is below
+   the cap. The factor covers the two ways a real threshold outruns a normal estimate:
+   variance concentrated in one season, and heavy tails. On 0.25° OSTIA the largest 95th
+   percentile threshold is 2.19 times the bare estimate.
+3. **A threshold that reaches the edge regrows the range.** If the estimate was still too
+   low somewhere, marEx widens the range to the cap at the same bin width and recomputes
+   the thresholds, with a WARNING. The bin edges are the same numbers at any range, so
+   every threshold that was inside the old range comes out identical, and past the cap
+   there is nothing left to clip, so this happens at most once. It costs a second
+   threshold pass, never a wrong threshold.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
+The bin width then gives 3000 bins over that range. On global 0.25° OSTIA the 95th
+percentile range is the warmest anomaly, ±21.0 K (the estimate, 24.7 K, does not bind),
+so the bins are 0.014 K wide. A synthetic precipitation-like (gamma) field with one
+400 mm/day storm gets a range set by the estimate instead, and bins six times finer than
+the storm alone would allow.
 
-   * - You supply
-     - What marEx uses
-   * - nothing
-     - ``max_anomaly`` from the data; ``precision = 2 * max_anomaly / n_bins``
-   * - ``precision`` only
-     - ``max_anomaly = precision * n_bins / 2`` (so ``precision=0.01`` still spans ±5.0)
-   * - ``max_anomaly`` only
-     - ``precision = 2 * max_anomaly / n_bins``
-   * - both
-     - exactly what you gave; ``n_bins`` is ignored
+The width matters more than its effect on the thresholds suggests. On 0.25° OSTIA
+(2003-2022), bins of 0.055 K -- what a fixed 1000-bin default gave there, because one
+27 K anomaly set the range -- moved thresholds by at most 0.08 K against 0.01 K bins,
+yet flagged 10-13 % more extreme days. If your variable needs finer bins than 3000 over
+its range give, pass ``precision``; beyond 10,000 bins marEx warns that the threshold
+stage gets markedly slower, and beyond 65,000 (the limit of the bin index) it raises
+before any work is done. Both resolved values are logged at INFO and recorded in the
+output attributes.
 
 .. note::
 
    The derivation is skipped entirely for ``method_percentile='exact'``, which builds
    no histogram. It costs one pass over the anomaly, which is cheap in the default
    ``persist`` mode (the anomaly is already staged) but walks the whole anomaly graph
-   under ``compute_mode='lazy'``. Pin ``max_anomaly`` there if that matters.
+   under ``compute_mode='lazy'``, as does a regrow.
+
+.. warning::
+
+   With the range **derived from the data**, a threshold in the outermost bin of the
+   cap is only a ``UserWarning``: nothing on that side was clipped, but the window
+   holding the most extreme sample has too few samples to resolve the percentile. It
+   happens on short or coarse series at high percentiles (roughly fewer than
+   ``0.5 / (1 - q)`` samples per window, i.e. under 10 at the 95th percentile).
+
+   A range **you pinned** with the deprecated ``max_anomaly`` keeps the old rule: a
+   threshold in its outermost bin is rejected with a ``ConfigurationError``
+   ("Quantile values exceed expected range", or "below expected range" for
+   ``tail='lower'``), because samples beyond it were clipped into that bin.
+
+Exact and Approximate Percentiles
+---------------------------------
+
+``method_percentile='exact'`` sorts every sample a cell contributes and takes
+``np.nanpercentile`` with numpy's default linear rule. ``'approximate'`` (the default)
+counts the samples into histogram bins and interpolates inside the bin where
+the cumulative count crosses the percentile. How closely the two agree depends on how
+many samples sit in the tail, and much less on ``precision``.
+
+``global_percentile`` pools the whole series per cell. Near the threshold, neighbouring
+samples are far closer together than one bin, so the approximate threshold tracks the
+exact one to about one bin. Measured on 20 years of daily data, the largest gap across
+four distributions and five percentiles was 1.09 bins. The agreement weakens as the tail
+thins. With 10 years at the 99th percentile (about 37 samples above it per cell) the gap
+reached up to 7.8 bins, depending on the random draw and the distribution.
+
+``seasonal_percentile`` pools only the days within ``window_days`` of each day of year,
+across all years, which is 220 samples for 20 years and an 11-day window. Here the two methods take
+different order statistics of the same samples. The histogram returns, to within 1.5 bins, the
+sample of rank ``floor(q * n) + 1`` in the window (for whole-number percentiles this is
+usually numpy's ``'higher'`` rule in the upper tail and ``'lower'`` in the lower tail),
+while ``'exact'`` interpolates between two samples. In a tail of 220 samples
+those neighbours are several bins apart, so the two threshold fields can differ by tens
+of bins in places. That gap is the sampling resolution of the data, and a finer
+``precision`` does not close it. Neither choice is wrong. They are two conventions for a
+percentile of a small sample, and marEx keeps both.
+
+The extreme-event mask moves far less than the threshold values suggest, apparently
+because both thresholds usually fall in the same gap between samples. On 20 years of Gaussian
+anomalies at the 90th percentile, ``'exact'`` flagged 10.01 % of days and
+``'approximate'`` with ``window_spatial=1`` flagged 10.16 %. The approximate excess grows
+with the bin width. With the range derived from heavy-tailed data the bins were nine times
+wider, and the approximate method flagged 10.97 %. Pass ``precision`` explicitly if the
+derived bin is coarse for your variable.
+
+.. note::
+
+   On a grid, the approximate seasonal path pools a 5×5 spatial window by default
+   (``window_spatial=5``), giving 25 times the samples. ``'exact'`` cannot pool spatially,
+   so out of the box the two compute different statistics. Compare them with
+   ``window_spatial=1``. The "Not enough samples" warning counts the spatial window, so
+   it fires on exact runs (and on ``window_spatial=1``) far sooner than on the default.
+
+Memory and Chunking of the Exact Path
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every percentile path, exact and approximate alike, needs each cell's whole series in
+one task. The anomaly keeps the time chunking of your input, so a time-chunked input is
+rechunked to ``time: -1`` per spatial tile by both paths, an all-to-all transpose whose cost
+grows with the number of time chunks (the exact path moves float32, the approximate path
+uint16 bin indices). The exact path has three further limits:
+
+* it sorts the raw float series of a tile rather than counting it into integer bins, so a task
+  needs several copies of ``n_time × cells-per-tile`` floats
+* it has no way to process time in pieces: a cell's percentile needs every sample at once
+* it cannot use ``window_spatial``
+
+The approximate path is the one exercised at scale (27 years of daily 0.25° data). No
+at-scale measurement of the exact path exists yet, so size an exact run from a short
+pilot rather than from the approximate path's memory.
 
 Time Resolution
 ---------------
@@ -719,7 +826,6 @@ Performance Optimisations
        # Use approximate percentiles for speed
        method_percentile='approximate',
        precision=0.05,  # Coarser precision for speed
-       max_anomaly=10.0
    )
 
 Multi-Variable Processing
@@ -740,6 +846,97 @@ Multi-Variable Processing
            method_anomaly='shifting_baseline',
            method_extreme='seasonal_percentile'
        )
+
+.. _detect-compute-mode:
+
+Compute Mode and Memory Sizing
+==============================
+
+``compute_mode`` decides where ``preprocess_data`` keeps the intermediates that more than one
+later stage reads (the anomaly field and the thresholds):
+
+* ``'persist'`` (default) pins them in cluster RAM. No staging directory is written (dask may
+  still spill to worker-local disk under memory pressure) and the returned dataset is held in
+  memory.
+* ``'streaming'`` writes them to Zarr under ``scratch_dir`` and reads them back. The
+  returned dataset reads lazily from that directory, which outlives the call, so write your
+  output first and then call :func:`marEx.clear_staging`.
+* ``'lazy'`` keeps nothing and recomputes the upstream graph for each consumer.
+
+.. code-block:: python
+
+   extremes_ds = marEx.preprocess_data(
+       sst,
+       method_anomaly='shifting_baseline',
+       method_extreme='seasonal_percentile',
+       compute_mode='streaming',
+       scratch_dir='/scratch/your_user/marex_staging',
+   )
+   extremes_ds.to_zarr('extremes.zarr')
+   marEx.clear_staging(extremes_ds)
+
+``'persist'`` and ``'streaming'`` have been compared byte for byte at full global 0.25°
+scale, and their data variables are identical. ``'streaming'`` changes the chunk layout of the
+returned ``dat_anomaly`` and the on-disk encoding of the coordinates (time units and dtype,
+compressor), not the data. ``'lazy'`` is checked against ``'persist'`` by the test suite on
+small fields only.
+
+.. _detect-memory-sizing:
+
+Memory Sizing
+-------------
+
+Two terms set the memory a run needs.
+
+**Pinned output** (``'persist'``) is about ``n_time × n_cells × 5`` bytes for the float32
+anomaly and the boolean event flags, plus ``n_cycle × n_cells × 4`` bytes for the thresholds.
+For global 0.25° data (1,036,800 cells) over 3438 output days with day-of-year thresholds,
+that is 14.3 + 3.6 + 1.5 ≈ 19 GB across the cluster, or about 1.2 GB per worker on 16
+workers. Under ``'streaming'`` the anomaly and thresholds end up on disk and the event flags
+are computed as the output is written, so most of this term drops away.
+
+**Histogram working memory** (every mode). The ``approximate`` percentile path regroups each
+spatial tile's full time series before it builds the per-cell histograms. Each task is
+bounded, but the shuffle buffers and the tasks running concurrently on a worker are not. Every
+worker restart in the measured runs below fell in this stage, in both modes, so
+``'streaming'`` does not remove the problem. Under ``'lazy'`` the anomaly is recomputed inside
+the same stage, which adds to it.
+
+The measured runs all used global 0.25° daily data (7091 input days),
+``shifting_baseline`` + ``seasonal_percentile``, input chunks
+``{'time': 25, 'lat': -1, 'lon': -1}`` and 16 workers of 4 threads and 14 GB each:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Mode
+     - Outcome
+   * - ``'persist'``
+     - Completed with 6 worker restarts. An earlier development version of the histogram
+       stage failed here with ``KilledWorker`` after 21 restarts.
+   * - ``'streaming'``
+     - Completed with 2 worker restarts.
+
+Read 14 GB per 4-thread worker as the edge at this size, not as a safe value, and budget
+above it. For a first estimate per worker, take that figure (about 3.5 GB per thread, of which
+roughly 1.2 GB per worker was pinned output under ``'persist'``) and scale the pinned part with
+your field. Only this one grid, cluster shape and thread count have been measured, and two or
+three runs do not give a crash rate.
+
+A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during
+extreme identification. A restart costs time because dask recomputes the lost tasks. In the
+measured runs, ``'persist'`` (6 restarts) and ``'streaming'`` (2 restarts) wrote byte-identical
+data variables. Two settings should move a run away from the edge, though neither has been
+measured at full scale yet:
+
+* **Fewer threads per worker** at the same ``memory_limit``, so fewer tiles are in memory at
+  once.
+* **A larger** ``memory_limit``, with fewer workers per node.
+
+Pass ``memory_limit`` to the cluster explicitly. Dask reads a memory cap from its own cgroup
+only. Where the batch system sets the cap on a parent cgroup, as some SLURM sites do, a
+``LocalCluster`` sizes itself from the node's physical RAM, so the limit it enforces can
+exceed what the job is given.
 
 Integration with Tracking
 =========================
@@ -834,7 +1031,9 @@ Error Handling
 Common Issues and Solutions
 ---------------------------
 
-**Memory Errors**:
+**Memory Errors**: a ``KilledWorker`` or repeated worker restarts during extreme
+identification can mean the histogram stage is short of memory per thread. See
+:ref:`detect-memory-sizing` first, then:
 
 .. code-block:: python
 
@@ -890,6 +1089,11 @@ Performance Benchmarks
 
 Method Performance Comparison
 -----------------------------
+
+.. note::
+
+   The memory figures below are indicative only. For full-resolution runs, size the
+   cluster from :ref:`detect-memory-sizing`.
 
 .. code-block:: python
 

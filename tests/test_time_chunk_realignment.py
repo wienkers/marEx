@@ -33,6 +33,7 @@ import pytest
 import xarray as xr
 
 import marEx
+from marEx.core.encoding import clear_store_encoding
 from marEx.track.morphology import fill_time_gaps
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -141,7 +142,12 @@ class TestFillTimeGapsRealignsTime:
         """Assert against zarr itself, not only against our model of what zarr allows."""
         data_bin = _tile_to(extremes.extreme_events, TRIGGER_NT).chunk({"time": TRIGGER_CHUNK, "lat": -1, "lon": -1})
         filled = _fill(data_bin, extremes.mask)
-        filled.rename("filled").to_dataset().to_zarr(str(tmp_path / "filled.zarr"), mode="w")
+        out = filled.rename("filled").to_dataset()
+        # The fixture is a format-2 store: its codecs ride along in `.encoding` and zarr 3 refuses
+        # them in a format-3 store. That is not what this test checks, so drop them as any caller
+        # writing an internal intermediate must; public outputs clear it themselves (D-139).
+        clear_store_encoding(out)
+        out.to_zarr(str(tmp_path / "filled.zarr"), mode="w")
 
     def test_a_deeper_kernel_still_realigns(self, extremes):
         """T_fill=8 widens the depth to 4, so remainders 1..3 all trigger the borrow."""

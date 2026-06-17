@@ -102,7 +102,12 @@ def _kwargs(method_extreme, dimensions, method_percentile="approximate", **extra
 def _assert_levels_match_own_runs(da, kw, spatial):
     """Each real level of the 3-D result equals that level run on its own."""
     result_3d = marEx.preprocess_data(da, **kw).compute()
-    bin_spec = {"precision": result_3d.attrs["precision"], "max_anomaly": result_3d.attrs["max_anomaly"]}
+    # The exact path has no bins: its attrs hold the string "None", which the exact guard rejects.
+    bin_spec = (
+        {}
+        if kw["method_percentile"] == "exact"
+        else {"precision": result_3d.attrs["precision"], "max_anomaly": result_3d.attrs["max_anomaly"]}
+    )
     for level in REAL_LEVELS:
         slice_nd = da.isel(depth=level, drop=True).chunk({"time": TIME_CHUNK, **{d: -1 for d in spatial}})
         result = marEx.preprocess_data(slice_nd, **{**kw, **bin_spec}).compute()

@@ -47,7 +47,7 @@ def preprocess_data(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: Optional[float] = None,
     max_anomaly: Optional[float] = None,
-    n_bins: int = 1000,
+    n_bins: Optional[int] = None,
     dask_chunks: Optional[Dict[str, int]] = None,
     compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
     scratch_dir: Optional[str] = None,
@@ -87,10 +87,22 @@ def preprocess_data(
         cold spells, drought, or any low-side extreme. The threshold is the
         ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
         is ``threshold_percentile=5, tail='lower'``.
-    window_years, smooth_days
-        Rolling-climatology parameters (``shifting_baseline`` only).
-    window_days, window_spatial
-        Day-of-year and spatial pooling windows (``seasonal_percentile`` only).
+    window_years
+        Rolling-climatology length (``shifting_baseline`` only).
+    smooth_days
+        Climatology smoothing window in days (``shifting_baseline``,
+        ``fixed_baseline`` and ``detrend_fixed_baseline``). The fixed baselines
+        smooth their day-of-year climatology with a moving average that wraps
+        the year, as in Hobday et al. (2016); ``smooth_days=1`` disables it.
+    window_days
+        Day-of-year window in days (``seasonal_percentile`` only).
+    window_spatial
+        Width in cells (odd) of the square spatial pooling window
+        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
+        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
+        on that path and to no pooling everywhere else. Passing a value is an
+        error on unstructured meshes, with ``global_percentile`` and with
+        ``method_percentile='exact'``.
     standardise
         Also threshold a standardised series, adding ``dat_stn``, ``STD``,
         ``extreme_events_stn`` and ``thresholds_stn``. Requires
@@ -103,14 +115,17 @@ def preprocess_data(
     method_percentile
         ``'approximate'`` (default) uses a histogram-based quantile; ``'exact'``
         computes a true quantile per cell.
-    precision, max_anomaly, n_bins
-        Histogram bin geometry for ``method_percentile='approximate'``.
-        ``max_anomaly`` is the half-width of the binned range and ``precision`` the
-        bin width; ``n_bins`` (default 1000) derives whichever of the two is left
-        unset. With both unset the range is taken from the data, which is what makes
-        the defaults work on a variable that is not an SST anomaly in kelvin --
-        precipitation in mm/day, or pressure in Pa. Supplying ``precision=0.01``
-        alone reproduces the historical ``+/-5.0`` range exactly.
+    precision
+        Histogram bin width for ``method_percentile='approximate'``, in the variable's
+        units. The binned range is derived from the data, so the default works for any
+        variable and units: the requested tail's own extreme is a hard cap, a per-cell
+        normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
+        when that extreme is an outlier, and a threshold that reaches the edge regrows the
+        range and is recomputed. Omitted, ``precision`` gives 3000 bins over that range;
+        given, the bin count follows (a warning above 10000 bins, an error above 65000).
+    max_anomaly, n_bins
+        Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
+        threshold then raises); ``n_bins`` replaces the 3000-bin target.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
         An integer time entry is a step count, and with one, extra dimensions on

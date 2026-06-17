@@ -36,6 +36,7 @@ from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
 from ..core.compute_mode import Materialiser, create_staging_dir
+from ..core.encoding import clear_inherited_attrs, clear_store_encoding, write_zarr
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
@@ -978,6 +979,13 @@ class tracker:
         logger.debug(f"Final dataset dimensions: {events_ds.dims}")
         log_memory_usage(logger, "Pipeline completion")
 
+        # The ID field inherits coordinates opened from the input store: drop their chunk and
+        # codec encoding so the caller's to_zarr works, including a format-2 input written
+        # by zarr-python 3.
+        clear_store_encoding(events_ds)
+        clear_store_encoding(merges_ds)
+        clear_inherited_attrs(events_ds, (self.timedim, self.timecoord, "time_start", "time_end"))
+
         # Streaming mode returns a dataset that reads lazily from the staged zarr stores,
         # so the staging directory deliberately OUTLIVES this call. The caller writes its
         # output first, then calls marEx.clear_staging(events_ds). Note the atexit backstop
@@ -1097,7 +1105,7 @@ class tracker:
                 data_bin_filtered.name = "data_bin_preproc"
                 # Write lazily (no .persist()): the store computes the preprocessing graph
                 # straight to disk, then we reload to break the graph for downstream steps.
-                data_bin_filtered.to_zarr(f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w")
+                write_zarr(data_bin_filtered, f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w")
                 data_bin_filtered = load_data_from_checkpoint()
         else:
             logger.debug("Persisting preprocessed data in memory")

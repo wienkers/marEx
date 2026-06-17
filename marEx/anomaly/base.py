@@ -65,7 +65,8 @@ def compute_normalised_anomaly(
     window_years : int, default=15
         Number of years for rolling climatology (shifting_baseline only)
     smooth_days : int, default=21
-        Days for smoothing rolling climatology (shifting_baseline only)
+        Days for smoothing the climatology (shifting_baseline, fixed_baseline and
+        detrend_fixed_baseline; ``1`` disables it for the fixed baselines)
     standardise : bool, default=False
         Whether to normalise by 30-day rolling standard deviation (detrend_harmonic only)
     detrend_orders : list, default=[1]
@@ -282,15 +283,25 @@ def _dispatch_anomaly(
         logger.debug(f"Shifting baseline parameters: window_years={window_years}, smooth_days={smooth_days}")
         return _compute_anomaly_shifting_baseline(da, window_years, smooth_days, dimensions, coordinates, cycle)
     elif method_anomaly == "fixed_baseline":
-        logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
-        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser, cycle)
+        logger.debug(f"Fixed baseline parameters: reference_period={reference_period}, smooth_days={smooth_days}")
+        return _compute_anomaly_fixed_baseline(
+            da, dimensions, coordinates, reference_period, materialiser, cycle, smooth_days=smooth_days
+        )
     elif method_anomaly == "detrend_fixed_baseline":
         logger.debug(
             f"Fixed detrended baseline parameters: orders={detrend_orders}, "
             f"zero_mean={force_zero_mean}, reference_period={reference_period}"
         )
         return _compute_anomaly_detrend_fixed_baseline(
-            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser, cycle
+            da,
+            detrend_orders,
+            dimensions,
+            coordinates,
+            force_zero_mean,
+            reference_period,
+            materialiser,
+            cycle,
+            smooth_days=smooth_days,
         )
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")

@@ -14,7 +14,7 @@ import xarray as xr
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_chunks, spatial_dims
 from ..logging_config import get_logger
-from .histogram import _compute_histogram_quantile_1d
+from .histogram import _clamp_exact_threshold, _compute_histogram_quantile_1d
 
 # Get module logger
 logger = get_logger(__name__)
@@ -30,6 +30,7 @@ def _identify_extremes_constant(
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     tail: Literal["upper", "lower"] = "upper",
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events beyond a constant (in time) percentile threshold.
@@ -62,6 +63,12 @@ def _identify_extremes_constant(
             # cannot change the result -- only the task count.
             n_cells = da[dimensions["x"]].size
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
+            # Each cell brings its whole series, so cap the tile at the element budget over
+            # the series length: sized from n_cells alone, a task grew linearly with n_time
+            # (5700 cells x 262,980 hourly steps = 6 GB float32 on ICON R02B09, D-142). The
+            # 100-cell floor still bounds the task count on very long series.
+            n_time = max(1, int(da.sizes[dimensions["time"]]))
+            rechunk_size = min(rechunk_size, max(min(n_cells, 100), TASK_ELEMENTS // n_time))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
         # Gridded: "auto" on every spatial dim, extra dims included -- dask bounds the bytes per
         # chunk, measured at 3.3e7 elements per task at depth 50 on 720x1440. On a mesh the
@@ -91,6 +98,7 @@ def _identify_extremes_constant(
 
         # Calculate threshold
         threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
+        threshold = _clamp_exact_threshold(threshold, tail)
 
     else:  # Use an efficient histogram-based method with specified accuracy
         threshold = _compute_histogram_quantile_1d(
@@ -102,6 +110,7 @@ def _identify_extremes_constant(
             materialiser=materialiser,
             tail=tail,
             horizontal=horizontal_dims(dimensions),
+            range_mode=range_mode,
         )
 
     # Clean up coordinates if needed

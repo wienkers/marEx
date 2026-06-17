@@ -68,7 +68,10 @@ CONFIGS = {
 # time chunk boundaries, and detect is now chunk-invariant. Only B moved (dat_anomaly max 7.6e-4
 # at 543,528 of 585,600; extreme_events 59 of 585,600; thresholds one 0.01 bin at 9,493 of
 # 292,800), and the rewritten values are bit-identical to the PRE-fix code run on a time-whole
-# input, so the change is the chunk dependence and nothing else. Never regenerate again.
+# input, so the change is the chunk dependence and nothing else.
+# Config B was rewritten AGAIN 2026-10-05 (D-141, Aaron): the smoothing's rolling mean moved from bottleneck's
+# float32 running sum to xarray's numpy path on every xarray release (dat_anomaly max 7.3e-4 at 543,605 of
+# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0). Never regenerate without a ruling.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # Phase D replaced the asymmetric histogram bins with symmetric ones, so the 1-D path now

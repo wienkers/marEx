@@ -73,6 +73,20 @@ class SeasonalCycle:
             return max(1, self.length // _DAYS_PER_YEAR)
         return 1 if self.is_daily else 0
 
+    @property
+    def slot_days(self) -> float:
+        """Width of one cycle SLOT in days, as opposed to :attr:`step_days`, the data cadence.
+
+        The two differ whenever the data is coarser than the cycle it is grouped on: 5-day
+        data still sits on the 366-slot ``dayofyear`` cycle, one slot per day. Anything that
+        operates along the cycle axis itself (smoothing a climatology) must count in slots.
+        """
+        if self.is_subdaily:
+            return 1.0 / self.steps_per_day
+        if self.is_daily:
+            return 1.0
+        return 365.25 / self.length
+
     def index_of(self, time_coord: xr.DataArray) -> xr.DataArray:
         """Map a time coordinate onto this cycle's 1-based index.
 

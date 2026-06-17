@@ -36,6 +36,7 @@ from numpy.typing import NDArray
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from ..core.encoding import write_zarr
 from ..exceptions import TrackingError
 from ..logging_config import get_logger
 from . import objects as _objects
@@ -1719,7 +1720,7 @@ def split_and_merge_objects_parallel(
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     pristine = object_id_field_unique.rename("temp")
-    pristine.to_zarr(zarr_path, mode="w")
+    write_zarr(pristine, zarr_path, mode="w")
     pristine_blocks = pristine.data  # (n_chunks, 1) blocks, persisted or staged upstream
 
     # Static arrays as single-chunk dask arrays: one key each, moved to a worker once, instead

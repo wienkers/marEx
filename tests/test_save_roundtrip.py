@@ -140,3 +140,44 @@ def test_roundtrip_tracked_events(fmt, tracked_events_lazy, tmp_path):
         ds.to_netcdf(target)
         reloaded = xr.open_dataset(target)
     _assert_roundtrip(reloaded, ds)
+
+
+def test_clear_store_encoding_drops_codecs_and_keeps_cf_keys(tmp_path):
+    """A format-2 input's codecs must not reach a write; CF encoding must survive.
+
+    zarr-python 3 refuses to write a format-2 ``numcodecs`` compressor into a format-3
+    store ("Expected a BytesBytesCodec"), so a variable opened from a format-2 store and
+    saved with the default ``to_zarr`` failed before ``clear_store_encoding`` existed.
+    """
+    from marEx.core.encoding import STORE_ENCODING_KEYS, clear_store_encoding
+
+    ds = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={})
+    assert any("compressor" in v.encoding or "compressors" in v.encoding for v in ds.variables.values())
+    cf_before = {
+        name: {k: v for k, v in var.encoding.items() if k in ("units", "calendar", "dtype")} for name, var in ds.variables.items()
+    }
+
+    clear_store_encoding(ds)
+
+    for name, var in ds.variables.items():
+        assert not set(STORE_ENCODING_KEYS) & set(var.encoding), name
+        assert {k: v for k, v in var.encoding.items() if k in ("units", "calendar", "dtype")} == cf_before[name]
+    ds.isel(time=slice(0, 4)).to_zarr(tmp_path / "out.zarr", mode="w")
+
+
+def test_detect_outputs_do_not_inherit_input_attrs(gridded_extremes_lazy):
+    """xarray >= 2025.11 keeps attrs by default: the input SST's standard_name, units and
+    valid_min/valid_max must not reappear on the anomaly or the boolean event mask (D-139)."""
+    assert DATA_DIR.joinpath("sst_gridded.zarr").exists()
+    for name in ("dat_anomaly", "extreme_events"):
+        assert gridded_extremes_lazy[name].attrs == {}, name
+
+
+@pytest.mark.parametrize("helper", ["rolling_climatology", "smoothed_rolling_climatology"])
+def test_climatology_helpers_write_to_zarr(helper, tmp_path):
+    """The public climatology helpers return a variable built from a format-2 input; the default
+    to_zarr must accept it under zarr-python 3 (it raised "Expected a BytesBytesCodec")."""
+    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(0, 3 * 365))
+    clim = getattr(marEx.anomaly, helper)(sst, window_years=2, dimensions={"time": "time", "x": "lon", "y": "lat"})
+    clim.rename("clim").to_dataset().to_zarr(tmp_path / "clim.zarr", mode="w")
+    assert xr.open_zarr(tmp_path / "clim.zarr").clim.shape == clim.shape

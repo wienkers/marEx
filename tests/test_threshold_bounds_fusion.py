@@ -16,6 +16,8 @@ import pytest
 import xarray as xr
 from dask.callbacks import Callback
 
+import marEx
+from marEx.exceptions import ConfigurationError
 from marEx.extremes.histogram import _compute_histogram_quantile_1d, _compute_histogram_quantile_2d
 
 
@@ -106,10 +108,10 @@ class TestBoundsCheckRoundTrips:
 class TestBoundsCheckBehaviourUnchanged:
     """Fusing the computes must not change a single observable behaviour."""
 
-    def test_still_warns_when_threshold_exceeds_the_top_bin(self):
+    def test_raises_when_threshold_exceeds_the_top_bin(self):
         da = _anomaly_fixture()
-        # max_anomaly small enough that the 95th percentile lands above the top bin edge.
-        with pytest.warns(UserWarning, match="exceed expected range"):
+        # max_anomaly small enough that the 95th percentile lands above the top bin edge (D-138: an error).
+        with pytest.raises(ConfigurationError, match="exceed expected range"):
             _compute_histogram_quantile_1d(da, q=0.95, dim="time", precision=0.01, max_anomaly=0.5)
 
     def test_still_warns_and_clamps_when_threshold_is_below_the_lower_bound(self):
@@ -132,6 +134,75 @@ class TestBoundsCheckBehaviourUnchanged:
         reference = np.percentile(da.compute().values, 95, axis=0)
         # The histogram method is approximate at the bin precision (0.01).
         np.testing.assert_allclose(result.values, reference, atol=0.05)
+
+
+class TestOutOfRangeThresholdRaises:
+    """D-138: a threshold inside the outermost bin is an error on both tails and both drivers.
+
+    Each raising case has a control on the same fixture with the default +/-5 range, so the
+    check is shown to be able to stay silent (N(0, 1) quantiles sit far inside the bins).
+    """
+
+    DIMS = {"time": "time", "x": "lon", "y": "lat"}
+
+    @staticmethod
+    def _seasonal_fixture():
+        da = _anomaly_fixture()
+        return da.assign_coords(dayofyear=da.time.dt.dayofyear)
+
+    @pytest.mark.parametrize("tail, q, match", [("upper", 0.95, "exceed expected range"), ("lower", 0.05, "below expected range")])
+    def test_1d_raises_on_a_saturated_tail(self, tail, q, match):
+        with pytest.raises(ConfigurationError, match=match):
+            _compute_histogram_quantile_1d(_anomaly_fixture(), q=q, dim="time", precision=0.01, max_anomaly=0.5, tail=tail)
+
+    @pytest.mark.parametrize("tail, q, match", [("upper", 0.95, "exceed expected range"), ("lower", 0.05, "below expected range")])
+    def test_2d_raises_on_a_saturated_tail(self, tail, q, match):
+        with pytest.raises(ConfigurationError, match=match):
+            _compute_histogram_quantile_2d(
+                self._seasonal_fixture(), q=q, window_steps=3, dimensions=self.DIMS, precision=0.01, max_anomaly=0.5, tail=tail
+            )
+
+    @pytest.mark.parametrize("tail, q", [("upper", 0.95), ("lower", 0.05)])
+    def test_1d_control_inside_the_range_does_not_raise(self, tail, q):
+        with warnings_as_errors():
+            result = _compute_histogram_quantile_1d(_anomaly_fixture(), q=q, dim="time", tail=tail)
+        assert np.isfinite(result.values).all()
+
+    @pytest.mark.parametrize("tail, q", [("upper", 0.95), ("lower", 0.05)])
+    def test_2d_control_inside_the_range_does_not_raise(self, tail, q):
+        # ~3 samples per day-of-year slot here, so the zero-guard UserWarning may fire; it is
+        # a separate, deliberately non-fatal check. Only the range check must stay silent.
+        result = _compute_histogram_quantile_2d(self._seasonal_fixture(), q=q, window_steps=3, dimensions=self.DIMS, tail=tail)
+        assert np.isfinite(result.values).all()
+
+
+class TestDerivedRangeOnlyWarns:
+    """D-138 add. 2: with the range DERIVED from the data, its edge is the data's own extreme and
+    nothing is clipped, so reaching the outermost bin is a small-sample warning, not an error.
+    The same field with the same range PINNED by the caller raises. One case per driver; the
+    fixtures were found by search (few samples per window put the interpolated quantile of the
+    cell holding the global max in the top bin)."""
+
+    DIMS = {"time": "time", "x": "lon", "y": "lat"}
+    CASES = {
+        "global": ({"n_time": 8, "seed": 1}, {"method": "global_percentile"}),
+        "seasonal": ({"n_time": 40, "seed": 1}, {"method": "seasonal_percentile", "window_days": 3, "window_spatial": 1}),
+    }
+
+    @pytest.mark.parametrize("case", ["global", "seasonal"])
+    def test_derived_range_warns_and_returns_a_threshold(self, case):
+        fixture, kwargs = self.CASES[case]
+        with pytest.warns(UserWarning, match="Nothing was clipped"):
+            ds = marEx.extremes.identify(_anomaly_fixture(**fixture), threshold_percentile=95, dimensions=self.DIMS, **kwargs)
+        assert np.isfinite(ds.thresholds.values).any()
+
+    @pytest.mark.parametrize("case", ["global", "seasonal"])
+    def test_the_same_range_pinned_raises(self, case):
+        fixture, kwargs = self.CASES[case]
+        da = _anomaly_fixture(**fixture)
+        scale = float(np.abs(da).max())
+        with pytest.raises(ConfigurationError, match="exceed expected range"):
+            marEx.extremes.identify(da, threshold_percentile=95, max_anomaly=scale, dimensions=self.DIMS, **kwargs)
 
 
 class warnings_as_errors:

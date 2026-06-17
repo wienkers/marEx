@@ -41,6 +41,7 @@ import xarray as xr
 
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
+from .encoding import write_zarr
 
 logger = get_logger(__name__)
 
@@ -407,12 +408,6 @@ class Materialiser:
             )
         path = self.staging_dir / f"{label}.zarr"
 
-        # Stale `chunks` encoding carried in from an upstream open_zarr conflicts with the
-        # dask chunking now being written. The pipeline clears this on its own output for
-        # exactly the same reason.
-        for var in list(ds.variables):
-            ds[var].encoding.pop("chunks", None)
-
         # Zarr requires uniform chunk sizes (a smaller FINAL chunk is allowed). Several
         # anomaly methods leave ragged chunking behind -- the fixed_baseline groupby
         # produces e.g. (30, 30, ..., 6, 24, 30, ...) along time -- and `to_zarr` rejects
@@ -429,8 +424,11 @@ class Materialiser:
         if uniform:
             ds = ds.chunk(uniform)
 
-        ds.to_zarr(path, mode="w", consolidated=True)
-        return xr.open_zarr(path, consolidated=True, chunks={})
+        # write_zarr drops the stale `chunks` and codec encoding carried in from an upstream
+        # open_zarr. Unconsolidated: the store is private and short-lived, and zarr-python 3
+        # warns on every consolidated format-3 write that consolidation is outside the spec.
+        write_zarr(ds, path, mode="w", consolidated=False)
+        return xr.open_zarr(path, consolidated=False, chunks={})
 
     @staticmethod
     def _restore(reopened: xr.DataArray, obj: xr.DataArray) -> xr.DataArray:

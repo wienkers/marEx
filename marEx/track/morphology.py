@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import label as scipy_label
 
+from ..core.encoding import write_zarr
 from ..exceptions import TrackingError
 from ..logging_config import get_logger
 
@@ -347,7 +348,7 @@ def refresh_dask_graph(data_bin: xr.DataArray, zarr_path: str) -> xr.DataArray:
     logger.debug("Refreshing Dask task graph...")
 
     data_bin.name = "temp"
-    data_bin.to_zarr(zarr_path, mode="w")
+    write_zarr(data_bin, zarr_path, mode="w")
     del data_bin
     gc.collect()
 

@@ -46,7 +46,7 @@ class TestSymmetryOracle:
     """thresholds(-x, upper, 100-p) == -thresholds(x, lower, p)."""
 
     @pytest.mark.parametrize("method", ["global_percentile", "seasonal_percentile"])
-    @pytest.mark.parametrize("percentile", [5, 10])
+    @pytest.mark.parametrize("percentile", [5, 10, 34])
     def test_thresholds_and_masks_mirror(self, method, percentile):
         da = _anomaly()
         kw = {"method": method, "dimensions": DIMENSIONS, "dask_chunks": {"time": 100}}
@@ -56,29 +56,53 @@ class TestSymmetryOracle:
         low = marEx.extremes.identify(da, threshold_percentile=percentile, tail="lower", **kw).compute()
         high = marEx.extremes.identify(-da, threshold_percentile=100 - percentile, tail="upper", **kw).compute()
 
-        # Bins are exactly symmetric about zero, so negating the data maps every
-        # sample onto the mirrored bin exactly and the two estimators see the same
-        # counts in mirrored order. What does NOT mirror exactly is the cumulative
-        # search's tie handling: `idx_upper = (cumsum <= q*N).sum()` is one-sided, so
-        # the mirrored problem resolves ties on the other side of a bin boundary.
-        #
-        # The two paths therefore get different tolerances, and the difference is the
-        # sample count per estimate, not the tail. The 1-D path pools the whole series
-        # into its bins, so the bin holding the quantile is well populated and the
-        # interpolation fraction is meaningful: measured, it mirrors to within one bin.
-        # The 2-D path pools only a per-day-of-year window (~60 samples here), so its
-        # bins hold 0 or 1 sample and the fraction degenerates -- measured, up to three
-        # bin widths, with a mean offset of about one. Tightening this would mean
-        # changing the 2-D path's centre-based interpolation, which is empirically
-        # justified for the upper tail and must not move.
-        atol = 0.01 if method == "global_percentile" else 0.04
-        np.testing.assert_allclose(low.thresholds.values, -high.thresholds.values, atol=atol)
+        if method == "seasonal_percentile":
+            # The 2-D path evaluates the lower tail as the upper-tail estimator on the
+            # reversed histogram at 1 - q, and closes its bins on the right, so a sample
+            # on an edge lands in the mirror bin. It is therefore the exact mirror: no
+            # tolerance. Run directly, the estimator sat one bin colder and under-flagged
+            # by 27 % against the exact path at 15 yr (D-136).
+            np.testing.assert_array_equal(low.thresholds.values, -high.thresholds.values)
+            np.testing.assert_array_equal(low.extreme_events.values, high.extreme_events.values)
+            return
+        # The 1-D path's cumulative search is one-sided (`cdf >= q`), so the mirrored
+        # problem resolves ties on the other side of a bin boundary. It pools the whole
+        # series, so the bin holding the quantile is well populated: measured, it
+        # mirrors to within one bin.
+        np.testing.assert_allclose(low.thresholds.values, -high.thresholds.values, atol=0.01)
         offset = np.nanmean(low.thresholds.values + high.thresholds.values)
         assert abs(offset) <= 0.01, f"systematic mirror offset {offset:.4f} exceeds one bin"
         # The masks are what a user acts on: they must agree except where a sample
         # sits between two thresholds that differ by less than a bin.
         disagree = (low.extreme_events.values != high.extreme_events.values).mean()
         assert disagree < 0.005, f"masks disagree on {disagree:.4%} of points"
+
+    @pytest.mark.parametrize("percentile", [5, 34, 50])
+    def test_seasonal_mirror_with_samples_on_bin_edges(self, percentile):
+        """Samples exactly ON a bin edge pin the right-closed digitize of the lower tail.
+
+        Normal data almost never lands on an edge (~0.2 %), so the oracle above passes
+        with ``right=False`` too. Here every sample sits on a float32 edge of explicit
+        bins, so a left-closed lower tail puts each one in the wrong mirror bin.
+        """
+        from marEx.extremes import histogram as H
+
+        edges = H._symmetric_bin_edges(0.01, 5.0, np.float32)
+        da = _anomaly()
+        on_edges = edges[np.clip(np.searchsorted(edges, da.values), 1, len(edges) - 2)]
+        da = da.copy(data=on_edges.astype(np.float32)).chunk(da.chunks)
+        kw = {
+            "method": "seasonal_percentile",
+            "dimensions": DIMENSIONS,
+            "dask_chunks": {"time": 100},
+            "window_days": 11,
+            "precision": 0.01,
+            "max_anomaly": 5.0,
+        }
+        low = marEx.extremes.identify(da, threshold_percentile=percentile, tail="lower", **kw).compute()
+        high = marEx.extremes.identify(-da, threshold_percentile=100 - percentile, tail="upper", **kw).compute()
+        np.testing.assert_array_equal(low.thresholds.values, -high.thresholds.values)
+        np.testing.assert_array_equal(low.extreme_events.values, high.extreme_events.values)
 
     def test_exact_percentile_mirrors_too(self):
         """The exact path shares none of the histogram machinery -- gate it separately."""

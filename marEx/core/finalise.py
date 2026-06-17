@@ -18,6 +18,7 @@ import xarray as xr
 from ..logging_config import get_logger, log_dask_info, log_memory_usage, log_timing
 from .attrs import make_netcdf_safe_attrs
 from .dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims
+from .encoding import clear_store_encoding
 
 # Get module logger
 logger = get_logger(__name__)
@@ -153,13 +154,10 @@ def finalise_dataset(
             chunk_dict[cycle_dim] = time_chunks
     ds = ds.chunk(chunk_dict)
 
-    # Clear encoding metadata that may conflict with actual Dask chunks
-    # (stale ``chunks`` encoding can otherwise trigger chunk-misalignment errors on save)
-    logger.debug("Clearing encoding metadata for Dask-backed variables")
-    for var in ds.data_vars:
-        if hasattr(ds[var].data, "chunks"):  # Only for Dask-backed variables
-            if hasattr(ds[var], "encoding") and "chunks" in ds[var].encoding:
-                del ds[var].encoding["chunks"]
+    # Clear the input store's encoding: stale ``chunks`` triggers chunk-misalignment errors
+    # on save, and a format-2 input's codecs cannot be written into a zarr-python 3 store.
+    logger.debug("Clearing input-store encoding metadata")
+    clear_store_encoding(ds)
 
     # Fix encoding issue with saving when calendar & units attribute is present
     if "calendar" in ds[coordinates["time"]].attrs:  # pragma: no cover
