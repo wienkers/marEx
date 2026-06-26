@@ -7,7 +7,7 @@ left spatially whole made one task the entire array -- and an extra dimension su
 as depth multiplied that directly.
 
 Two properties are pinned here, because a value-only test would have passed while
-the tiling was broken (CLAUDE.md records exactly that: 440 tests, the window
+the tiling was broken (the project notes record exactly that: 440 tests, the window
 harness and the coverage tripwires were all green while an all-to-all rechunk was
 live):
 

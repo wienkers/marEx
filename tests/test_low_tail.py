@@ -61,7 +61,7 @@ class TestSymmetryOracle:
             # reversed histogram at 1 - q, and closes its bins on the right, so a sample
             # on an edge lands in the mirror bin. It is therefore the exact mirror: no
             # tolerance. Run directly, the estimator sat one bin colder and under-flagged
-            # by 27 % against the exact path at 15 yr (D-136).
+            # by 27 % against the exact path at 15 yr.
             np.testing.assert_array_equal(low.thresholds.values, -high.thresholds.values)
             np.testing.assert_array_equal(low.extreme_events.values, high.extreme_events.values)
             return

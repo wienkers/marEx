@@ -1,6 +1,6 @@
 """Tests for the optional-dependency tracker (marEx._dependencies).
 
-Regression coverage for §7.1 of the Fable review: the probes were stripped to
+Regression coverage: the probes were once stripped to
 ``try: pass``, so every optional dependency was unconditionally reported as
 available. These tests pin that the probe reflects reality and, crucially, is
 *capable of returning False*.

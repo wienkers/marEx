@@ -1,4 +1,4 @@
-"""Auto-derived histogram bin geometry (D-152).
+"""Auto-derived histogram bin geometry.
 
 ``precision=0.01, max_anomaly=5.0`` were calibrated for SST anomalies in kelvin. On
 precipitation (mm/day, anomalies of tens) that range clips almost everything into the
@@ -53,7 +53,7 @@ class TestResolution:
         assert resolve_bin_spec(_field(), 0.02, 3.0, 1000) == (0.02, 3.0)
 
     def test_precision_alone_keeps_its_width_and_derives_the_range(self):
-        """D-152 retires the old fixed point (``0.01`` alone spanned +/-5.0): the range is the data's."""
+        """The derived range retires the old fixed point (``0.01`` alone spanned +/-5.0): the range is the data's."""
         da = _field()
         assert resolve_bin_spec(da, 0.01, None) == (0.01, pytest.approx(float(da.max())))
 
@@ -104,7 +104,7 @@ class TestScaling:
         assert ds.attrs["max_anomaly"] > 40
 
     def test_the_same_field_pinned_to_max_anomaly_5_raises(self):
-        """The failure the derivation removes, still reachable when pinned explicitly (D-138: an error)."""
+        """The failure the derivation removes, still reachable when pinned explicitly (an error)."""
         da = _field(scale=15.0, seed=3)
         with pytest.raises(ConfigurationError, match="exceed expected range"):
             marEx.extremes.identify(
@@ -120,7 +120,7 @@ class TestScaling:
         da = _field(scale=15.0, seed=3)
         ds = marEx.extremes.identify(da, method="global_percentile", dimensions=DIMENSIONS)
         # A Gaussian field: the per-cell estimate (3 x 1.645 sigma) lies past the data's own maximum,
-        # so the range is that maximum and the width gives 3000 bins over it (D-152).
+        # so the range is that maximum and the width gives 3000 bins over it.
         assert ds.attrs["max_anomaly"] == pytest.approx(float(da.max()), rel=1e-6)
         assert ds.attrs["precision"] == pytest.approx(2 * float(da.max()) / 3000, rel=1e-6)
 
@@ -151,7 +151,7 @@ def _outlier_field(n_time=1095, storm=400.0, seed=4):
 
 
 class TestDefaultGeometry:
-    """D-152: the range comes from the requested tail, the default width gives 3000 bins."""
+    """The range comes from the requested tail, the default width gives 3000 bins."""
 
     def test_the_upper_tail_range_is_the_data_maximum(self):
         da = _field(scale=3.0, offset=1.0)  # skewed in sign: max and -min differ
@@ -250,7 +250,7 @@ class TestRegrow:
 
     def test_a_seasonal_end_bin_crossing_below_the_inner_edge_is_regrown(self, monkeypatch):
         """The 2-D path interpolates between bin CENTRES, so a quantile crossing in the clipped end
-        bin can land below that bin's inner edge (falsifier finding 3). Here every window's end-bin
+        bin can land below that bin's inner edge. Here every window's end-bin
         mass is 2/30 of its samples, between (1-q) and 2(1-q) at q=0.95, so no threshold passes the
         inner edge: only a centre-based bound sees the saturation."""
         n_years = 30
@@ -300,7 +300,7 @@ class TestDeprecatedArguments:
         assert resolve_bin_spec(_field(), None, 40.0) == (pytest.approx(0.08), 40.0)
 
     def test_the_default_range_is_not_pinned(self):
-        """Only a caller-supplied range turns an out-of-range threshold into an error (D-138 r3)."""
+        """Only a caller-supplied range turns an out-of-range threshold into an error."""
         da = _field(scale=15.0, seed=3)
         ds = marEx.extremes.identify(da, method="global_percentile", threshold_percentile=95, dimensions=DIMENSIONS).compute()
         assert ds.attrs["max_anomaly"] > 40
@@ -416,7 +416,7 @@ class TestDerivationCost:
         monkeypatch.setattr(marEx.extremes.base.dask, "compute", counting_compute)
         resolve_bin_spec(_field(n_time=400), None, None, 1000)
         assert len(calls) == 1
-        # min, max and the std behind the coarse-bin warning (D-142), all in that one call.
+        # min, max and the std behind the coarse-bin warning, all in that one call.
         assert len(calls[0]) == 3
 
 

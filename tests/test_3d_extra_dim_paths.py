@@ -1,7 +1,7 @@
 """Extra-dimension paths that ``test_3d_preprocessing.py`` does not reach.
 
 That file pins the gridded, persist, approximate path: slice equivalence by value, and
-the day-of-year histogram tile as invariant in the depth length (D-127). Three paths
+the day-of-year histogram tile as invariant in the depth length. Three paths
 were left open, and each is pinned here the same two ways -- by VALUE against the
 per-level run, and by CHUNK STRUCTURE, because every tiling is value-identical and a
 value check alone passes while a tile quietly grows or shatters with depth:
@@ -12,13 +12,13 @@ value check alone passes while a tile quietly grows or shatters with depth:
   ``global_percentile`` path) and the exact seasonal path. It used to take the budget's
   root over every non-time dim, so a depth-1 field on a 720x1440 grid got 19x19 tiles
   (2888 tasks) where its 2-D slice got 85x85 (153), and a depth-3 field got the
-  multi-level (3, 19, 19) tile that D-127 found costly on the approximate path. It now
+  multi-level (3, 19, 19) tile that proved costly on the approximate path. It now
   tiles per level, like ``_histogram_tile_chunks``;
 - the other sites that sized an extra dim like a horizontal one: ``global_percentile``'s
   exact rechunk on a mesh, and the output layout (``finalise``, harmonic ``dat_stn`` /
   ``STD``), which held depth whole.
 
-Every site follows one rule, :func:`marEx.core.dimensions.extra_dim_chunks` (D-128): one
+Every site follows one rule, :func:`marEx.core.dimensions.extra_dim_chunks`: one
 level per chunk while the horizontal tile is smaller than the whole slice, and levels
 stacked with the leftover budget once a whole slice fits. The crops below fit in one
 tile at the shipped budgets, which is the STACKING regime; the per-level tests shrink the
@@ -277,7 +277,7 @@ def extra_dim_chunks(*args):
 
 
 class TestExtraDimChunks:
-    """The one rule every site uses (D-128)."""
+    """The one rule every site uses."""
 
     def test_a_2d_field_gets_nothing(self):
         assert extra_dim_chunks({"lat": 10, "lon": 20}, [], 200, 200, 10_000) == {}
@@ -319,7 +319,7 @@ class TestGlobalExactOnExtraDim:
 
 
 class TestOutputLayoutOnExtraDim:
-    """``finalise`` and harmonic ``dat_stn`` / ``STD``: depth follows the D-128 rule, not held whole."""
+    """``finalise`` and harmonic ``dat_stn`` / ``STD``: depth follows ``extra_dim_chunks``, not held whole."""
 
     @pytest.mark.parametrize("module", ["marEx.core.finalise"])
     def test_output_is_per_level_on_a_large_slice(self, gridded_3d, monkeypatch, module):

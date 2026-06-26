@@ -67,7 +67,7 @@ def rolling_climatology(
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
     >>> # Compute 15-year rolling climatology
-    >>> climatology = marEx.rolling_climatology(sst, window_years=15)
+    >>> climatology = marEx.anomaly.rolling_climatology(sst, window_years=15)
     >>> print(climatology.shape)
     (7305, 180, 360)  # Same as input
     >>>
@@ -78,7 +78,7 @@ def rolling_climatology(
     Shorter window for datasets with limited time span:
 
     >>> # For datasets with only 10 years, use shorter window
-    >>> short_climatology = marEx.rolling_climatology(
+    >>> short_climatology = marEx.anomaly.rolling_climatology(
     ...     sst, window_years=5
     ... )
     >>> # First 5 years will be NaN instead of 15
@@ -87,7 +87,7 @@ def rolling_climatology(
 
     >>> # ICON ocean model data
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
-    >>> icon_climatology = marEx.rolling_climatology(
+    >>> icon_climatology = marEx.anomaly.rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "x": "ncells"}
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"}
@@ -101,7 +101,7 @@ def rolling_climatology(
     >>> fixed_clim = sst.groupby(sst.time.dt.dayofyear).mean()
     >>>
     >>> # Rolling climatology (adaptive approach)
-    >>> rolling_clim = marEx.rolling_climatology(sst)
+    >>> rolling_clim = marEx.anomaly.rolling_climatology(sst)
     >>>
     >>> # Rolling climatology adapts to climate change
     >>> clim_2000 = rolling_clim.sel(time='2000').mean()
@@ -112,7 +112,7 @@ def rolling_climatology(
 
     >>> # Ensure appropriate chunking for memory efficiency
     >>> large_sst = sst.chunk({'time': 30, 'lat': 45, 'lon': 90})
-    >>> large_climatology = marEx.rolling_climatology(large_sst)
+    >>> large_climatology = marEx.anomaly.rolling_climatology(large_sst)
     >>> # Output maintains input chunking structure
     """
     # Infer and validate dimensions and coordinates
@@ -183,8 +183,8 @@ def rolling_climatology(
     # tests/test_climatology_tiling.py).
     #
     # The time axis is held whole in the same rechunk. Flox's grouped mean and the rolling mean
-    # before it accumulate block by block, so a time chunk boundary moves the result (D-091),
-    # and flox's task count scales with tiles x time chunks (D-090). `original_chunk_dict` was
+    # before it accumulate block by block, so a time chunk boundary moves the result,
+    # and flox's task count scales with tiles x time chunks. `original_chunk_dict` was
     # captured before this point, so the restore at the end returns the caller's own layout.
     spatial_tile = tile_spatial_chunks(
         da,
@@ -280,7 +280,7 @@ def smoothed_rolling_climatology(
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
     >>> # Compute smoothed rolling climatology
-    >>> smooth_clim = marEx.smoothed_rolling_climatology(
+    >>> smooth_clim = marEx.anomaly.smoothed_rolling_climatology(
     ...     sst,
     ...     window_years=15,
     ...     smooth_days=21
@@ -291,12 +291,12 @@ def smoothed_rolling_climatology(
     Comparing different smoothing windows:
 
     >>> # Short smoothing - more day-to-day variability
-    >>> clim_short = marEx.smoothed_rolling_climatology(
+    >>> clim_short = marEx.anomaly.smoothed_rolling_climatology(
     ...     sst, smooth_days=7
     ... )
     >>>
     >>> # Long smoothing - smoother seasonal cycle
-    >>> clim_long = marEx.smoothed_rolling_climatology(
+    >>> clim_long = marEx.anomaly.smoothed_rolling_climatology(
     ...     sst, smooth_days=61
     ... )
     >>>
@@ -308,7 +308,7 @@ def smoothed_rolling_climatology(
     Climatology for anomaly computation:
 
     >>> # Compute smoothed climatology then anomalies
-    >>> climatology = marEx.smoothed_rolling_climatology(sst)
+    >>> climatology = marEx.anomaly.smoothed_rolling_climatology(sst)
     >>> anomalies = sst - climatology
     >>>
     >>> # Check that anomalies have reasonable properties
@@ -319,7 +319,7 @@ def smoothed_rolling_climatology(
 
     >>> # ICON ocean data
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
-    >>> icon_smooth_clim = marEx.smoothed_rolling_climatology(
+    >>> icon_smooth_clim = marEx.anomaly.smoothed_rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
@@ -330,10 +330,10 @@ def smoothed_rolling_climatology(
     Effect of smoothing on seasonal cycle:
 
     >>> # Raw rolling climatology (no temporal smoothing)
-    >>> raw_clim = marEx.rolling_climatology(sst, window_years=15)
+    >>> raw_clim = marEx.anomaly.rolling_climatology(sst, window_years=15)
     >>>
     >>> # Smoothed rolling climatology
-    >>> smooth_clim = marEx.smoothed_rolling_climatology(
+    >>> smooth_clim = marEx.anomaly.smoothed_rolling_climatology(
     ...     sst, window_years=15, smooth_days=21
     ... )
     >>>
@@ -350,7 +350,7 @@ def smoothed_rolling_climatology(
     >>> # Efficient implementation smooths raw data first, then computes climatology
     >>> # This is more memory-efficient than smoothing the climatology
     >>> large_sst = sst.chunk({'time': 25, 'lat': 45, 'lon': 90})
-    >>> efficient_clim = marEx.smoothed_rolling_climatology(large_sst)
+    >>> efficient_clim = marEx.anomaly.smoothed_rolling_climatology(large_sst)
     """
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
@@ -379,7 +379,7 @@ def smoothed_rolling_climatology(
 
     # Smooth on a canonical layout: bottleneck's move_mean restarts its running sum at every dask
     # block boundary, so a chunked time axis shifts the smoothed field by a few float32 ULP, enough
-    # to move a 0.01 threshold bin (D-091). With time whole the only boundary left is the one xarray's
+    # to move a 0.01 threshold bin. With time whole the only boundary left is the one xarray's
     # centred padding adds near the end of the series, which depends on its length alone, so the result
     # does not depend on the caller's chunking, and a time chunk shorter than the window is no longer an error.
     caller_chunks = dict(zip(da.dims, da.chunks))

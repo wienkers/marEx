@@ -418,7 +418,7 @@ def partition_nn_grid(
     if not assigned.all():
         # Only the still-unassigned pixels need centroid distances. Passing the whole child
         # mask computed (n_child_pixels x n_parents) distances and then discarded all but
-        # the unassigned rows (review finding 5.21). Both this mask and the kernel enumerate
+        # the unassigned rows. Both this mask and the kernel enumerate
         # pixels with np.nonzero, so the returned rows line up with ~assigned by construction.
         unassigned_mask = np.zeros_like(child_mask)
         unassigned_mask[y_idx[~assigned], x_idx[~assigned]] = True
@@ -488,7 +488,7 @@ def partition_nn_unstructured(
     # Explicit per-parent BFS queues. A (parent, point) pair enters its queue at most
     # once, so one row of length n_points per parent is sufficient and the traversal
     # below costs O(visited) instead of re-scanning every parent's whole visited set at
-    # every level (review finding 5.16).
+    # every level.
     queue = np.empty((n_parents, n_points), dtype=np.int32)
     level_start = np.zeros(n_parents, dtype=np.int32)
     level_end = np.zeros(n_parents, dtype=np.int32)
@@ -620,8 +620,7 @@ def partition_nn_unstructured_optimised(
     # is never revisited), so a single queue of length n_points holds the entire
     # traversal. Expanding only the level just added replaces re-scanning the whole
     # field once per parent per direction per level, which was O(n_parents x
-    # max_distance x n_points) -- ~1e9 operations per merge event at ICON scale
-    # (review finding 5.16).
+    # max_distance x n_points) -- ~1e9 operations per merge event at ICON scale.
     queue = np.empty(n_points, dtype=np.int32)
     # Seed in parent-major order so that, within a level, a lower parent index still
     # claims a contested point first -- the tie-break the scan-based version had.

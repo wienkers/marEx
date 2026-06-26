@@ -87,7 +87,7 @@ class TestCheckpointFunctionality:
         assert "data_bin_preproc" in loaded_zarr, "Preprocessed data not in checkpoint"
 
     def test_checkpoint_save_stats_match_uncheckpointed_run(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
-        """checkpoint='save' returns the computed stats, not values re-read from the npz (§4.6).
+        """checkpoint='save' returns the computed stats, not values re-read from the npz.
 
         The save path wrote the stats npz and then immediately re-read it, so the returned
         tuple held 0-d numpy arrays instead of the scalars the uncheckpointed path returns.
@@ -988,7 +988,7 @@ class TestEnforceOverlapThreshold:
 
 
 class TestUnstructuredCellAreaRechunking:
-    """The rechunk from validate_unstructured_chunking must reach the tracker (§4.2).
+    """The rechunk from validate_unstructured_chunking must reach the tracker.
 
     setup_unstructured_grid rechunked cell_areas but never returned it, and the tracker
     persists self.cell_area before that call, so the rechunk was dropped on the floor.
@@ -1027,7 +1027,7 @@ class TestUnstructuredCellAreaRechunking:
         # representation-agnostic way so it holds under either.
         #
         # Honest note on coverage: because .compute() yields a contiguous array whatever the
-        # input chunking, this assertion can no longer *discriminate* the original §4.2 bug
+        # input chunking, this assertion can no longer *discriminate* the original bug
         # (a rechunk that never reached the tracker). It is not hiding that bug -- the bug
         # class is gone, since nothing downstream can now observe multi-chunk cell_area --
         # but this test is a contiguity guard, not a rechunk-plumbing guard, from here on.

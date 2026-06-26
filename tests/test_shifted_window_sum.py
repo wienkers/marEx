@@ -1,6 +1,6 @@
 """Tests for the integer-preserving centred window sum used by the hobday histogram.
 
-`_shifted_window_sum` (review finding 3.6) replaces `.rolling().sum()` on the bin-resolved
+`_shifted_window_sum` replaces `.rolling().sum()` on the bin-resolved
 histogram so the counts never leave their integer dtype. Two properties matter and only the
 first was ever checked:
 
@@ -10,7 +10,7 @@ first was ever checked:
    slices naively makes dask `unify_chunks` to the common refinement of every shifted
    boundary set, shredding the tiles into width-1 slivers and turning the smoothing into an
    all-to-all rechunk. That is invisible to any value-based test and it OOM-killed the
-   full-scale gridded hobday run (sbatch #3, job 26614089) while leaving every unit test,
+   full-scale gridded hobday run while leaving every unit test,
    golden and coverage tripwire green.
 """
 

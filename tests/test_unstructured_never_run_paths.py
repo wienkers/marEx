@@ -1,8 +1,8 @@
 """Two bugs that survived because their code paths had never been executed.
 
-Both were found by executing `examples/unstructured data/02_id_track_events.ipynb`, which had
+Both were found by executing `examples/unstructured/02_id_track_events.ipynb`, which had
 never been run: the notebook is committed with `execution_count: null` on every cell. Neither
-is a Phase-2 regression -- `partition_centroid_unstructured` is byte-identical at `c17c4ab`.
+is a recent regression.
 
 1. `partition_centroid_unstructured` allocated one label per *mesh* cell but the caller does
    `data_t[child_mask] = new_labels`, so the assignment raised ValueError whenever the child

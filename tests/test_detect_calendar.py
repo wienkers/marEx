@@ -1,14 +1,14 @@
 """
 Calendar and leap-year regression tests for the marEx detection pipeline.
 
-Covers the §2 findings of the code review:
-- §2.1  detrend_harmonic + standardise must not crash on a leap-free span.
-- §2.2  fixed_baseline must not NaN day-of-year 366 when the reference period has
-        no leap year.
-- §2.8  the 1D-harmonic path must be reachable with a partial dimensions dict.
-- §2.14 add_decimal_year must work for cftime / non-standard calendars.
+Covers these calendar regressions:
+- detrend_harmonic + standardise must not crash on a leap-free span.
+- fixed_baseline must not NaN day-of-year 366 when the reference period has
+  no leap year.
+- the 1D-harmonic path must be reachable with a partial dimensions dict.
+- add_decimal_year must work for cftime / non-standard calendars.
 
-Phase C adds the non-daily cadences per calendar. The cftime branch of
+The non-daily cadences are added per calendar. The cftime branch of
 ``add_decimal_year`` carries its own sub-day conditional, threaded to match the
 datetime64 branch exactly, and this is the only place it is exercised end to end --
 a calendar-dependent behaviour split would hide precisely here.
@@ -23,7 +23,7 @@ import marEx
 from marEx.core.time_axis import add_decimal_year
 
 
-# ── §2.14 cftime decimal year ────────────────────────────────────────────────
+# ── cftime decimal year ────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "calendar,days_in_year",
     [("noleap", 365), ("360_day", 360), ("all_leap", 366)],
@@ -75,7 +75,7 @@ def test_add_decimal_year_datetime64_unchanged():
     assert abs((dy[1] - dy[0]) - 1.0 / 366) < 1e-9
 
 
-# ── §2.1 leap-free standardise ─────────────────────────────────────────────
+# ── leap-free standardise ─────────────────────────────────────────────
 def _daily_series(start, end, seed=0):
     """A small dask-backed 1D daily time series over [start, end)."""
     time = pd.date_range(start, end, freq="D")
@@ -86,7 +86,7 @@ def _daily_series(start, end, seed=0):
 
 
 def test_harmonic_standardise_leap_free_span():
-    """§2.1: standardise on a span with no 29 Feb must not raise an align error."""
+    """Standardise on a span with no 29 Feb must not raise an align error."""
     # 2021-2023 contains no leap year.
     da = _daily_series("2021-01-01", "2024-01-01")
     result = marEx.preprocess_data(
@@ -102,9 +102,9 @@ def test_harmonic_standardise_leap_free_span():
     assert bool(np.isfinite(result.dat_anomaly).any().compute())
 
 
-# ── §2.8 1D harmonic reachable with partial dimensions ───────────────────────
+# ── 1D harmonic reachable with partial dimensions ───────────────────────
 def test_harmonic_1d_default_dimensions_reachable():
-    """§2.8: 1D input with dimensions={'time': 'time'} must not raise a bare KeyError."""
+    """1D input with dimensions={'time': 'time'} must not raise a bare KeyError."""
     da = _daily_series("2000-01-01", "2003-01-01")
     result = marEx.preprocess_data(
         da,
@@ -116,9 +116,9 @@ def test_harmonic_1d_default_dimensions_reachable():
     assert "dat_anomaly" in result
 
 
-# ── §2.2 fixed_baseline leap reference ───────────────────────────────────────
+# ── fixed_baseline leap reference ───────────────────────────────────────
 def test_fixed_baseline_day366_not_nan_with_nonleap_reference():
-    """§2.2: day-of-year 366 must not be all-NaN when the reference period is leap-free."""
+    """Day-of-year 366 must not be all-NaN when the reference period is leap-free."""
     # Full series spans 2019-2024 (includes leap years 2020 and 2024 → day 366 exists).
     da = _daily_series("2019-01-01", "2025-01-01")
     result = marEx.preprocess_data(
@@ -136,7 +136,7 @@ def test_fixed_baseline_day366_not_nan_with_nonleap_reference():
     assert np.isfinite(day366).any()  # and they are not all NaN
 
 
-# ── Phase C: non-daily cadences, per calendar ────────────────────────────────
+# ── Non-daily cadences, per calendar ───────────────────────────────────────
 @pytest.mark.parametrize(
     "calendar,days_in_year",
     [("noleap", 365), ("360_day", 360), ("all_leap", 366), ("standard", None)],

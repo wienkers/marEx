@@ -186,7 +186,7 @@ def cluster_rename_objects_and_props(
     # Get IDs from overlap pairs
     # Step 1: Find all IDs that actually exist in the data
     # (max_ID is taken from the sorted unique IDs computed below rather than from a
-    # separate .max() pass over the whole field -- review finding 5.8.)
+    # separate .max() pass over the whole field.)
 
     # Get unique IDs from overlap list
     if len(overlap_objects_list) > 0:
@@ -223,7 +223,7 @@ def cluster_rename_objects_and_props(
     # Step 3: Convert overlap pairs to dense indices
     if len(overlap_objects_list) > 0:
         # Map to dense indices with one binary search over the sorted ID array instead of
-        # a per-pair Python dict lookup across a multi-million-row list (finding 5.9).
+        # a per-pair Python dict lookup across a multi-million-row list.
         # all_valid_ids is the sorted union that includes every positive entry of this
         # array, so the only rows the dict version dropped were those holding a
         # non-positive (background) ID -- which is exactly what `keep` drops here.
@@ -401,11 +401,11 @@ def cluster_rename_objects_and_props(
 
     old_parent_IDs = xr.where(merge_events.parent_IDs > 0, merge_events.parent_IDs, 0)
     # Guard against ledger parent IDs beyond the final field's max_ID (rare stale entries):
-    # map out-of-range IDs to background (0) so .sel does not raise KeyError (§5.6).
+    # map out-of-range IDs to background (0) so .sel does not raise KeyError.
     old_parent_IDs = xr.where(old_parent_IDs <= max_ID, old_parent_IDs, 0)
     new_IDs_parents = ID_to_cluster_index_da.sel(ID=old_parent_IDs)
     # Real parents always map to an event ID >= 1; only padded / out-of-range slots yield 0.
-    # Map those to -1 so the sentinel matches the merge_ledger fill value (§5.20).
+    # Map those to -1 so the sentinel matches the merge_ledger fill value.
     new_IDs_parents = xr.where(new_IDs_parents > 0, new_IDs_parents, -1)
 
     # Replace the coordinate merge_ID in new_IDs_parents with merge_time.
@@ -437,7 +437,7 @@ def cluster_rename_objects_and_props(
         block the same single-chunk ``ID`` coordinate, so all blocks on a worker share one pandas
         index engine, and its first-use population is not thread-safe: a concurrent
         ``get_indexer`` can read ``is_unique == False`` off a unique index and raise
-        ``InvalidIndexError`` (D-079: one block of 73 failed on a full-year ICON run, not
+        ``InvalidIndexError`` (one block of 73 failed on a full-year ICON run, not
         reproducible from the data). Positions come from ``np.searchsorted`` on the block's own
         ``ID`` values, which are sorted and unique by construction (asserted by the caller).
         """
@@ -571,14 +571,13 @@ def cluster_rename_objects_and_props(
 
             # Group the slice's pixels by ID in one pass, instead of rebuilding a
             # full-slice `slice_data == event_id` mask for every present ID -- that was
-            # O(n_present x ny x nx) per timestep, ~1e8-1e9 operations at scale
-            # (review finding 5.10).
+            # O(n_present x ny x nx) per timestep, ~1e8-1e9 operations at scale.
             #
             # The segments are produced by a *stable* sort of the flat pixel positions, so
             # each ID's pixels arrive in exactly the row-major order np.nonzero gave, and
             # the reductions below run over identical arrays in an identical order. This
             # rewrite is therefore bit-identical, not merely equivalent in real arithmetic:
-            # it does not need the Phase-2 float tolerance.
+            # it needs no float tolerance.
             flat_ids = slice_data.ravel()
             flat_areas = cell_areas_slice.ravel()
             max_id_value = int(all_event_ids.max()) if n_ids > 0 else 0
@@ -813,8 +812,7 @@ def split_and_merge_objects(
 
     # No up-front overlap pass here: the serial loop below computes overlaps per timestep
     # from the consolidated field, and the full-run list is recomputed after the loop.
-    # The result of an up-front pass was persisted and then overwritten unread
-    # (review finding 5.7).
+    # The result of an up-front pass was persisted and then overwritten unread.
 
     # Initialise merge tracking lists
     merge_times = []  # When the merge occurred
@@ -988,7 +986,7 @@ def split_and_merge_objects(
                             # Prepare parent masks for structured grid. One broadcast
                             # comparison against the raw values instead of a Python loop of
                             # per-parent xarray comparisons, each of which built and
-                            # materialised its own full-slice DataArray (finding 5.15).
+                            # materialised its own full-slice DataArray.
                             prev_values = data_t_minus_1.values
                             parent_masks = prev_values[None, :, :] == np.asarray(parent_ids).reshape(-1, 1, 1)
 
@@ -1093,7 +1091,7 @@ def split_and_merge_objects(
 
         # End-of-chunk consolidation of the last timestep, against the timestep before it. A
         # one-timestep chunk takes that reference from the previous chunk: skipping it left the
-        # slice unconsolidated, so the result depended on the time chunking (D-087).
+        # slice unconsolidated, so the result depended on the time chunking.
         if chunk_data.sizes[timedim] >= 2 or updated_chunks:
 
             # Get last and second-to-last timesteps
@@ -1377,7 +1375,7 @@ def split_and_merge_objects_parallel(
         (object_id_field, object_props, overlap_objects_list, merge_events)
     """
     # -------------------------------------------------------------------------------------
-    # Structure (2026-09, Q8). Every time chunk is processed from its PRISTINE input labels
+    # Structure. Every time chunk is processed from its PRISTINE input labels
     # with the FINAL labels of the previous chunk's last timestep as its t-1 boundary. A chunk
     # is (re)run whenever that boundary, or the queue of objects handed across it, changed since
     # the chunk last ran; the loop ends when nothing changes. Inside a chunk the kernel is
@@ -1385,7 +1383,7 @@ def split_and_merge_objects_parallel(
     # equals the single-chunk result whatever the chunking. The previous scheme ran every chunk
     # from the iteration's UPDATED field and deferred cross-chunk cascades: a boundary object was
     # partitioned against stale parents, the re-queue dedup dropped it, and its sibling pieces
-    # were never repaired, so events depended on the time chunking (D-082).
+    # were never repaired, so events depended on the time chunking.
     # The accumulator is a zarr copy of the pristine field (``temp_field_path``); a chunk task
     # writes its own region and returns only small results, so no whole-field array is ever
     # held for the update. Records of a re-run chunk replace that chunk's earlier records.
@@ -1654,7 +1652,7 @@ def split_and_merge_objects_parallel(
             # Consolidate t against its final t-1 before t+1 reads it: the serial path's order
             # (it consolidates t-1 against t-2 at the top of step t). Without this a split keeps
             # one ID per piece, and a split that rejoins is re-partitioned and logged as a merge
-            # on every later day (D-087). A consolidated object is larger, so it can newly pass
+            # on every later day. A consolidated object is larger, so it can newly pass
             # the threshold against a child at t+1: queue those children for the parent check.
             grown = _consolidate_slice(data_m1, data_t, area, overlap_threshold)
             if grown:
@@ -1690,7 +1688,7 @@ def split_and_merge_objects_parallel(
     # Temp IDs are minted from above the range compaction writes into. Every timestep can mint at most
     # `id_stride` IDs, so the compacted range [global_id_counter, global_id_counter + n_minted) never reaches
     # `mint_base`, and a compaction task that dask retries after a worker restart cannot remap an ID it has
-    # already compacted (D-093). Compaction keeps sorted order, so the final IDs do not depend on the base.
+    # already compacted. Compaction keeps sorted order, so the final IDs do not depend on the base.
     mint_base = global_id_counter + n_time * id_stride
 
     initial_queue: List[List[int]] = [[] for _ in range(n_time)]
@@ -1704,7 +1702,7 @@ def split_and_merge_objects_parallel(
             ydim,
             xdim,
             # Only the queued IDs are looked up, so restrict the search instead of broadcasting
-            # a (time x buffer x max_objects) boolean over every possible ID (review finding 6.8).
+            # a (time x buffer x max_objects) boolean over every possible ID.
             all_objects=False,
         )
         for child in initial_children:

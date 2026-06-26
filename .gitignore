@@ -25,12 +25,14 @@ docs/generated/
 docs/tutorials/gridded/
 docs/tutorials/regional/
 docs/tutorials/unstructured/
+docs/tutorials/applications/
 .claude/
 NEXT.md
 DONE.md
 DECISIONS.md
 QUESTIONS.md
 LEDGER.md
+docs/runs/
 
 # Local working/review docs
 REPORT_*.md

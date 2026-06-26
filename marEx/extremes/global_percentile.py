@@ -65,7 +65,7 @@ def _identify_extremes_constant(
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
             # Each cell brings its whole series, so cap the tile at the element budget over
             # the series length: sized from n_cells alone, a task grew linearly with n_time
-            # (5700 cells x 262,980 hourly steps = 6 GB float32 on ICON R02B09, D-142). The
+            # (5700 cells x 262,980 hourly steps = 6 GB float32 on ICON R02B09). The
             # 100-cell floor still bounds the task count on very long series.
             n_time = max(1, int(da.sizes[dimensions["time"]]))
             rechunk_size = min(rechunk_size, max(min(n_cells, 100), TASK_ELEMENTS // n_time))
@@ -73,7 +73,7 @@ def _identify_extremes_constant(
         # Gridded: "auto" on every spatial dim, extra dims included -- dask bounds the bytes per
         # chunk, measured at 3.3e7 elements per task at depth 50 on 720x1440. On a mesh the
         # cells take `rechunk_size` and extra dims (depth, level) go one level per chunk until a
-        # whole mesh fits, then stack with the leftover (D-128): sizing depth like the cell axis
+        # whole mesh fits, then stack with the leftover: sizing depth like the cell axis
         # put up to `rechunk_size` levels in one task, 1.16e9 elements at depth 50 on 5e6 cells
         # vs 2.3e7 in 2-D. The exact quantile is a per-cell reduction over time, so how the
         # spatial axes are split cannot change the result, only the task layout.
@@ -120,7 +120,7 @@ def _identify_extremes_constant(
     # Ensure spatial dimensions are fully loaded for efficient comparison.
     # Rechunk only -- whether the threshold is materialised at all is the materialiser's
     # decision, not this function's. An unconditional persist here forced materialisation
-    # on callers who only wanted to stream the result to zarr (review finding 3.15).
+    # on callers who only wanted to stream the result to zarr.
     threshold = threshold.chunk(spatial_chunks(threshold, dimensions))
 
     # Create boolean mask for values exceeding threshold

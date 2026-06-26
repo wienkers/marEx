@@ -178,7 +178,7 @@ class TestExtraDimensionShape:
         """finalise makes the horizontal dims whole and chunks time as asked.
 
         Depth comes out whole here only because a 20x40 slice is far below the task
-        budget, so the D-128 rule stacks every level; on a large grid it is one level
+        budget, so ``extra_dim_chunks`` stacks every level; on a large grid it is one level
         per chunk (tests/test_3d_extra_dim_paths.py::TestOutputLayoutOnExtraDim).
         """
         result = _run(sst_3d, "fixed_baseline", "global_percentile")

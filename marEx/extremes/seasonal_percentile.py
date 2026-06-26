@@ -102,7 +102,7 @@ def _identify_extremes_seasonal(
     if N_above_threshold < 50:
         # Make warning
         # No advice to switch to method_percentile='exact': it cannot pool spatially, so on
-        # a grid it sees fewer samples than the default approximate path, not more (D-142).
+        # a grid it sees fewer samples than the default approximate path, not more.
         logger.warning(
             f"Not enough samples for accurate extreme detection: {N_above_threshold} < 50. "
             "Consider using a lower threshold_percentile, increasing your time-series size, "
@@ -114,7 +114,7 @@ def _identify_extremes_seasonal(
     # Add day-of-year coordinate (compute it to avoid chunked groupby issues).
     # No persist and no rechunk here: the rechunk restated the array's own chunks (a no-op)
     # and the persist duplicated the pipeline-level anomaly persist, pinning a second
-    # full-size copy -- ~38 GB at 0.25 deg / 25 yr (review finding 3.14).
+    # full-size copy -- ~38 GB at 0.25 deg / 25 yr.
     cycle = resolve_cycle(da, coordinates["time"], cycle)
     cycle_dim = cycle.index_name
     # `window_days` is a physical duration; convert it to whole timesteps. It must be
@@ -133,7 +133,7 @@ def _identify_extremes_seasonal(
         # spatially-unchunked pipeline anomaly as a single (time, y, x) task, which is a
         # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
         # for exactly this reason. Per-cell percentiles are independent of the tiling, so
-        # this changes task granularity only (review finding 3.10).
+        # this changes task granularity only.
         # Each cell yields one percentile per cycle slot (366 on daily data), so budget
         # the tile against that as well as against the time slab: a series shorter than
         # the cycle would otherwise get a tile whose output exceeds its own budget.
@@ -149,7 +149,7 @@ def _identify_extremes_seasonal(
 
             Built inside the task from the per-step cycle index, which is all the graph carries
             (n_time ints). The previous cycle.length x n_time boolean table was built in the
-            client and rode in the graph: 2 MB daily, ~2.3 GB at hourly x 30 yr (D-142). Sorted,
+            client and rode in the graph: 2 MB daily, ~2.3 GB at hourly x 30 yr. Sorted,
             these indices select exactly the elements, in exactly the order, the mask did.
             """
             order = np.argsort(cycle_vals, kind="stable")
@@ -226,7 +226,7 @@ def _identify_extremes_seasonal(
     # `spatial_chunks` spans the field and an unchunked cycle axis makes the threshold ONE
     # block of cycle.length x space: 1.5 GB at 0.25 deg. The comparison indexes that block
     # once per run of consecutive slots, and each of those tasks holds a copy of it, which
-    # killed the L1 full run (D-132). Size the cycle chunk to the shared element budget.
+    # killed a full-resolution global run. Size the cycle chunk to the shared element budget.
     spatial_block = int(np.prod(list(spatial_chunks.values()), dtype=np.int64))
     cycle_chunk = max(1, min(cycle.length, TASK_ELEMENTS // max(1, spatial_block)))
     align_chunks = {**spatial_chunks, cycle_dim: cycle_chunk}
@@ -242,7 +242,7 @@ def _identify_extremes_seasonal(
     # time. On an unstructured mesh `thresholds` is 366 x ncells x 4 B (21.8 GB at ICON
     # R02B09) -- space-scaled, so no amount of time-chunking shrinks it. In streaming mode
     # the histogram driver has already pinned it in cluster RAM for the bounds check
-    # (`pin_bounded`, D-125); staging it here writes it to disk so the pin is released and
+    # (`pin_bounded`); staging it here writes it to disk so the pin is released and
     # every downstream consumer reads the store.
     thresholds = materialiser.stage(thresholds, threshold_label)
     grouped = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))})

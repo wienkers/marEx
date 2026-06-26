@@ -1,7 +1,7 @@
-"""The detect stage must give the same answer however its input is chunked (D-091).
+"""The detect stage must give the same answer however its input is chunked.
 
 Every reduction along time -- the smoothing's running sum, flox's grouped means, the harmonic
-fit -- accumulates block by block, so before D-091 the floating-point result moved with the
+fit -- accumulates block by block, so the floating-point result used to move with the
 input's time chunk boundaries: ~1e-4 K, enough to move a threshold across a 0.01 bin and flip
 extreme events. The anomaly stage now reduces with the time axis whole inside bounded spatial
 tiles, so every layout must reproduce the time-whole reference bit for bit, for every anomaly

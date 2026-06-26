@@ -19,7 +19,7 @@ and under `compute_mode="streaming"` the run dies mid-merge with, respectively
     ValueError: Zarr requires uniform chunk sizes except for final chunk.
     ValueError: Final chunk of Zarr array must be the same size or smaller than the first.
 
-The production crash was the ragged-interior form: job 27272708 at n_time=951, time
+The production crash was the ragged-interior form: n_time=951, time
 chunk 25, T_fill=4, reporting ``ID_field ... ((25 x 37, 24, 2), ...)``. The fixtures below
 use the same shape at a length that runs in seconds. This is the tracker-side twin of the
 shifted-slice trap guarded by tests/test_shifted_window_sum.py: realign to the input's own
@@ -145,7 +145,7 @@ class TestFillTimeGapsRealignsTime:
         out = filled.rename("filled").to_dataset()
         # The fixture is a format-2 store: its codecs ride along in `.encoding` and zarr 3 refuses
         # them in a format-3 store. That is not what this test checks, so drop them as any caller
-        # writing an internal intermediate must; public outputs clear it themselves (D-139).
+        # writing an internal intermediate must; public outputs clear it themselves.
         clear_store_encoding(out)
         out.to_zarr(str(tmp_path / "filled.zarr"), mode="w")
 
@@ -158,7 +158,7 @@ class TestFillTimeGapsRealignsTime:
 
 
 class TestStreamingTrackerSurvivesTheTriggerLength:
-    """The end-to-end guard: the crash job 27272708 actually hit."""
+    """The end-to-end guard: the crash the production run actually hit."""
 
     def test_streaming_run_completes_at_the_trigger_length(self, extremes, tmp_path, dask_client):
         data_bin = _tile_to(extremes.extreme_events, TRIGGER_NT).chunk({"time": TRIGGER_CHUNK, "lat": -1, "lon": -1})

@@ -1,4 +1,4 @@
-"""The slab engine of the seasonal histogram path returns the dense engine's thresholds (D-143).
+"""The slab engine of the seasonal histogram path returns the dense engine's thresholds.
 
 ``_compute_histogram_quantile_2d`` builds the same integer (cycle x n_bins) counts per cell two
 ways: ``engine="dense"`` with flox over a whole spatial tile, ``engine="slab"`` (the default) one
@@ -77,7 +77,7 @@ def test_slab_matches_dense_other_cadences(freq, periods, tail, q):
 
 
 def test_slab_matches_dense_under_the_legacy_asymmetric_bins():
-    # The pre-Phase-D edges open at -inf (bin centre 0 substituted); upper tail only.
+    # The legacy edges open at -inf (bin centre 0 substituted); upper tail only.
     da, cycle = _field()
     edges = np.concatenate([[-np.inf], np.arange(-0.05, 5.0 + 0.05, 0.05, dtype=np.float32)], dtype=np.float32)
     common = {
@@ -284,7 +284,7 @@ def _int64_reference(da, cycle, q, count_dtype=np.int64):
 
 
 def test_slab_counts_past_uint16_match_an_int64_reference():
-    """D-146: a (cell, slot, bin) with more than 65535 samples. HEAD's uint16 flox count wrapped it."""
+    """A (cell, slot, bin) with more than 65535 samples. The old uint16 flox count wrapped it."""
     da, cycle = _crowded_slot_field()
     reference, max_count = _int64_reference(da, cycle, q=0.9)
     assert max_count > np.iinfo(np.uint16).max  # the premise: the wrap regime is reached
@@ -305,7 +305,7 @@ def test_dense_window_sum_past_uint16_matches_slab():
 
 @pytest.mark.parametrize("window_spatial", [1, 5])
 def test_slab_matches_dense_when_slots_are_fractional(window_spatial):
-    # flox's integer expected groups drop a fractional slot; the slab engine must drop it too (D-145 F2).
+    # flox's integer expected groups drop a fractional slot; the slab engine must drop it too.
     da, cycle = _field()
     slots = da[cycle.index_name].values.astype(np.float64)
     slots[::3] += 0.5

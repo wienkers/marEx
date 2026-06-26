@@ -1,5 +1,5 @@
 """
-The fixed baselines smooth their day-of-year climatology circularly (D-138).
+The fixed baselines smooth their day-of-year climatology circularly.
 
 Hobday et al. (2016) smooth the climatology with a moving average that wraps the year.
 These tests pin the wrap by SUPPORT (where a spike lands), not by a float tolerance,
@@ -126,7 +126,7 @@ class TestFixedBaselineAnomaly:
 
 
 class TestNaNPattern:
-    """D-138 add. 2: smoothing never changes WHICH slots are valid, only their values."""
+    """Smoothing never changes WHICH slots are valid, only their values."""
 
     def test_a_seasonal_nan_cell_keeps_exactly_its_valid_days(self):
         da = _daily_field()

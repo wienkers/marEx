@@ -32,7 +32,7 @@ METHODS = ("seasonal_percentile", "global_percentile")
 
 
 # How each within-year index reads in `preprocessing_steps`. "Day-of-year" is the
-# pre-Phase-C wording and must stay exactly that, because it is what every daily run
+# daily-only wording and must stay exactly that, because it is what every daily run
 # ever recorded and what `tests/test_stage_helpers.py` pins.
 _CADENCE_LABELS = {
     "month": "Monthly",
@@ -50,7 +50,7 @@ def _extreme_steps(
 ) -> List[str]:
     """Describe the extremes stage for ``ds.attrs["preprocessing_steps"]``.
 
-    ``index_name`` and ``tail`` default to the pre-Phase-C/D behaviour, so a daily
+    ``index_name`` and ``tail`` default to the historical behaviour, so a daily
     upper-tail run produces the identical string it always has -- character for
     character. Only a non-daily cadence or a lower tail changes the wording, and
     those runs previously described themselves wrongly ("Day-of-year thresholds" on a

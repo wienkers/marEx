@@ -11,6 +11,8 @@ The implementation is split across submodules:
 - :mod:`marEx.helper.cluster` — cluster management
   (:func:`start_local_cluster`, :func:`start_distributed_cluster`,
   :func:`get_cluster_info`)
+- :mod:`marEx.helper.resources` — wall time and memory per stage
+  (:class:`ResourceMonitor`)
 
 All public functions are re-exported here so that ``marEx.helper`` continues
 to behave exactly as the previous single-module implementation did.
@@ -18,10 +20,12 @@ to behave exactly as the previous single-module implementation did.
 
 from .cluster import get_cluster_info, start_distributed_cluster, start_local_cluster
 from .dask_config import configure_dask
+from .resources import ResourceMonitor
 
 __all__ = [
     "configure_dask",
     "start_local_cluster",
     "start_distributed_cluster",
     "get_cluster_info",
+    "ResourceMonitor",
 ]

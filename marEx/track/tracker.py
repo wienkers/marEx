@@ -193,17 +193,20 @@ class tracker:
     area_filter_absolute : int, optional
         The minimum area (in grid cells) for an object to be retained. Mutually exclusive with area_filter_quartile.
         Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
+        Applied after the morphological closing, so it cannot stop small specks from
+        bridging objects during the closing; see ``prefilter_min_cells`` for that.
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     compute_mode : {'persist', 'streaming'}, default='persist'
         Materialisation policy for whole-field intermediates during tracking.
 
         * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
-          whenever the run fits (measured peak ~57 GB at n_time=3804, 0.25 deg global).
+          whenever the run fits (in one measured gridded run, 0.25 deg global, n_time=3804: peak ~57 GB).
         * 'streaming': stages the ID field, the filled/filtered fields, the merge loop's
           output accumulator and the merge ledger to zarr under ``temp_dir`` instead of
           pinning them, so memory scales with cluster size rather than series length
-          (measured peak 19.1 GB on the same run, bytes pinned 337 -> 0.34 GB). Requires
+          (on the same run: peak 19.1 GB, bytes pinned 337 -> 0.34 GB; single measurements,
+          gridded tracker only). Requires
           ``temp_dir``. Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields,
           ~14 bytes per cell-timestep uncompressed (~55 GB uncompressed at that same
           n_time=3804 x 720 x 1440 run; less on disk, since the ID fields are mostly
@@ -225,10 +228,19 @@ class tracker:
           ``clear_staging`` runs that directory is gone, so an attrs-recorded path would
           be a dead reference baked into your output). An ``atexit`` hook cleans up on
           normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
-          wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
-          §3.1/§5.2 for the full contract and measurements.
+          wall-clock kill), so sweep ``temp_dir`` periodically.
+    prefilter_min_cells : int, optional
+        Keyword-only. Drop connected components smaller than this many cells from each
+        time slice *before* the morphological closing. On a fine grid, specks below the
+        scale of interest act as stepping stones under dilation and join objects that
+        would otherwise stay separate. ``area_filter_absolute`` runs after the closing and
+        cannot undo that. Connectivity is the tracker's own (8-connected with the
+        longitude seam joined on a global grid, edge neighbours on an unstructured mesh).
+        Default ``None`` disables it.
     T_fill : int, default=2
-        The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
+        The permissible temporal gap, in timesteps, between objects for tracking continuity to be maintained
+        (must be even). The temporal closing kernel spans ``T_fill + 1`` timesteps, so on daily data
+        the unit is days. ``0`` skips the temporal closing.
     allow_merging : bool, default=True
         Allow objects to split and merge across time.
         Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
@@ -329,7 +341,7 @@ class tracker:
     ...     extreme_events,
     ...     mask,
     ...     R_fill=12,               # Larger spatial gap filling
-    ...     T_fill=4,                # Fill up to 4-day temporal gaps
+    ...     T_fill=4,                # Fill temporal gaps of up to 4 timesteps
     ...     area_filter_quartile=0.25,  # More aggressive size filtering
     ...     allow_merging=True,      # Enable split/merge detection
     ...     overlap_threshold=0.3    # Lower threshold for object linking
@@ -338,8 +350,6 @@ class tracker:
     >>> events_advanced, merges_log = advanced_tracker.run(return_merges=True)
     >>> print(events_advanced.data_vars)
     Data variables:
-        event           (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
-        event_centroid  (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
         ID_field        (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
         global_ID       (time, ID)              int32           dask.array<chunksize=(25, 1247)>
         area            (time, ID)              float32         dask.array<chunksize=(25, 1247)>
@@ -476,6 +486,7 @@ class tracker:
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
         *,
         compute_mode: Literal["persist", "streaming"] = "persist",
+        prefilter_min_cells: Optional[int] = None,
     ) -> None:
         """Initialise the tracker with parameters and data."""
         # Both checks come FIRST, ahead of logging and every coordinate read. `mask` is
@@ -513,7 +524,8 @@ class tracker:
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
         logger.info(
             f"Parameters: R_fill={R_fill}, T_fill={T_fill}, "
-            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
+            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}, "
+            f"prefilter_min_cells={prefilter_min_cells}"
         )
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
@@ -552,7 +564,7 @@ class tracker:
         _validation.validate_rank(data_bin, unstructured_grid, self.timedim, self.xdim, self.ydim)
 
         # Validate coordinate presence before touching them, so a missing coordinate raises
-        # the descriptive error rather than a bare KeyError from the indexing below (§4.4).
+        # the descriptive error rather than a bare KeyError from the indexing below.
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
 
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
@@ -580,6 +592,16 @@ class tracker:
         self.mask = mask
         self.R_fill = int(R_fill)
         self.T_fill = T_fill
+        if prefilter_min_cells is not None and (
+            isinstance(prefilter_min_cells, bool)
+            or not isinstance(prefilter_min_cells, (int, np.integer))
+            or prefilter_min_cells < 1
+        ):
+            raise ConfigurationError(
+                f"prefilter_min_cells must be a positive integer or None, got {prefilter_min_cells!r}",
+                suggestions=["Pass e.g. prefilter_min_cells=23, or None to disable the pre-filter"],
+            )
+        self.prefilter_min_cells = None if prefilter_min_cells is None else int(prefilter_min_cells)
 
         # Resolve area filtering parameters
         (
@@ -591,7 +613,7 @@ class tracker:
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
         # Read the degree-unit coordinates from self.data_bin (the converted output of
-        # unify_coordinates); the input data_bin is no longer mutated in place (§1.3).
+        # unify_coordinates); the input data_bin is no longer mutated in place.
         self.lat = self.data_bin[self.ycoord].persist()
         self.lon = self.data_bin[self.xcoord].persist()
         if data_bin.chunks is None:
@@ -606,7 +628,7 @@ class tracker:
             # streaming region writer, the unstructured merge loop's accumulator), and zarr can
             # only encode chunks that are uniform except for a smaller last one. A ragged input
             # (open_mfdataset over uneven per-year files) is therefore re-tiled once, here. This
-            # does not change the result: tracking is invariant in the time chunking (D-077).
+            # does not change the result: tracking is invariant in the time chunking.
             width = int(max(time_chunks))
             logger.warning(
                 f"Input time chunks are not uniform ({_format_chunk_pattern(time_chunks)}); "
@@ -623,7 +645,7 @@ class tracker:
         # Resolve the scratch directory used for checkpointing and temporary zarr stores.
         # This must be available on BOTH grid branches: previously it was only set inside the
         # unstructured setup, so checkpoint='save'/'load' raised AttributeError on structured
-        # grids (§4.1). The path is kept stable and user-managed so that a later
+        # grids. The path is kept stable and user-managed so that a later
         # checkpoint='load' can find the files written by an earlier checkpoint='save' run.
         if self.checkpoint and not temp_dir:
             raise ConfigurationError(
@@ -754,7 +776,7 @@ class tracker:
             # Validation already done in _validate_inputs, but the spatial chunking of
             # neighbours/cell_areas still has to be enforced here: self.cell_area is
             # persisted below, before setup_unstructured_grid runs, so a rechunk applied
-            # any later would never reach it (§4.2).
+            # any later would never reach it.
             neighbours, cell_areas = _validation.validate_unstructured_chunking(neighbours, cell_areas, self.xdim)
         else:
             # Handle structured grids
@@ -1057,6 +1079,20 @@ class tracker:
         raw_area = self.compute_area(self.data_bin)
         logger.debug(f"Initial raw area: {raw_area}")
 
+        # Drop specks before the closing, so they cannot bridge separate objects. Lazy: it
+        # fuses into the hole-filling graph and is materialised with it.
+        if self.prefilter_min_cells is not None:
+            logger.info(f"Dropping components smaller than {self.prefilter_min_cells} cells before hole filling")
+            self.data_bin = _morphology.drop_small_components(
+                self.data_bin,
+                self.prefilter_min_cells,
+                self.unstructured_grid,
+                self.xdim,
+                self.ydim,
+                self.regional_mode,
+                getattr(self, "neighbours_int", None),
+            )
+
         # Fill small holes & gaps between objects
         logger.info(f"Filling spatial holes with radius R_fill={self.R_fill}")
         with log_timing(logger, "Spatial hole filling"):
@@ -1064,8 +1100,7 @@ class tracker:
             # rather than being deferred into the later "Small object filtering" step.
             # raw_area rides along in the same persist: it is only consumed much later, for
             # one scalar diagnostic, and by then self.data_bin has been released -- so on
-            # its own it forced a second full read of the entire raw input
-            # (review finding 4.3).
+            # its own it forced a second full read of the entire raw input.
             data_bin_filled, raw_area = self.materialiser.pin(self.fill_holes(self.data_bin), raw_area)
             if self.materialiser.is_streaming:
                 # pin is a no-op in streaming, which would leave raw_area lazy and force the
@@ -1150,7 +1185,7 @@ class tracker:
             )
             # The zarr store is already reloaded above (its contents have not changed since),
             # and object_stats holds the values just written -- re-reading the npz only
-            # replaced Python scalars with 0-d numpy arrays (§4.6).
+            # replaced Python scalars with 0-d numpy arrays.
 
         return data_bin_filtered, object_stats
 
@@ -1242,6 +1277,8 @@ class tracker:
         events_ds.attrs["R_fill"] = self.R_fill
         events_ds.attrs["T_fill"] = self.T_fill
         events_ds.attrs["area_filter_quartile"] = self.area_filter_quartile
+        if self.prefilter_min_cells is not None:
+            events_ds.attrs["prefilter_min_cells"] = self.prefilter_min_cells
         events_ds.attrs["area_threshold (cells)"] = area_threshold
         events_ds.attrs["accepted_area_fraction"] = accepted_area_fraction
         events_ds.attrs["preprocessed_area_fraction"] = preprocessed_area_fraction
@@ -1540,11 +1577,12 @@ class tracker:
         Returns
         -------
         overlap_objects_list_unique_filtered : (N x 3) numpy.ndarray
-            Array of object ID pairs that overlap across time, with overlap area
+            Array of object ID pairs that overlap across time, with overlap area.
             The object in the first column precedes the second column in time.
             The third column contains:
-                * For structured grid: number of overlapping pixels (int32)
-                * For unstructured grid: total overlapping area in m^2 (float32)
+
+            * For structured grid: number of overlapping pixels (int32)
+            * For unstructured grid: total overlapping area in m^2 (float32)
         """
         return _overlap.find_overlapping_objects(
             object_id_field,
@@ -1739,8 +1777,7 @@ class tracker:
 
         # Rechunk final output. The time dimension is deliberately left alone here: run()
         # rechunks the returned dataset to {time: 1} immediately afterwards, so setting it
-        # to timechunks first only layered a superseded rechunk over the graph
-        # (review finding 4.7).
+        # to timechunks first only layered a superseded rechunk over the graph.
         chunk_dict = {
             "ID": -1,
             "component": -1,

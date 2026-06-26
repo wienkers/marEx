@@ -1,10 +1,10 @@
 """Graph-structure guard for the default (`persist`) tracker path.
 
 Values are guarded by tests/test_track_golden.py. This file guards what values are
-blind to: the SHAPE of the dask graph. Phase 2 shipped an all-to-all rechunk
-regression while 440 value-based tests, the window harness and the coverage
-tripwires were all green; only the full-scale run caught it. Phase 4 changes the
-materialisation strategy, which is exactly the kind of change that perturbs graph
+blind to: the SHAPE of the dask graph. An all-to-all rechunk regression once shipped
+while 440 value-based tests, the window harness and the coverage
+tripwires were all green; only the full-scale run caught it. Changing the
+materialisation strategy is exactly the kind of change that perturbs graph
 shape without moving a single output value.
 
 The absolute numbers here are not meaningful in themselves -- they are a tripwire.
@@ -69,7 +69,7 @@ class TestTrackGraphStructure:
         """Record/compare the persist-mode graph shape of the returned dataset.
 
         A rise in n_rechunk is the specific failure this exists to catch: it is the
-        signature of chunk boundaries being shredded (the Phase 2 regression).
+        signature of chunk boundaries being shredded (the earlier regression).
         """
         events_ds = self._run()
         stats = _graph_stats(events_ds)

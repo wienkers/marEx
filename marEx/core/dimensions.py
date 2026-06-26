@@ -105,12 +105,12 @@ def extra_dim_chunks(
 
     One level per chunk while the horizontal tile is smaller than the whole
     horizontal slice, so each level of a large field gets exactly its 2-D slice's
-    tiling at any extra-dim length (D-127). Spreading the budget over depth as well
+    tiling at any extra-dim length. Spreading the budget over depth as well
     gave tiles spanning several levels and peaked at the node's memory cap on the
     slice_3d oracle.
 
     Once a whole horizontal slice fits, the leftover budget stacks levels, shortest
-    extra dim first (D-128). Without that, a small horizontal extent -- a mooring, a
+    extra dim first. Without that, a small horizontal extent -- a mooring, a
     station mesh, an ensemble ``member`` axis -- became one tiny task per level:
     5000 tasks of ~1.5e4 elements where 8 would do, and at the output 25-element
     chunks. A tile the ``window_spatial`` floor already pushed over budget stacks
@@ -134,7 +134,7 @@ def extra_dim_chunks(
         ``{dim: chunk}`` for every extra dim present; empty for a 2-D field.
     """
     present = [d for d in extra if d in sizes]
-    chunks = {d: 1 for d in present}
+    chunks = dict.fromkeys(present, 1)
     if not present or horizontal_tile_cells < horizontal_cells:
         return chunks
     remaining = int(budget_cells) // max(1, int(horizontal_tile_cells))
@@ -375,10 +375,10 @@ def canonical_time_chunks(
     Every reduction along time in the anomaly stage (a rolling mean, a flox
     group mean, a harmonic fit) accumulates block by block, so its floating-point
     result depends on where the time chunk boundaries fall: ~1e-4 K on SST, enough
-    to move a threshold across a 0.01 bin (D-091). Holding time whole makes the
+    to move a threshold across a 0.01 bin. Holding time whole makes the
     answer a property of the data alone. It also keeps the graph small: flox's
     task count scales with tiles x time chunks, and a 27-year daily input at
-    30-day chunks never finished building (D-090).
+    30-day chunks never finished building.
 
     The spatial side is capped with :func:`tile_spatial_chunks`, so one task's
     working set stays near :data:`TASK_ELEMENTS` whatever the caller passed in.

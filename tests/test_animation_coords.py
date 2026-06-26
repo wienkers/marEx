@@ -3,9 +3,9 @@ distributed stack where a dask-backed coordinate that does NOT vary with the ani
 dimension (so the identical coordinate task is shared by every per-frame ``dask.delayed`` call)
 gets submitted to the scheduler with an unresolvable dependency, cancelling every frame with
 ``FutureCancelledError: ... cancelled for reason: lost dependencies`` -- instantly, with no
-worker error, independent of array scale or chunking (D-120).
+worker error, independent of array scale or chunking.
 
-Isolated with a marEx-independent probe (jobs 27595891, 27595929): the trigger is the
+Isolated with a marEx-independent probe: the trigger is the
 ``.where()`` CONDITION being sourced from a coordinate -- an otherwise-identical condition
 sourced from a plain dask-backed data variable never fails, even on an array that still
 carries other, untouched dask coordinates. ``_animate`` cannot avoid the upstream bug, but it
@@ -14,9 +14,8 @@ before the frame loop. Persisting resolves the coordinate under its own key, ahe
 a frame's graph never has to re-traverse the fragile lineage back through the original
 ``.where()`` -- while, under a real distributed client, keeping it a small, by-reference dask
 array rather than a numpy literal that ``dask.delayed`` would embed in every one of the N
-per-frame task specs. That embedding is not hypothetical: a falsifier round caught an earlier
-``.compute()``-based version of this fix doing exactly that, reintroducing D-122's separate
-large-per-frame-graph crash at ICON scale.
+per-frame task specs. That embedding is not hypothetical: an earlier ``.compute()``-based version of this fix did
+exactly that, causing a separate large-per-frame-graph crash at ICON scale.
 """
 
 from pathlib import Path
@@ -65,9 +64,9 @@ class TestMaterialiseDaskCoords:
     def test_a_non_time_varying_dask_coord_is_persisted_not_computed(self, zarr_da):
         """Must stay a dask array (not become numpy): computing it eagerly turns it into a
         literal that dask.delayed EMBEDS in every per-frame task spec, which at ICON scale
-        reintroduces D-122's large-graph crash (falsifier-caught in an earlier attempt:
-        measured 0.01 MB -> 4.80 MB per frame at 300k cells). Persisting severs the graph
-        lineage back to the original `.where()` (what D-120's bug loses track of) while
+        causes a large-graph crash (measured in an earlier attempt: 0.01 MB -> 4.80 MB
+        per frame at 300k cells). Persisting severs the graph
+        lineage back to the original `.where()` (what the lost-dependencies bug loses track of) while
         keeping it a small, by-reference dask array."""
         assert hasattr(zarr_da.lat.data, "dask")
         assert not _is_persisted(zarr_da.lat.data)
@@ -104,7 +103,7 @@ class TestMaterialiseDaskCoords:
         """The regression this whole function exists to avoid a second time: a per-frame
         slice's pickled size must stay near the unfixed baseline, not scale with the
         coordinate's byte size (which is what `.compute()` did). Needs a coordinate large
-        enough for the difference to show above pickling overhead -- a falsifier round
+        enough for the difference to show above pickling overhead -- an earlier attempt
         measured 0.01 MB -> 4.80 MB at 300k cells; this uses the same scale.
 
         Needs `dask_client` (an ACTIVE distributed client): `dask.persist()` only keeps the
@@ -168,8 +167,8 @@ class TestMaterialiseDaskCoordsPreventsLostDependencies:
     def test_a_second_where_cut_array_needs_its_own_materialising(self, zarr_da, dask_client, tmp_path):
         """``_animate`` passes ``object_ids``/``centroids`` as SEPARATE arrays, each isel'd per
         frame into its own delayed task -- materialising the main field does not protect them
-        (falsifier finding: an unfixed object_ids field still crashed a run with a fixed main
-        field). Each array touched by the frame loop needs its own call.
+        (an unfixed object_ids field still crashed a run with a fixed main field). Each array
+        touched by the frame loop needs its own call.
 
         ``object_ids`` is built from an INDEPENDENT zarr store (own path, own values), not
         from ``zarr_da`` itself: persisting a dask array registers its result on the cluster
@@ -203,8 +202,8 @@ class TestMaterialiseDaskCoordsPreventsLostDependencies:
 class TestAnimateExecutesWithMaterialisedCoords:
     """Every test above exercises ``_materialise_dask_coords`` directly; none of them RUNS
     ``_animate`` itself, so the ``plotter.da`` -> ``da`` call-site rewiring, and the
-    ``centroids``/``object_ids`` wiring, were checked by reading and grep, not by execution
-    (flagged twice by falsifier review). This is the one test that actually calls
+    ``centroids``/``object_ids`` wiring, were checked by reading and grep, not by execution.
+    This is the one test that actually calls
     ``_animate``, with ffmpeg/make_frame/subprocess stubbed so it stays fast and
     deterministic while still building and computing the real per-frame dask graph -- the
     exact region where the object_ids wiring bug lived and was found only by an adversarial

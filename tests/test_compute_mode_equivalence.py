@@ -1,8 +1,8 @@
 """Cross-mode bit-identity: lazy and streaming must equal persist, byte for byte.
 
-This is the Phase-2 equivalence gate applied to the Phase-3 compute modes. Integer,
-boolean and label outputs are compared with no tolerance, and so are the floats: nothing
-in this phase reorders a reduction, so a float difference here is a bug, not rounding.
+This is the equivalence gate applied to the compute modes. Integer,
+boolean and label outputs are compared with no tolerance, and so are the floats: no
+compute mode reorders a reduction, so a float difference here is a bug, not rounding.
 
 The modes differ only in *where* an intermediate lives -- cluster RAM, nowhere, or a
 scratch zarr -- so any divergence points at a round-trip defect (a dtype demoted on write,

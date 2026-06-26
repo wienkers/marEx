@@ -1,4 +1,4 @@
-"""The exact path's guard: a (near-)constant anomaly is never extreme (D-147, ruling (a)).
+"""The exact path's guard: a (near-)constant anomaly is never extreme.
 
 A sea-ice cell's anomaly is constant (or nearly), so its exact percentile EQUALS that constant
 and the inclusive comparison flags every tie: at L1 the exact path flagged 9.8 % of all cell-days,

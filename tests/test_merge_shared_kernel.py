@@ -4,7 +4,7 @@ The unstructured merge loop executes ``process_chunk`` ONCE per dirty time chunk
 History. The loop used to derive eight arrays from a single ``apply_ufunc`` call; all eight were
 ``getitem``s on one shared blockwise task, so materialising a strict subset let the scheduler
 release that task and anchoring the remaining one re-ran the whole kernel (80 invocations where
-40 were expected in the instrumented ICON runs). That wiring is gone: design R (2026-09, D-084)
+40 were expected in the instrumented ICON runs). That wiring is gone: the merge loop
 runs one ``dask.delayed`` task per dirty chunk and writes each chunk's labels to a zarr region.
 
 The tests are in two layers:
@@ -65,8 +65,8 @@ def unstructured_merging_data(dask_client_unstructured):
     ``AssertionError: assert not self.tasks`` inside ``Scheduler.restart``. The teardown
     calls ``restart()`` BEFORE ``close()`` inside one ``try``, so that exception -- swallowed
     by design -- skips ``close()`` and leaves a client that never reaches ``closed``. What is
-    still not established is that this is what happened in the failing suite run
-    (job 27115003); the chain is observed link by link, not end to end. It does not need to
+    still not established is that this is what happened in the failing suite run;
+    the chain is observed link by link, not end to end. It does not need to
     be: requesting the client fixture pins the ordering, and holding no futures at all makes
     the question moot.
     """
@@ -235,7 +235,7 @@ class _CountingDask:
 class TestMergeLoopSharesKernel:
     """The real call site: every submitted chunk task executes exactly once.
 
-    The merge loop (design R, 2026-09, D-084) runs ``process_chunk`` as one ``dask.delayed``
+    The merge loop runs ``process_chunk`` as one ``dask.delayed``
     task per DIRTY time chunk, in two batches per iteration (even chunks, then odd chunks,
     so no chunk reads a boundary slice that its own batch writes). Iteration 1 runs every
     chunk; a later iteration runs only chunks whose predecessor's last slice or forwarded

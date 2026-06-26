@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
-abstract: "A high-performance Python framework for computing climatologies and anomalies, identifying extremes, and tracking them through time in exascale weather and climate datasets. The anomaly and climatology stage is usable on its own, and every stage applies equally to ocean, atmosphere, land surface, and biogeochemical variables on regular grids and unstructured meshes."
+abstract: "A Python framework to detect and track weather and climate extremes at scale, on regular grids and unstructured meshes. It has three stages, each usable on its own: climatologies and anomalies, percentile-based extreme identification, and event tracking through time with merging and splitting. It applies to ocean, atmosphere, land surface and biogeochemical variables on regular grids and unstructured meshes."
 authors:
   - family-names: "Wienkers"
     given-names: "Aaron"
@@ -30,8 +30,7 @@ keywords:
   - "distributed computing"
   - "dask"
   - "python"
-version: "3.1"
-date-released: "2025-08-22"
+version: "5.0.0"
 preferred-citation:
   type: software
   title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
@@ -42,8 +41,8 @@ preferred-citation:
       orcid: "https://orcid.org/0000-0002-8464-3139"
   doi: "10.5281/zenodo.16922881"
   url: "https://github.com/wienkers/marEx"
-  version: "3.1"
-  year: 2025
+  version: "5.0.0"
+  year: 2026
 funding:
   - agency: "European Commission"
     program: "Horizon Europe"

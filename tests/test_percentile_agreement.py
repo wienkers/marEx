@@ -1,12 +1,12 @@
 """How far the histogram (``approximate``) percentile may sit from the ``exact`` one.
 
 The two seasonal paths do NOT target the same order statistic, and that is documented
-rather than fixed (D-142). ``exact`` is ``np.nanpercentile``'s default linear rule
+rather than fixed. ``exact`` is ``np.nanpercentile``'s default linear rule
 (rank ``q * (n - 1)``). The 2-D histogram kernel returns, to within its bin-centre
 interpolation, the sample of rank ``floor(q * n) + 1`` (the lower tail is the mirrored
-upper estimator, D-136). That equals numpy's ``higher`` (upper) / ``lower`` (lower) only
+upper estimator). That equals numpy's ``higher`` (upper) / ``lower`` (lower) only
 while ``frac(q * n) <= q``, which always holds for the percentiles tested here. At
-p=90.9 with n=110 it does not, and the gap to ``higher`` is ~50 bins (D-142 add. 1).
+p=90.9 with n=110 it does not, and the gap to ``higher`` is ~50 bins.
 In a day-of-year window of a few hundred samples the tail samples sit several bins
 apart, so against the shipped ``exact`` the two can differ by tens of bins. Against
 the matching rank rule they must agree to 1.5 bins: half a bin from the centre
@@ -99,7 +99,7 @@ def test_seasonal_approximate_matches_the_rank_rule_for_whole_percentiles(percen
 def test_seasonal_gap_to_shipped_exact_is_a_rank_gap_not_precision(percentile, tail):
     """The documented gap is real: against numpy's linear rule the seasonal paths sit
     several bins apart on average, with the approximate threshold outward. If this
-    ever collapses to within a bin the convention changed and D-142's docs are stale."""
+    ever collapses to within a bin the convention changed and the documented gap is stale."""
     da = _anomaly()
     approx = _identify(da, "seasonal_percentile", "approximate", percentile, tail)
     exact = _identify(da, "seasonal_percentile", "exact", percentile, tail)
@@ -141,7 +141,7 @@ class _CaptureMarExLogs(logging.Handler):
 
 
 class TestCoarseDerivedBins:
-    """One outlier sets the derived range and so every bin (D-142): warn, never change the value."""
+    """One outlier sets the derived range and so every bin: warn, never change the value."""
 
     def _field(self, heavy):
         rng = np.random.default_rng(3)
@@ -153,7 +153,7 @@ class TestCoarseDerivedBins:
         with _CaptureMarExLogs() as captured:
             precision, max_anomaly = resolve_bin_spec(da, None, None, 1000)
         assert any("Derived histogram bins are coarse" in m for m in captured.messages), captured.messages
-        # The range is the upper tail's own extreme (D-152), not max|anomaly|.
+        # The range is the upper tail's own extreme, not max|anomaly|.
         observed = float(da.max())
         assert max_anomaly == pytest.approx(observed)
         assert precision == pytest.approx(2 * observed / 1000)

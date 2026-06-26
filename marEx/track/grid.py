@@ -208,7 +208,7 @@ def setup_unstructured_grid(
     neighbours = neighbours.drop_vars({ycoord, xcoord, "nv"}.intersection(set(neighbours.coords)))
 
     # Spatial chunking of neighbours/cell_areas is validated by the caller, which needs the
-    # rechunked cell_areas before this point (§4.2).
+    # rechunked cell_areas before this point.
 
     # Initialise dilation array for unstructured grid
     neighbours_int = neighbours.astype(np.int32) - 1  # Convert to 0-based indexing

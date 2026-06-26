@@ -76,7 +76,7 @@ def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord
     """Raise a descriptive error if any required coordinate is absent from ``data_bin``.
 
     Called before the tracker touches ``data_bin[ycoord]`` so that a missing coordinate
-    surfaces as this error rather than a bare ``KeyError`` (§4.4).
+    surfaces as this error rather than a bare ``KeyError``.
     """
     if timecoord not in data_bin.coords or xcoord not in data_bin.coords or ycoord not in data_bin.coords:
         raise create_data_validation_error(

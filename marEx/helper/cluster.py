@@ -72,10 +72,10 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
     >>> import marEx
     >>>
     >>> # Start local cluster
-    >>> client = marEx.start_local_cluster(n_workers=2)
+    >>> client = marEx.helper.start_local_cluster(n_workers=2)
     >>>
     >>> # Get connection information
-    >>> info = marEx.get_cluster_info(client)
+    >>> info = marEx.helper.get_cluster_info(client)
     Hostname: login01
     Forward Port: login01:8787
     Dashboard Link: localhost:8787/status
@@ -87,12 +87,12 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
     SSH tunneling for remote access:
 
     >>> # Start cluster on HPC system
-    >>> client = marEx.start_distributed_cluster(
+    >>> client = marEx.helper.start_distributed_cluster(
     ...     n_workers=8, workers_per_node=4, dashboard_address=8889
     ... )
     >>>
     >>> # Get tunneling information
-    >>> info = marEx.get_cluster_info(client)
+    >>> info = marEx.helper.get_cluster_info(client)
     Hostname: levante-login01
     Forward Port: levante-login01:8889
     Dashboard Link: localhost:8889/status
@@ -105,8 +105,8 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
 
     Monitoring cluster status:
 
-    >>> client = marEx.start_local_cluster(n_workers=4)
-    >>> info = marEx.get_cluster_info(client)
+    >>> client = marEx.helper.start_local_cluster(n_workers=4)
+    >>> info = marEx.helper.get_cluster_info(client)
     >>>
     >>> # Access cluster details
     >>> print(f"Dashboard URL: {client.dashboard_link}")
@@ -183,7 +183,7 @@ def start_local_cluster(
     >>> import marEx
     >>>
     >>> # Start simple local cluster
-    >>> client = marEx.start_local_cluster(n_workers=2, threads_per_worker=1)
+    >>> client = marEx.helper.start_local_cluster(n_workers=2, threads_per_worker=1)
     >>> print(client)
     <Client: 'tcp://127.0.0.1:xxxxx' processes=2 threads=2, memory=15.7 GB>
     >>>
@@ -196,7 +196,7 @@ def start_local_cluster(
     Optimised cluster for CPU-intensive work:
 
     >>> # Use one worker per physical core
-    >>> client = marEx.start_local_cluster(
+    >>> client = marEx.helper.start_local_cluster(
     ...     n_workers=8,           # Number of physical cores
     ...     threads_per_worker=1   # Avoid hyperthreading for compute
     ... )
@@ -210,7 +210,7 @@ def start_local_cluster(
     Memory-optimised cluster:
 
     >>> # Configure for large datasets
-    >>> client = marEx.start_local_cluster(
+    >>> client = marEx.helper.start_local_cluster(
     ...     n_workers=4,
     ...     threads_per_worker=2,
     ...     memory_limit='8GB',      # Limit memory per worker
@@ -220,7 +220,7 @@ def start_local_cluster(
     Integration with marEx preprocessing:
 
     >>> # Start cluster then process data
-    >>> client = marEx.start_local_cluster(n_workers=16)
+    >>> client = marEx.helper.start_local_cluster(n_workers=16)
     >>>
     >>> # Load and preprocess SST data
     >>> sst = xr.open_dataset('sst_data.nc').sst.chunk({'time': 30})
@@ -241,7 +241,7 @@ def start_local_cluster(
     Custom worker configuration:
 
     >>> # Advanced configuration for specific workloads
-    >>> client = marEx.start_local_cluster(
+    >>> client = marEx.helper.start_local_cluster(
     ...     n_workers=4,
     ...     threads_per_worker=2,
     ...     processes=True,         # Use separate processes (default)
@@ -375,7 +375,7 @@ def start_distributed_cluster(
     >>> import marEx
     >>>
     >>> # Start cluster with 16 workers on 4 nodes (4 workers per node)
-    >>> client = marEx.start_distributed_cluster(
+    >>> client = marEx.helper.start_distributed_cluster(
     ...     n_workers=16,
     ...     workers_per_node=4,
     ...     runtime=60,      # 1 hour
@@ -383,13 +383,13 @@ def start_distributed_cluster(
     ... )
     >>> print(f"Cluster: {client}")
     >>> # Access dashboard via SSH tunnel
-    >>> cluster_info = marEx.get_cluster_info(client)
+    >>> cluster_info = marEx.helper.get_cluster_info(client)
     >>> client.close()
 
     Processing large marEx workflow on HPC:
 
     >>> # Start cluster for full marEx pipeline
-    >>> client = marEx.start_distributed_cluster(
+    >>> client = marEx.helper.start_distributed_cluster(
     ...     n_workers=32,
     ...     workers_per_node=8,
     ...     runtime=60,  # 1 hour
@@ -398,7 +398,7 @@ def start_distributed_cluster(
     >>>
     >>> # Load very large SST dataset
     >>> import xarray as xr
-    >>> sst = xr.open_zarr('/work/data/large_sst.zarr').chunk({'time': 25})
+    >>> sst = xr.open_zarr('large_sst.zarr').chunk({'time': 25})
     >>>
     >>> # Preprocess with distributed computing
     >>> processed = marEx.preprocess_data(
@@ -417,13 +417,13 @@ def start_distributed_cluster(
     >>> events = tracker.run()
     >>>
     >>> # Save results
-    >>> events.to_zarr('/work/results/tracked_events.zarr')
+    >>> events.to_zarr('tracked_events.zarr')
     >>> client.close()
 
     Custom SLURM configuration:
 
     >>> # Advanced SLURM configuration
-    >>> client = marEx.start_distributed_cluster(
+    >>> client = marEx.helper.start_distributed_cluster(
     ...     n_workers=64,
     ...     workers_per_node=32,
     ...     runtime=20,           # 20 minutes
@@ -435,14 +435,14 @@ def start_distributed_cluster(
     Dashboard access and monitoring:
 
     >>> # Start cluster and set up monitoring
-    >>> client = marEx.start_distributed_cluster(
+    >>> client = marEx.helper.start_distributed_cluster(
     ...     n_workers=16,
     ...     workers_per_node=4,
     ...     dashboard_address=8890  # Custom dashboard port
     ... )
     >>>
     >>> # Get connection info for SSH tunneling
-    >>> info = marEx.get_cluster_info(client)
+    >>> info = marEx.helper.get_cluster_info(client)
     >>> print(f"SSH tunnel: ssh -L {info['port']}:localhost:{info['port']} {info['hostname']}")
     >>> print(f"Dashboard: {info['dashboard_link']}")
     >>>
@@ -455,12 +455,12 @@ def start_distributed_cluster(
     >>> # Optimise for different workload types
     >>>
     >>> # Memory-intensive: fewer workers per node
-    >>> memory_cluster = marEx.start_distributed_cluster(
+    >>> memory_cluster = marEx.helper.start_distributed_cluster(
     ...     n_workers=8, workers_per_node=2, node_memory=512
     ... )
     >>>
     >>> # CPU-intensive: more workers per node
-    >>> cpu_cluster = marEx.start_distributed_cluster(
+    >>> cpu_cluster = marEx.helper.start_distributed_cluster(
     ...     n_workers=64, workers_per_node=16, node_memory=256
     ... )
     """

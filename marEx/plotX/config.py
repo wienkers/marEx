@@ -48,9 +48,8 @@ class PlotConfig:
         quiet: Enable quiet logging
         projection: Cartopy projection for map plots
         framerate: Frames per second for animations (default 10)
-        ckdtree_res: Resolution (degrees) of the pre-computed ckdtree grid used
-            for unstructured interpolation, matching the ``res<value>.nc`` file
-            naming (default 0.3)
+        ckdtree_res: Resolution (degrees) of the pre-computed ckdtree grid used for unstructured interpolation,
+            matching the ``res<value>.nc`` file naming (default 0.3)
     """
 
     title: Optional[str] = None

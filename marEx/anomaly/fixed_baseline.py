@@ -74,7 +74,7 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     dims = clim.dims
     rows = clim.drop_vars(cycle_dim).coarsen({cycle_dim: steps_per_row}).construct({cycle_dim: ("_row", "_step")})
     padded = rows.pad({"_row": (window, window)}, mode="wrap")
-    # NaN-preserving (D-138 add. 2): average the finite rows in each window, then re-mask rows that
+    # NaN-preserving: average the finite rows in each window, then re-mask rows that
     # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
     # instead of losing half a window at each edge of its NaN season.
     with rolling_numerics():
@@ -209,7 +209,7 @@ def _compute_anomaly_fixed_baseline(
         # Spatial data - create 2D/3D mask.
         # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
         # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
-        # under global_extreme). Drop both.
+        # under global_percentile). Drop both.
         # Extra (non-horizontal) spatial dims such as depth are made whole alongside
         # the horizontal ones, so the mask keeps the field's full spatial shape.
         chunk_dict_mask = {dim: -1 for dim in mask_dims}

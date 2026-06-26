@@ -2,7 +2,7 @@
 
 The gridded merge/split loop (:func:`marEx.track.merge_split.split_and_merge_objects`)
 produces its output one time chunk at a time, as *concrete numpy*, from a Python loop.
-That fits neither verb of :class:`marEx.detect.compute_mode.Materialiser`: ``pin`` takes
+That fits neither verb of :class:`marEx.core.compute_mode.Materialiser`: ``pin`` takes
 bounded intermediates and ``stage`` takes a finished lazy graph. Hence a third verb.
 
 Why a plain region write is safe here

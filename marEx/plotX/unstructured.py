@@ -53,7 +53,7 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
     if fpath_tgrid not in _GRID_CACHE["triangulation"]:
         # Only load required variables. Open the file once to discover which variables to
         # drop: the previous form opened it a second time inside the comprehension and
-        # never closed that handle (review finding 8.10).
+        # never closed that handle.
         keep = {"vertex_of_cell", "clon", "clat"}
         with xr.open_dataset(fpath_tgrid) as probe:
             drop = [v for v in probe.variables if v not in keep]

@@ -5,7 +5,7 @@ Extremes (:mod:`marEx.extremes`)
 .. currentmodule:: marEx.extremes
 
 Percentile thresholding and binary extreme-event identification. Takes anomalies
--- from :mod:`marEx.anomaly` or from anywhere else -- and returns a boolean event
+(from :mod:`marEx.anomaly` or from anywhere else) and returns a boolean event
 field plus the thresholds that defined it.
 
 ``seasonal_percentile`` resolves its thresholds on a within-year cycle inferred from
@@ -20,7 +20,7 @@ threshold reaches it), which is what lets the defaults work on a variable that i
 SST anomaly in kelvin; ``precision`` alone sets the bin width.
 
 For method-selection guidance, worked examples, and the tail, bin-geometry and
-time-resolution tables, see :doc:`../guide/detection`.
+time-resolution tables, see :doc:`../guide/extremes`.
 
 .. autosummary::
    :nosignatures:
@@ -43,3 +43,12 @@ Full chain
 :func:`preprocess_data` runs both stages back to back.
 
 .. autofunction:: preprocess_data
+
+Staging cleanup
+===============
+
+With ``compute_mode="streaming"`` the returned dataset reads lazily from a staging
+directory on disk. Write your output first, then call :func:`clear_staging`. The path
+is on ``ds.encoding["marex_staging_dir"]``. See :doc:`../guide/performance`.
+
+.. autofunction:: clear_staging

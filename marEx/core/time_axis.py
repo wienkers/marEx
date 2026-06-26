@@ -311,7 +311,7 @@ def cadence_index_name(da: xr.DataArray, coord_name: str, cycle: Optional[Season
 
     An axis whose spacing is unmeasurable -- one step, or a non-positive median, which is
     what a DECREASING axis produces -- is reported as daily. That is what every
-    pre-Phase-C run recorded, and it is the conservative answer: :func:`infer_cycle`
+    daily-only run recorded, and it is the conservative answer: :func:`infer_cycle`
     rejects a non-positive median outright, so guessing a cycle from one would be worse
     than saying the thing the code has always said.
 

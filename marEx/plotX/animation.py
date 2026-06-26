@@ -176,19 +176,16 @@ def _materialise_dask_coords(da: xr.DataArray, time_dim: str) -> xr.DataArray:
     dependencies`` -- independent of array scale or chunking, and with no worker error to
     point at it. The trigger is the ``.where()`` CONDITION being sourced from a coordinate:
     an otherwise-identical ``.where()`` sourced from a plain dask-backed data variable
-    never fails, even when the array still carries other, untouched dask coordinates. See
-    D-120, D-123.
+    never fails, even when the array still carries other, untouched dask coordinates.
 
     Uses ``dask.persist``, NOT ``.compute()``: computing eagerly turns the coordinate into
     a plain numpy array, which ``dask.delayed`` then EMBEDS as a literal in every one of
     the N per-frame task specs -- at ICON scale (14.9M-cell lat/lon, ~119 MB each) that is
-    ~238 MB duplicated into every frame, which is exactly D-122's separate large-graph
-    crash (a falsifier review round caught a `.compute()`-based first attempt doing this;
-    measured 0.01 MB -> 4.80 MB per frame at 300k cells, and confirmed it silently undid
-    render_2013.py's own D-122 workaround). ``dask.persist`` keeps the coordinate a dask
+    ~238 MB duplicated into every frame, which crashes on graph size instead (a
+    `.compute()`-based version measured 0.01 MB -> 4.80 MB per frame at 300k cells). ``dask.persist`` keeps the coordinate a dask
     array -- now backed by an already-resolved remote Future rather than a lazy graph --
     so every frame task references it by key instead of re-embedding it: measured 0.008 MB
-    per frame, same order as the unfixed lazy case, while still fixing D-120 -- persisting
+    per frame, same order as the unfixed lazy case, while still fixing the lost dependencies -- persisting
     resolves the coordinate under its OWN key, ahead of time, so a frame's graph never has to
     re-traverse the fragile lineage back through the original ``.where()`` at all (observed:
     persisting one array's coordinate also fixed a SEPARATE, independently-built array that
@@ -202,7 +199,7 @@ def _materialise_dask_coords(da: xr.DataArray, time_dim: str) -> xr.DataArray:
     would (confirmed empirically). ``_animate`` always runs under one in practice -- that is
     the entire reason it batches frames through ``dask.delayed`` in the first place -- but a
     caller invoking ``_animate`` with only the default local/synchronous scheduler gets no
-    graph-size benefit from this function, only the D-120 fix (which is itself a
+    graph-size benefit from this function, only the lost-dependencies fix (which is itself a
     distributed-specific failure mode, so is unlikely to be hit that way either).
     """
     targets = {name: coord for name, coord in da.coords.items() if time_dim not in coord.dims and hasattr(coord.data, "dask")}
@@ -338,8 +335,8 @@ def _animate(
     # Use provided centroids or None if not provided. Materialised for the same reason as
     # `da` above: centroids/object_ids are separate DataArrays, each isel'd per frame into
     # its own delayed task, and are just as exposed to the "lost dependencies" bug if either
-    # carries a dask-backed, non-time-varying coordinate (falsifier finding, reproduced with
-    # a fixed `da` but an unfixed `object_ids`).
+    # carries a dask-backed, non-time-varying coordinate (reproduced with a fixed `da` but
+    # an unfixed `object_ids`).
     centroid_data = _materialise_dask_coords(centroids, time_dim) if centroids is not None else None
     object_ids_data = _materialise_dask_coords(object_ids, time_dim) if object_ids is not None else None
 

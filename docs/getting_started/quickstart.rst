@@ -2,115 +2,110 @@
 Quickstart
 ==========
 
-This guide gets you detecting, tracking, and visualising extreme events in a
-few minutes. For the full runnable versions, see the :doc:`../tutorials/index`.
+marEx runs in three stages: anomalies, extremes, tracking. Each can be used alone. The examples below build a small synthetic daily field (12 years on a 5-degree global grid, with a few warm blobs added) so everything runs in seconds. For real data see the :doc:`../tutorials/index`.
 
-Pre-process SST data
-====================
-
-*cf.* the gridded :doc:`Preprocess notebook <../tutorials/gridded/01_preprocess_extremes>`.
+Synthetic Data
+==============
 
 .. code-block:: python
 
+   import numpy as np
+   import pandas as pd
    import xarray as xr
+   from scipy.ndimage import gaussian_filter
+
    import marEx
 
-   # Load SST data & rechunk for optimal processing
-   file_name = 'path/to/sst/data'
-   sst = xr.open_dataset(file_name, chunks={'time': 500}).sst
+   rng = np.random.default_rng(0)
+   time = pd.date_range("2000-01-01", periods=12 * 366, freq="D")
+   time = time[time.dayofyear <= 365][: 12 * 365]   # drop day 366: too few samples for a threshold
+   lat = np.arange(-87.5, 90, 5.0)
+   lon = np.arange(2.5, 360, 5.0)
+   nt, ny, nx = len(time), len(lat), len(lon)
 
-   # Process data
-   extremes = marEx.preprocess_data(
-      sst,
-      method_anomaly='shifting_baseline',      # Anomalies from a rolling climatology using previous window_year years
-      method_extreme='seasonal_percentile',         # Local day-of-year specific thresholds with windowing
-      threshold_percentile=95,                 # 95th percentile threshold for extremes
-      window_years=15,                 # Rolling climatology window
-      smooth_days=21,                 #    and smoothing window for determining the anomalies
-      window_days=11,                   # Window size of compiled samples collected for the extremes detection
-   )
+   season = 2.0 * np.sin(2 * np.pi * (time.dayofyear.values - 80) / 365.25)
+   data = gaussian_filter(rng.standard_normal((nt, ny, nx)), sigma=(3, 2, 2))
+   data += season[:, None, None] + np.linspace(0, 0.5, nt)[:, None, None]
 
-   # Performance note: JAX acceleration automatically used if available
-   if marEx.has_dependency('jax'):
-      print("🚀 Using JAX-accelerated computations")
+   # Add three short-lived warm blobs, each drifting one cell a day
+   yy, xx = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+   for t0, y0, x0 in [(2000, 10, 20), (3100, 25, 50), (3900, 15, 35)]:
+       for k in range(3):
+           r2 = (yy - y0) ** 2 + (xx - (x0 + k)) ** 2
+           data[t0 + k] += 4.0 * np.exp(-r2 / 20.0)
 
-**Output variables:**
+   sst = xr.DataArray(
+       data, coords={"time": time, "lat": lat, "lon": lon}, dims=("time", "lat", "lon"), name="sst"
+   ).chunk({"time": 100})
 
-* ``dat_anomaly`` (time, lat, lon): Anomaly data
-* ``extreme_events`` (time, lat, lon): Binary field locating extreme events (1=event, 0=background)
-* ``thresholds`` (dayofyear, lat, lon): Extreme event thresholds used to determine extreme events
-* ``mask`` (lat, lon): Valid data mask
+Step 1: Anomalies Only
+======================
 
-Identify & Track Extreme Events
-=================================
-
-*cf.* the gridded :doc:`Tracking notebook <../tutorials/gridded/02_id_track_events>`.
+``marEx.anomaly.compute`` removes the seasonal cycle and trend, with no thresholding. Use it when you want a climatology or anomaly field and nothing else.
 
 .. code-block:: python
 
-   import xarray as xr
-   import marEx
+   anom = marEx.anomaly.compute(sst, method="shifting_baseline", window_years=5)
+   anom.dat_anomaly      # (time, lat, lon), float32
+   anom.mask             # (lat, lon), True where the first timestep is finite
 
-   # Load pre-processed data
-   file_name = 'path/to/binary/extreme/data'
-   chunk_size = {'time': 25, 'lat': -1, 'lon': -1}
-   extremes = xr.open_dataset(file_name, chunks=chunk_size)
+``shifting_baseline`` takes the climatology from the previous ``window_years`` years, so the first ``window_years`` of the series are dropped from the output.
 
-   # ID, track, & merge
-   tracker = marEx.tracker(
-      extremes.extreme_events,
-      extremes.mask,
-      area_filter_quartile=0.5,      # Remove the smallest 50% of the identified coherent extreme areas
-      R_fill=8,                      # Fill small holes with radius < 8 _cells_
-      T_fill=2,                      # Allow gaps of 2 days and still continue the event tracking with the same ID
-      allow_merging=True,            # Allow extreme events to split/merge. Keeps track of merge events & unique IDs.
-      overlap_threshold=0.5,         # Overlap threshold for merging events. If overlap < threshold, events keep independent IDs.
-      nn_partitioning=True,          # Use nearest-neighbor partitioning
-   )
-   tracked_events, merge_events = tracker.run(return_merges=True)
+Step 2: Extremes
+================
 
-**Output variables:**
-
-* ``ID_field`` (time, lat, lon): Field containing the IDs of tracked events (0=background)
-* ``global_ID`` (time, ID): Unique global ID of each object; ``global_ID.sel(ID=10)`` maps event ID 10 to its original ID at each time
-* ``area`` (time, ID): Area of each event as a function of time
-* ``centroid`` (component, time, ID): (x, y) centroid coordinates of each event as a function of time
-* ``presence`` (time): Presence (boolean) of each event at each time (anywhere in space)
-* ``time_start`` (ID): Start time of each event
-* ``time_end`` (ID): End time of each event
-* ``merge_ledger`` (time, ID, sibling_ID): Sibling IDs for merging events (matching ``ID_field``); ``-1`` indicates no merging event occurred
-
-* If ``return_merges=True``, the ``merge_events`` dataset will include:
-
-  * ``parent_IDs`` (merge_ID, parent_idx): Original parent IDs of each merging event
-  * ``child_IDs`` (merge_ID, child_idx): Original child IDs of each merging event
-  * ``overlap_areas`` (merge_ID, parent_idx): Area of overlap between parent and child objects in each merging event
-  * ``merge_time`` (merge_ID): Time of each merging event
-  * ``n_parents`` (merge_ID): Number of parent objects in each merging event
-  * ``n_children`` (merge_ID): Number of child objects in each merging event
-
-Visualise results
-=================
-
-*cf.* the gridded :doc:`Visualisation notebook <../tutorials/gridded/03_visualise_events>`.
+``marEx.preprocess_data`` chains the anomaly stage and the threshold stage. Here the 95th percentile of each day of year, pooled over an 11-day window, flags the extremes.
 
 .. code-block:: python
 
-   # Plot MHW frequency
-   fig, ax, im = (tracked_events.ID_field > 0).mean("time").plotX.single_plot(
-       marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96])
+   ds = marEx.preprocess_data(
+       sst,
+       method_anomaly="shifting_baseline",
+       method_extreme="seasonal_percentile",
+       threshold_percentile=95,
+       window_years=5,
+   )
+   ds.extreme_events     # (time, lat, lon), bool
+   ds.thresholds         # per-cell threshold for each day of year
+
+For cold spells or droughts, add ``tail="lower"`` (with ``threshold_percentile=5`` for the coldest 5 %). If you already have anomalies from elsewhere, ``marEx.extremes.identify`` runs the threshold stage alone.
+
+Step 3: Tracking and a Plot
+===========================
+
+The tracker needs a ``dask.distributed`` client, a boolean event field, and ``R_fill``, the radius in grid cells of the morphological closing.
+
+.. code-block:: python
+
+   # In a script, run everything from here under `if __name__ == "__main__":`,
+   # because the local cluster starts worker processes that re-import the script.
+   client = marEx.helper.start_local_cluster(n_workers=2, threads_per_worker=2, memory_limit="3GB")
+
+   events = marEx.tracker(
+       ds.extreme_events,
+       ds.mask,
+       R_fill=2,
+       area_filter_absolute=5,
+   ).run()
+
+   events.ID_field       # (time, lat, lon), int32; 0 is background
+   events.area           # (time, ID)
+   events.time_start     # (ID)
+
+   # The three planted blobs are the largest events (start dates 2005-06-25, 2008-06-29, 2010-09-08)
+   peak_area = events.area.max("time")
+   for ID, cells in peak_area.to_series().nlargest(3).items():
+       print(ID, str(events.time_start.sel(ID=ID).values)[:10], cells)
+
+   fig, ax, im = (events.ID_field > 0).mean("time").plotX.single_plot(
+       marEx.PlotConfig(var_units="Event frequency", cmap="hot_r", cperc=[0, 96])
    )
 
-   # Create an animated movie of tracked events
-   tracked_events.ID_field.plotX.animate(
-       marEx.PlotConfig(plot_IDs=True), plot_dir="./plots", file_name="mhw_animation"
-   )
+The tracker keeps the spatial dimensions whole and chunks in time. Pass ``return_merges=True`` to ``run`` to also get the merge and split ledger. Datasets too large for memory are handled with ``compute_mode="streaming"``, covered in the :doc:`../guide/performance` guide.
 
-That's it! You've detected, tracked, and visualised extreme events in your data.
-
-Next steps
+Next Steps
 ==========
 
-* Read the :doc:`../guide/index` for detailed workflows and method selection.
-* Explore the :doc:`../api/index` for all available functions.
-* Work through the :doc:`../tutorials/index` for complete notebooks.
+* :doc:`../guide/index` for how each stage works and how to choose methods.
+* :doc:`../tutorials/index` for full notebooks on gridded, regional and unstructured data.
+* :doc:`../whats_new` if you are upgrading from 4.x.

@@ -3,10 +3,10 @@
 ``split_and_merge_objects_parallel`` processes each time chunk from the iteration's input field and
 defers cascades that cross a chunk boundary. Before the 2026-09 repair a deferred boundary object was
 partitioned against stale parents and never repaired, so lineages that were only ever bridged for a
-few days fused into one event, and the result changed with the chunk width (Q8, D-082).
+few days fused into one event, and the result changed with the chunk width.
 
 The oracle is the serial (gridded) path. Since the kernel consolidates split pieces the way the
-serial path does (D-087), the single-chunk parallel run matches it on merge counts, events AND object
+serial path does, the single-chunk parallel run matches it on merge counts, events AND object
 IDs, and both paths are independent of the time chunking, including one-timestep chunks.
 """
 
@@ -101,7 +101,7 @@ def test_serial_path_is_the_oracle(reference, name, tmp_path):
 def test_serial_path_is_chunk_invariant(name, width, dask_client_unstructured, tmp_path):
     """(3, ..., 3, 1) and all-ones. The serial path skipped end-of-chunk consolidation for a
     one-timestep chunk; these three cases changed object IDs (S4 also merges, 20 vs 0) before
-    the fix (D-087)."""
+    the fix."""
     sc = _scenario(name)
     binary, _, _ = render(sc["nrow"], sc["ncol"], NT, sc["blobs"], sc["bridges"])
     (tmp_path / "one").mkdir()
@@ -123,7 +123,7 @@ def _run_dataset(binary_sq, nrow, ncol, time_chunks, temp_dir, **extra):
 
 
 def test_size_one_tail_chunk_with_merges(reference, tmp_path):
-    """(3, ..., 3, 1): the last chunk holds one timestep. Crashed before 2026-09 (D-077)."""
+    """(3, ..., 3, 1): the last chunk holds one timestep. Crashed before 2026-09."""
     sc, binary, lineage, bridge_day, (ref_events, _, ref_merges) = reference["S3"]
     assert NT % 3 == 1
     events, merges = _run_dataset(binary, sc["nrow"], sc["ncol"], 3, tmp_path)
@@ -150,7 +150,7 @@ def test_ragged_time_chunks_are_retiled(reference, tmp_path):
 def test_merge_ledger_is_written_positionally(reference, tmp_path):
     """The ledger holds, at (time, ID, sibling), that parent's own event ID (the pre-2026-09
     label-based write produced exactly this); it is written by position so a shared pandas
-    index engine can never race (D-079)."""
+    index engine can never race."""
     sc, binary, lineage, bridge_day, (ref_events, _, ref_merges) = reference["S2"]
     events, merges = _run_dataset(binary, sc["nrow"], sc["ncol"], 5, tmp_path)
     ledger = events.merge_ledger.transpose("time", "ID", "sibling_ID").values
@@ -169,7 +169,7 @@ def test_merge_ledger_is_written_positionally(reference, tmp_path):
 def test_compaction_survives_a_task_retry(reference, name, tmp_path, monkeypatch):
     """A worker restart makes dask re-run a compaction task whose first attempt already wrote its
     region. Minted IDs used to share a range with the compacted ones, so the retry remapped IDs a
-    second time and the run crashed or relabelled cells (D-093). Every region is compacted once up
+    second time and the run crashed or relabelled cells. Every region is compacted once up
     front, then the real compute runs over the already-compacted store."""
     import dask
 
