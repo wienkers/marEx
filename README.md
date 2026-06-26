@@ -13,23 +13,34 @@
 
 marEx is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
 
+📚 **[Full documentation on ReadTheDocs →](https://marex.readthedocs.io/)**
+
 ---
 
 ## Key Features
 
 - **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
-- **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
-- **📈 Advanced Event Tracking**: Handles coherent object splitting, merging, and evolution
-- **📊 Multiple Detection Methods**: Scientifically rigorous algorithms for robust extreme event identification
+- **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models (FESOM, ICON-O, MPAS-Ocean)
+- **📈 Advanced Event Tracking**: Overlap-thresholded merge/split handling with genealogical record — avoids the spurious "mega-events" of naive 3D connected-component methods
+- **📊 Multiple Detection Methods**: Four anomaly methods and a generalised Hobday extreme definition with spatial pooling
 - **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to supercomputer using up to 1024+ cores
 - **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
-
 
 ---
 
 https://github.com/user-attachments/assets/501537ff-5adb-4e13-ba08-6a333bac2a02
 
 ![marEx_front](https://github.com/user-attachments/assets/939fceee-8990-46fb-b3f8-30e803b6c802)
+
+---
+
+## Installation
+
+```bash
+pip install marEx[full,hpc]
+```
+
+For detailed instructions, including HPC environments and optional dependencies, see the **[Installation Guide](https://marex.readthedocs.io/en/latest/installation.html)**.
 
 ---
 
@@ -42,42 +53,28 @@ import marEx
 # Load sea surface temperature data
 sst = xr.open_dataset('sst_data.nc', chunks={'time': 30}).sst
 
-# Identify extreme events
+# 1. Detect extreme events
 extreme_events_ds = marEx.preprocess_data(
     sst,
     threshold_percentile=95,
     method_anomaly='shifting_baseline',
-    method_extreme='hobday_extreme'
+    method_extreme='hobday_extreme',
 )
 
-# Track events through time
+# 2. Track events through time
 events_ds = marEx.tracker(
     extreme_events_ds.extreme_events,
     extreme_events_ds.mask,
     R_fill=8,
     area_filter_absolute=100,
-    allow_merging=True
+    allow_merging=True,
 ).run()
 
-# Visualise results
+# 3. Visualise results
 fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(
     marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96])
 )
 ```
-
----
-
-## Installation
-
-```bash
-pip install marEx[full,hpc]
-```
-
-For detailed installation instructions, including HPC environments and optional dependencies, see the **[Installation Guide](https://marex.readthedocs.io/en/latest/installation.html)**.
-
----
-
-## Core Workflow
 
 marEx follows a three-stage pipeline:
 
@@ -93,94 +90,64 @@ Binary extreme map        Tracked objects          Maps, animations,
                             with unique IDs           & statistics
 ```
 
-**Learn more**: [Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html) | [User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)
+➡️ **[Five-minute Quickstart](https://marex.readthedocs.io/en/latest/getting_started/quickstart.html)** · **[Core Concepts](https://marex.readthedocs.io/en/latest/guide/concepts.html)**
 
 ---
 
 ## Documentation
 
-For detailed guides, tutorials, and API reference, visit the full documentation:
+The documentation is organised so you can find what you need quickly:
 
-### 📚 **[marEx Documentation on ReadTheDocs](https://marex.readthedocs.io/)**
+| Section | What's there |
+| --- | --- |
+| **[Getting Started](https://marex.readthedocs.io/en/latest/getting_started/index.html)** | Installation and a five-minute quickstart |
+| **[Tutorials](https://marex.readthedocs.io/en/latest/tutorials/index.html)** | End-to-end notebooks for gridded, regional, and unstructured data |
+| **[User Guide](https://marex.readthedocs.io/en/latest/guide/index.html)** | Concepts, method selection, parameter tuning, and performance |
+| **[API Reference](https://marex.readthedocs.io/en/latest/api/index.html)** | Every public function and class |
+| **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** | What sets marEx apart (with a tracking-comparison video) |
+| **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** | Common issues and solutions |
 
-**Quick Links:**
-- **[Quickstart Guide](https://marex.readthedocs.io/en/latest/quickstart.html)** - Get started in 5 minutes
-- **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** - Learn about the unique capabilities
-- **[Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html)** - Understanding marEx's design and workflow
-- **[User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)** - Comprehensive usage guide with method selection, parameter tuning, and performance optimisation
-- **[API Reference](https://marex.readthedocs.io/en/latest/api.html)** - Complete function documentation
-- **[Examples](https://marex.readthedocs.io/en/latest/examples.html)** - Jupyter notebooks for gridded, regional, and unstructured data
-- **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** - Common issues and solutions
+### Tutorials
 
----
+Complete, runnable workflows (preprocess → track → visualise) are rendered directly in the docs:
 
-## Examples
+- **[Gridded data](https://marex.readthedocs.io/en/latest/tutorials/gridded.html)** — regular lat/lon grids (satellite data, CMIP6 models)
+- **[Regional data](https://marex.readthedocs.io/en/latest/tutorials/regional.html)** — spatially bounded, higher-resolution domains
+- **[Unstructured data](https://marex.readthedocs.io/en/latest/tutorials/unstructured.html)** — irregular meshes (FESOM, ICON-O, MPAS-Ocean)
 
-Explore complete workflows in the [example notebooks](https://github.com/wienkers/marEx/tree/main/examples):
-
-- **Gridded Data**: Standard analysis for regular lat/lon grids (satellite data, CMIP6 models)
-- **Regional Data**: Regional analysis with boundary handling (EURO-CORDEX)
-- **Unstructured Data**: Analysis for irregular meshes (FESOM, ICON-O, MPAS-Ocean)
-
-Each example demonstrates the full pipeline from preprocessing to visualisation.
+The source notebooks live in the [`examples/`](https://github.com/wienkers/marEx/tree/main/examples) directory.
 
 ---
 
-## Key Capabilities
+## Capabilities at a Glance
 
-### Detection Methods
+**Detection** — see the **[Detection guide](https://marex.readthedocs.io/en/latest/guide/detection.html)**:
 
-marEx provides multiple scientifically rigorous methods for anomaly calculation and extreme identification:
+- Four anomaly methods: *shifting baseline* (rolling climatology, research standard), *detrend fixed baseline* (detrending + fixed climatology), *fixed baseline* (trend-inclusive), and *harmonic detrending* (fast screening)
+- Two extreme definitions: the *Hobday* day-of-year method with a spatial-window extension (Hobday et al. 2016), and a fast *global* threshold
+- Memory-efficient histogram-based approximate percentiles for terabyte-scale data
 
-**Anomaly Detection:**
-- **Shifting Baseline**: Rolling climatology (most accurate, research standard)
-- **Detrend Fixed Baseline**: Polynomial detrending + fixed climatology (preserves full time series)
-- **Fixed Baseline**: Simple daily climatology (trend-inclusive)
-- **Harmonic Detrending**: Fast polynomial + harmonic model (efficient screening)
+**Tracking** — see the **[Tracking guide](https://marex.readthedocs.io/en/latest/guide/tracking.html)**:
 
-**Extreme Identification:**
-- **Hobday Method**: Day-of-year specific thresholds with spatial window extension (literature standard, Hobday et al. 2016)
-- **Global Method**: Single threshold across time (fast, exploratory analysis)
+- Morphological gap-filling (`R_fill`) and temporal gap-filling (`T_fill`)
+- Overlap-thresholded merge/split handling with nearest-neighbour partitioning
+- Percentile or absolute area filtering; automatic spherical cell-area calculation
 
-**[→ Learn more about method selection](https://marex.readthedocs.io/en/latest/user_guide.html#method-selection-guide)**
+**Performance & scale** — see the **[Performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html)**:
 
-### Advanced Tracking
-
-- **Morphological Operations**: Fill spatial gaps and smooth event boundaries
-- **Temporal Gap Filling**: Maintain event continuity across short interruptions
-- **Merge/Split Handling**: Track event genealogy with improved nearest-neighbor partitioning
-- **Area Filtering**: Remove spurious small events with percentile or absolute thresholds
-
-**[→ Explore tracking algorithms](https://marex.readthedocs.io/en/latest/modules/track.html)**
-
-### Performance & Scalability
-
-- **Dask-First Architecture**: Parallel computation with automatic memory management
-- **JAX Acceleration**: Optional GPU/TPU support for 10-50× speedup
-- **HPC Integration**: SLURM cluster support for supercomputing environments
-- **Memory Optimisation**: Process datasets 100-1000× larger than available RAM
-
-**[→ Performance tuning guide](https://marex.readthedocs.io/en/latest/user_guide.html#performance-optimisation)**
+- Dask-first architecture for datasets 100–1000× larger than memory
+- Optional JAX acceleration (10–50× speedup) with graceful NumPy/Numba fallback
+- SLURM/HPC cluster integration via `marEx.helper`
 
 ---
 
 ## Getting Help
 
-### Support Channels
+- **[Documentation](https://marex.readthedocs.io/)** — guides, tutorials, and API reference
+- **[GitHub Issues](https://github.com/wienkers/marEx/issues)** — bug reports and feature requests
+- **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)** — questions, ideas, and community support
 
-- **[Documentation](https://marex.readthedocs.io/)** - Detailed guides and API reference
-- **[GitHub Issues](https://github.com/wienkers/marEx/issues)** - Bug reports and feature requests
-- **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)** - Questions, ideas, and community support
-- **[Example Notebooks](https://github.com/wienkers/marEx/tree/main/examples)** - Complete workflow demonstrations
-
-### Reporting Issues
-
-When reporting issues, please include:
-- marEx version (`marEx.__version__`)
-- Python version and operating system
-- Dependency status (`marEx.print_dependency_status()`)
-- Minimal reproducible example
-- Full error traceback
+When reporting issues, please include: marEx version (`marEx.__version__`), Python version and OS, dependency status (`marEx.print_dependency_status()`), a minimal reproducible example, and the full error traceback.
 
 ---
 

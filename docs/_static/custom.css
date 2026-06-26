@@ -1,0 +1,31 @@
+/* marEx documentation — small tweaks on top of pydata-sphinx-theme */
+
+/* Give rendered notebook cells a little breathing room */
+.nbinput,
+.nboutput {
+    margin-bottom: 0.6rem;
+}
+
+/* Constrain very large notebook output images to the content width */
+.nboutput img,
+.nbinput img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* Tidy notebook prompts in the pydata theme */
+.nbinput .prompt,
+.nboutput .prompt {
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
+/* Slightly tighter sphinx-design cards on the landing page */
+.bd-content .sd-card {
+    border-radius: 0.5rem;
+}
+
+/* Make admonition titles a touch more compact */
+.admonition > .admonition-title {
+    font-weight: 600;
+}

@@ -1,52 +1,44 @@
 # Read the Docs configuration file for marEx
 # See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
 
-# Required
 version: 2
 
-# Set the OS, Python version and tools
 build:
   os: ubuntu-22.04
   tools:
     python: "3.11"
+  # pandoc is required by nbsphinx to render the example notebooks
+  apt_packages:
+    - pandoc
   jobs:
-    # Pre-install requirements to handle problematic packages
     pre_install:
       - pip install --upgrade pip setuptools wheel
-      - pip install numpy scipy  # Install these first to avoid build issues
 
-# Build documentation in the docs/ directory with Sphinx
+# Build the HTML documentation with Sphinx
 sphinx:
   configuration: docs/conf.py
   builder: html
   fail_on_warning: false
 
-# VCS submodules are automatically detected by Read the Docs
-
-# Set the Python environment and dependencies
+# Install marEx (with full optional deps) plus the doc-build toolchain
 python:
   install:
     - method: pip
       path: .
       extra_requirements:
-        - full  # Install with full optional dependencies
+        - full
     - requirements: docs/requirements-docs.txt
 
-# Configure search functionality
+# Configure search ranking
 search:
   ranking:
     api/: -1
+    _autosummary/: -2
     generated/: -2
   ignore:
-    - "*.pdf"
     - "_build/*"
     - "_static/*"
     - "_templates/*"
 
-# Formats to build (HTML is default, can add PDF/EPUB)
-formats:
-  - pdf
-  - epub
-
-# Environment variables are automatically set by Read the Docs
-# READTHEDOCS=True is automatically available during builds
+# HTML only: PDF/EPUB LaTeX builds are fragile with image-heavy notebooks.
+formats: []
