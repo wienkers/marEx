@@ -1133,18 +1133,27 @@ def split_and_merge_objects(
         if chunk_idx % 10 == 0:
             logger.info(f"Processing splitting and merging in chunk {chunk_idx} of {len(object_id_field_unique.chunks[0])}")
 
-            # Periodically flush finished chunks to manage memory. The LAST chunk is
-            # always retained: the next chunk reads its final two timesteps as t-1/t-2
-            # (see the invariant in region_writer.py). Do not flush it.
-            if len(updated_chunks) > 1:
-                for start, end, processed_chunk_data in updated_chunks[:-1]:
-                    if writer is not None:
-                        writer.write(start, end, processed_chunk_data)
-                    else:
-                        object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
-                updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
-                if writer is None:
-                    object_id_field_unique = object_id_field_unique.persist()
+        # Flush finished chunks. The LAST chunk is always retained: the next chunk reads its
+        # final two timesteps as t-1/t-2 (see the invariant in region_writer.py).
+        # Streaming writes every finished chunk at once, so the driver holds at most two.
+        # Persist batches the flush: each flush is a setitem + persist of the whole field,
+        # whose cost grows with the number of blocks, and the scheduler keeps a copy of
+        # every chunk it was handed, so flushing per chunk costs more than it frees.
+        if len(updated_chunks) > 1 and (writer is not None or chunk_idx % 10 == 0):
+            for start, end, processed_chunk_data in updated_chunks[:-1]:
+                if writer is not None:
+                    writer.write(start, end, processed_chunk_data)
+                else:
+                    object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+            updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
+            if writer is None:
+                object_id_field_unique = object_id_field_unique.persist()
+
+        # Release every local name that can still view an older chunk's buffer, so the next
+        # load is joined only by its predecessor in updated_chunks. prev_values in particular
+        # is only rebound when a merge is partitioned, so it can pin a chunk from long ago.
+        chunk_data = data_t = data_t_minus_1 = data_t_minus_2 = last_chunk_data = prev_values = None
+        last_t_data = second_last_t_data = consolidated_last = processed_chunk_data = None
 
     # Apply final chunk updates
     for start, end, processed_chunk_data in updated_chunks:
@@ -1152,6 +1161,7 @@ def split_and_merge_objects(
             writer.write(start, end, processed_chunk_data)
         else:
             object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+    updated_chunks = processed_chunk_data = None
     if writer is not None:
         object_id_field_unique = writer.finalise()
     else:

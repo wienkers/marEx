@@ -11,6 +11,7 @@ Targets the cases the gridded golden fixture does *not* exercise:
 
 from pathlib import Path
 
+import dask.array
 import numpy as np
 import xarray as xr
 
@@ -340,33 +341,59 @@ def test_output_budget_does_not_change_quantile_values():
     np.testing.assert_array_equal(tiled.values, reference.values)
 
 
+def _tile_cells(tiler, ntime, ncells=10_000):
+    """Cells per tile the production tiler gives a lazy (ntime x ncells) mesh."""
+    da = xr.DataArray(dask.array.zeros((ntime, ncells), chunks=(ntime, 1_000), dtype=np.float32), dims=("time", "ncells"))
+    chunks = tiler(da, {"time": "time", "x": "ncells"})
+    assert chunks["time"] == -1
+    return chunks["ncells"]
+
+
 def test_2d_tile_budget_is_constant_in_series_length():
     """The 2-D path holds time whole, so its tile must also be budgeted against ntime.
 
     Sizing only on the ``366 x n_bins`` output leaves the slab each task READS growing
     linearly with the length of the series -- a per-task working set that scales with input
     size. Budgeting on ``max(ntime, 366 * n_bins)`` makes it constant in both directions.
+    Asserted on the production dense tiler, not on a copy of its formula.
     """
     n_bins = 502
     out_per_cell = 366 * n_bins
+    budget = H._HISTOGRAM_TASK_ELEMENTS
 
     def cells(ntime):
-        return max(1, H._HISTOGRAM_TASK_ELEMENTS // max(ntime, out_per_cell))
+        return _tile_cells(lambda da, dims: H._histogram_tile_chunks(da, dims, n_bins, None, 366), ntime)
 
     # Realistic series: the output term dominates, so tiling is unchanged.
     assert cells(1_825) == cells(5_475) == cells(20_000)
-    assert cells(5_475) == H._HISTOGRAM_TASK_ELEMENTS // out_per_cell
+    assert out_per_cell * cells(5_475) <= budget < out_per_cell * (cells(5_475) + 1)
 
     # Absurdly long series: the tile shrinks so the read slab stays inside the budget.
     huge = out_per_cell * 4
     assert cells(huge) < cells(5_475)
-    assert huge * cells(huge) <= H._HISTOGRAM_TASK_ELEMENTS
+    assert huge * cells(huge) <= budget
 
     # The bound holds across the whole range: neither side ever exceeds the budget.
     for ntime in (10, 366, 5_475, 100_000, out_per_cell, out_per_cell * 10):
         c = cells(ntime)
-        assert ntime * c <= H._HISTOGRAM_TASK_ELEMENTS, f"read slab over budget at ntime={ntime}"
-        assert out_per_cell * c <= H._HISTOGRAM_TASK_ELEMENTS, f"histogram over budget at ntime={ntime}"
+        assert ntime * c <= budget, f"read slab over budget at ntime={ntime}"
+        assert out_per_cell * c <= budget, f"histogram over budget at ntime={ntime}"
+
+
+def test_slab_tile_budget_is_constant_in_series_length():
+    """The slab tiler budgets on what a task reads and writes, never on n_bins, under the cell cap."""
+    budget = H._HISTOGRAM_TASK_ELEMENTS
+
+    def cells(ntime):
+        return _tile_cells(lambda da, dims: H._slab_tile_chunks(da, dims, None, 366), ntime)
+
+    # Cut from the 1000-cell input chunks, so the cap binds as the largest multiple below it.
+    assert cells(1_825) == cells(5_475)
+    assert H._SLAB_TILE_CELLS // 2 < cells(5_475) <= H._SLAB_TILE_CELLS
+    huge = budget // 100
+    assert cells(huge) < cells(5_475)
+    for ntime in (10, 366, 5_475, 100_000, huge, huge * 10):
+        assert max(ntime, 366) * cells(ntime) <= budget, f"slab over budget at ntime={ntime}"
 
 
 def test_single_step_window_does_not_duplicate_the_cycle():

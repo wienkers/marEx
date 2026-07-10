@@ -61,11 +61,23 @@ class TestSilentOnTheOrdinaryPath:
         exercise the multi-tile path (TASK_ELEMENTS 30_000).
         """
         monkeypatch.setattr(dims_mod, "TASK_ELEMENTS", 30_000)
+        # The budget shrinks the tile only when the caller's chunk is not kept; the kept-chunk
+        # path is covered by tests/test_canonical_tile.py.
+        monkeypatch.setattr(dims_mod, "KEEP_INPUT_CHUNK_FACTOR", 1)
         da = _field()
         with marex_warnings as cap:
             chunks = canonical_time_chunks(da, DIMENSIONS)
         assert _fit_warnings(cap) == []
         assert chunks["lat"] < 20 and chunks["lon"] < 30  # it really did tile
+
+    def test_kept_input_chunk_is_silent(self, marex_warnings, monkeypatch):
+        """A caller-sized spatial chunk within the keep band is the tile, and no warning."""
+        monkeypatch.setattr(dims_mod, "TASK_ELEMENTS", 30_000)
+        da = _field().chunk({"lat": 10})  # 10 x 30 cells x 200 steps = 2x the budget
+        with marex_warnings as cap:
+            chunks = canonical_time_chunks(da, DIMENSIONS)
+        assert _fit_warnings(cap) == []
+        assert (chunks["lat"], chunks["lon"]) == (10, 30)
 
     def test_tile_side_rounding_alone_is_not_a_misfit(self, marex_warnings, monkeypatch):
         """A tile over budget from integer rounding ALONE is not reported.

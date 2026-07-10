@@ -235,3 +235,99 @@ class TestTrackerPrefilter:
         b = marEx.tracker(pre, ds.mask, **_unstructured_kw(ds, tmp_path / "b")).run()
         np.testing.assert_array_equal(a.ID_field.values, b.ID_field.values)
         assert a.attrs["prefilter_min_cells"] == 3
+
+
+def _census_field(n_time, ny, nx):
+    """Objects in four slices spread over three time chunks; none after t=13, so the count is fixed."""
+    field = np.zeros((n_time, ny, nx), dtype=bool)
+    field[0, 1:3, 1:3] = True
+    field[1, 3:5, 4:7] = True
+    field[1, 0, 0] = True
+    field[7, 0:2, 5:8] = True
+    field[7, 4, 1] = True
+    field[13, 2:6, 0:2] = True
+    field[13, 0, 7] = True
+    return field
+
+
+def _census_oracle(field, threshold):
+    """Per-slice 8-connected areas in labelling order (regional, no seam), and the kept mask."""
+    structure = np.ones((3, 3), dtype=int)
+    areas, kept = [], np.zeros_like(field)
+    for t, frame in enumerate(field):
+        labels, _ = label(frame, structure=structure)
+        counts = np.bincount(labels.ravel())
+        areas.extend(counts[1:][counts[1:] > 0].tolist())
+        keep = counts >= threshold
+        keep[0] = False
+        kept[t] = keep[labels]
+    return areas, kept
+
+
+def _gathered_bytes_in_filter(n_time, absolute, monkeypatch):
+    """Bytes returned to the driver by every outermost compute inside gridded filter_small_objects."""
+    import dask
+    import dask.array as dsa
+
+    from marEx.track import morphology
+
+    ny, nx = 6, 8
+    field = _census_field(n_time, ny, nx)
+    data_bin = xr.DataArray(field, dims=("time", "lat", "lon")).chunk({"time": 5, "lat": -1, "lon": -1})
+    lat = xr.DataArray(np.linspace(-10, 10, ny), dims="lat")
+    lon = xr.DataArray(np.linspace(0, 20, nx), dims="lon")
+    mask = xr.DataArray(np.ones((ny, nx), dtype=bool), dims=("lat", "lon"))
+
+    gathered = []
+    depth = [0]
+
+    def nbytes(obj):
+        if isinstance(obj, (tuple, list)):
+            return sum(nbytes(o) for o in obj)
+        return int(getattr(obj, "nbytes", 0))
+
+    def wrap(fn):
+        def spy(*args, **kwargs):
+            depth[0] += 1
+            try:
+                out = fn(*args, **kwargs)
+            finally:
+                depth[0] -= 1
+            if depth[0] == 0:
+                gathered.append(nbytes(out))
+            return out
+
+        return spy
+
+    monkeypatch.setattr(xr.DataArray, "compute", wrap(xr.DataArray.compute))
+    monkeypatch.setattr(xr.Dataset, "compute", wrap(xr.Dataset.compute))
+    monkeypatch.setattr(dsa.Array, "compute", wrap(dsa.Array.compute))
+    monkeypatch.setattr(dask, "compute", wrap(dask.compute))
+    monkeypatch.setattr(dask.base, "compute", wrap(dask.base.compute))
+    monkeypatch.setattr(dsa, "compute", wrap(dsa.compute))
+    out = morphology.filter_small_objects(data_bin, False, "lon", absolute, 2, 0.5, mask, None, True, lat, lon, None, "time", "lat")
+    monkeypatch.undo()
+    return sum(gathered), out
+
+
+class TestAreaCensusGather:
+    """The gridded small-object census gathers compact areas, never the padded per-slice buffer."""
+
+    @pytest.mark.parametrize("absolute", [False, True], ids=["quartile", "absolute"])
+    def test_gathered_bytes_do_not_grow_with_record_length(self, absolute, monkeypatch):
+        short, out_short = _gathered_bytes_in_filter(20, absolute, monkeypatch)
+        long, out_long = _gathered_bytes_in_filter(40, absolute, monkeypatch)
+        # Same objects, twice the record: what reaches the driver must not double.
+        assert long <= short + 1024, f"gathered {short} B at nt=20 but {long} B at nt=40"
+        assert short < 20 * 8192 * 8, f"gathered {short} B: the padded census reached the driver"
+        # The census is exact and in time-major labelling order, across time chunks.
+        for n_time, out in ((20, out_short), (40, out_long)):
+            filtered, threshold, areas, n_unfiltered, n_filtered = out
+            oracle_areas, _ = _census_oracle(_census_field(n_time, 6, 8), 0)
+            assert areas.dtype == np.int64
+            assert areas.values.tolist() == oracle_areas == [4, 1, 6, 6, 1, 1, 8]
+            assert threshold == (2 if absolute else np.percentile(oracle_areas, 50.0))
+            assert n_unfiltered == 7
+            assert n_filtered == sum(a >= threshold for a in oracle_areas)
+            _, oracle_kept = _census_oracle(_census_field(n_time, 6, 8), threshold)
+            np.testing.assert_array_equal(filtered.values, oracle_kept)

@@ -1,8 +1,9 @@
 """
 Each float rolling mean in detect runs under ``rolling_numerics``, one test per site.
 
-A spy on xarray's rolling ``mean`` records the accelerator options in force when it is
-called (the graph is built there, and that is when xarray reads them). ``preprocess_data``
+A spy on xarray's rolling ``mean`` and ``construct`` (the climatology builds its windows
+directly) records the accelerator options in force when it is called (the graph is built
+there, and that is when xarray reads them). ``preprocess_data``
 runs under a global ``use_bottleneck=True``, so a site that loses its pin records True, and
 so does a site whose pin is flipped. Comparing output values cannot see the second case:
 a flipped pin ignores the global option exactly as a correct one does.
@@ -31,13 +32,14 @@ def sst():
 def rolling_mean_options(monkeypatch):
     seen = []
     for cls in ROLLING_CLASSES:
-        original = cls.mean
+        for name in ("mean", "construct"):
+            original = getattr(cls, name)
 
-        def spy(self, *args, _original=original, **kwargs):
-            seen.append({key: OPTIONS.get(key) for key in ("use_bottleneck", "use_numbagg")})
-            return _original(self, *args, **kwargs)
+            def spy(self, *args, _original=original, **kwargs):
+                seen.append({key: OPTIONS.get(key) for key in ("use_bottleneck", "use_numbagg")})
+                return _original(self, *args, **kwargs)
 
-        monkeypatch.setattr(cls, "mean", spy)
+            monkeypatch.setattr(cls, name, spy)
     return seen
 
 

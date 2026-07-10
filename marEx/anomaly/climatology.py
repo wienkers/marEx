@@ -205,6 +205,17 @@ def rolling_climatology(
     target_year_da = xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year")
     cycle_da = xr.DataArray(cycle_groups, dims=[long_timedim], name=cycle_dim)
 
+    # flox fills an expected group that received no data by assigning NaN through dask's
+    # `__setitem__`, whose graph build is quadratic in the number of blocks: hours of client
+    # time on the ICON mesh before any task runs. Here the only empty groups are normally
+    # whole target years (the first `window_years` have no history), so reduce over the
+    # years that do have data and pad the rest back with a reindex, which is one indexing
+    # task per block. Any other gap falls back to letting flox fill it.
+    data_years = np.unique(target_year_groups)
+    n_pairs = len(set(zip(target_year_groups.tolist(), cycle_groups.tolist())))
+    complete = len(data_years) > 0 and n_pairs == len(data_years) * len(cycle.labels)
+    reduce_years = data_years if complete else unique_years
+
     # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
@@ -212,11 +223,14 @@ def rolling_climatology(
         cycle_da,
         dim=long_timedim,
         func="nanmean",
-        expected_groups=(unique_years, cycle.labels),
+        expected_groups=(reduce_years, cycle.labels),
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
-    ).chunk({cycle_dim: -1})
+    )
+    if len(reduce_years) < len(unique_years):
+        climatologies = climatologies.reindex(target_year=unique_years, fill_value=np.nan)
+    climatologies = climatologies.chunk({cycle_dim: -1})
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
@@ -236,6 +250,44 @@ def rolling_climatology(
     result = result.chunk(original_chunk_dict)
     clear_store_encoding(result)  # the caller may write it; a format-2 input's codecs would not survive zarr 3
     return result
+
+
+_FLOAT32_EXACT_COUNT = 2**24
+
+
+def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int) -> xr.DataArray:
+    """Centred rolling mean over ``steps`` that keeps ``da``'s spatial chunks.
+
+    xarray's ``rolling().mean()`` counts the valid samples per window through a ``construct``
+    that lets dask rechunk automatically, which splits every spatial tile about ``steps`` ways.
+    The split carries into the climatology's flox reduction and multiplies its task count. This
+    is the same arithmetic as xarray's numpy path (zero-filled window sum, valid count,
+    ``min_periods`` equal to the window, masked sum divided by count in its dtype), with both
+    windows built in place. xarray already builds the float sum's windows in place, so only the
+    layout of the integer count changes, and an integer count is exact: the values do not move.
+    """
+    window = f"_{timedim}_window"
+    while window in da.dims or window in da.coords:
+        window = f"_{window}"
+    in_place = {"automatic_rechunk": False}
+
+    def window_sum(obj, fill_value, **kwargs):
+        windows = obj.rolling({timedim: steps}, center=True).construct(
+            window, fill_value=fill_value, sliding_window_view_kwargs=in_place
+        )
+        return windows.sum(window, skipna=False, **kwargs)
+
+    total = window_sum(da.fillna(0), 0)
+    # Counted in float32 rather than int64 then float64: a quarter of the bytes on the tile, and
+    # the same numbers once cast to the mean's dtype. float32 is exact only up to 2**24, so a
+    # longer window counts in float64.
+    counts = window_sum(da.notnull(), False, dtype=np.float32 if steps <= _FLOAT32_EXACT_COUNT else np.float64)
+    enough = counts >= steps
+    mean = total.where(enough)
+    mean = mean / counts.where(enough).astype(mean.dtype)
+    if xr.get_options()["keep_attrs"] is not False:
+        mean.attrs = dict(da.attrs)
+    return mean
 
 
 def smoothed_rolling_climatology(
@@ -387,7 +439,7 @@ def smoothed_rolling_climatology(
 
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
     with rolling_numerics():
-        da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().astype(np.float32)
+        da_smoothed = _rolling_mean_keep_tiles(da, timedim, smooth_steps).astype(np.float32)
 
     clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates, cycle)
 

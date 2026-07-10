@@ -205,20 +205,21 @@ def test_slab_matches_dense_with_samples_clipped_into_the_top_bin():
 def test_one_extra_count_breaks_identity(monkeypatch):
     """Discriminator: the identity tests above can fail. One extra count per cell moves thresholds.
 
-    Pinned to the synchronous scheduler: a session-scoped distributed client (conftest) runs the
-    blocks in worker processes, where this process's monkeypatch does not reach.
+    The extra count is one more sample per cell, in the first slot at the middle bin, handed to
+    the slab kernel with its block. Pinned to the synchronous scheduler: a session-scoped
+    distributed client (conftest) runs the blocks in worker processes, where this process's
+    monkeypatch does not reach.
     """
     monkeypatch.setitem(dask.config.config, "scheduler", "synchronous")
     da, cycle = _field()
-    original = H._rolling_histogram_quantile
+    original = H._slab_quantile_cells
 
-    def plus_one(hist, *a, **k):
-        hist = hist.copy()
-        hist[0, hist.shape[1] // 2] += 1
-        return original(hist, *a, **k)
+    def plus_one(block, slots, n_slots, n_bins, *a, **k):
+        extra = np.full((1,) + block.shape[1:], n_bins // 2, dtype=block.dtype)
+        return original(np.concatenate([block, extra]), np.append(slots, 1), n_slots, n_bins, *a, **k)
 
     dense, _ = _both(da, cycle, GRID_DIMS, 30, q=0.95, tail="upper", window_spatial=1)
-    monkeypatch.setattr(H, "_rolling_histogram_quantile", plus_one)
+    monkeypatch.setattr(H, "_slab_quantile_cells", plus_one)
     da2 = da.chunk({"time": 30})
     slab = H._compute_histogram_quantile_2d(
         da2,

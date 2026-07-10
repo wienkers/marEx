@@ -19,6 +19,7 @@ that used to be written out at every chunking site, each of which silently
 dropped any dimension the ``dimensions`` mapping did not name.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
@@ -37,6 +38,14 @@ COORDINATE_KEYS: Tuple[str, ...] = ("time",) + HORIZONTAL_KEYS
 # Target number of array elements one task may touch. Shared by every spatial
 # tiling decision so a single number governs the per-task working set.
 TASK_ELEMENTS = 50_000_000
+
+# An input spatial chunk the caller already sized is kept as the canonical tile while one task on
+# it costs at most this multiple of ``TASK_ELEMENTS``. Splitting such a chunk only to merge it back
+# later multiplies the task count (about 3x on a 25,000-cell ICON chunk over 20 years). The price is
+# a per-task input of up to ``KEEP_INPUT_CHUNK_FACTOR x TASK_ELEMENTS`` elements (about 800 MB as
+# float32) instead of ``TASK_ELEMENTS``; the anomaly stage's intermediates make the working set a
+# small multiple of that input.
+KEEP_INPUT_CHUNK_FACTOR = 4
 
 # Stable substring of the fit warning, so a caller (or a test) can recognise one
 # without matching the whole sentence.
@@ -381,22 +390,52 @@ def canonical_time_chunks(
     30-day chunks never finished building.
 
     The spatial side is capped with :func:`tile_spatial_chunks`, so one task's
-    working set stays near :data:`TASK_ELEMENTS` whatever the caller passed in.
-    Each cell is reduced independently, so the spatial layout never moves values.
+    working set stays near :data:`TASK_ELEMENTS`, unless the caller's own spatial
+    chunk is kept (:func:`_kept_input_tile`), which allows up to
+    :data:`KEEP_INPUT_CHUNK_FACTOR` times that. Each cell is reduced independently,
+    so the spatial layout never moves values.
     """
     timedim = dimensions["time"]
     if input_elements_per_cell is None:
         input_elements_per_cell = int(obj.sizes[timedim])
     chunks: Dict[str, int] = {timedim: -1}
+    tiled = spatial_dims(obj, dimensions)
+    kept = _kept_input_tile(obj, tiled, max(input_elements_per_cell, output_elements_per_cell))
     chunks.update(
-        tile_spatial_chunks(
+        kept
+        if kept is not None
+        else tile_spatial_chunks(
             obj,
-            spatial_dims(obj, dimensions),
+            tiled,
             input_elements_per_cell=input_elements_per_cell,
             output_elements_per_cell=output_elements_per_cell,
         )
     )
     return chunks
+
+
+def _kept_input_tile(obj: Union[xr.DataArray, xr.Dataset], dims: Sequence[str], elements_per_cell: int) -> Optional[Dict[str, int]]:
+    """Return the caller's own spatial chunk as the canonical tile, or ``None`` to tile by budget.
+
+    The tile is the largest input chunk along each tiled dim. It is kept when one task on it costs
+    more than :data:`TASK_ELEMENTS` but at most :data:`KEEP_INPUT_CHUNK_FACTOR` times it. On regular
+    input chunks the rechunk to time-whole tiles is then a pure merge along time; on irregular ones
+    it still splits the chunks that straddle a tile boundary, but costs fewer tasks than the budget
+    tile. Never kept unless the field spans at least two whole tiles (a spatially whole field, or one
+    chunk holding all but a sliver of it, would leave the time-whole stages a single real task), nor
+    when one cell alone exceeds the budget (the single-cell fit warning must keep firing). Values
+    never depend on the spatial layout; only the task count and the per-task working set do.
+    """
+    if not isinstance(obj, xr.DataArray) or not obj.chunks or int(elements_per_cell) > TASK_ELEMENTS:
+        return None
+    current = dict(zip(obj.dims, obj.chunks))
+    if any(d not in current for d in dims):
+        return None
+    tile = {d: max(current[d]) for d in dims}
+    if not all(tile.values()) or math.prod(obj.sizes[d] // tile[d] for d in dims) < 2:
+        return None
+    cost = math.prod(tile.values()) * max(1, int(elements_per_cell))
+    return tile if TASK_ELEMENTS < cost <= KEEP_INPUT_CHUNK_FACTOR * TASK_ELEMENTS else None
 
 
 @dataclass(frozen=True)
