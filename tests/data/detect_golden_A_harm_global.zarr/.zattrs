@@ -1,0 +1,17 @@
+{
+    "detrend_orders": [
+        1
+    ],
+    "force_zero_mean": true,
+    "max_anomaly": 5.0,
+    "method_anomaly": "detrend_harmonic",
+    "method_extreme": "global_extreme",
+    "method_percentile": "approximate",
+    "precision": 0.01,
+    "preprocessing_steps": [
+        "Removed polynomial trend orders=[1] & seasonal cycle",
+        "Global percentile threshold applied to all days"
+    ],
+    "std_normalise": false,
+    "threshold_percentile": 95
+}

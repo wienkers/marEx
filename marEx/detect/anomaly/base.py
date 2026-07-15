@@ -35,7 +35,6 @@ def compute_normalised_anomaly(
     detrend_orders: Optional[List[int]] = None,  # "
     force_zero_mean: bool = True,  # "
     reference_period: Optional[Tuple[int, int]] = None,  # for fixed_baseline & detrend_fixed_baseline
-    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -217,9 +216,7 @@ def compute_normalised_anomaly(
         return _compute_anomaly_detrended(da, std_normalise, detrend_orders, dimensions, coordinates, force_zero_mean)
     elif method_anomaly == "shifting_baseline":
         logger.debug(f"Shifting baseline parameters: window_years={window_year_baseline}, smooth_days={smooth_days_baseline}")
-        return _compute_anomaly_shifting_baseline(
-            da, window_year_baseline, smooth_days_baseline, dimensions, coordinates, use_temp_checkpoints
-        )
+        return _compute_anomaly_shifting_baseline(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
     elif method_anomaly == "fixed_baseline":
         logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
         return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period)

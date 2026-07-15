@@ -14,7 +14,6 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
-from ...helper import checkpoint_to_zarr
 from ...logging_config import get_logger
 from ..validation import _infer_dims_coords
 
@@ -27,7 +26,6 @@ def rolling_climatology(
     window_year_baseline: int = 15,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
-    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
@@ -182,10 +180,6 @@ def rolling_climatology(
         fill_value=np.nan,
     ).chunk({"dayofyear": -1})
 
-    if use_temp_checkpoints:
-        logger.debug("Checkpointing climatologies to break graph dependencies")
-        climatologies = checkpoint_to_zarr(climatologies, name="climatologies", timedim=timedim)
-
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
     year_indices = year_to_idx[year_vals].values
@@ -208,7 +202,6 @@ def smoothed_rolling_climatology(
     smooth_days_baseline: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
-    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data
@@ -325,6 +318,6 @@ def smoothed_rolling_climatology(
         da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
     )
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates, use_temp_checkpoints)
+    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
 
     return clim

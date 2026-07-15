@@ -25,7 +25,6 @@ def _compute_anomaly_shifting_baseline(
     smooth_days_baseline: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
-    use_temp_checkpoints: bool = False,
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -39,9 +38,7 @@ def _compute_anomaly_shifting_baseline(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(
-        da, window_year_baseline, smooth_days_baseline, dimensions, coordinates, use_temp_checkpoints
-    )
+    climatology_smoothed = smoothed_rolling_climatology(da, window_year_baseline, smooth_days_baseline, dimensions, coordinates)
 
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed

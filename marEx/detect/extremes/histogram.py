@@ -19,11 +19,52 @@ from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
-from ...helper import checkpoint_to_zarr
 from ...logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Target number of array elements per histogram task. Tiling the spatial dimensions
+# to roughly this many elements keeps each task's working set bounded (~200 MB for
+# float32) regardless of field resolution or input chunking, which is what allows the
+# histogram-quantile path to run at full resolution without exhausting worker memory.
+_HISTOGRAM_TASK_ELEMENTS = 50_000_000
+
+
+def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: int = _HISTOGRAM_TASK_ELEMENTS) -> xr.DataArray:
+    """Tile the non-reduced dimensions of ``da`` for memory-safe histogram reduction.
+
+    The histogram-quantile kernels reduce over ``dim`` (typically time), which must stay
+    in a single chunk per task. The remaining (spatial) dimensions are tiled so that the
+    per-task element count stays near ``target_elements`` -- independent of the caller's
+    chunking or the field resolution. This is a pure rechunk: every spatial cell's reduced
+    axis lies wholly within one tile, so it changes only task granularity, never values.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input array to be reduced along ``dim``.
+    dim : str
+        Name of the dimension that is reduced (kept unchunked).
+    target_elements : int, optional
+        Approximate number of array elements per spatial tile.
+
+    Returns
+    -------
+    xarray.DataArray
+        ``da`` rechunked with ``dim`` unchunked and the spatial dimensions tiled.
+    """
+    spatial_dims = [d for d in da.dims if d != dim]
+    if not spatial_dims:
+        return da.chunk({dim: -1})
+
+    ntime = max(int(da.sizes[dim]), 1)
+    tile_area = max(1, target_elements // ntime)
+    side = max(1, int(round(tile_area ** (1.0 / len(spatial_dims)))))
+
+    chunks = {d: min(int(da.sizes[d]), side) for d in spatial_dims}
+    chunks[dim] = -1
+    return da.chunk(chunks)
 
 
 def _rolling_histogram_quantile(
@@ -132,7 +173,6 @@ def _compute_histogram_quantile_2d(
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
-    use_temp_checkpoints: bool = False,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -194,10 +234,6 @@ def _compute_histogram_quantile_2d(
         .astype(np.uint16)
     )
 
-    if use_temp_checkpoints:
-        logger.debug("Checkpointing binned data to break graph dependencies")
-        da_bin = checkpoint_to_zarr(da_bin, name="da_bin", timedim=dimensions["time"]).chunk(chunk_dict)
-
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
         da_bin,
@@ -255,10 +291,6 @@ def _compute_histogram_quantile_2d(
         dask_gufunc_kwargs={"output_sizes": {"dayofyear": 366}},
         keep_attrs=True,
     )
-
-    if use_temp_checkpoints:
-        logger.debug("Checkpointing threshold to break graph dependencies")
-        threshold = checkpoint_to_zarr(threshold, name="threshold")
 
     # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
     if dimensions["time"] in threshold.coords:
@@ -334,6 +366,16 @@ def _compute_histogram_quantile_1d(
     if bin_edges is None:
         # Create optimised asymmetric bins
         bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+
+    # Tile the non-reduced (spatial) dimensions so each histogram task processes a
+    # bounded working set, independent of how the caller chunked the input. Without
+    # this, a spatially-unchunked full-resolution field (e.g. a single 720x1440 chunk)
+    # forces one task to hold the entire (time x space) array plus the per-bin working
+    # memory, which exhausts worker memory at scale. Because every spatial cell's
+    # time series lies wholly within its own tile (time stays unchunked), the per-cell
+    # histogram counts -- and therefore the resulting quantiles -- are independent of
+    # this tiling: the operation is bit-for-bit identical to the unchunked computation.
+    da = _chunk_spatial_for_histogram(da, dim)
 
     # Compute histogram
     hist = histogram(da, bins=[bin_edges], dim=[dim]).persist()

@@ -225,60 +225,49 @@ These scripts are designed to be copied and modified for your specific:
 
 The scripts handle cluster setup, data processing, and saving results to zarr/netCDF files on the scratch filesystem.
 
-Checkpointing for Large Datasets
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Memory-Safe Processing of Large Datasets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When processing very large datasets on HPC systems, Dask may recompute intermediate results multiple times, especially for complex operations like 2D histogram-based percentile calculations. This can significantly increase computation time and memory usage.
+Large datasets (e.g. full-resolution global OSTIA or regridded ICON output) are
+processed without any special configuration: ``marEx.preprocess_data`` and the
+tracker are designed to keep each Dask task's working set bounded so the pipeline
+runs at full resolution within reasonable per-worker memory.
 
-**The Problem:**
+The histogram-based percentile kernels (the ``approximate`` method used by both
+``global_extreme`` and ``hobday_extreme``) are the most memory-intensive step. They
+internally tile the spatial dimensions before building the per-cell histograms, so a
+single task never has to hold the entire ``(time × space)`` field at once -- regardless
+of how the input was chunked. As a result, no manual graph-breaking or checkpointing is
+required, and the returned dataset can be written straight to Zarr or NetCDF.
 
-Dask builds a computation graph that tracks all operations. For large preprocessing pipelines, this graph can become deeply nested, causing Dask to recompute expensive intermediate steps (climatologies, anomalies, thresholds) whenever downstream operations need them.
+.. note::
 
-**The Solution:**
+   Earlier versions exposed a ``use_temp_checkpoints`` parameter that round-tripped
+   intermediate arrays through temporary Zarr stores to work around memory blow-ups in
+   the histogram step. That workaround has been removed: the underlying memory issue is
+   fixed at the algorithm level, so the parameter is no longer needed (or accepted).
 
-The ``use_temp_checkpoints=True`` parameter breaks the Dask computation graph by saving intermediate results to temporary zarr stores and immediately reloading them. This prevents expensive recomputations at the cost of some disk I/O.
-
-**How It Works:**
-
-1. Intermediate arrays (anomalies, climatologies, thresholds, extremes) are saved to temporary zarr files
-2. The saved data is immediately reloaded as a fresh Dask array
-3. This breaks the dependency chain in the computation graph
-4. Temporary files are automatically cleaned up after reloading
-
-**When to Use:**
-
-* Large datasets (>100 GB) where preprocessing takes hours
-* HPC environments with fast scratch storage
-* When 2D histogram percentile calculations are a bottleneck
-* When you notice Dask recomputing the same operations multiple times
-
-**Example Usage:**
+**Saving results:**
 
 .. code-block:: python
 
    import xarray as xr
    import marEx
 
-   # Load large dataset
+   # Load a large dataset (chunk only the time dimension; spatial dims stay contiguous)
    sst = xr.open_zarr('large_dataset.zarr', chunks={'time': 30}).sst
 
-   # Enable checkpointing to prevent expensive recomputations
    extremes = marEx.preprocess_data(
        sst,
        method_anomaly='shifting_baseline',
        method_extreme='hobday_extreme',
        threshold_percentile=95,
-       use_temp_checkpoints=True,  # Enable checkpointing
-       dask_chunks={'time': 25}
+       dask_chunks={'time': 25},
    )
 
-**Performance Trade-offs:**
-
-* **Benefit**: Prevents expensive recomputations, reduces memory pressure
-* **Cost**: Requires fast disk I/O for temporary zarr stores
-* **Recommendation**: Enable on HPC systems with high-speed scratch storage; test on your specific dataset to measure performance impact
-
-**Note:** Temporary files are automatically removed after data is reloaded, so no manual cleanup is required.
+   # The returned dataset writes directly to either format:
+   extremes.to_zarr('extremes.zarr', mode='w')
+   extremes.to_netcdf('extremes.nc')
 
 The HPC helper module
 =====================

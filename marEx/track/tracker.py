@@ -21,7 +21,6 @@ Key terminology:
 """
 
 import logging
-import time
 import warnings
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
@@ -787,11 +786,10 @@ class tracker:
         if checkpoint and "save" in checkpoint:
             logger.info("Saving preprocessed data to checkpoint")
             with log_timing(logger, "Checkpoint saving"):
-                time.sleep(5)
                 data_bin_filtered.name = "data_bin_preproc"
-                data_bin_filtered.to_zarr(
-                    f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w"
-                )  # N.B.: This needs to be done without .persist() due to dask to_zarr tuple bug...
+                # Write lazily (no .persist()): the store computes the preprocessing graph
+                # straight to disk, then we reload to break the graph for downstream steps.
+                data_bin_filtered.to_zarr(f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w")
                 data_bin_filtered = load_data_from_checkpoint()
         else:
             logger.debug("Persisting preprocessed data in memory")

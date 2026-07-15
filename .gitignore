@@ -25,3 +25,10 @@ docs/generated/
 docs/tutorials/gridded/
 docs/tutorials/regional/
 docs/tutorials/unstructured/
+.claude/
+NEXT.md
+
+# Local working/review docs — kept out of public history
+marEx_Fable_Review.md
+REPORT_saving_fixes_verification.md
+SAVING_HACKS_CHANGES_FIXED.md

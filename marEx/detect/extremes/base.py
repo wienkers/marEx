@@ -32,7 +32,6 @@ def identify_extremes(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
-    use_temp_checkpoints: bool = False,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
@@ -390,7 +389,6 @@ def identify_extremes(
             coordinates,
             precision,
             max_anomaly,
-            use_temp_checkpoints,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")
