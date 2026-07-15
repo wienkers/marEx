@@ -7,7 +7,7 @@ the dependency graph and imports only third-party libraries and the package
 logger.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 # Number of day-of-year slots the daily cycle is resolved on. 366 rather than 365 so a
 # leap day is a group of its own rather than colliding with 1 March.
 _DAYS_PER_YEAR = 366
+
+# Days in a year of each fixed-length cftime calendar; every other calendar averages 365.25.
+_DAYS_PER_CALENDAR_YEAR = {"360_day": 360.0, "noleap": 365.0, "365_day": 365.0, "all_leap": 366.0, "366_day": 366.0}
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,20 @@ class SeasonalCycle:
     def window_steps(self, days: float, name: str = "window_days") -> int:
         """:meth:`steps_for_days` with the result forced odd (symmetric windows)."""
         return self.steps_for_days(days, odd=True, name=name)
+
+    def window_slots(self, days: float, calendar: str = "standard", name: str = "window_days") -> int:
+        """Count an odd window of ``days`` in cycle SLOTS, for a window applied along the cycle axis.
+
+        The seasonal-percentile window pools neighbouring slots, so it is measured in
+        :attr:`slot_days`, not in the data cadence: 11 days of 5-day data still spans 11
+        ``dayofyear`` slots. Where a slot is one step (daily, evenly sub-daily) this is
+        :meth:`window_steps`. A month is the mean month of ``calendar`` (the time coordinate's
+        ``.dt.calendar``): 30 days on a 360-day calendar, whatever the data's own cadence.
+        """
+        slot_days = self.slot_days
+        if self.index_name == "month":
+            slot_days = _DAYS_PER_CALENDAR_YEAR.get(calendar, 365.25) / self.length
+        return replace(self, step_days=slot_days).window_steps(days, name=name)
 
 
 #: The daily cycle -- marEx's historical, and still overwhelmingly common, resolution.

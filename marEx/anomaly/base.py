@@ -43,6 +43,7 @@ def compute_normalised_anomaly(
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_max_missing: float = 0.1,  # for shifting_baseline
 ) -> xr.Dataset:
     """
     Generate normalised anomalies using specified methodology.
@@ -69,6 +70,11 @@ def compute_normalised_anomaly(
     smooth_days : int, default=21
         Days for smoothing the climatology (shifting_baseline, fixed_baseline and
         detrend_fixed_baseline; ``1`` disables it for the fixed baselines)
+    smooth_max_missing : float, default=0.1
+        Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
+        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
+        otherwise over the valid samples. Windows reaching past either end of the record stay
+        NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     standardise : bool, default=False
         Whether to normalise by 30-day rolling standard deviation (detrend_harmonic only)
     detrend_orders : list, default=[1]
@@ -255,6 +261,7 @@ def compute_normalised_anomaly(
         reference_period,
         materialiser,
         cycle,
+        smooth_max_missing,
     )
     for name in ("dat_anomaly", "dat_stn"):
         if name in ds and dimensions["time"] in ds[name].dims:
@@ -275,6 +282,7 @@ def _dispatch_anomaly(
     reference_period: Optional[Tuple[int, int]],
     materialiser: Optional[Materialiser],
     cycle: Optional[SeasonalCycle],
+    smooth_max_missing: float = 0.1,
 ) -> xr.Dataset:
     if method_anomaly == "detrend_harmonic":
         logger.debug(
@@ -282,8 +290,13 @@ def _dispatch_anomaly(
         )
         return _compute_anomaly_detrended(da, standardise, detrend_orders, dimensions, coordinates, force_zero_mean, cycle=cycle)
     elif method_anomaly == "shifting_baseline":
-        logger.debug(f"Shifting baseline parameters: window_years={window_years}, smooth_days={smooth_days}")
-        return _compute_anomaly_shifting_baseline(da, window_years, smooth_days, dimensions, coordinates, cycle)
+        logger.debug(
+            f"Shifting baseline parameters: window_years={window_years}, smooth_days={smooth_days}, "
+            f"smooth_max_missing={smooth_max_missing}"
+        )
+        return _compute_anomaly_shifting_baseline(
+            da, window_years, smooth_days, dimensions, coordinates, cycle, smooth_max_missing=smooth_max_missing
+        )
     elif method_anomaly == "fixed_baseline":
         logger.debug(f"Fixed baseline parameters: reference_period={reference_period}, smooth_days={smooth_days}")
         return _compute_anomaly_fixed_baseline(

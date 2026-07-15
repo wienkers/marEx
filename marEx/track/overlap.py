@@ -12,10 +12,12 @@ identical to the original ``tracker`` methods.
 """
 
 import functools
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
+import dask
 import numpy as np
 import xarray as xr
+from dask.base import is_dask_collection
 from numba import njit, prange
 from numpy.typing import NDArray
 
@@ -120,8 +122,9 @@ def check_overlap_slice(
 
         # Sum areas for overlapping cells
         areas_valid = (cell_area.values if isinstance(cell_area, xr.DataArray) else cell_area)[combined_mask]
-        areas = np.zeros(len(unique_pairs), dtype=np.float32)
+        areas = np.zeros(len(unique_pairs), dtype=np.float64)
         np.add.at(areas, inverse_indices, areas_valid)
+        areas = areas.astype(np.float32)
     else:
         # Get unique pairs and their counts (pixel counts)
         unique_pairs, areas = np.unique(pair_ids, return_counts=True)
@@ -403,6 +406,36 @@ def consolidate_object_ids(
     return data_t_minus_1, object_props
 
 
+def _first_time_in_block(
+    block: NDArray[np.int32], t0: int, buffer: int, keep: Optional[NDArray[np.int64]] = None
+) -> Tuple[NDArray[np.int32], NDArray[np.int64]]:
+    """Distinct IDs of a (time, ...) block and the global time index where each first appears in it.
+
+    ID 0 counts as present in a slice that has background, or fewer than ``buffer`` distinct
+    IDs, which is where the earlier fixed-width per-slice ID list carried zero padding.
+    With ``keep`` (sorted), only those IDs are returned, so the gathered summary follows the
+    queried IDs rather than every object in the block.
+    """
+    uniques = []
+    for row in block.reshape(block.shape[0], -1):
+        u = np.unique(row)
+        if u.size < buffer and not np.any(u == 0):
+            u = np.concatenate((np.zeros(1, dtype=u.dtype), u))
+        uniques.append(u)
+    ids = np.concatenate(uniques)
+    times = np.concatenate([np.full(u.size, t0 + t, dtype=np.int64) for t, u in enumerate(uniques)])
+    distinct, first = np.unique(ids, return_index=True)  # rows are in time order, so this is the earliest
+    first_times = times[first]
+    if keep is not None and len(keep):
+        # searchsorted, not isin: isin sorts the query together with the block's IDs, so each
+        # block would allocate in proportion to the query.
+        wanted = keep[np.minimum(np.searchsorted(keep, distinct), len(keep) - 1)] == distinct
+        return distinct[wanted], first_times[wanted]
+    if keep is not None:
+        return distinct[:0], first_times[:0]
+    return distinct, first_times
+
+
 def compute_id_time_dict(
     da: xr.DataArray,
     child_objects: Union[List[int], NDArray[np.int32]],
@@ -432,46 +465,44 @@ def compute_id_time_dict(
     time_index_map : dict
         Dictionary mapping object IDs to time indices
     """
-    # Estimate max objects per time
-    est_objects_per_time_max = int(max_objects / da[timedim].shape[0] * 100)
-
-    def unique_pad(x: NDArray[np.int32]) -> NDArray[np.int32]:
-        """Extract unique values and pad to fixed size."""
-        uniq = np.unique(x)
-        result = np.zeros(est_objects_per_time_max, dtype=x.dtype)  # Pad output to maximum size
-        result[: len(uniq)] = uniq
-        return result
-
-    # Get unique IDs for each time slice
+    # Each block reports its distinct IDs and the first time each appears in it; those
+    # compact pairs are gathered and reduced to the global first occurrence. Nothing of
+    # size (time x objects per slice x queried IDs) is ever built.
     input_dims = [xdim] if unstructured_grid else [ydim, xdim]
-    unique_ids_by_time = xr.apply_ufunc(
-        unique_pad,
-        da,
-        input_core_dims=[input_dims],
-        output_core_dims=[["unique_values"]],
-        dask="parallelized",
-        vectorize=True,
-        dask_gufunc_kwargs={"output_sizes": {"unique_values": est_objects_per_time_max}},
-    )
-
-    # Set up IDs to search for
-    if not all_objects:
-        # Just search for the specified child objects
-        search_ids = xr.DataArray(child_objects, dims=["child_id"], coords={"child_id": child_objects})
+    buffer = int(max_objects / da[timedim].shape[0] * 100)
+    data = da.transpose(timedim, *input_dims).data
+    if is_dask_collection(data) and any(len(c) > 1 for c in data.chunks[1:]):
+        # Which IDs a slice holds, and whether it has background, is a whole-slice property.
+        raise ValueError(f"compute_id_time_dict needs {input_dims} in a single chunk; got chunks {data.chunks[1:]}")
+    # Only the queried IDs leave each block when the query is restricted.
+    keep = None if all_objects else np.unique(np.asarray(child_objects, dtype=np.int64))
+    if is_dask_collection(data):
+        time_starts = np.cumsum((0,) + data.chunks[0])[:-1]
+        blocks = data.to_delayed()
+        first_time = dask.delayed(_first_time_in_block, pure=True)
+        # One shared node for the query, not a copy embedded in every block's task.
+        keep_node = None if keep is None else dask.delayed(keep, pure=True)
+        parts = dask.compute(
+            *[first_time(blocks[idx], int(time_starts[idx[0]]), buffer, keep_node) for idx in np.ndindex(blocks.shape)]
+        )
     else:
-        # Search for all possible IDs
-        search_ids = xr.DataArray(
-            np.arange(max_objects, dtype=np.int32),
-            dims=["child_id"],
-            coords={"child_id": np.arange(max_objects, dtype=np.int32)},
-        ).chunk(
-            {"child_id": 10000}
-        )  # Chunk for better parallelism
+        parts = [_first_time_in_block(np.asarray(data), 0, buffer, keep)]
+    ids = np.concatenate([p[0] for p in parts])
+    times = np.concatenate([p[1] for p in parts])
+    order = np.lexsort((times, ids))
+    seen_ids, first = np.unique(ids[order], return_index=True)
+    first_times = times[order][first]
 
-    # Find the first time index where each ID appears
-    time_indices = (unique_ids_by_time == search_ids).any(dim=["unique_values"]).argmax(dim=timedim).compute().astype(np.int32)
+    # Look up the queried IDs. An ID that never appears maps to time index 0, as the
+    # earlier argmax over an all-False presence mask did.
+    search_ids = np.arange(max_objects, dtype=np.int64) if all_objects else np.asarray(child_objects, dtype=np.int64)
+    time_index = np.zeros(len(search_ids), dtype=np.int64)
+    if len(seen_ids):
+        pos = np.minimum(np.searchsorted(seen_ids, search_ids), len(seen_ids) - 1)
+        found = seen_ids[pos] == search_ids
+        time_index[found] = first_times[pos[found]]
 
     # Convert to dictionary for fast lookup
-    time_index_map = {int(id_val): int(idx.values) for id_val, idx in zip(time_indices.child_id, time_indices)}
+    time_index_map = {int(id_val): int(idx) for id_val, idx in zip(search_ids, time_index)}
 
     return time_index_map

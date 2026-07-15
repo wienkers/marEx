@@ -59,6 +59,7 @@ def preprocess_data(
     cell_areas: Optional[xr.DataArray] = None,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
+    smooth_max_missing: float = 0.1,
 ) -> xr.Dataset:
     """
     Compute anomalies and identify extreme events in one pass.
@@ -94,6 +95,11 @@ def preprocess_data(
         ``fixed_baseline`` and ``detrend_fixed_baseline``). The fixed baselines
         smooth their day-of-year climatology with a moving average that wraps
         the year, as in Hobday et al. (2016); ``smooth_days=1`` disables it.
+    smooth_max_missing
+        Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
+        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
+        otherwise over the valid samples. Windows reaching past either end of the record stay
+        NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     window_days
         Day-of-year window in days (``seasonal_percentile`` only).
     window_spatial
@@ -209,6 +215,7 @@ def preprocess_data(
             coordinates,
             materialiser,
             cycle,
+            smooth_max_missing,
         )
 
         # Stage 2: extremes on the raw anomaly.

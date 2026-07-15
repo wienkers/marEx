@@ -38,7 +38,12 @@ TRACKER_KWARGS = {
 # value. (n_tasks was 678 at the same measurement; not asserted here, but useful as a
 # reference point if these bounds ever need to be revisited.)
 EXPECTED_MAX_RECHUNK = 466  # measured 464 at dd43301, +2 margin
-EXPECTED_MAX_TRANSPOSE = 50  # measured 48 at dd43301, +2 margin
+# Raised from 50 (48 measured at dd43301) when global_ID and presence moved from driver numpy
+# to arrays anchored on the cluster and centroid's anchoring moved: global_ID and presence share
+# one new transpose layer and centroid adds two, each one anchored leaf per time chunk. The
+# returned graph also gained per-chunk getitem, gt and concatenate tasks; the rechunk count did
+# not move.
+EXPECTED_MAX_TRANSPOSE = 98  # measured 96, +2 margin
 
 
 def _graph_stats(dataset):
@@ -150,3 +155,253 @@ class TestOverlapAreaPayload:
         area = xr.DataArray(np.array([1.0, 2.0, 4.0, 8.0], dtype=np.float32), dims=("ncells",), coords={"ncells": [3, 2, 1, 0]})
         result = _overlap.find_overlapping_objects(field, "time", True, None, "ncells", area)
         np.testing.assert_array_equal(result, np.array([[1, 1, 3.0], [2, 2, 8.0]], dtype=np.float32))
+
+
+def _lifetime_field(n_time, n_cells=60):
+    """IDs 2t+1 and 2t+2 are born at t and live three steps; returns the field and the children queried."""
+    import numpy as np
+
+    field = np.zeros((n_time, n_cells), dtype=np.int32)
+    for t in range(n_time):
+        for k, obj in enumerate((2 * t + 1, 2 * t + 2)):
+            cells = slice((2 * (t % 5) + k) * 6, (2 * (t % 5) + k) * 6 + 6)
+            field[t : t + 3, cells] = obj
+    children = [2 * t + 1 for t in range(n_time)]
+    return field, children
+
+
+def _id_time_work(n_time, monkeypatch, time_chunk=5):
+    """Per source block: bytes of every element-wise comparison built, and tasks run, while looking
+    up each child's first time. Blockwise fusion hides a comparison inside one task, so the
+    comparison is measured where it is built, not from task results."""
+    import dask
+    from dask.callbacks import Callback
+
+    from marEx.track import overlap as _overlap
+
+    field, children = _lifetime_field(n_time)
+    da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": time_chunk, "ncells": -1})
+    compared, n_tasks = [], [0]
+    original_eq = xr.DataArray.__eq__
+
+    def eq_spy(self, other):
+        out = original_eq(self, other)
+        compared.append(out.size * out.dtype.itemsize)
+        return out
+
+    def count(key, result, dsk, state, id):
+        n_tasks[0] += 1
+
+    monkeypatch.setattr(xr.DataArray, "__eq__", eq_spy)
+    with dask.config.set(scheduler="sync"), Callback(posttask=count):
+        mapping = _overlap.compute_id_time_dict(da, children, 2 * n_time + 1, "time", True, None, "ncells", all_objects=False)
+    monkeypatch.undo()
+
+    n_source_blocks = n_time // time_chunk
+    return sum(compared) / n_source_blocks, n_tasks[0] / n_source_blocks, mapping
+
+
+class TestChildTimeLookup:
+    """The first-time lookup costs the same per source block whatever the record length and query size."""
+
+    def test_work_per_block_does_not_grow_with_record_and_children(self, monkeypatch):
+        bytes_short, tasks_short, map_short = _id_time_work(20, monkeypatch)
+        bytes_long, tasks_long, map_long = _id_time_work(40, monkeypatch)
+        # Twice the record AND twice the queried children: a (time x buffer x children)
+        # comparison grows 4x in total, 2x per source block, however it is chunked.
+        assert bytes_long <= 1.25 * bytes_short + 1024, f"{bytes_short:.0f} -> {bytes_long:.0f} compared B per source block"
+        assert tasks_long <= 1.25 * tasks_short, f"{tasks_short:.1f} -> {tasks_long:.1f} tasks per source block"
+        assert map_short == {2 * t + 1: t for t in range(20)}
+        assert map_long == {2 * t + 1: t for t in range(40)}
+
+    @pytest.mark.parametrize("time_chunk", [1, 3, 7])
+    @pytest.mark.parametrize("all_objects", [False, True])
+    def test_first_time_matches_oracle(self, time_chunk, all_objects):
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        rng = np.random.default_rng(time_chunk)
+        field = rng.integers(0, 30, size=(17, 40)).astype(np.int32)
+        field[field < 12] = 0
+        field[:, 0] = 0  # every slice has background
+        max_objects = 35  # IDs 30..34 never occur: absent IDs map to 0
+        children = [33, 5, 29, 12, 31, 18]
+        da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": time_chunk, "ncells": -1})
+        mapping = _overlap.compute_id_time_dict(da, children, max_objects, "time", True, None, "ncells", all_objects=all_objects)
+
+        queried = range(max_objects) if all_objects else children
+        oracle = {}
+        for obj in queried:
+            present = np.nonzero((field == obj).any(axis=1))[0]
+            oracle[int(obj)] = int(present[0]) if present.size else 0
+        assert mapping == oracle
+
+    @pytest.mark.parametrize("n_first", [100, 1], ids=["first-slice-full-buffer", "first-slice-padded"])
+    def test_background_id_follows_the_padded_slice_rule(self, n_first):
+        """ID 0 is 'present' where a slice has background or fewer distinct IDs than the old buffer."""
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        n_time = max_objects = 101  # buffer = int(101 / 101 * 100) = 100 distinct IDs per slice
+        field = np.zeros((n_time, 100), dtype=np.int32)
+        field[0] = np.arange(1, 101) if n_first == 100 else 1
+        da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": 10, "ncells": -1})
+        mapping = _overlap.compute_id_time_dict(da, [], max_objects, "time", True, None, "ncells", all_objects=True)
+        assert mapping[0] == (1 if n_first == 100 else 0)
+        assert mapping[1] == 0 and mapping[100] == 0
+
+    def test_query_enters_the_lookup_graph_once(self, monkeypatch):
+        """The query is one shared node: the per-block graph has the same shape whichever children
+        are queried, and no block task carries its own copy of the query."""
+        import collections
+        import pickle
+
+        import dask
+
+        from marEx.track import overlap as _overlap
+
+        field, children = _lifetime_field(20)
+        da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": 5, "ncells": -1})
+        shapes, block_task_bytes = [], []
+        original = dask.compute
+
+        def spy(*args, **kwargs):
+            graph = {k: v for a in args if dask.is_dask_collection(a) for k, v in dict(a.__dask_graph__()).items()}
+            names = [str(k[0] if isinstance(k, tuple) else k).rsplit("-", 1)[0] for k in graph]
+            shapes.append(collections.Counter(names))
+            block_task_bytes.append(sorted(len(pickle.dumps(v)) for k, v in graph.items() if "_first_time_in_block" in str(k)))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(dask, "compute", spy)
+        for query in (children[:3], children):
+            _overlap.compute_id_time_dict(da, query, 41, "time", True, None, "ncells", all_objects=False)
+        monkeypatch.undo()
+        assert len(shapes) == 2 and shapes[0] == shapes[1], shapes
+        assert shapes[0]["ndarray"] == 1, f"the query should be one shared node: {shapes[0]}"
+        assert block_task_bytes[0] == block_task_bytes[1], block_task_bytes
+
+    def test_block_filter_allocation_does_not_follow_the_query(self):
+        """Filtering a block to the query allocates by the block's IDs, not by the query's length."""
+        import tracemalloc
+
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        block = np.arange(200, dtype=np.int32).reshape(4, 50)
+
+        def peak(n_query):
+            keep = np.arange(0, 2 * n_query, 2, dtype=np.int64)  # sorted, half the block's IDs
+            tracemalloc.start()
+            try:
+                ids, _ = _overlap._first_time_in_block(block, 0, 10, keep)
+                return tracemalloc.get_traced_memory()[1], ids
+            finally:
+                tracemalloc.stop()
+
+        # tracemalloc also sees other threads' allocations, so keep the smallest of five runs.
+        (small, ids_small), (large, ids_large) = (min((peak(n) for _ in range(5)), key=lambda r: r[0]) for n in (10_000, 1_000_000))
+        assert np.array_equal(ids_small, ids_large) and np.array_equal(ids_small, np.arange(0, 200, 2))
+        assert large <= 2 * small + 64 * 1024, f"block peak {small} B with a 1e4 query, {large} B with 1e6"
+
+    def test_gathered_summary_follows_the_query(self, monkeypatch):
+        """With a fixed query, the bytes gathered to the driver do not grow with unrelated objects."""
+        import dask
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        gathered = []
+        original = dask.compute
+
+        def spy(*args, **kwargs):
+            out = original(*args, **kwargs)
+            gathered.append(sum(arr.nbytes for part in out for arr in part))
+            return out
+
+        def run(n_unrelated):
+            n_time, n_cells = 20, 2 + n_unrelated
+            field = np.zeros((n_time, n_cells), dtype=np.int32)
+            field[3:, 0], field[7:, 1] = 1, 2  # the two queried objects
+            # unrelated objects: a new ID in every cell at every step
+            field[:, 2:] = 3 + np.arange(n_time * n_unrelated, dtype=np.int32).reshape(n_time, n_unrelated)
+            da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": 5, "ncells": -1})
+            gathered.clear()
+            monkeypatch.setattr(dask, "compute", spy)
+            mapping = _overlap.compute_id_time_dict(
+                da, [2, 1], int(field.max()) + 1, "time", True, None, "ncells", all_objects=False
+            )
+            monkeypatch.undo()
+            assert mapping == {2: 7, 1: 3}
+            return gathered[0]
+
+        small, large = run(10), run(80)
+        assert large == small, f"gathered {small} B with 10 unrelated objects per step, {large} B with 80"
+
+    def test_split_space_is_rejected(self):
+        """Background and buffer membership are whole-slice properties, so a split slice is refused."""
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        field = np.zeros((4, 6), dtype=np.int32)
+        field[:, :3] = 1
+        da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": 2, "ncells": 3})
+        with pytest.raises(ValueError):
+            _overlap.compute_id_time_dict(da, [1], 2, "time", True, None, "ncells", all_objects=False)
+
+    def test_memory_does_not_depend_on_the_query(self, monkeypatch):
+        """Peak allocation inside each block does not change with the number of queried children, and
+        the extra peak of a large query over a small one does not grow with the record."""
+        import gc
+        import tracemalloc
+
+        import dask
+        import numpy as np
+
+        from marEx.track import overlap as _overlap
+
+        block_peaks = []
+        original = _overlap._first_time_in_block
+
+        def measured(block, t0, buffer, keep=None):
+            tracemalloc.reset_peak()
+            start = tracemalloc.get_traced_memory()[0]
+            out = original(block, t0, buffer, keep)
+            block_peaks.append(tracemalloc.get_traced_memory()[1] - start)
+            return out
+
+        monkeypatch.setattr(_overlap, "_first_time_in_block", measured)
+
+        def run(n_time, n_children):
+            field, _ = _lifetime_field(n_time)
+            da = xr.DataArray(field, dims=("time", "ncells")).chunk({"time": 5, "ncells": -1})
+            query = list(range(1, n_children + 1))
+            block_peaks.clear()
+            gc.collect()
+            tracemalloc.start()
+            try:
+                with dask.config.set(scheduler="sync"):
+                    _overlap.compute_id_time_dict(da, query, 2 * n_time + 1, "time", True, None, "ncells", all_objects=False)
+                whole = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+            return list(block_peaks), whole
+
+        run(20, 2)  # first-call allocations (lazy imports, caches) are not the lookup's
+        # tracemalloc also sees other threads, so one block or one run can carry a stray
+        # allocation: compare the median block and the smallest of three runs.
+        extra = {}
+        for n_time in (20, 40):
+            few = [run(n_time, 2) for _ in range(3)]
+            many = [run(n_time, 2000) for _ in range(3)]
+            assert all(len(blocks) == n_time // 5 for blocks, _ in few + many)
+            median_few = float(np.median(few[0][0]))
+            median_many = float(np.median(many[0][0]))
+            # A (time x buffer x children) array in a block adds ~1 kB per queried child here.
+            assert abs(median_many - median_few) <= 16 * 2000, (few[0][0], many[0][0])
+            extra[n_time] = min(w for _, w in many) - min(w for _, w in few)
+        # The lookup itself is O(queried children); a (time x buffer x children) array doubles here.
+        assert extra[40] <= 1.25 * extra[20] + 256 * 2000, extra

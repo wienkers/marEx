@@ -8,7 +8,7 @@ candidate loop in ``process_chunk``::
         if n_parents >= MAX_PARENTS:
             raise TrackingError(...)
         ...
-        if overlap_area / min_area < overlap_threshold:
+        if _overlap_fraction(overlap_area, min_area) < overlap_threshold:
             continue                       # <- candidate REJECTED, n_parents unchanged
         parent_ids[n_parents] = parent_id  # <- only here does it consume a slot
 
@@ -109,7 +109,7 @@ class TestSourceStructure:
 
     def test_guard_follows_the_overlap_threshold_reject(self):
         src = self._source()
-        reject = src.index("if overlap_area / min_area < overlap_threshold:")
+        reject = src.index("if _overlap_fraction(overlap_area, min_area) < overlap_threshold:")
         guard = src.index("if n_parents >= MAX_PARENTS:")
         assert guard > reject, (
             "The MAX_PARENTS guard must sit after the overlap-threshold `continue`, so it only "

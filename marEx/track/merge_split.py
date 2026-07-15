@@ -61,6 +61,22 @@ MAX_MERGES = 64
 MAX_PARENTS = 64
 
 
+# Every unstructured area is summed in float64 and stored as float32, and every overlap fraction
+# divides those float32 values in float64: the serial path's arithmetic, so both paths decide alike.
+def _area_sum(values: NDArray) -> np.float32:
+    """Sum in float64 and round once to float32."""
+    return np.float32(np.sum(values, dtype=np.float64))
+
+
+def _overlap_fraction(overlap, min_area):
+    """``overlap / min_area`` in float64.
+
+    A float32 ratio rounds, and NumPy compares a float32 array with a Python float in float32,
+    so a fraction just below the threshold can round onto it.
+    """
+    return np.asarray(overlap, dtype=np.float64) / np.asarray(min_area, dtype=np.float64)
+
+
 def _consolidate_slice(
     ids_prev: NDArray[np.int32],
     ids_cur: NDArray[np.int32],
@@ -96,7 +112,7 @@ def _consolidate_slice(
         return sums[np.searchsorted(labels, wanted)]
 
     min_area = np.minimum(_areas(ids_prev, pair_parent), _areas(ids_cur, pair_child))
-    accepted = overlap / min_area >= overlap_threshold
+    accepted = _overlap_fraction(overlap, min_area) >= overlap_threshold
     pair_parent = pair_parent[accepted]
     pair_child = pair_child[accepted]
     parents, counts = np.unique(pair_parent, return_counts=True)
@@ -353,8 +369,15 @@ def cluster_rename_objects_and_props(
             dask_gufunc_kwargs={"output_sizes": {"ID": len(new_ids)}},
         )
         .assign_coords(ID=new_ids)
-        .compute()
+        .rename("global_ID")
     )
+    # (time, ID): it grows with the series length and the event count, so it is anchored on
+    # the cluster or on disk, never gathered to the driver. Presence, the event start and end
+    # times and the area/centroid recomputation below all read it.
+    if materialiser is None:
+        global_id_mapping = global_id_mapping.persist()
+    else:
+        global_id_mapping = materialiser.stage(global_id_mapping, "global_ID", preserve_chunks=True)
 
     # Store original ID mapping
     object_props_extended["global_ID"] = global_id_mapping
@@ -365,16 +388,24 @@ def cluster_rename_objects_and_props(
     dummy = object_props.isel(ID=0) * np.nan  # Add vale of ID = 0 to this coordinate ID
     object_props = xr.concat([dummy.assign_coords(ID=0), object_props], dim="ID")
 
-    for var_name in object_props.data_vars:
+    # area and centroid are recomputed from the relabelled field below, which overwrites
+    # whatever is transferred here, so they are not transferred: the label-indexed gather
+    # would pull the whole (time, ID) mapping onto the driver for values that are discarded.
+    recomputed = {"area", "centroid"} if {"area", "centroid"} & set(object_props.data_vars) else set()
+    transferred = [v for v in object_props.data_vars if v not in recomputed]
+    # Any other property is relabelled by label lookup, which needs the mapping in memory.
+    # Only caller-supplied extra properties take this path; the tracker's own do not.
+    local_id_mapping = global_id_mapping.compute() if transferred else None
+    for var_name in transferred:
         # Filter global_id_mapping to only include IDs that exist in object_props.
         # Pass an ndarray, not a set: xarray/np.isin against a Python set returns all-False,
         # which silently NaN-ed every transferred property (masked only because area and
         # centroid are recomputed below).
         existing_ids = np.asarray(object_props.ID.values)
-        valid_mapping_mask = global_id_mapping.isin(existing_ids)
+        valid_mapping_mask = local_id_mapping.isin(existing_ids)
 
         # Only select existing IDs
-        valid_global_mapping = global_id_mapping.where(valid_mapping_mask, drop=True)
+        valid_global_mapping = local_id_mapping.where(valid_mapping_mask, drop=True)
 
         if len(valid_global_mapping.ID) == 0:
             # No valid IDs - create empty result
@@ -522,13 +553,16 @@ def cluster_rename_objects_and_props(
     valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
     object_props_extended["presence"] = valid_presence
-    object_props_extended["time_start"] = valid_presence[timecoord][valid_presence.argmax(dim=timedim).astype(np.int32)]
+    # Both ends in one pass: indexing the time coordinate with a lazy argmax computes each end
+    # on its own, and each would re-read the whole (time, ID) mapping. The results are ID-length.
+    first, last_reversed = dask.compute(valid_presence.argmax(dim=timedim), valid_presence[::-1].argmax(dim=timedim))
+    object_props_extended["time_start"] = valid_presence[timecoord][first.astype(np.int32)]
     object_props_extended["time_end"] = valid_presence[timecoord][
-        ((valid_presence.sizes[timedim] - 1) - (valid_presence[::-1]).argmax(dim=timedim)).astype(np.int32)
+        ((valid_presence.sizes[timedim] - 1) - last_reversed).astype(np.int32)
     ]
 
     # Recompute area & centroid (now that the IDs have been consolidated & merged & made continuous)
-    if "area" in object_props_extended.data_vars or "centroid" in object_props_extended.data_vars:
+    if recomputed:
         logger.info("Recalculating area and centroid properties for potentially disjoint events...")
 
         def calculate_area_centroid_for_slice(
@@ -611,8 +645,7 @@ def cluster_rename_objects_and_props(
 
                     # Calculate physical area
                     areas_masked = flat_areas[cells]
-                    total_area = np.sum(areas_masked)
-                    areas[id_idx] = total_area
+                    areas[id_idx] = _area_sum(areas_masked)
 
                     # Calculate area-weighted centroid using spherical geometry
                     cos_lat = np.cos(lat_rad[cells])
@@ -620,10 +653,10 @@ def cluster_rename_objects_and_props(
                     y = cos_lat * np.sin(lon_rad[cells])
                     z = np.sin(lat_rad[cells])
 
-                    # Weighted average in Cartesian coordinates
-                    weighted_x = np.sum(areas_masked * x)
-                    weighted_y = np.sum(areas_masked * y)
-                    weighted_z = np.sum(areas_masked * z)
+                    # Weighted average in Cartesian coordinates, summed in float64 like the areas
+                    weighted_x = np.sum(areas_masked * x, dtype=np.float64)
+                    weighted_y = np.sum(areas_masked * y, dtype=np.float64)
+                    weighted_z = np.sum(areas_masked * z, dtype=np.float64)
 
                     # Normalise
                     norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
@@ -739,7 +772,13 @@ def cluster_rename_objects_and_props(
             output_dtypes=[np.float32, np.float32, np.float32],
         )
 
-        results = persist(areas_computed, centroid_lats_computed, centroid_lons_computed)
+        # One kernel yields all three, so they are anchored together: separately, each would
+        # re-run it. Under streaming they go to disk, not into cluster memory.
+        recomputed_props = {"area": areas_computed, "centroid_lat": centroid_lats_computed, "centroid_lon": centroid_lons_computed}
+        if materialiser is None:
+            results = persist(*recomputed_props.values())
+        else:
+            results = materialiser.stage_many(recomputed_props, "event_properties", preserve_chunks=True)
         areas_computed, centroid_lats_computed, centroid_lons_computed = results
 
         # Update area with proper dimension ordering (time, ID)
@@ -753,6 +792,10 @@ def cluster_rename_objects_and_props(
         object_props_extended["centroid"] = new_centroid.transpose("component", timedim, "ID")
 
         logger.info("Property recalculation complete.")
+
+    # Keep the variable order of the input properties: area and centroid are assigned last above.
+    leading = ["global_ID"] + [v for v in object_props.data_vars if v in object_props_extended.data_vars]
+    object_props_extended = object_props_extended[leading + [v for v in object_props_extended.data_vars if v not in leading]]
 
     # Combine all components into final dataset
     split_merged_relabeled_events_ds = xr.merge(
@@ -1422,6 +1465,18 @@ def split_and_merge_objects_parallel(
     n_chunks = len(chunk_sizes)
     n_time = int(object_id_field_unique.sizes[timedim])
 
+    # Temporary IDs are minted above two reserved ranges of `n_time * id_stride` IDs past the largest
+    # object ID (see `mint_base` below) and written as int32, so check the whole range before any is
+    # minted. The largest must stay below the int32 maximum: the overlap step computes max ID + 1 in int32.
+    largest_object_id = int(object_props.ID.max().item())
+    id_ceiling = largest_object_id + 1 + 2 * n_time * id_stride
+    if id_ceiling > np.iinfo(np.int32).max:
+        raise ValueError(
+            f"Merging needs IDs up to {id_ceiling}, beyond the int32 ID range: the largest object ID is "
+            f"{largest_object_id} and {n_time} timesteps reserve {2 * id_stride} temporary IDs each. "
+            "Track a shorter period or filter more small objects."
+        )
+
     # -- the kernel -----------------------------------------------------------------------
     def process_chunk(
         chunk_pristine: NDArray[np.int32],
@@ -1516,7 +1571,7 @@ def split_and_merge_objects_parallel(
                     continue
 
                 potential_parents = np.unique(data_m1[child_mask])
-                child_area = area[child_mask].sum()
+                child_area = _area_sum(area[child_mask])
                 parent_masks_uint = np.full(n_pts, 255, dtype=np.uint8)
                 parent_centroids = np.full((MAX_PARENTS, 2), -1.0e10, dtype=np.float32)
                 parent_ids = np.full(MAX_PARENTS, -1, dtype=np.int32)
@@ -1529,10 +1584,10 @@ def split_and_merge_objects_parallel(
                     overlap_cells = child_cells[parent_mask[child_cells]]
                     if not overlap_cells.size:
                         continue
-                    area_0 = area[parent_mask].sum()
+                    area_0 = _area_sum(area[parent_mask])
                     min_area = np.minimum(area_0, child_area)
-                    overlap_area = area[overlap_cells].sum()
-                    if overlap_area / min_area < overlap_threshold:
+                    overlap_area = _area_sum(area[overlap_cells])
+                    if _overlap_fraction(overlap_area, min_area) < overlap_threshold:
                         continue
 
                     # Only an ACCEPTED parent can exhaust the fixed-width arrays; a candidate that
@@ -1564,11 +1619,10 @@ def split_and_merge_objects_parallel(
                     mask_area = area[parent_mask]
                     weighted = np.array(
                         [
-                            np.sum(mask_area * x[parent_mask]),
-                            np.sum(mask_area * y[parent_mask]),
-                            np.sum(mask_area * z[parent_mask]),
+                            np.sum(mask_area * x[parent_mask], dtype=np.float64),
+                            np.sum(mask_area * y[parent_mask], dtype=np.float64),
+                            np.sum(mask_area * z[parent_mask], dtype=np.float64),
                         ],
-                        dtype=np.float32,
                     )
                     norm = np.sqrt(np.sum(weighted * weighted))
                     parent_centroids[n_parents, 0] = np.degrees(np.arcsin(weighted[2] / norm))
@@ -1616,7 +1670,7 @@ def split_and_merge_objects_parallel(
                     new_labels_uint = partition_nn_unstructured_optimised(
                         child_mask,
                         parent_masks_uint,
-                        parent_centroids,
+                        parent_centroids[:n_parents],
                         neighbours_int,
                         lat,
                         lon,
@@ -1625,12 +1679,12 @@ def split_and_merge_objects_parallel(
                     new_labels = child_ids[new_labels_uint]
                     new_labels_uint = None
                 else:
-                    new_labels = partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon)
+                    new_labels = partition_centroid_unstructured(child_mask, parent_centroids[:n_parents], child_ids, lat, lon)
 
                 data_t[child_mask] = new_labels
                 changed = True
 
-                # Forward search: children at t+1 that overlap the new pieces above threshold.
+                # Forward search: children at t+1 that overlap the new pieces at or above the threshold.
                 # Every cell holding a new id was in child_mask, so `child_cells[new_labels ==
                 # new_id]` is exactly what `data_t == new_id` would find, ascending, at O(child).
                 new_merging_list = []
@@ -1638,16 +1692,16 @@ def split_and_merge_objects_parallel(
                     parent_cells = child_cells[new_labels == new_id]
                     if not parent_cells.size:
                         continue
-                    area_0 = area[parent_cells].sum()
+                    area_0 = _area_sum(area[parent_cells])
                     for potential_child in np.unique(data_p1[parent_cells]):
                         if potential_child <= 0:
                             continue
                         potential_child_mask = data_p1 == potential_child
-                        area_1 = area[potential_child_mask].sum()
+                        area_1 = _area_sum(area[potential_child_mask])
                         min_area = min(area_0, area_1)
                         overlap_cells = parent_cells[potential_child_mask[parent_cells]]
-                        overlap_area = area[overlap_cells].sum()
-                        if overlap_area / min_area > overlap_threshold:
+                        overlap_area = _area_sum(area[overlap_cells])
+                        if _overlap_fraction(overlap_area, min_area) >= overlap_threshold:
                             new_merging_list.append(int(potential_child))
 
                 if t < n_t - 1:

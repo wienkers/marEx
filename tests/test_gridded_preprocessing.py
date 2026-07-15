@@ -17,7 +17,12 @@ class TestGriddedPreprocessing:
     def setup_class(cls):
         """Load test data for all tests."""
         test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst_data = xr.open_zarr(str(test_data_path), chunks={}).to.persist()
+        # Rooted in the zarr store, not persisted: futures would tie the data to whichever client
+        # was current when the class was set up, and that client may close before these tests run.
+        cls.sst_data = xr.open_zarr(str(test_data_path), chunks={}).to
+        from distributed.client import futures_of
+
+        assert not futures_of(cls.sst_data), "keep the class data rooted in the zarr store"
 
         # Artificially make some masked NaN data in the 2nd lat and 2nd lon point
         cls.sst_data = cls.sst_data.where(

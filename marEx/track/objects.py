@@ -10,6 +10,7 @@ explicit arguments. Behaviour and numerics are identical to the original
 
 from typing import Dict, List, Optional, Tuple, Union
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 from dask import persist
@@ -22,6 +23,7 @@ from skimage.measure import regionprops_table
 
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
+from .labelling import label_time_connected
 
 logger = get_logger(__name__)
 
@@ -202,7 +204,12 @@ def identify_objects(
         neighbours = np.zeros((3, 3, 3))
         neighbours[:, :, :] = 1  # +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
 
-        if regional_mode:
+        data = data_bin.data
+        if isinstance(data, da.Array) and data.ndim == 3 and len(data.chunks[1]) == 1 and len(data.chunks[2]) == 1:
+            # Same labels and count as dask_image's label, in a graph linear in the number of
+            # time chunks (dask_image's grows roughly quadratically). Space must be whole.
+            object_id_field, N_objects = label_time_connected(data, wrap_x=not regional_mode)
+        elif regional_mode:
             object_id_field, N_objects = label(data_bin, structure=neighbours)
         else:
             object_id_field, N_objects = label(data_bin, structure=neighbours, wrap_axes=(2,))  # Wrap in x-direction !
@@ -267,9 +274,11 @@ def identify_objects(
             if labels.max() == 0:
                 return labels.astype(np.int32)
             # Compact (seam-merge leaves gaps) so per-slice max == object count -> valid offsets.
+            # A slice with no background has no 0 label, so compact the foreground only.
             unique = np.unique(labels)
+            fg = unique[unique > 0]
             remap = np.zeros(int(unique.max()) + 1, dtype=np.int32)
-            remap[unique] = np.arange(len(unique), dtype=np.int32)  # background 0 -> 0
+            remap[fg] = np.arange(1, len(fg) + 1, dtype=np.int32)  # background stays 0
             return remap[labels]
 
         local_ids = xr.apply_ufunc(
@@ -595,26 +604,6 @@ def calculate_object_properties(
         lon_rad = np.radians(lon).chunk({xdim: -1})
         cell_area_core = cell_area.chunk({xdim: -1})
 
-        # Calculate buffer size for IDs in chunks
-        max_ID = int(object_id_field.max().compute().item()) + 1
-
-        # Handle case where object_id_field may not have time dimension (e.g., single time slice)
-        if timedim in object_id_field.dims:
-            time_steps = object_id_field.sizes[timedim]
-        else:
-            # For single time slice, use 1 as time steps
-            time_steps = 1
-
-        # Per-timestep property buffer. The estimate is 4x the mean number of objects per
-        # timestep, plus slack. The old floor was `max_ID`, i.e. the total object count over
-        # the whole run, which made these buffers O(time x total objects) and is consistent
-        # with the recorded unstructured-tracking OOM. The floor is now
-        # a constant, so it still gives small runs generous headroom (where max_ID <= 100 it
-        # is exactly the old value) without scaling with the length of the run. Overflow is
-        # not silent: the `result[0, :n_ids] = areas` fill below raises if a timestep holds
-        # more objects than the buffer.
-        ID_buffer_size = max(int(max_ID / time_steps) * 4 + 2, min(max_ID, 100))
-
         def object_properties_chunk(
             ids: NDArray[np.int32],
             lat: NDArray[np.float32],
@@ -646,10 +635,10 @@ def calculate_object_properties(
             mapped_indices = np.searchsorted(ids_chunk, ids[valid_mask]).astype(np.int32)
 
             # Pre-allocate arrays
-            areas = np.zeros(n_ids, dtype=np.float32)
-            weighted_x = np.zeros(n_ids, dtype=np.float32)
-            weighted_y = np.zeros(n_ids, dtype=np.float32)
-            weighted_z = np.zeros(n_ids, dtype=np.float32)
+            areas = np.zeros(n_ids, dtype=np.float64)
+            weighted_x = np.zeros(n_ids, dtype=np.float64)
+            weighted_y = np.zeros(n_ids, dtype=np.float64)
+            weighted_z = np.zeros(n_ids, dtype=np.float64)
 
             # Convert to Cartesian for centroid calculation
             cos_lat = np.cos(lat[valid_mask])
@@ -688,6 +677,11 @@ def calculate_object_properties(
                 np.where(centroid_lon < -180.0, centroid_lon + 360.0, centroid_lon),
             )
 
+            # Summed and converted in float64, stored as float32.
+            areas = areas.astype(np.float32)
+            centroid_lat = centroid_lat.astype(np.float32)
+            centroid_lon = centroid_lon.astype(np.float32)
+
             assert areas.shape == (n_ids,)
             assert centroid_lat.shape == (n_ids,)
             assert centroid_lon.shape == (n_ids,)
@@ -724,6 +718,24 @@ def calculate_object_properties(
             props = xr.DataArray(props_np, dims=["prop", "out_id"])
 
         else:
+            # Per-timestep property buffer: exactly the largest number of distinct objects in
+            # any one timestep, from a single pass over the field. A buffer sized from the
+            # mean object count overflows on temporally concentrated activity, and one sized
+            # from the total object count grows with the length of the run.
+            def slice_object_count(ids: NDArray[np.int32]) -> np.int64:
+                return np.int64(np.unique(ids[ids > 0]).size)
+
+            per_slice_count = xr.apply_ufunc(
+                slice_object_count,
+                object_id_field,
+                input_core_dims=[[xdim]],
+                output_core_dims=[[]],
+                output_dtypes=[np.int64],
+                vectorize=True,
+                dask="parallelized",
+            )
+            ID_buffer_size = max(int(per_slice_count.max().compute().item()), 1)
+
             # Process in parallel
             props_buffer, ids_buffer = xr.apply_ufunc(
                 object_properties_chunk,
@@ -795,6 +807,23 @@ def calculate_object_properties(
             ids: NDArray[np.int32],
         ) -> Dict[str, List[Union[int, float]]]:
             """Calculate object properties for a chunk of data."""
+            # Labels are globally offset, so a late slice holds large IDs. regionprops sizes its
+            # per-label lookup by the largest label, not by the objects present: compact to 1..k
+            # (order-preserving, so the label-ordered output is unchanged) and map back at the end.
+            # Compacting costs a few arrays the size of the slice, the lookup ~8 B per label, so
+            # compact only once the largest label exceeds the number of cells.
+            original_labels = None
+            present = np.empty(0, dtype=ids.dtype)
+            if ids.size and int(ids.max()) > ids.size:
+                present = np.unique(ids)
+                present = present[present > 0]
+            if present.size and present[-1] != present.size:
+                original_labels = present
+                compact = np.zeros(ids.shape, dtype=ids.dtype)
+                foreground = ids > 0
+                compact[foreground] = np.searchsorted(present, ids[foreground]) + 1
+                ids = compact
+
             # Ask regionprops for the bounding box as well, so the antimeridian test below
             # is a column comparison rather than a full-slice mask per object.
             wrap_check = check_centroids and not regional_mode
@@ -834,6 +863,10 @@ def calculate_object_properties(
             if bbox_added:
                 for bbox_key in ("bbox-0", "bbox-1", "bbox-2", "bbox-3"):
                     props_slice.pop(bbox_key, None)
+
+            if original_labels is not None:
+                compact_labels = np.asarray(props_slice["label"])
+                props_slice["label"] = original_labels[compact_labels - 1].astype(compact_labels.dtype)
 
             return props_slice
 
