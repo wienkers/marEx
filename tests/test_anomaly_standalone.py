@@ -78,27 +78,21 @@ class TestStandaloneOutput:
         valid = ds.mask.values
         assert valid.any(), f"{method}: mask marks nothing valid"
 
-        # Day-of-year 366 is excluded deliberately. A rolling climatology can only fill
-        # that group from a leap year inside its own window, so with a short
-        # window_years a leap day legitimately has no baseline and yields NaN. Measured
-        # here: exactly one timestep, 2004-12-31, whose preceding three years
-        # (2001-2003) contain no leap day. This is a property of the method, not of the
-        # split -- the shipped default of window_years=15 always spans a leap year.
-        not_leap_day = ds.dat_anomaly.time.dt.dayofyear.values != 366
-        anomaly = ds.dat_anomaly.values[not_leap_day][:, valid]
+        # Including day of year 366: it takes every year's 31 December, so even a short
+        # window_years with no leap year inside it has a baseline for a leap year's last day.
+        anomaly = ds.dat_anomaly.values[:, valid]
         assert np.isfinite(anomaly).all(), f"{method}: non-finite anomaly inside the valid region"
 
         # The land cell stays masked out.
         assert not valid[0, 0]
 
-    def test_short_window_leaves_only_the_leap_day_unbaselined(self, da):
-        """Pin the exception above, so a broader NaN leak cannot hide behind it."""
+    def test_short_window_baselines_the_leap_day(self, da):
+        """A window spanning no leap year (2001-2003 before 2004) still baselines 2004-12-31."""
         ds = marEx.anomaly.compute(da, **_kwargs("shifting_baseline")).compute()
         valid = ds.mask.values
-        non_finite_rows = ~np.isfinite(ds.dat_anomaly.values[:, valid]).all(axis=1)
-
-        affected = ds.dat_anomaly.time.dt.dayofyear.values[non_finite_rows]
-        assert set(affected.tolist()) <= {366}, f"NaN on non-leap days: {sorted(set(affected.tolist()))}"
+        leap_day = ds.dat_anomaly.time.dt.strftime("%Y-%m-%d").values == "2004-12-31"
+        assert leap_day.sum() == 1
+        assert np.isfinite(ds.dat_anomaly.values[leap_day][:, valid]).all()
 
     @pytest.mark.parametrize("method", METHODS)
     def test_preprocessing_steps_describe_only_the_anomaly_stage(self, da, method):

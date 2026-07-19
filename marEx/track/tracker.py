@@ -575,6 +575,7 @@ class tracker:
             self.coordinate_units,
             self.xcoord,
             self.ycoord,
+            unstructured_grid=unstructured_grid,
         )
 
         # No mask supplied: every cell is valid. Built from the coordinate-unified
@@ -1133,6 +1134,16 @@ class tracker:
             logger.info(f"Filtered {N_objects_prefiltered} -> {N_objects_filtered} objects (threshold: {area_threshold})")
             log_memory_usage(logger, "After object filtering", logging.DEBUG)
 
+        # Nothing left to track: fail here, naming the cause, rather than dividing by a zero area below.
+        # Only the absolute filter can remove every object: a quantile threshold never exceeds the
+        # largest area, and ties are kept.
+        if int(N_objects_filtered) == 0:
+            raise TrackingError(
+                f"The area filter removed every object (area_filter_absolute={self.area_filter_absolute})",
+                details=f"{N_objects_prefiltered} objects were found before filtering; none reaches the threshold.",
+                suggestions=["Lower area_filter_absolute below the area of the largest object"],
+            )
+
         # Persist preprocessed data &/or Save checkpoint
         if checkpoint and "save" in checkpoint:
             logger.info("Saving preprocessed data to checkpoint")
@@ -1161,6 +1172,12 @@ class tracker:
 
         total_hobday_area = float(raw_area.sum().compute().item())
         total_processed_area = float(processed_area.sum().compute().item())
+        if total_processed_area <= 0:
+            raise TrackingError(
+                "The objects kept after filtering have zero total area",
+                details="Their cell areas sum to zero, so the preprocessed area fraction is undefined.",
+                suggestions=["Check that cell_areas is positive wherever the mask is True"],
+            )
         preprocessed_area_fraction = total_hobday_area / total_processed_area
 
         object_stats = (

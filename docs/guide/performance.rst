@@ -141,11 +141,12 @@ between stages is correct, not something to optimise away.
      - Modest, at least ``smooth_days``. The default ``dask_chunks={"time": 25}`` is a sound
        start.
    * - Detect, large unstructured mesh
-     - **Chunk the cell dimension.** About 25,000 cells per chunk is what the shipped example uses.
-     - Modest, at least ``smooth_days`` (21 in the example).
+     - **Chunk the cell dimension**, below about 200 million / ``n_time`` cells per chunk (see below).
+       The shipped example uses 15,625.
+     - At least ``smooth_days``. The shipped example uses 365 steps (23 MB chunks).
    * - Tracker, either grid
      - **Whole** (``-1``). Connected-component labelling and the dilation matrix are global in space.
-     - The only knob. Small chunks: 25 on the lat/lon example, 4 on the unstructured one.
+     - The only knob. Small chunks: 25 on the lat/lon example, 5 on the unstructured one.
 
 Detect on a Large Mesh
 ----------------------
@@ -165,6 +166,12 @@ On the ICON R02B09 mesh (14.9 M cells, 8 years, 2922 steps), input chunks of
 5 h 40 min, because the internal re-chunk becomes an all-to-all transpose. With
 ``{"time": 21, "ncells": 25000}`` the tile is 292 MB. The failure is a cliff and not a slope: the
 workers pause and resume, memory is reported as unmanaged and high, and nothing progresses.
+
+The anomaly stage keeps your spatial chunk as its internal tile while one task on it, ``n_time`` × cells per
+chunk, stays within about 200 million elements (four times the 50-million-element task budget).
+Above that it re-tiles the input into smaller tiles that straddle your chunks, and the task graph
+grows several-fold. In the 30-year ICON example (10,957 steps) the limit is about 18,000 cells, and
+the example uses 15,625.
 
 Leaving space whole is therefore wrong on a large unstructured mesh. The advice does not transfer to a
 lat/lon grid: the global 0.25° runs in :ref:`performance-measured` used spatially whole input chunks,
@@ -261,10 +268,12 @@ threads and 14 GB each:
 These runs used an earlier version of the histogram stage. The current per-cell kernel completed the
 40-year rows in the table below at 1.2 to 1.4 GB per thread, so the figures here are a conservative
 bound. Read 14 GB per 4-thread worker as the edge for that earlier stage at this size and budget
-above it. For a first estimate per worker, take about 3.5 GB per thread, of which roughly 1.2 GB per
-worker was pinned output under ``'persist'``, and scale the pinned part with your field. Only this
-one grid, cluster shape and thread count were measured, and two or three runs do not give a crash
-rate.
+above it. Size ``memory_limit`` from the largest single worker's peak, which
+:class:`~marEx.helper.ResourceMonitor` reports per stage, not from the summed peak. In the detect
+runs of the example notebooks the largest worker reached 5.3 GB of 7.8 GB on single-threaded workers
+(global 0.25°, 40 years of input, ``persist``) and 24.4 GB of 31.2 GB on 8-thread workers (ICON,
+30 years of input, ``streaming``). Each is one run, sampled once a second, so the peaks are lower
+bounds, and one run per shape does not give a crash rate.
 
 A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during extreme
 identification (see :ref:`troubleshooting-worker-warnings` for why you may not see it). A restart
@@ -369,10 +378,14 @@ submits workers as batch jobs.
    )
 
 The signature is ``start_distributed_cluster(n_workers, workers_per_node, runtime=9,
-node_memory=256, dashboard_address=8889, queue='compute', scratch_dir=None, account=None,
-verbose=None, quiet=None, **kwargs)``. It was written for the DKRZ Levante machine: the defaults for
-network interface and log directory are specific to it, and ``node_memory`` outside 256, 512 and 1024
-raises ``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
+threads_per_worker=1, node_memory=256, dashboard_address=8889, queue='compute', scratch_dir=None,
+account=None, verbose=None, quiet=None, **kwargs)``. Each node runs ``workers_per_node`` processes of
+``threads_per_worker`` threads. Fewer, multi-threaded workers mean fewer peers in every all-to-all
+transfer. Without ``account`` the worker jobs are charged to ``$SLURM_ACCOUNT``, ``$SBATCH_ACCOUNT`` or
+``$SLURM_JOB_ACCOUNT``, the first that is set, or else to the account of the SLURM job the call runs
+in. The function was written for the DKRZ Levante machine: the defaults for network interface and log
+directory are specific to it, and ``node_memory`` outside 256, 512 and 1024 raises
+``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
 same memory and spill settings, or run marEx inside a single batch allocation with
 ``start_local_cluster`` and an explicit ``memory_limit``. Inside an allocation, keep
 ``n_workers × memory_limit`` below the memory you were granted.
@@ -386,7 +399,8 @@ Measuring a Run
 ---------------
 
 :class:`marEx.helper.ResourceMonitor` records, stage by stage, the wall time, the peak summed worker
-memory, the peak client memory, the peak bytes spilled to disk and the number of worker restarts.
+memory, the peak of the largest single worker, the peak client memory, the peak bytes spilled to disk
+and the number of worker restarts.
 
 .. code-block:: python
 
@@ -404,8 +418,9 @@ memory, the peak client memory, the peak bytes spilled to disk and the number of
 
 A background thread samples the scheduler every ``interval`` seconds, so a spike shorter than that
 can be missed and the peaks are lower bounds. On construction the monitor logs each worker's
-``memory_limit`` and warns if the limits add up to more than the memory of the job (the cgroup limit
-when one is set, otherwise the SLURM grant).
+``memory_limit`` and warns if the limits of the workers on this machine add up to more than the
+memory of the job (the cgroup limit when one is set, otherwise the SLURM grant). Workers started as
+their own SLURM jobs on other nodes do not count against it.
 
 .. _performance-measured:
 
@@ -461,6 +476,11 @@ Detect
      - 4563 to 5199 s per slab
      - spill peak 143 to 167 GiB per slab, 0 restarts
      - 1 per slab
+   * - ICON R02B09 (14.9 M cells), 30 yr input (7305 output days), ``streaming``, all cells in one run
+     - 48 workers × 8 threads × 31.2 GB (6 nodes)
+     - 36.6 min
+     - largest worker 24.4 GB, spill peak 1061 GB, 0 restarts
+     - 1
 
 In the first and third rows ``persist`` and ``streaming`` produced identical data variables (the 19.4 yr
 pair was compared file by file, 292 of 292). In the second row the thresholds, masks and events were
@@ -468,9 +488,10 @@ compared against the first row and agreed. In each pair ``streaming`` was no slo
 ``persist``. The first two rows are the same data and method on two cluster shapes, so wall time
 depends on the cluster as much as on the data. The regional run is marginal: three histogram
 restarts, and it completed. The slab runs used the native (non-streaming) path, and three slabs ran
-at once without slowing down.
+at once without slowing down. The whole-mesh ICON row is the shipped unstructured example notebook, peaks sampled once a second
+by :class:`~marEx.helper.ResourceMonitor`.
 
-The ICON slab row is the only unstructured detect measurement. Detect on a spatially whole input
+The two ICON rows are the only unstructured detect measurements. Detect on a spatially whole input
 of a large unstructured mesh is not advertised (see :ref:`performance-chunking`).
 
 Tracking
@@ -524,6 +545,9 @@ What these rows say:
   harness deadline on both attempts, with no out-of-memory event recorded, and ``streaming``
   completed in 3 h 50 min. That is a wall-clock statement and not a statement that ``persist``
   cannot fit.
+
+The scripts behind these rows, with the SLURM legs that produced each one and the per-run summaries they write, are
+in `examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_.
 
 Choosing a Strategy
 ===================

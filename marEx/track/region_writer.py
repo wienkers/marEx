@@ -100,7 +100,7 @@ class ObjectIDRegionWriter:
         # Coordinates were written by _initialise; a region write must carry only the
         # data variable, or zarr rejects the mismatched coordinate extents.
         ds = ds.drop_vars(list(ds.coords))
-        write_zarr(ds, self.path, region={self.timedim: slice(start, end)})
+        write_zarr(ds, self.path, region={self.timedim: slice(start, end)}, consolidated=False)
         self._n_written += 1
         self._regions.append((start, end))
 

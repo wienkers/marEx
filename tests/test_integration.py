@@ -18,14 +18,32 @@ import marEx
 from .conftest import assert_reasonable_bounds
 
 
+def _open_sst(name):
+    """A shipped SST store, rooted in the zarr store and never persisted.
+
+    Futures would tie the data to whichever client was current when a class was set up, and that
+    client may close before the class's tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / name), chunks={})
+
+
+def test_class_inputs_carry_no_futures(dask_client_integration):
+    """Re-adding ``.persist()`` to ``_open_sst`` pins every class's input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    for name in ("sst_gridded.zarr", "sst_unstructured.zarr"):
+        held = futures_of(_open_sst(name))
+        assert not held, f"{name} holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 class TestFullPipelineGridded:
     """Integration tests for the complete marEx pipeline with gridded data."""
 
     @classmethod
     def setup_class(cls):
         """Load test data for all tests."""
-        test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        ds = _open_sst("sst_gridded.zarr")
         cls.sst_data = ds.to
 
         # Define standard dimensions for gridded data
@@ -232,8 +250,7 @@ class TestFullPipelineUnstructured:
     @classmethod
     def setup_class(cls):
         """Load unstructured test data."""
-        test_data_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        ds = _open_sst("sst_unstructured.zarr")
         cls.sst_data = ds.to
 
         # Add lat/lon coordinates for unstructured data (required for preprocessing)
@@ -312,11 +329,8 @@ class TestPipelineIntegration:
     @classmethod
     def setup_class(cls):
         """Load both gridded and unstructured test data."""
-        gridded_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.gridded_data = xr.open_zarr(str(gridded_path), chunks={}).persist().to
-
-        unstructured_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        cls.unstructured_data = xr.open_zarr(str(unstructured_path), chunks={}).persist().to
+        cls.gridded_data = _open_sst("sst_gridded.zarr").to
+        cls.unstructured_data = _open_sst("sst_unstructured.zarr").to
 
     @pytest.mark.integration
     def test_method_combinations_consistency(self, dask_client_integration):

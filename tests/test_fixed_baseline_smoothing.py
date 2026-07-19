@@ -99,6 +99,9 @@ class TestFixedBaselineAnomaly:
         da = _daily_field()
         result = _compute_anomaly_fixed_baseline(da, smooth_days=1).dat_anomaly.compute()
         clim = da.groupby("time.dayofyear").mean("time").compute()
+        # Day 366 takes every year's 31 December, not only the leap years'.
+        dec31 = (da.time.dt.month == 12) & (da.time.dt.day == 31)
+        clim.loc[{"dayofyear": 366}] = da.isel(time=dec31.values).mean("time").compute()
         reference = (da.groupby("time.dayofyear") - clim).astype(np.float32).drop_vars("dayofyear").compute()
         np.testing.assert_allclose(result.values, reference.values, rtol=0, atol=1e-6)
 

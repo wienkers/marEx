@@ -9,11 +9,35 @@ import marEx
 from .conftest import assert_percentile_frequency
 
 
+def _open_store(name):
+    """Open a shipped fixture store, rooted in the zarr store and never persisted.
+
+    Futures would tie the data to whichever client was current when it was built, and that client may
+    close before the tests that use it run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / name), chunks={})
+
+
 @pytest.fixture(scope="module")
 def extremes_unstructured():
     """Load unstructured extremes data for testing."""
-    test_data_path = Path(__file__).parent / "data" / "extremes_unstructured.zarr"
-    return xr.open_zarr(str(test_data_path), chunks={}).persist()
+    return _open_store("extremes_unstructured.zarr")
+
+
+def test_store_inputs_carry_no_futures():
+    """Re-adding ``.persist()`` to ``_open_store`` pins the fixture and both classes' data to whichever
+    client was current when they were built, and the tests fail with ``lost dependencies`` once it closes.
+
+    With no client current ``.persist()`` leaves no futures, so the loader is run here under a live
+    distributed one to make the check bite.
+    """
+    from distributed import Client
+    from distributed.client import futures_of
+
+    with Client(processes=False, n_workers=1, threads_per_worker=1, dashboard_address=None):
+        for name in ("extremes_unstructured.zarr", "sst_unstructured.zarr"):
+            held = futures_of(_open_store(name))
+            assert not held, f"{name} holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 class TestUnstructuredPreprocessing:
@@ -22,8 +46,7 @@ class TestUnstructuredPreprocessing:
     @classmethod
     def setup_class(cls):
         """Load test data for all tests."""
-        test_data_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        ds = _open_store("sst_unstructured.zarr")
         cls.sst_data = ds.to  # Extract the DataArray named 'to'
 
         # Artificially make some masked NaN data in the 2nd cell
@@ -493,8 +516,7 @@ class TestUnstructuredGridEdgeCases:
     @classmethod
     def setup_class(cls):
         """Load unstructured test data."""
-        test_data_path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        ds = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        ds = _open_store("sst_unstructured.zarr")
         cls.sst_data = ds.to  # Extract the DataArray
 
         # Add mock lat/lon coordinates

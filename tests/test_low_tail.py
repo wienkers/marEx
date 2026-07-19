@@ -147,7 +147,7 @@ class TestAnalyticRecovery:
 
 
 class TestGuardRail:
-    def test_a_constant_zero_cell_is_not_extreme_in_either_tail(self):
+    def test_a_constant_zero_cell_is_not_extreme_in_either_tail(self, caplog):
         """The guard rail exists for sea ice: a flat-zero anomaly must never flag.
 
         Under the legacy bins this was enforced only upward. The symmetric bins make
@@ -158,10 +158,13 @@ class TestGuardRail:
         da[:, 0, 0] = 0.0
         da = da.chunk({"time": -1, "lat": 2, "lon": 5})
         for tail, percentile in [("lower", 5), ("upper", 95)]:
-            with pytest.warns(UserWarning, match="constant anomaly"):
+            caplog.clear()
+            logging.getLogger("marEx").propagate = True
+            with caplog.at_level(logging.INFO, logger="marEx"):
                 ds = marEx.extremes.identify(
                     da, method="global_percentile", threshold_percentile=percentile, tail=tail, dimensions=DIMENSIONS
                 ).compute()
+            assert any("constant" in r.getMessage() and "never extreme" in r.getMessage() for r in caplog.records)
             assert not ds.extreme_events.isel(lat=0, lon=0).values.any(), f"{tail} tail flagged a constant-zero cell"
 
 
@@ -230,11 +233,11 @@ class TestSampleCountWarning:
         """
         da = _anomaly(n_time=730, n_y=2, n_x=2)  # 2 years x 11-day window = 22 slots
         with _CaptureMarExLogs() as captured:
-            marEx.extremes.identify(da, method="seasonal_percentile", threshold_percentile=5, tail="lower", dimensions=DIMENSIONS)
+            marEx.extremes.identify(da, method="seasonal_percentile", threshold_percentile=1, tail="lower", dimensions=DIMENSIONS)
         messages = captured.messages
         assert any("Not enough samples" in m for m in messages), messages
-        # 5 % of 550 samples, not 95 % of them.
-        assert any("27.5 < 50" in m for m in messages), messages
+        # 1 % of 550 samples, not 99 % of them.
+        assert any("5.5 < 10" in m for m in messages), messages
 
 
 class TestPreprocessingStepsNameTheTail:

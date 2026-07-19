@@ -19,6 +19,7 @@ import xarray as xr
 
 from ..exceptions import DependencyError, VisualisationError
 from ..logging_config import get_logger
+from .mesh import pcolormesh_seam_safe
 
 # Handle optional dependencies for plotting
 try:
@@ -392,6 +393,9 @@ def _animate(
         subprocess.run(
             [
                 "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",  # ffmpeg's encoder banner and its full-range-JPEG input notice are not failures
                 "-y",
                 "-threads",
                 "0",
@@ -498,7 +502,7 @@ def make_frame(
             # Regular grid plotting - use the resolved coordinate names (not hardcoded lat/lon)
             lat = data_slice[y_coord].values
             lon = data_slice[x_coord].values
-            im = ax.pcolormesh(lon, lat, data_slice_np, **plot_kwargs)
+            im = pcolormesh_seam_safe(ax, lon, lat, data_slice_np, **plot_kwargs)
 
         time_str = plot_params.get("time_str", f"Frame {time_ind}")
         ax.set_title(time_str, size=12)

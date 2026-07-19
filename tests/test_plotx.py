@@ -1455,3 +1455,114 @@ class TestGriddedPlotterEdgeCases:
         fig, ax, im = plotter.single_plot(config)
 
         assert fig is not None
+
+
+@pytest.fixture
+def agg_backend():
+    """Render off-screen and release figures afterwards."""
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    previous = matplotlib.get_backend()
+    plt.switch_backend("Agg")
+    yield
+    plt.close("all")
+    plt.switch_backend(previous)
+
+
+class TestGlobalGridDatelineCell:
+    """A global grid whose centres include the antimeridian must render, not crash in shapely."""
+
+    @staticmethod
+    def _global_field(lon_start):
+        lon = np.arange(lon_start, 360, 5.0)
+        lat = np.arange(-87.5, 90, 5.0)
+        rng = np.random.default_rng(0)
+        return xr.DataArray(rng.random((lat.size, lon.size)), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+
+    @pytest.mark.parametrize("lon_start", [0.0, 2.5])
+    def test_single_plot_global_five_degree_grid(self, agg_backend, lon_start):
+        da = self._global_field(lon_start)
+
+        fig, ax, im = da.plotX.single_plot(marEx.PlotConfig(var_units="x", cmap="hot_r", cperc=[0, 96]))
+        fig.canvas.draw()
+
+        assert im is not None
+
+    def test_cell_across_seam_is_split_in_two(self, agg_backend):
+        """The seam-straddling cell is drawn as two halves carrying the same value."""
+        import cartopy.crs as ccrs
+        import matplotlib.pyplot as plt
+
+        from marEx.plotX.mesh import pcolormesh_seam_safe
+
+        lon = np.arange(-180.0, 180, 5.0)  # centred on 0, the seam of a projection centred on 180
+        lat = np.arange(-87.5, 90, 5.0)
+        values = np.tile(np.arange(lon.size, dtype=float), (lat.size, 1))
+
+        ax = plt.axes(projection=ccrs.PlateCarree(central_longitude=180))
+        mesh = pcolormesh_seam_safe(ax, lon, lat, values, transform=ccrs.PlateCarree(), shading="auto")
+
+        zero_column = int(np.flatnonzero(lon == 0.0)[0])
+        shown = np.asarray(mesh.get_array()).reshape(lat.size, -1)
+        assert shown.shape[1] == lon.size + 1
+        assert (shown == zero_column).sum() == 2 * lat.size
+
+    def test_grid_without_seam_cell_is_untouched(self):
+        """No cell across the seam: the call is forwarded exactly as given."""
+        from marEx.plotX.mesh import pcolormesh_seam_safe
+
+        lon = np.arange(2.5, 360, 5.0)
+        lat = np.arange(-87.5, 90, 5.0)
+        values = np.zeros((lat.size, lon.size))
+        ax = MagicMock()
+        ax.projection.proj4_params = {"lon_0": 0.0}
+
+        pcolormesh_seam_safe(ax, lon, lat, values, shading="auto")
+
+        args, kwargs = ax.pcolormesh.call_args
+        assert args[0] is not None and args[2] is values
+        assert kwargs == {"shading": "auto"}
+
+
+class TestEmptyIdField:
+    """An ID field with no objects plots an empty map and warns instead of raising."""
+
+    @staticmethod
+    def _ids(values):
+        lon = np.arange(2.5, 360, 5.0)
+        lat = np.arange(-87.5, 90, 5.0)
+        return xr.DataArray(values, dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+
+    @pytest.fixture
+    def plotx_warnings(self, caplog):
+        """The marEx logger tree does not propagate, so attach the capture handler directly."""
+        import logging
+
+        target = logging.getLogger("marEx")
+        target.addHandler(caplog.handler)
+        caplog.set_level(logging.WARNING, logger="marEx")
+        yield caplog
+        target.removeHandler(caplog.handler)
+
+    def test_all_zero_id_field_plots_empty_map_and_warns(self, agg_backend, plotx_warnings):
+        da = self._ids(np.zeros((36, 72), dtype=int))
+
+        fig, ax, im = da.plotX.single_plot(marEx.PlotConfig(plot_IDs=True))
+        fig.canvas.draw()
+
+        assert np.ma.getmaskarray(im.get_array()).all()
+        messages = [r.getMessage() for r in plotx_warnings.records if r.levelname == "WARNING"]
+        assert any("no objects" in m for m in messages)
+
+    def test_non_empty_id_field_still_plots_without_warning(self, agg_backend, plotx_warnings):
+        values = np.zeros((36, 72), dtype=int)
+        values[10:14, 20:30] = 3
+        values[20:24, 40:50] = 7
+
+        fig, ax, im = self._ids(values).plotX.single_plot(marEx.PlotConfig(plot_IDs=True))
+        fig.canvas.draw()
+
+        shown = np.ma.compressed(im.get_array())
+        assert set(np.unique(shown)) == {3.0, 7.0}
+        assert not [r for r in plotx_warnings.records if r.levelname == "WARNING" and "no objects" in r.getMessage()]

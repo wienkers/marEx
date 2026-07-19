@@ -37,6 +37,19 @@ class TestObjectIDRegionWriter:
         out = writer.finalise()
         xr.testing.assert_identical(out.compute(), source)
 
+    def test_region_writes_raise_no_consolidated_metadata_warning(self, tmp_path):
+        """The staging store is unconsolidated, so a region write must not probe for consolidated metadata."""
+        import warnings
+
+        template = _field()
+        writer = ObjectIDRegionWriter(template, tmp_path / "f.zarr", "time")
+        source = template.compute()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*consolidated metadata.*")
+            for start in range(0, 8, 2):
+                writer.write(start, start + 2, source.isel(time=slice(start, start + 2)))
+            writer.finalise()
+
     def test_regions_may_be_written_with_a_ragged_final_chunk(self, tmp_path):
         """n_time not divisible by the chunk size must still round-trip."""
         template = _field(n_time=7, chunk=3)

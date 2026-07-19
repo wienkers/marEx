@@ -71,7 +71,17 @@ CONFIGS = {
 # input, so the change is the chunk dependence and nothing else.
 # Config B was rewritten AGAIN 2026-10-05: the smoothing's rolling mean moved from bottleneck's
 # float32 running sum to xarray's numpy path on every xarray release (dat_anomaly max 7.3e-4 at 543,605 of
-# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0). Never regenerate without a deliberate decision.
+# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0).
+# Config B was rewritten again 2026-10-18: the seasonal spatial window wrapped longitude on any
+# lat/lon grid, so on this 10-degree box the edge columns pooled samples from the opposite edge. It now
+# wraps only a grid spanning 360 degrees. Only the outermost window_spatial // 2 columns on each side moved
+# (lon 0, 1, 38, 39): thresholds at 28,505 of 292,800; extreme_events 1,350 of 585,600; dat_anomaly and
+# mask 0.
+# Config B was rewritten again 2026-10-21: the day-366 climatology now pools every year's 31 December
+# instead of the leap years' alone, which left a leap year's 31 December with a one-sample climatology
+# carrying the trend. Every moved element sits on the predicted day-366 set: dat_anomaly 799 of 585,600,
+# all on 2020-12-31; thresholds 1,874 of 292,800, on day of year 365, 366 and 1 only; extreme_events 118
+# of 585,600, on dates with those days of year only; mask 0. Never regenerate without a deliberate decision.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # The histogram bins were changed from asymmetric to symmetric ones, so the 1-D path now
@@ -92,10 +102,21 @@ GOLDEN_VARS = ["dat_anomaly", "mask", "extreme_events", "thresholds"]
 
 
 def _load_sst():
-    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(-N_GOLDEN_STEPS, None)).persist()
+    # Rooted in the zarr store, not persisted: futures would tie the input to whichever client was
+    # current when the class was set up, and that client may close before these tests run.
+    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(-N_GOLDEN_STEPS, None))
     # Match the masked-NaN injection used by test_gridded_preprocessing.
     sst = sst.where(~((sst.lat == sst.lat[1]) & (sst.lon == sst.lon[1])), np.nan)
     return sst
+
+
+def test_input_carries_no_futures(dask_client_gridded):
+    """Re-adding ``.persist()`` to ``_load_sst`` pins the class input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(_load_sst())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 class TestDetectGolden:

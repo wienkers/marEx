@@ -566,8 +566,9 @@ Troubleshooting
 Workers killed, or ``P2PConsistencyError``
    Look for a worker memory warning above the traceback. Try ``compute_mode="streaming"``,
    smaller time chunks, or more memory per worker. For ICON-scale unstructured tracking,
-   12 GB per worker was stable on a 3-year run where 9 GB per worker was bistable; the 5-year
-   example notebook (``R_fill=80``, 8 threads per worker) needs more and uses 28 GB per worker.
+   12 GB per worker was stable on a 3-year run where 9 GB per worker was bistable. The one-year
+   example notebook (``R_fill=80``, 8 workers × 8 threads × 28 GB) peaked at 13.2 GB in its
+   largest worker.
 
 One enormous event
    ``overlap_threshold`` is too low, ``T_fill`` or ``R_fill`` too large, or the specks that
@@ -575,6 +576,10 @@ One enormous event
 
 Many tiny events
    Increase the area filter, or raise ``R_fill`` so the opening removes them.
+
+``ValueError`` that the merge IDs or object count exceed the int32 range
+   On an unstructured mesh the IDs are checked against int32 before merging. Track a shorter
+   period or filter more small objects.
 
 Complete Workflow
 =================

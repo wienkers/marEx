@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Larger-than-memory squeeze: `marEx.preprocess_data` on a structured (lat/lon) grid.
+r"""Larger-than-memory squeeze: `marEx.preprocess_data` on a structured (lat/lon) grid.
 
-Input is the full 0.25-degree OSTIA record, 14761 days x 720 x 1440 = 61.2 GB of float32.
-Under ``persist`` this pins roughly a third of the input and peaks near twice it, so a
-cluster of a few tens of GB cannot run it at all; under ``streaming`` the anchors go to a
-scratch zarr and only a handful of chunks are ever resident.
+Input is the full 0.25-degree OSTIA record, 14761 days x 720 x 1440 = 61.2 GB of float32
+(arithmetic; the legs measured here use the first 2200 days, 9.1 GB).  At 2200 days
+``persist`` pins 9.95 GB and ``streaming`` 35 KB, yet both peak near 127 GB with ample
+memory: this path is compute-bound and its peak is a transient that ``compute_mode`` does not
+move.  It is a useful equivalence check, not a squeeze (see the README).
 
 Chunking note, and it is the setting that decides whether this runs: the quantile
 reductions are global in time and independent in space, so marEx rechunks internally to a
@@ -14,18 +15,20 @@ width and not by the time chunk.  Leaving lat/lon whole makes that the entire ar
 turns the internal rechunk into an all-to-all transpose -- which does not fail fast, it
 thrashes.  That rule was established on a 14.9 M-cell unstructured mesh, and it does **not**
 transfer to this grid: at 1.04 M cells, spatially-whole input is what the production
-notebook uses and what every previous measurement on this path used.  Splitting lat/lon
-into finer tiles here made things strictly worse -- measured 2026-08-26, a 90 x 180 tiling
-died in 6 minutes where the spatially-whole version survived, because the histogram's
-internal rechunk then has to gather many more pieces.  Chunk the spatial dimension for the
-ICON mesh; leave it whole here.
+notebook uses and what the runs reported in the README used (``--lat-chunk`` and
+``--lon-chunk`` default to -1).  In one probe at 2200 days with spilling disabled, a 90 x 180
+tiling was classified as an out-of-memory failure after 369 s; the spatially-whole probes ran
+with spilling on, so that is a hint and not a controlled comparison.  Chunk the spatial
+dimension for the ICON mesh; leave it whole here.
 
 Examples
 --------
-Feasibility (expect persist to die, streaming to complete)::
+Equivalence-sized run (both modes fit)::
 
-    python detect_gridded.py --label f1_persist --mode persist    --workers 6 --mem-per-worker 6GB ...
-    python detect_gridded.py --label f1_stream  --mode streaming  --workers 6 --mem-per-worker 6GB ...
+    python detect_gridded.py --label dg_persist --mode persist --nt 2200 \
+        --outdir OUT --scratch SCRATCH --workers 16 --mem-per-worker 12GB
+    python detect_gridded.py --label dg_stream --mode streaming --nt 2200 \
+        --outdir OUT --scratch SCRATCH --workers 16 --mem-per-worker 12GB
 """
 
 import argparse
@@ -34,11 +37,11 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-from squeeze_common import GB, add_common_args, execute, snapshot_boundary
+from squeeze_common import GB, add_common_args, apply_smoke, default_data_path, execute, snapshot_boundary
 
 import marEx
 
-DEFAULT_INPUT = "/scratch/b/b382615/mhws/ostia.zarr"
+DEFAULT_INPUT = default_data_path("input/ostia/ostia.zarr")
 
 
 def main() -> None:
@@ -55,6 +58,7 @@ def main() -> None:
     parser.add_argument("--out-time-chunk", type=int, default=25, help="dask_chunks for the OUTPUT dataset.")
     parser.add_argument("--write-output", default="", help="Optional zarr path; also produces a track leg's input.")
     args = parser.parse_args()
+    apply_smoke(args, nt=365)
 
     chunks = {"time": args.time_chunk, "lat": args.lat_chunk, "lon": args.lon_chunk}
     da = xr.open_zarr(args.input, chunks=chunks)[args.var]

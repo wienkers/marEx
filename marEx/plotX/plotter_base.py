@@ -371,6 +371,11 @@ class PlotterBase:
         """Set up parameters for plotting IDs"""
         # Use min=1 and max from data without computing all unique values
         max_id = int(self.da.max().values)
+        if max_id < 1:
+            # No objects: keep a single placeholder bin so the norm stays valid. Zeros are masked
+            # before drawing, so the map comes out empty.
+            logger.warning("ID field contains no objects (all values are zero); plotting an empty map")
+            max_id = 1
         bounds = np.arange(1, max_id + 2) - 0.5
         n_bins = len(bounds) - 1
 

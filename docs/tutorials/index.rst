@@ -45,6 +45,15 @@ a few grid-specific arguments change.
       ERA5 wind over Europe, 1980-2024: lower-tail extremes of hub-height
       capacity factor tracked into a catalogue of low-wind spells.
 
+Scripts
+=======
+
+`examples/batch_jobs <https://github.com/wienkers/marEx/tree/main/examples/batch_jobs>`_ holds the gridded detect and
+track notebooks as plain Python scripts with SLURM wrappers, for running the same workflow without Jupyter.
+`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ holds the
+measurement harness behind :doc:`../guide/performance`. An index of every example, with its input and measured run
+time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/examples/README.md>`_.
+
 .. toctree::
    :hidden:
 

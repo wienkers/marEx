@@ -27,6 +27,38 @@ from ..logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def last_day_pool(time_coord: xr.DataArray, cycle: SeasonalCycle, read_coord: Optional[xr.DataArray] = None) -> Optional[tuple]:
+    """Time positions and cycle slots that feed the climatology of a leap year's last day.
+
+    Grouping by calendar day of year gives day 366 only the leap years' 31 December, a
+    quarter of the samples every other slot gets, and none at all when no leap year is in
+    the baseline. On a trending series that lone sample sits years from the target, so a leap
+    year's 31 December inherits the trend as a whole-field anomaly. Day 366 instead takes
+    every year's 31 December: a non-leap year's, which is day 365, is mapped onto the day-366
+    slot at the same time of day.
+
+    Returns ``(positions, slots, labels)``: positions into ``time_coord``, the day-366 slot
+    each feeds, and the day-366 slot labels. ``None`` for a monthly cycle, which has no
+    day-366 slot, and for a series with no day 366 at all (a no-leap calendar, or a span
+    without a leap year), whose day-366 slot no timestep reads. ``read_coord`` is the series
+    the climatology is subtracted from when that differs from ``time_coord`` (a reference
+    period); it decides whether day 366 is read.
+    """
+    if not (cycle.is_daily or cycle.is_subdaily):
+        return None
+    steps_per_day = cycle.steps_per_day
+    first_slot = cycle.length - steps_per_day + 1
+    index = np.asarray(cycle.index_of(time_coord).values)
+    own = index >= first_slot
+    read = own if read_coord is None else np.asarray(cycle.index_of(read_coord).values) >= first_slot
+    if not read.any():
+        return None
+    borrowed = (np.asarray(time_coord.dt.month.values) == 12) & (np.asarray(time_coord.dt.day.values) == 31) & ~own
+    positions = np.flatnonzero(own | borrowed)
+    slots = np.where(borrowed, index + steps_per_day, index)[positions].astype(np.int32)
+    return positions, slots, np.arange(first_slot, cycle.length + 1, dtype=np.int32)
+
+
 def rolling_climatology(
     da: xr.DataArray,
     window_years: int = 15,
@@ -230,8 +262,44 @@ def rolling_climatology(
         dtype=np.float32,
         fill_value=np.nan,
     )
+
+    # Recompute the day-366 slots from every year's 31 December (see `last_day_pool`) and
+    # splice them in. Every other slot is left exactly as reduced above.
+    pool = last_day_pool(da[time_coord], cycle)
+    if pool is not None and len(pool[0]):
+        positions, slots, last_labels = pool
+        pool_time, pool_target, pool_cycle = [], [], []
+        for position, slot in zip(positions.tolist(), slots.tolist()):
+            year_val = int(year_vals[position])
+            targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_years)]
+            targets = targets[targets >= min_year + window_years]
+            pool_time.extend([position] * len(targets))
+            pool_target.extend(targets.tolist())
+            pool_cycle.extend([slot] * len(targets))
+        if pool_time:
+            last_day = flox.xarray.xarray_reduce(
+                da.isel({timedim: np.array(pool_time, dtype=np.int32)}).rename({timedim: long_timedim}),
+                xr.DataArray(np.array(pool_target, dtype=np.int32), dims=[long_timedim], name="target_year"),
+                xr.DataArray(np.array(pool_cycle, dtype=np.int32), dims=[long_timedim], name=cycle_dim),
+                dim=long_timedim,
+                func="nanmean",
+                expected_groups=(reduce_years, last_labels),
+                isbin=(False, False),
+                dtype=np.float32,
+                fill_value=np.nan,
+            )
+            climatologies = xr.concat(
+                [climatologies.sel({cycle_dim: slice(None, int(last_labels[0]) - 1)}), last_day], dim=cycle_dim
+            )
+
     if len(reduce_years) < len(unique_years):
-        climatologies = climatologies.reindex(target_year=unique_years, fill_value=np.nan)
+        # Pad by position onto one appended all-NaN year. A `reindex(fill_value=nan)` builds its
+        # fill mask by OR-ing per-dimension dask masks of different chunking, which multiplies
+        # the task count across every spatial tile.
+        nan_year = xr.full_like(climatologies.isel(target_year=slice(0, 1)), np.nan)
+        padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
+        position = pd.Series(range(len(reduce_years)), index=reduce_years).reindex(unique_years, fill_value=len(reduce_years))
+        climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
     climatologies = climatologies.chunk({cycle_dim: -1})
 
     # Create index arrays for final mapping

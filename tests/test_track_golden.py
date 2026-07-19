@@ -57,6 +57,24 @@ TRACKING_PARAMS = {
 CHUNK_SIZE = {"time": 2, "lat": -1, "lon": -1}
 
 
+def _open_extremes():
+    """The shipped extremes store, rooted in the zarr store and never persisted.
+
+    Futures would tie the input to whichever client was current when the class was set up, and that
+    client may close before these tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / "extremes_gridded.zarr"), chunks={})
+
+
+def test_input_carries_no_futures(dask_client_gridded):
+    """Re-adding ``.persist()`` to ``_open_extremes`` pins the class input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(_open_extremes())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 class TestTrackGolden:
     """Golden snapshot test for the tracker merge/split core."""
 
@@ -65,7 +83,7 @@ class TestTrackGolden:
         """Load the synthetic input data and the golden baseline outputs."""
         data_dir = Path(__file__).parent / "data"
 
-        cls.extremes_data = xr.open_zarr(str(data_dir / "extremes_gridded.zarr"), chunks={}).persist()
+        cls.extremes_data = _open_extremes()
 
         # Golden baselines captured from the pre-refactor code.
         cls.golden_events = xr.open_dataset(str(data_dir / "track_golden_events.nc"))

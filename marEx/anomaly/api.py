@@ -280,6 +280,15 @@ def _anomaly_core(
     # it belongs to this module rather than to whoever calls it.
     ds["dat_anomaly"] = materialiser.stage(ds.dat_anomaly, "dat_anomaly")
     clear_inherited_attrs(ds, ("dat_anomaly", "dat_stn", "STD"))
+    # The mask is a comparison on the input, so it arrives with the input's standard_name,
+    # units and valid range, none of which describe a boolean. Give it its own.
+    if ds.mask.ndim:
+        ds["mask"].attrs = {
+            "long_name": "valid-data mask",
+            "description": "True where the input is finite at the first timestep",
+        }
+    else:
+        ds["mask"].attrs = {"long_name": "valid-data mask", "description": "True where the time series has any finite value"}
 
     ds.attrs.update({"method_anomaly": method})
     ds.attrs["preprocessing_steps"] = _anomaly_steps(

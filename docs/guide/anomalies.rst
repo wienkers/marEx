@@ -79,10 +79,9 @@ It approximates the seasonal cycle, so structure those harmonics cannot represen
 the anomaly. It rejects sub-daily data with a ``ConfigurationError``. Monthly data is not blocked, but
 the method has not been exercised there.
 
-Sub-daily data needs ``fixed_baseline`` or ``detrend_fixed_baseline``, whose climatologies
-are resolved on the sub-daily cycle. A test of ``shifting_baseline`` on a 6-hourly fixture
-left a diurnal cycle larger than the signal in the anomaly, so it is not recommended there.
-See :doc:`dimensions_and_time`.
+On sub-daily data ``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline``
+resolve their climatologies on the sub-daily cycle, so the diurnal cycle is removed from the
+anomaly. See :doc:`dimensions_and_time`.
 
 Parameters by Method
 ====================
@@ -109,6 +108,12 @@ Parameters by Method
      - yes
      - ignored
      - 21
+   * - ``smooth_max_missing``
+     - yes
+     - no
+     - no
+     - no
+     - 0.1
    * - ``reference_period``
      - error
      - yes
@@ -143,7 +148,10 @@ Smoothing
 your data. ``smooth_days=1`` turns smoothing off.
 
 * ``shifting_baseline`` smooths the raw field with a centred rolling mean of ``smooth_days``
-  steps before taking the rolling climatology.
+  before taking the rolling climatology. On sub-daily data each time of day is averaged across
+  days. Up to ``smooth_max_missing`` (default 0.1) of a window may be missing (NaN, or a step
+  absent from a sub-daily axis) before the smoothed value is NaN, and windows that reach past
+  either end of the record stay NaN. ``smooth_max_missing=0`` requires complete windows.
 * ``fixed_baseline`` and ``detrend_fixed_baseline`` smooth the day-of-year climatology with
   a circular moving average, so 31 December is averaged with 1 January, as in Hobday et al.
   (2016). A smoothing window as long as the whole cycle raises a ``ConfigurationError``.

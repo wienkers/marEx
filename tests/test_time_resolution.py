@@ -40,19 +40,27 @@ DIMENSIONS = {"time": "time", "x": "lon", "y": "lat"}
 # --------------------------------------------------------------------------------------
 
 
+def _build_monthly_sst():
+    """The shipped gridded fixture resampled to month-start means (40 years, 481 steps).
+
+    Rooted in the zarr store, not persisted: futures would tie the fixture to whichever client was
+    current when it was built, and that client may close before these tests run.
+    """
+    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to
+    return sst.resample(time="MS").mean().chunk({"time": 24})
+
+
 @pytest.fixture(scope="module")
 def monthly_sst():
-    """The shipped gridded fixture resampled to month-start means (40 years, 481 steps)."""
-    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to
-    return sst.resample(time="MS").mean().chunk({"time": 24}).persist()
+    return _build_monthly_sst()
 
 
-@pytest.fixture(scope="module")
-def sixhourly_sst():
+def _build_sixhourly_sst():
     """A synthetic 6-hourly field carrying a real diurnal cycle on top of a seasonal one.
 
     Six years is enough for ``fixed_baseline`` and for a 5-year ``shifting_baseline``
-    window, and small enough (8768 steps x 4 x 5 cells) to stay quick.
+    window, and small enough (8768 steps x 4 x 5 cells) to stay quick. Not persisted, for the same
+    reason as the monthly field: the values are held in the graph itself.
     """
     time = pd.date_range("2000-01-01", "2005-12-31T18:00:00", freq="6h")
     lat = np.linspace(35.0, 36.0, 4).astype(np.float32)
@@ -72,7 +80,28 @@ def sixhourly_sst():
         coords={"time": time, "lat": lat, "lon": lon},
         name="to",
     )
-    return da.chunk({"time": 400}).persist()
+    return da.chunk({"time": 400})
+
+
+@pytest.fixture(scope="module")
+def sixhourly_sst():
+    return _build_sixhourly_sst()
+
+
+def test_fixtures_carry_no_futures():
+    """Re-adding ``.persist()`` to either builder pins the fixture to whichever client was current when it
+    was built, and these tests fail with ``lost dependencies`` once that client closes.
+
+    With no client current ``.persist()`` leaves no futures, so the builders are run here under a live
+    distributed one to make the check bite.
+    """
+    from distributed import Client
+    from distributed.client import futures_of
+
+    with Client(processes=False, n_workers=1, threads_per_worker=1, dashboard_address=None):
+        for name, build in (("monthly_sst", _build_monthly_sst), ("sixhourly_sst", _build_sixhourly_sst)):
+            held = futures_of(build())
+            assert not held, f"{name} holds {len(held)} future(s); keep it rooted in the store or the graph"
 
 
 # --------------------------------------------------------------------------------------

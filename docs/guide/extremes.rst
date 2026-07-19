@@ -73,9 +73,10 @@ cell) is never flagged on either side.
 Seasonal Window and Spatial Pooling
 ===================================
 
-``window_days`` (default 11) is a duration in days. On a daily axis it must be odd, because
-the window is symmetric about the day. On other cadences it is converted to whole timesteps
-(:ref:`cadence-rules`).
+``window_days`` (default 11) is a duration in days, counted in cycle slots (:ref:`cadence-rules`),
+so 11 days of 5-day data pools 11 day-of-year slots. On a day-of-year cycle (daily and multi-day
+data) it must be odd, because the window is symmetric about the day. On other cadences it is
+forced to an odd number of slots.
 
 ``window_spatial`` pools the samples of neighbouring cells into each cell's threshold. It is
 a way to get more samples for a percentile, and the field itself is not smoothed. The rule
@@ -89,11 +90,13 @@ that decides its value is:
 * Passing any value raises a ``ConfigurationError`` on unstructured meshes, with
   ``global_percentile`` and with ``method_percentile="exact"``.
 
-The value that was used is recorded in the output attribute ``window_spatial``.
+The neighbourhood wraps in longitude only when the grid spans the globe. On a regional box the
+edge columns pool only real neighbours, as the latitude edges always have. The value that was
+used is recorded in the output attribute ``window_spatial``.
 
 The number of samples behind each threshold is ``n_years × window_days × window_spatial²``,
 and the number beyond the threshold is that times ``1 - q``. marEx logs a warning when fewer
-than 50 samples lie beyond the threshold.
+than 10 samples lie beyond the threshold.
 
 .. list-table::
    :header-rows: 1

@@ -203,13 +203,13 @@ def _apply_threshold_bounds(
         out_of_range = out_of_range & threshold.notnull()
         on_guard = on_guard & threshold.notnull()
 
-    reductions = [out_of_range.any(), on_guard.any(), threshold.max(), threshold.min()]
+    reductions = [out_of_range.any(), on_guard.any(), threshold.max(), threshold.min(), on_guard.sum(), threshold.notnull().sum()]
     if range_mode == "estimated":
         upper_bound, lower_bound = saturation_bounds if saturation_bounds is not None else (bin_edges[-2], bin_edges[1])
         saturated = threshold > float(upper_bound) if tail == "upper" else threshold < float(lower_bound)
         reductions.append((saturated & threshold.notnull()).any())
     computed = dask.compute(*reductions)
-    any_range, any_guard, thr_max, thr_min = computed[:4]
+    any_range, any_guard, thr_max, thr_min, n_guard, n_valid = computed[:6]
 
     # A threshold inside the outermost bin is not a threshold when samples were clipped there:
     # every sample beyond the range sits in that bin, so the true quantile could be anywhere
@@ -218,7 +218,7 @@ def _apply_threshold_bounds(
     # When the range IS the data's own extreme on the tail's side, nothing on that side was
     # clipped; reaching the outermost bin then means too few samples per window resolve this
     # percentile in the cell holding the extreme, which is worth saying but not fatal.
-    if range_mode == "estimated" and bool(computed[4]):
+    if range_mode == "estimated" and bool(computed[6]):
         raise _RangeSaturated(float(thr_max) if tail == "upper" else float(thr_min))
     if bool(any_range):
         if tail == "upper":
@@ -254,19 +254,15 @@ def _apply_threshold_bounds(
         )
 
     if bool(any_guard):
-        if tail == "upper":
-            message = (
-                f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {guard:.4f}. "
-                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-                "Double check the computed threshold values are correct."
-            )
-        else:
-            message = (
-                f"Quantile values above expected range in some locations: max={float(thr_max):.4f} > {guard:.4f}. "
-                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-                "Double check the computed threshold values are correct."
-            )
-        warnings.warn(message, UserWarning, stacklevel=2)
+        # Expected wherever the anomaly is (near-)constant, e.g. sea ice held at the freezing
+        # point: the percentile of a flat-zero series is zero. Clamping is the designed outcome,
+        # so this is reported, not warned about.
+        extreme = f"min={float(thr_min):.4f}" if tail == "upper" else f"max={float(thr_max):.4f}"
+        logger.info(
+            f"{int(n_guard)} of {int(n_valid)} threshold values ({extreme}) lie on the wrong side of zero anomaly, "
+            f"typically where the anomaly is constant (e.g. sea ice at the freezing point). They are set to "
+            f"{guard:.4f}, one histogram bin from zero, so a constant anomaly is never extreme."
+        )
         # Clamp onto the guard rail so a constant-zero anomaly is never "extreme".
         threshold = threshold.where(~on_guard, guard)
         if clamp is not None:
@@ -461,6 +457,32 @@ def _histogram_tile_chunks(
         itemsize=da.dtype.itemsize,
     )
     return chunk_dict
+
+
+def _x_is_periodic(da: xr.DataArray, x_dim: Optional[str]) -> bool:
+    """Whether the spatial window should wrap ``x``: only when the grid spans the globe in it.
+
+    The x coordinate is read as longitude, in degrees unless its ``units`` attribute names
+    radians. It closes on itself when its columns at the median step make a full turn to within
+    half a step, counted either way a global grid is stored: ``n`` steps (0 to 360 - dx) or
+    ``n - 1`` (a repeated seam column, 0 to 360). The step is taken across the seam too, so a
+    global grid rolled to start mid-way (e.g. 180..359, 0..179) still wraps. A regional box does
+    not, and its edge columns then pool only real neighbours, as the y edges always have.
+
+    Without a 1-D numeric coordinate there is no span to measure (a bare dimension, or the 2-D
+    coordinates of a curvilinear grid), so ``x`` keeps wrapping as it did before this check existed.
+    """
+    if x_dim is None or x_dim not in da.coords:
+        return True
+    coord = da.coords[x_dim]
+    if coord.ndim != 1 or coord.size < 2 or coord.dtype.kind not in "iuf":
+        return True
+    # Units are read from the attribute, never guessed from the range: a 25-column 0.25 degree
+    # box spans 6.25, within half a step of a full turn in radians.
+    full_turn = 2 * np.pi if "rad" in str(coord.attrs.get("units", "")).lower() else 360.0
+    step = np.abs(np.diff(np.asarray(coord.values, dtype=np.float64)))
+    step = float(np.median(np.minimum(step, full_turn - np.mod(step, full_turn))))
+    return step > 0 and any(abs(n * step - full_turn) <= 0.5 * step for n in (coord.size, coord.size - 1))
 
 
 def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
@@ -988,8 +1010,9 @@ def _slab_quantile_block(
 
     ``halo[i]`` cells border the block on spatial axis ``i`` (``window_spatial // 2`` on the
     horizontal axes, 0 elsewhere); a core cell pools every sample in its ``2 h + 1`` window,
-    which is the spatial window sum of the dense path (periodic in x, nothing beyond the y
-    edges: the caller pads x by wrapping and y with the out-of-range index ``n_bins``).
+    which is the spatial window sum of the dense path (periodic in x on a global grid, nothing
+    beyond the other edges: the caller pads a periodic x by wrapping and every other edge with
+    the out-of-range index ``n_bins``).
     Indices ``>= n_bins`` are NaN samples and slot 0 marks a step outside the cycle (NaT, or
     day 366 under a 365-slot cycle); both are dropped, as flox's expected groups drop them.
     Each cell's counts go through the estimator of ``_rolling_histogram_quantile`` exactly as
@@ -1050,7 +1073,7 @@ def _slab_seasonal_threshold(
             name="da_bin",
         )
         .astype(np.uint16)
-        # The y pad is the dropped index n_bins, which uint16 cannot hold when float32 edge
+        # The edge pad is the dropped index n_bins, which uint16 cannot hold when float32 edge
         # rounding realises 65536 bins; widen only then, after the uint16 cast the dense
         # engine applies, so every sample keeps the index it gets there.
         .astype(np.uint16 if n_bins <= np.iinfo(np.uint16).max else np.uint32)
@@ -1067,15 +1090,23 @@ def _slab_seasonal_threshold(
     x_dim, y_dim = dimensions.get("x"), dimensions.get("y")
     # overlap refuses a depth beyond the array. A y axis narrower than the halo is one chunk, and a
     # depth of its size already reaches every real row from every cell, so the window is unchanged.
-    halo = [min(half, int(da.sizes[dim])) if dim == y_dim else half if dim == x_dim else 0 for dim in spatial_dims_present]
+    # A non-global x is clamped the same way.
+    x_periodic = _x_is_periodic(da, x_dim)
+    halo = [
+        half if dim == x_dim and x_periodic else min(half, int(da.sizes[dim])) if dim in (x_dim, y_dim) else 0
+        for dim in spatial_dims_present
+    ]
     data = da_bin.data
     if any(halo):
-        # Wrap in x (the dense path pads longitude periodically), pad y with the dropped
-        # index n_bins (the dense path's zero-padded window sum).
+        # Wrap a global x (the dense path pads it periodically), pad every other edge with the
+        # dropped index n_bins (the dense path's zero-padded window sum).
         data = dask.array.overlap.overlap(
             data,
             depth={0: 0, **{i + 1: h for i, h in enumerate(halo)}},
-            boundary={0: "none", **{i + 1: ("periodic" if dim == x_dim else n_bins) for i, dim in enumerate(spatial_dims_present)}},
+            boundary={
+                0: "none",
+                **{i + 1: ("periodic" if dim == x_dim and x_periodic else n_bins) for i, dim in enumerate(spatial_dims_present)},
+            },
         )
 
     # Declare the blocks overlap actually built: it merges a trailing chunk narrower than the
@@ -1277,14 +1308,17 @@ def _compute_histogram_quantile_2d(
             use_integer_window = window_spatial % 2 == 1
             hist_rolled = hist_raw
 
-            # Periodic padding in longitude, rolling mean in both dimensions, then trim
+            # Longitude wraps only on a grid that spans the globe; a regional box is edged like latitude
             if lon_dim in hist_raw.dims:
+                lon_periodic = _x_is_periodic(da, lon_dim)
                 if use_integer_window:
-                    hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=True)
-                else:
+                    hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=lon_periodic)
+                elif lon_periodic:
                     hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
                     hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
                     hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
+                else:
+                    hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
 
             # Standard rolling in latitude
             if lat_dim in hist_raw.dims:

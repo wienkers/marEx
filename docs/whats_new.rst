@@ -136,7 +136,8 @@ Now Raises
 ----------
 
 * A threshold reaching the outermost bin of a range you pinned with ``max_anomaly``: ``ConfigurationError`` (was a warning). With a derived range the range is regrown, or a ``UserWarning`` is issued.
-* A ``precision`` that gives more than 65000 bins (more than 10000 warns).
+* A ``precision`` that gives more than 65000 bins on a derived range (more than 10000 warns), and any geometry whose bin edges realise more than 65535 bins.
+* ``shifting_baseline`` on a sub-daily axis whose timestamps sit off its regular grid. The message names the rounding that fixes it.
 * ``smooth_days`` spanning the whole cycle.
 * ``detrend_harmonic`` on sub-daily data, which previously left the diurnal cycle in the anomaly silently.
 * A ``dimensions`` mapping that names ``y`` or any non-time dimension without ``x``.
@@ -163,5 +164,7 @@ Some outputs differ from 4.x because the earlier behaviour was wrong, depended o
 * **Tracker area-filter ties and edges.** Objects exactly at the area cutoff are kept on both grid types; latitude no longer wraps in the morphology padding; the antimeridian margin scales with the grid.
 * **Unstructured tracker.** Events used to depend on the time chunking and worker layout. They no longer do, except for cells exactly equidistant between candidate parents.
 * **Merge loop.** Events fused by an ID-range overrun now stay separate.
-
-Shifting-baseline anomalies on sub-daily data still leave part of the diurnal cycle in the anomaly. This is unchanged from 4.x; prefer ``fixed_baseline`` or ``detrend_fixed_baseline`` for sub-daily input.
+* **Sub-daily shifting baseline.** ``shifting_baseline`` smooths each time of day across days, so the diurnal cycle is removed from the anomaly instead of left in it. Sub-daily ``shifting_baseline`` values change.
+* **Gaps in the shifting baseline.** Up to ``smooth_max_missing`` (default 0.1) of a smoothing window may be missing before the window is invalid. On gappy input this moves smoothed climatology values on every cadence, and ``smooth_max_missing=0`` restores the earlier behaviour.
+* **Seasonal window in cycle slots.** ``window_days`` counts cycle slots, so thresholds change where one slot is not one step (multi-day and monthly data, and sub-daily steps that do not divide a day).
+* **Regional edge thresholds.** ``window_spatial`` pooling no longer wraps longitude on a regional box, so thresholds in its outermost ``window_spatial // 2`` columns change. Global grids are unchanged, and a 1-D numeric x that is not a global longitude (projected metres, an index) also stops wrapping.

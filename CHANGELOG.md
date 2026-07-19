@@ -21,9 +21,11 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Python 3.13 in CI; dask is un-pinned (`dask[complete]>=2025.9.0`, was `==2025.3.0`).
 - Logical subpackages: `marEx.anomaly`, `marEx.extremes`, `marEx.core`, `marEx.helper`, `marEx.track` (split from single modules).
 - `smooth_max_missing` (default 0.1) on `preprocess_data` and `anomaly.compute` (keyword-only there): the fraction of a climatology smoothing window that may be missing before the window is invalid. Windows that reach past either end of the record stay NaN, and a missing step contributes nothing to the climatology. On gappy input this moves smoothed climatology values on every cadence, daily included; `smooth_max_missing=0` reproduces the previous behaviour.
+- `threads_per_worker` (default 1) on `marEx.helper.start_distributed_cluster`: each node runs `workers_per_node` processes of `threads_per_worker` threads.
 
 ### Changed
 
+- `marEx.helper.start_distributed_cluster` no longer defaults to a fixed SLURM account. Without `account=` it uses the first of `$SLURM_ACCOUNT`, `$SBATCH_ACCOUNT` and `$SLURM_JOB_ACCOUNT` that is set, then the account of the job in `$SLURM_JOB_ID` (an interactive allocation), and raises a `ConfigurationError` when none of these gives one.
 - Extreme-method names are domain neutral: `hobday_extreme` is now `seasonal_percentile`, `global_extreme` is now `global_percentile`.
 - Parameter names: `window_year_baseline` -> `window_years`, `smooth_days_baseline` -> `smooth_days`, `window_days_hobday` -> `window_days`, `window_spatial_hobday` -> `window_spatial`, `std_normalise` -> `standardise`. The output attributes carry the new names.
 - `fixed_baseline` and `detrend_fixed_baseline` now smooth their day-of-year climatology with a circular moving average (default `smooth_days=21`, as `shifting_baseline` always did; wraps the year, as in Hobday et al. 2016). `smooth_days=1` restores the unsmoothed climatology. Anomalies from these two methods change by default.
@@ -44,6 +46,13 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Tracker: the first-time lookup of merging children no longer raises when a slice holds more distinct IDs than its old fixed buffer.
 - Unstructured tracker: after a merge splits an object, the next timestep's objects that overlap a new piece by exactly `overlap_threshold` are now followed too, as every other overlap test in the tracker (and the serial path) already did. Before, such a cascade stopped at the tie, so an object the serial path partitions between two parents was left whole and the two events fused.
 - Unstructured tracker: the areas the merge step uses (overlaps, object and event areas, the merge loop's parent and child areas) are summed in float64 and rounded once to float32, and every overlap fraction divides those rounded values in float64. The merge loop's split consolidation and the serial consolidation therefore decide alike (they sum in the same order). Returned unstructured event `area` and `centroid` can differ from earlier 5.0 builds by a few float32 units in the last place, and a merge decision within rounding of `overlap_threshold` can change. Gridded results are unchanged.
+- Seasonal-percentile spatial pooling (`window_spatial`) wraps in longitude only when the grid spans the globe. On a regional box the edge columns pool only real neighbours, as the latitude edges always did, so thresholds and events in the outermost `window_spatial // 2` columns change. Global grids and grids without a 1-D numeric x coordinate are unchanged. A 1-D numeric x that is not a global longitude (projected metres, an index) also stops wrapping.
+- The seasonal-percentile sample warning fires below 10 expected exceedances per cell and slot (was 50), so a 30-year, 11-day climatology at the 95th percentile no longer warns.
+- Thresholds clamped onto the guard bin next to zero (a constant anomaly, for example sea ice at the freezing point) are reported as an INFO log with their count, not a `UserWarning`.
+- `ResourceMonitor` reports the peak of the largest single worker alongside the summed peak, and its over-commit warning counts only the workers on its own machine.
+- `start_local_cluster` logs the memory limit it passes to each worker, not the machine's memory divided by the worker count.
+- The detect output `mask` carries its own `long_name` and `description` instead of the input variable's `standard_name`, `units` and valid range.
+- The day-of-year 366 climatology pools every year's 31 December (day 365 in a non-leap year) instead of the leap years' alone, in `shifting_baseline`, `fixed_baseline` and `detrend_fixed_baseline`, so a leap year's 31 December no longer inherits years of trend as a whole-field anomaly. Anomalies change on leap years' 31 December; percentile thresholds near the year end move through their day-of-year window; in `fixed_baseline` and `detrend_fixed_baseline` the circular climatology smoothing also carries the change to days within `smooth_days / 2` of the year end.
 
 ### Deprecated
 
@@ -75,6 +84,10 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Cluster, logging and dependency probes: `has_dependency` always returned True, lazy logging configuration never fired, runtime was labelled hours when it was minutes.
 - plotX: bare `.plotX()` on unstructured data, single-panel `multi_plot`, `plot_IDs=True` permanently altering the plotter's data, animation projection and coordinate handling, frame size from the projected domain, `animate` on a `where()`-cut dask coordinate.
 - `to_netcdf` of outputs carrying tuple attributes. Already in 4.1.2.
+- `start_distributed_cluster` exports the comm timeouts into each SLURM worker job's environment, so workers no longer fall back to dask's 30 s connect timeout.
+- `tracker` raises a `TrackingError` naming the cause when the area filter removes every object, or when the kept objects' `cell_areas` sum to zero, instead of a `ZeroDivisionError`. On unstructured grids the small-object pre-filter error names its cell cutoff and the active `area_filter_absolute` / `area_filter_quartile`, and a longitude range that cannot be classified no longer suggests `regional_mode=True`, which unstructured grids do not support (`coordinate_units=` is the working route).
+- A tuple or list time chunk in `dask_chunks` no longer fails on outputs with a seasonal cycle axis (`dayofyear`, `month`, `hourofyear`); the cycle axis takes the largest block.
+- plotX: a global grid with a cell straddling the map projection's seam (180 degrees from its central longitude) no longer crashes `single_plot` or animations (the cell is drawn split at the seam); an ID field with no objects plots an empty map with a warning instead of raising.
 
 ### Performance
 
@@ -90,6 +103,8 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Tracker, gridded: a slice whose largest label exceeds its number of cells has its object properties computed on compacted labels, so late in a long record the cost per slice is capped near what a slice of that size costs instead of growing with the globally offset IDs.
 - Tracker, gridded, `allow_merging=False`: space-time labelling builds a task graph linear in the number of time chunks (578 tasks at 64 chunks; `dask_image.ndmeasure.label` built 2037 at 8, 6517 at 16 and about 82,000 at 64) and gives the same labels and count. Input chunked in space still uses `dask_image`.
 - Seasonal slab quantile kernel compiled with numba (4.3-20x faster single-threaded, releases the GIL); outputs bitwise identical.
+- Detect keeps the caller's spatial chunk as its internal tile while one task on it stays within 4x the 50-million-element budget, instead of splitting it and merging it back (about 3x fewer tasks on a 25,000-cell ICON chunk over 20 years).
+- The rolling climatology pads missing target years by position instead of `reindex`, and the unstructured `fill_holes` keeps its sparse-matrix inputs in one chunk each, so neither multiplies tasks across spatial tiles.
 
 ## Earlier Versions
 

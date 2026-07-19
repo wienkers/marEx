@@ -8,14 +8,31 @@ import marEx
 from .conftest import assert_count_in_reasonable_range, assert_reasonable_bounds
 
 
+def _open_extremes():
+    """The shipped extremes store, rooted in the zarr store and never persisted.
+
+    Futures would tie the input to whichever client was current when the class was set up, and that
+    client may close before the class's tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / "extremes_gridded.zarr"), chunks={})
+
+
+def test_input_carries_no_futures(dask_client_gridded):
+    """Re-adding ``.persist()`` to ``_open_extremes`` pins the class input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(_open_extremes())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 class TestGriddedTracking:
     """Test event tracking functionality for gridded data."""
 
     @classmethod
     def setup_class(cls):
         """Load test data for all tests."""
-        test_data_path = Path(__file__).parent / "data" / "extremes_gridded.zarr"
-        cls.extremes_data = xr.open_zarr(str(test_data_path), chunks={}).persist()
+        cls.extremes_data = _open_extremes()
 
         # Standard chunk size for tracking (spatial dimensions must be contiguous)
         cls.chunk_size = {"time": 2, "lat": -1, "lon": -1}

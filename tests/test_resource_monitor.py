@@ -94,3 +94,24 @@ def test_warns_when_limits_exceed_the_job_memory(client, monkeypatch, caplog):
     logging.getLogger("marEx").propagate = True
     hpc.ResourceMonitor(client)
     assert any("the job may use" in r.getMessage() for r in caplog.records)
+
+
+def test_records_the_largest_single_worker(client):
+    monitor = hpc.ResourceMonitor(client, interval=0.1)
+    with monitor.stage("sum"):
+        da.ones((2000, 2000), chunks=500).sum().compute()
+    row = monitor.summary().loc["sum"]
+    assert 0 < row["peak per worker (GB)"] <= row["peak worker memory (GB)"]
+
+
+def test_remote_workers_do_not_count_against_the_job(client, monkeypatch, caplog):
+    import marEx.helper.resources as res
+
+    workers = client.scheduler_info(n_workers=-1)["workers"]
+    remote = {addr: {**w, "host": "192.0.2.1"} for addr, w in workers.items()}  # TEST-NET-1: never a local address
+    monkeypatch.setattr(res.ResourceMonitor, "_workers", lambda self: remote)
+    monkeypatch.setattr(res, "_job_memory_bytes", lambda: 1e9)
+    caplog.set_level(logging.WARNING, logger="marEx")
+    logging.getLogger("marEx").propagate = True
+    hpc.ResourceMonitor(client)
+    assert not any("the job may use" in r.getMessage() for r in caplog.records)

@@ -33,7 +33,18 @@ def scratch():
 
 @pytest.fixture(scope="module")
 def extremes_gridded(dask_client):
-    return xr.open_zarr(str(DATA_DIR / "extremes_gridded.zarr"), chunks={}).persist()
+    # Rooted in the zarr store, not persisted: futures would tie the fixture to whichever
+    # client was current when it was built, and that client may close before these tests run.
+    return xr.open_zarr(str(DATA_DIR / "extremes_gridded.zarr"), chunks={})
+
+
+def test_fixture_carries_no_futures(dask_client, extremes_gridded):
+    """Re-adding ``.persist()`` to the fixture pins it to whichever client was current when it was
+    built, and these tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(extremes_gridded)
+    assert not held, f"the fixture holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 def _codec_keys(obj):

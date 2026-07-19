@@ -91,13 +91,36 @@ class TestPartitionCentroidUnstructured:
         assert len(out) == int(child_mask.sum())
 
 
+def _open_extremes():
+    """The shipped gridded extremes store, rooted in the zarr store and never persisted.
+
+    Futures would tie the input to whichever client was current when the class was set up, and that
+    client may close before the class's tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / "extremes_gridded.zarr"), chunks={})
+
+
+def test_checkpoint_class_input_carries_no_futures():
+    """Re-adding ``.persist()`` to ``_open_extremes`` pins the class input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes.
+
+    With no client current ``.persist()`` leaves no futures, so the loader is run here under a live
+    distributed one to make the check bite.
+    """
+    from distributed import Client
+    from distributed.client import futures_of
+
+    with Client(processes=False, n_workers=1, threads_per_worker=1, dashboard_address=None):
+        held = futures_of(_open_extremes())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 class TestCheckpointLoadBypassesSingleUseGuard:
     """run(checkpoint='load') must not be rejected as 'already been run'."""
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "extremes_gridded.zarr"
-        cls.extremes = xr.open_zarr(str(path), chunks={}).persist()
+        cls.extremes = _open_extremes()
 
     def _tracker(self, **kw):
         return marEx.tracker(

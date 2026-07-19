@@ -5,7 +5,8 @@ Unlike ``detect``, the tracker is global *in space*: connected-component labelli
 dilation matrix span the whole domain, so the spatial dimension must stay whole and time
 is the only lever.  What grows with the record length is the whole-field int32 ID array --
 3804 days at 0.25 degrees is 15.8 GB of it, and ``persist`` holds several such fields at
-once (measured peak 57.0 GB at that length, against streaming's 20.4 GB).
+once.  At a 4 x 8 GB budget both modes complete (``persist`` peak 22.1 GB against
+``streaming``'s 7.0 GB); at 4 x 4 GB in a 24 GiB allocation only ``streaming`` does.
 
 Settings variants exposed here because they change the memory shape, not just the answer:
 ``--no-allow-merging`` skips the merge loop entirely, and ``--nn-partitioning`` selects the
@@ -17,16 +18,16 @@ import sys
 
 import numpy as np
 import xarray as xr
-from squeeze_common import GB, add_common_args, execute
+from squeeze_common import GB, add_common_args, apply_smoke, default_data_path, execute
 
 import marEx
 
-DEFAULT_INPUT = "/scratch/b/b382615/mhws/extremes_binary_gridded_shifting_hobday.zarr"
+DEFAULT_INPUT = default_data_path("output/detect_binaries/extremes_binary_gridded_shifting_hobday.zarr")
 
 
 def main() -> None:
     """Run the gridded track leg: build the input, size the whole-field arrays, execute."""
-    parser = add_common_args(argparse.ArgumentParser(description=__doc__))
+    parser = add_common_args(argparse.ArgumentParser(description=__doc__), modes=("persist", "streaming"))
     parser.add_argument("--input", default=DEFAULT_INPUT)
     parser.add_argument("--time-chunk", type=int, default=25)
     parser.add_argument("--R-fill", type=int, default=12)
@@ -38,6 +39,7 @@ def main() -> None:
     parser.add_argument("--no-allow-merging", dest="merging", action="store_false", default=True)
     parser.add_argument("--temp-dir", required=True, help="Staging root for compute_mode='streaming'.")
     args = parser.parse_args()
+    apply_smoke(args)
 
     ds = xr.open_zarr(args.input, chunks={"time": args.time_chunk, "lat": -1, "lon": -1})
     if args.nt:

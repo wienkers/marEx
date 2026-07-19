@@ -157,8 +157,11 @@ on from the median spacing of the time coordinate:
 Durations are in days
 ---------------------
 
-``window_days`` and ``smooth_days`` are always **durations in days**, whatever the cadence,
-and are converted to whole timesteps.
+``window_days`` and ``smooth_days`` are always **durations in days**, whatever the cadence.
+``smooth_days`` is converted to whole timesteps (to whole days at one time of day for
+``shifting_baseline`` on sub-daily data). ``window_days`` pools neighbouring slots of
+the cycle, so it is converted to cycle slots: one per day of year on daily and multi-day data,
+one per step on sub-daily data, and one per month (the calendar's mean month) on monthly data.
 
 .. list-table::
    :header-rows: 1
@@ -168,18 +171,22 @@ and are converted to whole timesteps.
      - ``window_days=11`` becomes
      - Effect
    * - Daily
-     - 11 steps
+     - 11 slots
      - Unchanged
+   * - 5-day
+     - 11 slots
+     - 11 day-of-year slots, not 3 steps
    * - 6-hourly
-     - 45 steps
+     - 45 slots
      - 11.25 days, with a warning about the rounding
    * - Monthly
-     - 1 step
-     - 31 days, with a warning
+     - 1 slot
+     - 30.44 days (30 on a ``360_day`` calendar), with a warning
 
 An 11-day window cannot be represented on a monthly axis, so marEx uses a single month and
-warns, naming the requested and the realised duration. On a daily axis ``window_days`` must be
-odd. On other cadences the window is forced to an odd number of steps and an even request
+warns, naming the requested and the realised duration. A window wider than the cycle pools
+every slot once. On a day-of-year cycle (daily and multi-day data) ``window_days`` must be
+odd. On other cadences the window is forced to an odd number of slots and an even request
 does not raise. ``smooth_days`` is not forced odd, and on a monthly axis the default 21 days
 rounds below one step, so no smoothing is applied and a warning says so.
 
@@ -197,7 +204,7 @@ Which methods run where
    * - ``shifting_baseline``
      - yes
      - yes
-     - not recommended
+     - yes
    * - ``fixed_baseline``
      - yes
      - yes
@@ -221,10 +228,12 @@ Which methods run where
 
 ``detrend_harmonic`` raises a ``ConfigurationError`` on sub-daily data, because its basis
 removes annual and semi-annual cycles only and the diurnal cycle would remain in the anomaly.
-For sub-daily data ``shifting_baseline`` is likewise not recommended. A test on a 6-hourly
-fixture left a diurnal cycle larger than the signal in the anomaly. Use ``fixed_baseline``
-or ``detrend_fixed_baseline``, whose climatologies are resolved on the sub-daily cycle and
-remove the diurnal cycle.
+``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline`` resolve their
+climatologies on the sub-daily cycle and remove the diurnal cycle. ``shifting_baseline``
+smooths each time of day across days, which needs the timestamps on a regular sub-daily grid
+(missing steps may be left out). Timestamps slightly off that grid, for example decoded from
+float offsets, raise a ``ConfigurationError`` whose message gives the rounding that fixes them,
+such as ``da["time"] = da["time"].dt.round("3600s")`` for hourly data.
 
 Sub-daily runs are expensive. The threshold histogram is ``cycle_length × number of bins`` per cell,
 so 6-hourly data is four times the daily size and hourly data twenty-four times. The internal

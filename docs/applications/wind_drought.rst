@@ -18,8 +18,8 @@ Why marEx Fits
   lull through time, how long it lives, and where its centroid moves. A per-cell tool returns
   a time series for each cell and leaves the spatial correlation to be reconstructed.
 * The pipeline accepts non-daily cadences. Hourly and 6-hourly input is thresholded per
-  hour of the year. ``window_days`` and ``smooth_days`` are in days and converted to time
-  steps.
+  hour of the year. ``window_days`` and ``smooth_days`` are in days and converted to cycle
+  slots and time steps.
 
 Configuration
 =============
@@ -77,10 +77,9 @@ The ``if __name__ == "__main__":`` guard is needed because the local cluster sta
 processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
 not read a SLURM or container memory cap. Size both to your own allocation.
 
-For sub-daily input (hourly or 6-hourly wind), use ``fixed_baseline`` rather than
-``shifting_baseline``. Its climatology is resolved by hour of year, so the diurnal cycle is
-part of the baseline and does not appear in the anomaly. ``detrend_harmonic`` raises an error
-on sub-daily data. See :doc:`../guide/dimensions_and_time`.
+On sub-daily input (hourly or 6-hourly wind), ``fixed_baseline`` and ``shifting_baseline``
+both resolve their climatology by hour of year, so the diurnal cycle is part of the baseline
+and does not appear in the anomaly. ``detrend_harmonic`` raises an error on sub-daily data. See :doc:`../guide/dimensions_and_time`.
 
 For a worked example on reanalysis data, see the ERA5 notebook in :doc:`../tutorials/index`.
 

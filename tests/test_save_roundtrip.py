@@ -39,11 +39,17 @@ def _assert_roundtrip(reloaded: xr.Dataset, reference: xr.Dataset):
         assert got.attrs.get(key) == ref.attrs.get(key)
 
 
-@pytest.fixture(scope="module")
+# The three fixtures below hold pipeline and tracker outputs, which persist internally and so carry
+# futures. They are function-scoped: a wider scope would pin those futures to whichever client was current
+# when the fixture was built, and that client may close before the tests using it run. Their inputs are
+# read straight from the zarr store, never persisted.
+
+
+@pytest.fixture
 def gridded_extremes_lazy(dask_client_gridded):
     """A small lazy gridded extremes dataset (1D-histogram / global path)."""
     sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to
-    sst = sst.isel(time=slice(0, 4 * 365)).persist()
+    sst = sst.isel(time=slice(0, 4 * 365))
     sst = sst.where(~((sst.lat == sst.lat[1]) & (sst.lon == sst.lon[1])), np.nan)
     return marEx.preprocess_data(
         sst,
@@ -54,10 +60,10 @@ def gridded_extremes_lazy(dask_client_gridded):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def unstructured_extremes_lazy(dask_client_gridded):
     """A small lazy unstructured extremes dataset (exercises neighbours/cell_areas/coords)."""
-    ds = xr.open_zarr(str(DATA_DIR / "sst_unstructured.zarr"), chunks={}).persist()
+    ds = xr.open_zarr(str(DATA_DIR / "sst_unstructured.zarr"), chunks={})
     sst = ds.to.where(~(ds.to.ncells == 2), np.nan)
     ncells = sst.sizes["ncells"]
     sst = sst.assign_coords(
@@ -106,10 +112,10 @@ def test_roundtrip_unstructured(fmt, unstructured_extremes_lazy, tmp_path):
     _assert_roundtrip(reloaded, ds)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tracked_events_lazy(dask_client_gridded):
     """A small lazy tracked-events dataset (the tracker's user-facing output)."""
-    ex = xr.open_zarr(str(DATA_DIR / "extremes_gridded.zarr"), chunks={}).persist()
+    ex = xr.open_zarr(str(DATA_DIR / "extremes_gridded.zarr"), chunks={})
     data_bin = ex.extreme_events.chunk({"time": 2, "lat": -1, "lon": -1})
     mask = ex.mask.where((ex.lat < 85) & (ex.lat > -90), other=False)
     tracker = marEx.tracker(
