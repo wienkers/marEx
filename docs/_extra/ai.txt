@@ -1,0 +1,5 @@
+# marEx reserves its code and documentation from text and data mining,
+# including AI/ML model training (Article 4(3), Directive (EU) 2019/790).
+# See https://github.com/wienkers/marEx/blob/main/NOTICE
+User-Agent: *
+Disallow: /

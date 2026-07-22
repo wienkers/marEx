@@ -52,6 +52,7 @@ The full pipeline, from raw field to tracked events:
 import xarray as xr
 import marEx
 
+# In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
 client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="8GB")
 
 sst = xr.open_dataset("sst_data.nc", chunks={"time": 25}).sst
@@ -92,14 +93,14 @@ fig, ax, im = (events.ID_field > 0).mean("time").plotX.single_plot(
 
 ## Measured at Scale
 
-Single runs on one DKRZ Levante node, with outputs checked for agreement between modes.
+Runs on one DKRZ Levante node, one per mode unless a row says otherwise, with outputs compared between modes wherever both completed.
 
 | Stage and data | Configuration | Result |
 | --- | --- | --- |
 | Detect, 40 years of daily 0.25° global SST (9282 × 720 × 1440 output days) | 4 workers × 22 GB, 64 threads | 3954 s with `persist`, 3663 s with `streaming`, identical arrays |
 | Track, 0.25° global, 3804 days | 24 GiB allocation, 4 × 4 GB dask budget | `persist` OOM-killed in 5 of 5 runs, `streaming` completed in 7 of 7 |
 | Track, same field, 96 GB budget | single run each | pinned 337 GB → 0.34 GB; peak 56.7 → 19.1 GB; wall time within 1 % |
-| Track, ICON R02B09 (14.9 M cells), 1096 days | 16 workers × 12 GB | `persist` 4297 s, `streaming` 4219 s; pinned 751 → 148 GB |
+| Track, ICON R02B09 (14.9 M cells), 1096 days | 16 workers × 12 GB | `persist` 4297 and 4302 s (two runs), `streaming` 4219 s; pinned 751 → 148 GB |
 
 The squeeze result rests on the gridded tracker. Detection did not show a peak-memory saving from streaming. Details, sizing guidance and caveats are in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).
 
@@ -146,7 +147,7 @@ For HPC environments and optional dependencies, see the **[Installation Guide](h
 ## What's New in 5.0
 
 - A standalone `marEx.anomaly.compute` and `marEx.extremes.identify`, a lower tail, fields with an extra dimension, and monthly or sub-daily time axes.
-- `compute_mode` (`persist`, `lazy`, `streaming`) on detection and tracking, plus a per-stage `ResourceMonitor` and a small-object prefilter for the tracker.
+- `compute_mode` on detection (`persist`, `lazy`, `streaming`) and tracking (`persist`, `streaming`), plus a per-stage `ResourceMonitor` and a small-object prefilter for the tracker.
 - Renamed methods and parameters (`seasonal_percentile`, `window_years`, `standardise`) and a removed `marEx.detect` module. The [migration table](https://marex.readthedocs.io/en/latest/whats_new.html) maps every old name to its replacement.
 
 ---
@@ -173,6 +174,14 @@ When using marEx in publications, please cite:
 
 - **marEx package**: DOI [10.5281/zenodo.16922881](https://doi.org/10.5281/zenodo.16922881)
 - **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves." *Progress in Oceanography* 141, 227-238. DOI [10.1016/j.pocean.2015.12.014](https://doi.org/10.1016/j.pocean.2015.12.014)
+
+---
+
+## License
+
+From version 5.0, marEx is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). You can use, study, modify and share it freely. If you distribute a modified version, or run one as a network service, you must release your changes under the same licence. Keep the [NOTICE](NOTICE) and cite marEx in published work. Earlier releases keep the terms they were distributed with.
+
+The code and documentation are reserved from text and data mining, including AI model training (Art. 4(3) of the EU Directive 2019/790). For other licensing terms, [get in touch](mailto:aaron.wienkers@gmail.com).
 
 ---
 

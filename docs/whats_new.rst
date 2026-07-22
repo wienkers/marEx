@@ -15,6 +15,7 @@ Version 5.0 splits the detect stage into three peer stages, each usable on its o
 * **Tracker.** ``prefilter_min_cells`` drops small objects before the morphology step; ``mask`` is optional; merge and parent records are 64 wide (were 20 and 10); the unstructured tracker's events no longer depend on the time chunking, except for equidistant tie-breaks.
 * **Zarr 3.** zarr-python 2 (``>=2.18``) and 3 are both supported, along with current xarray releases. Dask is un-pinned (``>=2025.9.0``).
 * **Resource monitor.** ``marEx.helper.ResourceMonitor`` reports wall time and memory per pipeline stage.
+* **Licence.** From 5.0, marEx is released under the GNU Affero General Public License v3.0 or later. Earlier releases keep their original terms.
 
 Already in 4.1.x
 ----------------
@@ -108,7 +109,7 @@ Output Attributes and Variables
    * - attrs ``window_year_baseline``, ``smooth_days_baseline``, ``std_normalise``, ``window_days_hobday``
      - ``window_years``, ``smooth_days``, ``standardise``, ``window_days``
    * - attr ``window_spatial_hobday``
-     - ``window_spatial`` (the effective value; ``None`` on the exact path)
+     - ``window_spatial`` (the effective value; omitted on the exact path)
    * - (none)
      - attr ``tail``. The streaming staging directory is on ``ds.encoding["marex_staging_dir"]``, not in attrs.
    * - boolean and ``None`` attrs
@@ -129,8 +130,9 @@ Changed Defaults
 * The approximate percentile range and bin width come from the data (about 3000 bins over the tail's range) instead of a fixed ``precision=0.01`` and ``max_anomaly=5.0``.
 * Tracker merge and parent limits: 64 and 64 (were 20 and 10).
 * ``dask`` is ``>=2025.9.0`` (was ``==2025.3.0``); ``zarr>=2.18`` is declared.
-* ``window_spatial`` is recorded as ``None`` for ``method_percentile="exact"``, where it was never used.
-* On the exact path, a threshold at or below zero is nudged to the smallest value above zero.
+* ``window_spatial`` is omitted from the output for ``method_percentile="exact"``, where it was never used.
+* On the exact path, an upper-tail threshold at or below zero is nudged to the smallest positive
+  normal float32, and a lower-tail threshold at or above zero to its negative.
 
 Now Raises
 ----------
@@ -158,12 +160,14 @@ Some outputs differ from 4.x because the earlier behaviour was wrong, depended o
 * **Data-derived range.** Default bins are no longer 0.01 in the data's units, so thresholds shift by a fraction of a bin and a small fraction of events flip.
 * **Exact percentiles on degenerate cells.** Cells with no variance, such as permanent sea ice, no longer flag every timestep.
 * **Histogram counts** no longer wrap at 65535 samples per (cell, slot, bin).
-* **Leap years.** ``fixed_baseline`` with a reference period containing no leap year no longer leaves day 366 NaN.
+* **Leap years.** The day-of-year 366 climatology pools every year's 31 December instead of the leap years' alone, in all three baselines, so day 366 no longer needs a leap year in the window and a leap year's 31 December no longer inherits years of trend. Anomalies change on that day, and thresholds move near the year end.
 * **Tracker morphology.** Closing and opening use an exact Euclidean disk, and the periodic-longitude seam is padded to the full reach. This changes events slightly near the seam.
 * **Tracker first object.** The first object in raster order at the first timestep was dropped on every gridded and regional track.
 * **Tracker area-filter ties and edges.** Objects exactly at the area cutoff are kept on both grid types; latitude no longer wraps in the morphology padding; the antimeridian margin scales with the grid.
 * **Unstructured tracker.** Events used to depend on the time chunking and worker layout. They no longer do, except for cells exactly equidistant between candidate parents.
 * **Merge loop.** Events fused by an ID-range overrun now stay separate.
+* **Gridded slices with no background.** A time slice where every cell is foreground keeps its object, so events that pass through it now merge across it.
+* **Unstructured merge ties and areas.** Objects that overlap a newly split piece by exactly ``overlap_threshold`` are followed, as every other overlap test already did, and merge areas are summed in float64. A merge decision within rounding of ``overlap_threshold`` can change.
 * **Sub-daily shifting baseline.** ``shifting_baseline`` smooths each time of day across days, so the diurnal cycle is removed from the anomaly instead of left in it. Sub-daily ``shifting_baseline`` values change.
 * **Gaps in the shifting baseline.** Up to ``smooth_max_missing`` (default 0.1) of a smoothing window may be missing before the window is invalid. On gappy input this moves smoothed climatology values on every cadence, and ``smooth_max_missing=0`` restores the earlier behaviour.
 * **Seasonal window in cycle slots.** ``window_days`` counts cycle slots, so thresholds change where one slot is not one step (multi-day and monthly data, and sub-daily steps that do not divide a day).

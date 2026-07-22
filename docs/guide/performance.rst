@@ -195,9 +195,8 @@ Tracker Chunking
 ----------------
 
 Because space stays whole, one chunk is ``time_chunk × n_cells``. On the ICON mesh a boolean chunk of
-4 steps is 59.5 MB, and on the 720 × 1440 grid a chunk of 25 steps is 25.9 MB. The unstructured tracker needs every time chunk to hold at least two steps,
-and a series length of the form ``k × chunk + 1`` leaves a one-step final chunk. A 365-day record
-fails at ``time=4`` for that reason and works at ``time=5``. Re-chunk after any ``.sel``.
+4 steps is 59.5 MB, and on the 720 × 1440 grid a chunk of 25 steps is 25.9 MB. Interior time chunks
+should be uniform; a shorter final chunk, including a single step, is accepted.
 
 Output Chunking
 ---------------
@@ -219,14 +218,14 @@ The Tile-Fit Warning
 --------------------
 
 The internal re-chunk holds time whole and caps the spatial tile near 50 million elements per task,
-but a ``window_spatial`` floor overrides that cap, because a rolling window may not cross a chunk
-boundary. On a sub-daily cadence the per-cell output of the day-of-year histogram grows with the
-number of steps per day while the window does not. At an hourly cycle with 1000 bins and the
-default ``window_spatial=5``, one task touches 219.6 million elements (about 878 MB), roughly 4.4
-times the budget. marEx logs a warning that names the estimate, the budget and the
-window that forced it. The warning never changes the tile and therefore cannot change a result.
-The levers are a narrower ``window_spatial``, a shorter ``window_years``, fewer bins, fewer threads
-per worker, or ``compute_mode="streaming"``. See also :ref:`troubleshooting-tile-warning`.
+where each cell counts the larger of its number of timesteps and the cycle length. The bin count
+does not enter this budget. A ``window_spatial`` floor overrides the cap, because a rolling window
+may not cross a chunk boundary, so the warning fires only when ``n_time × window_spatial²`` alone
+exceeds the budget. At the gridded default of ``window_spatial=5`` that takes more than 2 million
+timesteps, over two centuries of hourly data. marEx logs a warning that names the estimate, the
+budget and the window that forced it. The warning never changes the tile and therefore cannot
+change a result. The levers are a narrower ``window_spatial``, a shorter record, fewer threads per
+worker, or ``compute_mode="streaming"``. See also :ref:`troubleshooting-tile-warning`.
 
 .. _detect-memory-sizing:
 
@@ -265,17 +264,19 @@ threads and 14 GB each:
    * - ``'streaming'``
      - Completed with 2 worker restarts (one run).
 
-These runs used an earlier version of the histogram stage. The current per-cell kernel completed the
-40-year rows in the table below at 1.2 to 1.4 GB per thread, so the figures here are a conservative
-bound. Read 14 GB per 4-thread worker as the edge for that earlier stage at this size and budget
-above it. Size ``memory_limit`` from the largest single worker's peak, which
+These runs used an earlier version of the histogram stage. A later per-cell kernel, before the
+data-derived default bins, completed the two global 40-year rows in the table below at no more than
+about 1.4 GB per thread (cgroup peak, page cache included), so the figures here are a conservative
+bound. For that earlier stage at this size, treat 14 GB per 4-thread worker as the edge, and
+budget above it. Size ``memory_limit`` from the largest single worker's peak, which
 :class:`~marEx.helper.ResourceMonitor` reports per stage, not from the summed peak. In the detect
 runs of the example notebooks the largest worker reached 5.3 GB of 7.8 GB on single-threaded workers
 (global 0.25°, 40 years of input, ``persist``) and 24.4 GB of 31.2 GB on 8-thread workers (ICON,
 30 years of input, ``streaming``). Each is one run, sampled once a second, so the peaks are lower
 bounds, and one run per shape does not give a crash rate.
 
-A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during extreme
+A run at the edge logs the dask line ``exceeded 80% memory budget. Restarting...`` (80 % under
+``start_local_cluster``, dask's default of 95 % elsewhere) during extreme
 identification (see :ref:`troubleshooting-worker-warnings` for why you may not see it). A restart
 costs time, because dask recomputes the lost tasks. Two settings should move a run away from the
 edge, though neither has been measured at full scale:
@@ -307,6 +308,7 @@ the detect stages should use one, because without it there is no memory limit to
 
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=4,
        threads_per_worker=2,
@@ -383,9 +385,9 @@ account=None, verbose=None, quiet=None, **kwargs)``. Each node runs ``workers_pe
 ``threads_per_worker`` threads. Fewer, multi-threaded workers mean fewer peers in every all-to-all
 transfer. Without ``account`` the worker jobs are charged to ``$SLURM_ACCOUNT``, ``$SBATCH_ACCOUNT`` or
 ``$SLURM_JOB_ACCOUNT``, the first that is set, or else to the account of the SLURM job the call runs
-in. The function was written for the DKRZ Levante machine: the defaults for network interface and log
-directory are specific to it, and ``node_memory`` outside 256, 512 and 1024 raises
-``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
+in. If none of these gives an account it raises ``ConfigurationError``. The function was written
+for the DKRZ Levante machine: the defaults for network interface and log directory are specific
+to it, and ``node_memory`` outside 256, 512 and 1024 raises ``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
 same memory and spill settings, or run marEx inside a single batch allocation with
 ``start_local_cluster`` and an explicit ``memory_limit``. Inside an allocation, keep
 ``n_workers × memory_limit`` below the memory you were granted.
@@ -406,6 +408,7 @@ and the number of worker restarts.
 
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="12GB")
    monitor = marEx.helper.ResourceMonitor(client, interval=1.0)
 
@@ -537,8 +540,8 @@ What these rows say:
   0.65 GB, which is the size of the growth being measured, so nothing sharper than that is
   defensible. At 28 GiB ``persist`` did not finish within its deadline and at 40 GiB it completed,
   so the result is about this allocation and this budget, not a general threshold.
-* At a 96 GB budget the wall times are within noise of each other (about 5 %). Streaming is not a
-  speed-up. Its effect is on pinned bytes, 337.0 GB to 0.340 GB, and the peak fell as well because
+* At a 96 GB budget the wall times of the two runs, one per mode, differ by under 1 %. Streaming is
+  not a speed-up. Its effect is on pinned bytes, 337.0 GB to 0.340 GB, and the peak fell as well because
   this is the one wide-window case.
 * On ICON ``persist`` completes the 1096-step track at 192 GB total. Streaming cut pinned bytes
   5.1 times but the peak by only 6.5 %. At 4 × 8 GB (32 GB), ``persist`` was stopped by a 5 h

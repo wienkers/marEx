@@ -25,6 +25,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Changed
 
+- Licence: marEx 5.0 and later is released under the GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`). Earlier releases keep their original terms. See `LICENSE` and `NOTICE`, which also reserve the code and documentation from text and data mining for AI training.
 - `marEx.helper.start_distributed_cluster` no longer defaults to a fixed SLURM account. Without `account=` it uses the first of `$SLURM_ACCOUNT`, `$SBATCH_ACCOUNT` and `$SLURM_JOB_ACCOUNT` that is set, then the account of the job in `$SLURM_JOB_ID` (an interactive allocation), and raises a `ConfigurationError` when none of these gives one.
 - Extreme-method names are domain neutral: `hobday_extreme` is now `seasonal_percentile`, `global_extreme` is now `global_percentile`.
 - Parameter names: `window_year_baseline` -> `window_years`, `smooth_days_baseline` -> `smooth_days`, `window_days_hobday` -> `window_days`, `window_spatial_hobday` -> `window_spatial`, `std_normalise` -> `standardise`. The output attributes carry the new names.
@@ -88,6 +89,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - `tracker` raises a `TrackingError` naming the cause when the area filter removes every object, or when the kept objects' `cell_areas` sum to zero, instead of a `ZeroDivisionError`. On unstructured grids the small-object pre-filter error names its cell cutoff and the active `area_filter_absolute` / `area_filter_quartile`, and a longitude range that cannot be classified no longer suggests `regional_mode=True`, which unstructured grids do not support (`coordinate_units=` is the working route).
 - A tuple or list time chunk in `dask_chunks` no longer fails on outputs with a seasonal cycle axis (`dayofyear`, `month`, `hourofyear`); the cycle axis takes the largest block.
 - plotX: a global grid with a cell straddling the map projection's seam (180 degrees from its central longitude) no longer crashes `single_plot` or animations (the cell is drawn split at the seam); an ID field with no objects plots an empty map with a warning instead of raising.
+- plotX: `plot_IDs=True` accepts a colormap name (`cmap="viridis"`), as `PlotConfig` documents; it raised an `AttributeError`. A named map is sampled to one colour per ID, and a colormap with fewer colours than IDs (which raised a `ValueError`) cycles its colours. A qualitative map (for example `tab10`) keeps neighbouring IDs distinct; a continuous one gives them near-identical shades. Animation centroid markers follow the objects present in `object_ids` (or in the animated field when it is itself an ID field); on an anomaly movie they were picked by matching anomaly values against object IDs.
 
 ### Performance
 
@@ -103,7 +105,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Tracker, gridded: a slice whose largest label exceeds its number of cells has its object properties computed on compacted labels, so late in a long record the cost per slice is capped near what a slice of that size costs instead of growing with the globally offset IDs.
 - Tracker, gridded, `allow_merging=False`: space-time labelling builds a task graph linear in the number of time chunks (578 tasks at 64 chunks; `dask_image.ndmeasure.label` built 2037 at 8, 6517 at 16 and about 82,000 at 64) and gives the same labels and count. Input chunked in space still uses `dask_image`.
 - Seasonal slab quantile kernel compiled with numba (4.3-20x faster single-threaded, releases the GIL); outputs bitwise identical.
-- Detect keeps the caller's spatial chunk as its internal tile while one task on it stays within 4x the 50-million-element budget, instead of splitting it and merging it back (about 3x fewer tasks on a 25,000-cell ICON chunk over 20 years).
+- Detect keeps the caller's spatial chunk as its internal tile while one task on it stays within 4x the 50-million-element budget, instead of splitting it and merging it back (about 3x fewer anomaly-stage tasks with 25,000-cell ICON chunks over 16 years).
 - The rolling climatology pads missing target years by position instead of `reindex`, and the unstructured `fill_holes` keeps its sparse-matrix inputs in one chunk each, so neither multiplies tasks across spatial tiles.
 
 ## Earlier Versions

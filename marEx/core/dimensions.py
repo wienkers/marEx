@@ -256,9 +256,9 @@ def check_tile_fit(
         )
     message += (
         " The tile is used as it stands -- this warning changes nothing. If the run then dies on memory,"
-        " the levers are: a narrower window_spatial, a shorter window_years, or fewer histogram bins"
-        " (each cuts the per-cell element count); fewer threads per worker, so one task gets more of the"
-        " worker's memory; or compute_mode='streaming'."
+        " the levers are: a narrower window_spatial; fewer threads per worker, so one task gets more of"
+        " the worker's memory; compute_mode='streaming'; or, with an even window_spatial (the dense"
+        " day-of-year histogram), a coarser precision, so fewer bins."
     )
     logger.warning(message)
     return message

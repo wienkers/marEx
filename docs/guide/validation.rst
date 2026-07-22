@@ -9,8 +9,8 @@ tolerance, the same answer is required from different chunkings and compute mode
 that need real scale are measured on real data. This page says what each check covers and, as
 important, what it does not.
 
-The test suite lives in ``tests/`` and holds about 1,400 tests. The most recent full run in both
-environments listed below passed 1390 tests with 4 skipped and no failures.
+The test suite lives in ``tests/`` and contains about 2,100 tests. The most recent full run, in the
+first environment listed below, passed 2078 tests with 4 skipped and no failures.
 
 Reference-Output Tests
 ======================
@@ -110,17 +110,21 @@ at most 9.5e-7 in ``STD``, ``dat_stn`` and ``thresholds_stn``. Rolling means run
 (with ``bottleneck`` and ``numbagg`` switched off) so that they do not depend on the chunk layout or
 on the xarray version. Python 3.11 and 3.12 were not run in these two environments.
 
-The continuous-integration workflow runs the suite on Linux, macOS and Windows for Python 3.10 to
-3.13. ``tests/test_api_surface.py`` fixes the public surface, so a removed name or a threshold
-parameter appearing on :func:`marEx.anomaly.compute` fails a test.
+The continuous-integration workflow is configured for selected test files on Linux, macOS and
+Windows (Python 3.10 on Linux only, 3.11 to 3.13 on all three), and for a coverage run over
+``tests/`` on Linux and Python 3.11. The 2078 passed tests quoted at the top of this page come
+from a full-suite run outside it. ``tests/test_api_surface.py`` fixes the public surface, so a
+removed name or a threshold parameter appearing on :func:`marEx.anomaly.compute` fails a test.
 
 Percentile Accuracy
 -------------------
 
 The approximate and exact percentile paths use different conventions, and
 ``tests/test_percentile_agreement.py`` pins the relationship. The seasonal approximate threshold
-matches NumPy's ``higher`` (upper tail) or ``lower`` (lower tail) interpolation to within 1.5
-histogram bins. Against the exact path, which uses linear interpolation, the gap can reach
+returns, to within 1.5 histogram bins, the sample of rank ``floor(q * n) + 1``. For the
+percentiles tested that is NumPy's ``higher`` (upper tail) or ``lower`` (lower tail)
+interpolation, but not for every ``q`` and ``n``: at the 90.9th percentile of 110 samples the
+gap to ``higher`` is about 50 bins. Against the exact path, which uses linear interpolation, the gap can reach
 tens of bins on the sparse per-day-of-year samples at extreme percentiles (on the global path it
 stays within about 8 bins). The cause is the thin sample behind each day-of-year window, not the bin width.
 Where fewer than 10 samples lie beyond the threshold, marEx logs a warning.
@@ -138,7 +142,7 @@ What Is Not Claimed
 * **The performance of** ``lazy`` **is unmeasured.** Its correctness is tested on small fields.
 * **The unstructured tracker excludes equidistant tie-breaks**, as above, and the seasonal slab path
   has not been run on an unstructured mesh.
-* **Sub-daily data with** ``shifting_baseline`` **is not advertised.** ``detrend_harmonic`` rejects it.
+* **Sub-daily data with** ``detrend_harmonic`` **is not supported.** It raises.
 
 .. _validation-development-note:
 

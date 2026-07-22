@@ -46,6 +46,7 @@ not the cgroup limit of a batch allocation, so without it a memory constraint ne
    import xarray as xr
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=4, threads_per_worker=1, memory_limit="8GB"
    )
@@ -390,6 +391,7 @@ main dataset is in final event IDs, and is the one to use for event-level questi
 
 .. code-block:: python
 
+   # Call this in place of run(): a tracker instance runs only once.
    events, merges = event_tracker.run(return_merges=True)
 
 Event Statistics
@@ -501,8 +503,9 @@ Measured on DKRZ Levante, single runs unless stated:
 
 The gridded peak reduction therefore does not transfer to the unstructured tracker. Plan
 around pinned bytes, and size the cluster with a margin: ``P2PConsistencyError``,
-``KilledWorker`` and a timeout are symptoms, and the cause is usually a worker over 95 % of
-its memory limit.
+``KilledWorker`` and a timeout are symptoms, and the cause is usually a worker over its
+termination threshold (80 % of its memory limit under ``start_local_cluster``, 95 % at dask's
+default).
 
 Staging, disk and chunking requirements
 ---------------------------------------
@@ -542,9 +545,8 @@ advice for ``preprocess_data`` on a large unstructured mesh, which chunks the ce
   degree global boolean field). Keep the chunk at least ``T_fill + 1`` timesteps long, so the
   temporal closing does not have to rebalance chunk boundaries.
 * On the full ICON R02B09 mesh the time chunk is a few timesteps, because a chunk is already
-  tens of megabytes. Every chunk must be at least 2 timesteps, and the last one must not be a
-  single step. A time chunk of 4 over 365 days leaves a one-step tail and fails, whereas 5
-  works. After a ``.sel`` along time, re-chunk.
+  tens of megabytes. Interior chunks should be uniform; a shorter final chunk, including a
+  single step, is accepted.
 * ``neighbours`` and ``cell_areas`` do not constrain the chunking of the input.
 
 Troubleshooting
@@ -558,6 +560,17 @@ Troubleshooting
 
 ``TrackingError``: extra dimension
    The tracker is 2-D in space. Select a level (``isel(depth=0)``) or loop over levels.
+
+``TrackingError``: the area filter removed every object
+   ``area_filter_absolute`` is larger than the largest object. Lower it.
+
+``TrackingError``: no objects larger than the cutoff on an unstructured grid
+   Before the area filter, objects of 5 cells or fewer (50 under ``area_filter_quartile``) are
+   dropped, and none was larger. Check that ``data_bin`` has events inside the mask, or relax
+   the detection threshold so that events are larger.
+
+``TrackingError``: the objects kept after filtering have zero total area
+   ``cell_areas`` is zero over the kept objects. It must be positive wherever the mask is True.
 
 ``CoordinateError`` on a regional domain
    The longitude range is not about 360 degrees. Use ``regional_tracker`` with
@@ -589,6 +602,7 @@ Complete Workflow
    import xarray as xr
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=4, threads_per_worker=1, memory_limit="8GB"
    )

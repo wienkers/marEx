@@ -235,12 +235,15 @@ smooths each time of day across days, which needs the timestamps on a regular su
 float offsets, raise a ``ConfigurationError`` whose message gives the rounding that fixes them,
 such as ``da["time"] = da["time"].dt.round("3600s")`` for hourly data.
 
-Sub-daily runs are expensive. The threshold histogram is ``cycle_length × number of bins`` per cell,
-so 6-hourly data is four times the daily size and hourly data twenty-four times. The internal
-tiling shrinks each task in proportion, which keeps the working set bounded and multiplies the
-task count. For long sub-daily series, prefer ``global_percentile`` or coarsen to daily first.
-A tile-fit warning at the shipped chunk defaults on sub-daily data names a rechunk that
-avoids it.
+Sub-daily runs are expensive because a cell has more time steps: 6-hourly data has four times
+the steps of daily data over the same record, and hourly data twenty-four times. The seasonal
+threshold holds each cell's whole series in one task and builds its ``cycle_length × number of
+bins`` counts one cell at a time, so the record length sets a task's memory and the number of
+bins does not. The tile-fit warning on this path needs a very long record: about 2.4 million
+steps per cell with ``window_spatial=5``, over 250 years of hourly data. An even
+``window_spatial`` keeps the older dense histogram, whose per-cell cost is ``cycle_length ×
+number of bins``, so there hourly data is twenty-four times the daily size. For long sub-daily
+series, prefer ``global_percentile`` or coarsen to daily first.
 
 Irregular axes and overrides
 ----------------------------

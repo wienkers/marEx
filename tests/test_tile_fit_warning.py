@@ -241,10 +241,19 @@ class TestMessageIsActionable:
         message = _fit_warnings(cap)[0]
         assert "window_spatial" in message
         assert "streaming" in message
+        assert "precision" in message
         # Never suggest chunking the input finer: the floor is applied before the
         # caller's own chunks are taken into account, so that would silently
         # narrow the tile below the rolling window.
         assert "chunk your input" not in message.lower()
+
+    @pytest.mark.parametrize("n_bins, warns", [(3000, True), (30, False)])
+    def test_bins_move_the_warning_on_the_even_window_path(self, marex_warnings, n_bins, warns):
+        # The message offers a coarser precision for an even window_spatial; it must be a real lever.
+        da = _field(n_time=87840, n_lat=40, n_lon=40)
+        with marex_warnings as cap:
+            hist_mod._histogram_tile_chunks(da, DIMENSIONS, n_bins=n_bins, window_spatial=4, cycle_length=8784)
+        assert bool(_fit_warnings(cap)) is warns
 
 
 if __name__ == "__main__":

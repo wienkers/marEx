@@ -382,6 +382,19 @@ class PlotterBase:
         if cmap is None:
             np.random.seed(42)
             cmap = ListedColormap(np.random.random(size=(n_bins, 3)))
+        elif isinstance(cmap, str) or cmap.N < n_bins:
+            # One colour per ID bin: BoundaryNorm rejects a map with fewer colours than IDs (256 for
+            # viridis). A named map is sampled evenly across its range when it has colours enough;
+            # otherwise its own colours cycle, so a qualitative map keeps neighbouring IDs distinct.
+            if isinstance(cmap, str):
+                from matplotlib import colormaps
+
+                cmap = colormaps[cmap]
+            if cmap.N >= n_bins:
+                colours = cmap(np.linspace(0.0, 1.0, n_bins))
+            else:
+                colours = np.resize(cmap(np.arange(cmap.N)), (n_bins, 4))
+            cmap = ListedColormap(colours)
 
         norm = BoundaryNorm(bounds, cmap.N)
         return cmap, norm, "ID"

@@ -166,7 +166,9 @@ Detrending
 
 ``detrend_orders`` lists the polynomial orders to remove. The default ``[1]`` removes a
 linear trend, and ``[1, 2]`` adds a quadratic. It must be non-empty and contain orders of at
-least 1. With ``force_zero_mean=True`` the final anomaly is shifted to zero mean.
+least 1. With ``force_zero_mean=True`` the detrended field is shifted to zero mean.
+``detrend_fixed_baseline`` then subtracts its reference climatology, so its final anomaly is not
+guaranteed to have zero mean.
 
 .. code-block:: python
 
@@ -184,7 +186,7 @@ Standardising
 =============
 
 ``standardise=True`` (``detrend_harmonic`` only) divides the anomaly by a local standard
-deviation, a 30-day rolling mean of the per-day-of-year standard deviation, and returns it as
+deviation, the square root of a circular 30-day rolling mean of the per-day-of-year variance, and returns it as
 ``dat_stn`` with the divisor as ``STD``. Through ``preprocess_data`` the extremes stage then
 runs a second time on ``dat_stn`` and adds ``extreme_events_stn`` and ``thresholds_stn``.
 Use it when variability differs strongly between regions or seasons and you want events
@@ -197,10 +199,10 @@ Trimming and Leap Days
 20-year input with ``window_years=15`` gives 5 years of anomalies. If the series is
 too short, the stage raises a ``DataValidationError`` before computing anything.
 
-Day-of-year 366 needs a leap year in the data that builds the climatology. When a
-``shifting_baseline`` window contains no leap year (a small ``window_years`` can do this),
-that one timestep has no climatology and its anomaly is NaN. This is expected. A
-``fixed_baseline`` reference period without a leap year fills day 366 from day 365 instead.
+The day-of-year 366 climatology pools every year's 31 December (day 365 in a non-leap
+year), in all three baseline methods. A leap year's 31 December therefore has a climatology
+even when the window or reference period contains no other leap year, and it no longer
+inherits years of trend as a whole-field anomaly.
 
 Cadence
 =======

@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import dask
 import numpy as np
@@ -290,6 +290,7 @@ def _animate(
         "projection": config.projection,
         "x_coord": x_coord,
         "y_coord": y_coord,
+        "plot_IDs": config.plot_IDs,
     }
 
     # Size the canvas once, from the domain, and reuse it for every frame. Computed here
@@ -425,6 +426,24 @@ def _animate(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _frame_centroids(centroids: xr.DataArray, id_field: Optional[np.ndarray]) -> List[Tuple[float, float]]:
+    """``(lon, lat)`` of each object in the frame that has a finite centroid.
+
+    Args:
+        centroids: This frame's centroids, dimensions (component, ID) with component 0 = lat, 1 = lon
+        id_field: This frame's object IDs (> 0 is an object; 0 or NaN background), or None to take
+            every ID whose centroid is finite at this time step
+    """
+    lat = np.asarray(centroids.values[0], dtype=float)
+    lon = np.asarray(centroids.values[1], dtype=float)
+    keep = np.isfinite(lat) & np.isfinite(lon)
+    if id_field is not None:
+        ids = np.asarray(id_field)
+        present = np.unique(ids[np.isfinite(ids) & (ids > 0)])
+        keep &= np.isin(centroids.ID.values, present)
+    return [(float(x), float(y)) for x, y in zip(lon[keep], lat[keep])]
+
+
 @dask.delayed
 def make_frame(
     data_slice: xr.DataArray,
@@ -545,47 +564,30 @@ def make_frame(
         centroids = plot_params.get("centroids")
         if centroids is not None:
             try:
-                # Get unique object IDs present in this frame
-                unique_ids = np.unique(data_slice_np)
-                unique_ids = unique_ids[unique_ids > 0]  # Remove background (0)
-
-                if len(unique_ids) > 0:
-                    # Extract centroid coordinates for present objects
-                    # centroids shape: (component, ID) where component 0=lat, 1=lon
-                    centroids_np = centroids.values
-
-                    # Find which IDs have valid centroids
-                    valid_centroids = []
-                    for obj_id in unique_ids:
-                        try:
-                            # Find ID index in centroids
-                            id_idx = np.where(centroids.ID.values == obj_id)[0]
-                            if len(id_idx) > 0:
-                                idx = id_idx[0]
-                                lat_centroid = centroids_np[0, idx]  # component 0 = latitude
-                                lon_centroid = centroids_np[1, idx]  # component 1 = longitude
-
-                                # Check if centroid is valid (not NaN)
-                                if not (np.isnan(lat_centroid) or np.isnan(lon_centroid)):
-                                    valid_centroids.append((lon_centroid, lat_centroid))
-                        except (IndexError, KeyError):
-                            continue
-
+                # The objects present come from the ID field, never from the animated values (an
+                # anomaly movie's floats are not IDs); without one, every finite centroid is drawn.
+                if object_ids_data is not None:
+                    id_field = object_ids_data.values
+                elif plot_params.get("plot_IDs"):
+                    id_field = data_slice_np
+                else:
+                    id_field = None
+                valid_centroids = _frame_centroids(centroids, id_field)
+                if valid_centroids:
                     # Plot centroids as scatter points
-                    if valid_centroids:
-                        centroid_lons, centroid_lats = zip(*valid_centroids)
-                        ax.scatter(
-                            centroid_lons,
-                            centroid_lats,
-                            c="black",
-                            s=20,
-                            marker="o",
-                            edgecolors="white",
-                            linewidth=1.5,
-                            transform=ccrs.PlateCarree(),
-                            zorder=5,  # Plot above data but below grid lines
-                            alpha=0.8,
-                        )
+                    centroid_lons, centroid_lats = zip(*valid_centroids)
+                    ax.scatter(
+                        centroid_lons,
+                        centroid_lats,
+                        c="black",
+                        s=20,
+                        marker="o",
+                        edgecolors="white",
+                        linewidth=1.5,
+                        transform=ccrs.PlateCarree(),
+                        zorder=5,  # Plot above data but below grid lines
+                        alpha=0.8,
+                    )
             except Exception:
                 # Silently skip centroid plotting if any error occurs
                 pass

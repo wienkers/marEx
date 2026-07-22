@@ -64,7 +64,7 @@ fmt_time() {
 # ── steps matching ci.yml ─────────────────────────────────────────────────────
 
 run_step "Unit tests (helpers)" \
-    tests/test_detect_helpers.py tests/test_track_helpers.py
+    tests/test_stage_helpers.py tests/test_track_helpers.py
 
 run_step "Error handling tests" \
     tests/test_error_handling.py
