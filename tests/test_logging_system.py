@@ -108,6 +108,30 @@ class TestLoggingConfiguration:
         configure_logging()
         # Note: This test might need adjustment
 
+    def test_explicit_config_not_wiped_by_later_get_logger(self):
+        """Regression (§7.5): an explicit configure_logging() must set the
+        configured flag so a subsequent get_logger() does not lazily re-run
+        configure_logging() with defaults and silently reset the level."""
+        try:
+            configure_logging(verbose=True)  # DEBUG
+            assert logging.getLogger("marEx").level == logging.DEBUG
+            # A later logger request must NOT reset the user's DEBUG level.
+            get_logger("marEx.some.module")
+            assert logging.getLogger("marEx").level == logging.DEBUG
+        finally:
+            set_normal_logging()
+
+    def test_lazy_autoconfig_fires_for_submodule_logger(self):
+        """Regression (§7.4): lazy auto-config must fire for a "marEx.<module>"
+        name, not only the bare "marEx" root."""
+        import marEx.logging_config as lc
+
+        lc._logger_configured = False
+        logging.getLogger("marEx").handlers.clear()
+        get_logger("marEx.detect.pipeline")
+        assert lc._logger_configured is True
+        assert len(logging.getLogger("marEx").handlers) > 0
+
     def test_log_file_configuration(self):
         """Test logging to file."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -553,6 +577,24 @@ class TestProgressBars:
         progress_msgs = [r for r in caplog.records if "Test op:" in r.message and "50%" in r.message]
         assert len(progress_msgs) > 0
 
+    def test_log_progress_integer_bucketing_non_round_total(self, caplog):
+        """Regression (§7.8): log_progress must fire on a non-round total.
+
+        The old ``percentage % frequency == 0`` float test virtually never matched
+        unless the total divided evenly, so progress logging silently did nothing.
+        """
+        logger = get_logger("test_log_progress")
+
+        with caplog.at_level(logging.INFO):
+            total = 37  # deliberately not a multiple of 10
+            fired = 0
+            for current in range(1, total + 1):
+                caplog.clear()
+                log_progress(logger, current=current, total=total, operation="Bucket test", frequency=10)
+                fired += any("Bucket test:" in r.message for r in caplog.records)
+            # Crossing 10%..100% should fire roughly 10 times, never zero.
+            assert fired >= 5
+
     def test_log_progress_quiet_mode(self, caplog):
         """Test log_progress in quiet mode."""
         logger = get_logger("test_log_progress")
@@ -583,13 +625,17 @@ class TestProgressBars:
 
     def test_log_progress_verbose_mode(self, caplog):
         """Test log_progress in verbose mode with rate calculation."""
+        import time
+
         logger = get_logger("test_log_progress")
         set_verbose_mode()
 
         try:
             with caplog.at_level(logging.DEBUG):
-                # Test specific frequency that triggers logging
-                log_progress(logger, current=10, total=100, operation="Verbose test", frequency=10)
+                # Rate is reported only when a start_time delta is supplied (the old
+                # absolute-perf_counter rate was meaningless). Provide one here.
+                start_time = time.perf_counter() - 1.0
+                log_progress(logger, current=10, total=100, operation="Verbose test", frequency=10, start_time=start_time)
 
             # Should have verbose progress message with rate calculation
             progress_msgs = [r for r in caplog.records if "Verbose test:" in r.message and "Rate:" in r.message]
