@@ -96,7 +96,15 @@ def _compute_anomaly_fixed_baseline(
         isbin=False,
         method="cohorts",
         dtype=np.float32,
-    ).persist()
+    )
+
+    # Ensure the climatology spans the full day-of-year range 1..366. If the reference
+    # period contains no leap year it only has 365 groups, and subtracting it from a
+    # full series that does include 29 Feb (day-of-year 366) would silently NaN every
+    # such day. Reindex to 366 and forward-fill the missing tail group from day 365.
+    # In the common (leap-containing) case both operations are no-ops. The dayofyear
+    # dim is rechunked to a single chunk so the dask ffill is valid.
+    daily_climatology = daily_climatology.reindex(dayofyear=np.arange(1, 367)).chunk({"dayofyear": -1}).ffill("dayofyear").persist()
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
@@ -112,9 +120,15 @@ def _compute_anomaly_fixed_baseline(
     # Handle both spatial (3D) and time-series (1D) data
     spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
     if spatial_dims:
-        # Spatial data - create 2D/3D mask
+        # Spatial data - create 2D/3D mask.
+        # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
+        # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
+        # under global_extreme). Drop both.
         chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
-        mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars({coordinates["time"]}).chunk(chunk_dict_mask)
+        coords_to_drop = [coordinates["time"]]
+        if "dayofyear" in da.coords:
+            coords_to_drop.append("dayofyear")
+        mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars(coords_to_drop).chunk(chunk_dict_mask)
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
         mask = xr.DataArray(np.any(np.isfinite(da.values)), dims=[], attrs={"description": "Time series validity mask"})

@@ -363,6 +363,9 @@ def preprocess_data(
     _validate_data_values(da, dimensions)
 
     logger.debug("Enabling Dask large chunk splitting for preprocessing")
+    # Capture the caller's value so we can restore it before returning rather than
+    # leaking split_large_chunks=True into their global dask config.
+    _prev_split_large_chunks = dask.config.get("array.slicing.split_large_chunks", None)
     dask.config.set({"array.slicing.split_large_chunks": True})
 
     # Step 1: Compute anomalies
@@ -491,6 +494,14 @@ def preprocess_data(
         chunk_dict = {dim: -1 for dim in cell_areas.dims}
         ds["cell_areas"] = cell_areas.astype(np.float32).chunk(chunk_dict)
 
+    # Resolve the spatial hobday window actually used. identify_extremes silently
+    # defaults a gridded hobday run to a 5x5 window when the user leaves it None, so
+    # the recorded attrs/steps must reflect that rather than the raw None. (Mirrors
+    # the default in extremes/base.py.)
+    effective_window_spatial_hobday = window_spatial_hobday
+    if method_extreme == "hobday_extreme" and window_spatial_hobday is None and "y" in dimensions and dimensions["y"] in ds.dims:
+        effective_window_spatial_hobday = 5
+
     # Add processing parameters to metadata
     ds.attrs.update(
         {
@@ -505,7 +516,7 @@ def preprocess_data(
                 window_year_baseline,
                 smooth_days_baseline,
                 window_days_hobday,
-                window_spatial_hobday,
+                effective_window_spatial_hobday,
                 reference_period,
             ),
         }
@@ -543,11 +554,14 @@ def preprocess_data(
 
     if method_extreme == "hobday_extreme":
         ds.attrs.update({"window_days_hobday": window_days_hobday})
+        if effective_window_spatial_hobday is not None:
+            ds.attrs.update({"window_spatial_hobday": effective_window_spatial_hobday})
 
     ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
-    # Final rechunking
-    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 10))
+    # Final rechunking. Fall back to the documented default time chunk (25), not 10,
+    # so a partial dask_chunks dict does not silently get 10-step chunks.
+    time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     chunk_dict = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
     chunk_dict[dimensions["time"]] = time_chunks
@@ -582,18 +596,22 @@ def preprocess_data(
 
         log_memory_usage(logger, "After dataset persistence", logging.DEBUG)
 
-    # Final success reporting with summary
-    extreme_count = ds.extreme_events.sum()
-    if hasattr(extreme_count, "compute"):
-        extreme_count = extreme_count.compute()
-
-    logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
+    # Final success reporting with summary. Only pay for the full reduction when the
+    # INFO line will actually be emitted (this sum is a pass over the whole field).
+    if logger.isEnabledFor(logging.INFO):
+        extreme_count = ds.extreme_events.sum()
+        if hasattr(extreme_count, "compute"):
+            extreme_count = extreme_count.compute()
+        logger.info(f"Preprocessing completed successfully - {extreme_count} extreme events identified")
     logger.debug(f"Final dataset shape: {ds.dims}")
     log_dask_info(logger, ds, "Final preprocessed dataset")
 
     # Ensure the returned dataset is directly saveable to *both* Zarr and NetCDF.
     # Booleans/None in attrs round-trip through Zarr but break Dataset.to_netcdf.
     ds = make_netcdf_safe_attrs(ds)
+
+    # Restore the caller's dask slicing config (see the capture above).
+    dask.config.set({"array.slicing.split_large_chunks": _prev_split_large_chunks})
 
     return ds
 
