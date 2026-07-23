@@ -47,15 +47,19 @@ class GriddedPlotter(PlotterBase):
 
     def wrap_lon(self, data: xr.DataArray) -> xr.DataArray:
         """Handle periodic boundary in longitude by adding a column of data."""
-        lon = data[self.dimensions["x"]]
+        x_dim = self.dimensions["x"]
+        x_coord = self.coordinates["x"]
+        # Look up the longitude values via the coordinate mapping (may differ from the
+        # dimension name for curvilinear-style configs).
+        lon = data[x_coord]
 
         # Check if we're dealing with global data that needs wrapping
         lon_spacing = np.diff(lon)[0]
         if abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing:
             # Add a column at lon=360 that equals the data at lon=0
             new_lon = np.append(lon, lon[0] + 360)
-            wrapped_data = xr.concat([data, data.isel({self.dimensions["x"]: 0})], dim=self.dimensions["x"])
-            wrapped_data[self.dimensions["x"]] = new_lon
+            wrapped_data = xr.concat([data, data.isel({x_dim: 0})], dim=x_dim)
+            wrapped_data[x_coord] = new_lon
             return wrapped_data
         return data
 
@@ -88,8 +92,8 @@ class GriddedPlotter(PlotterBase):
                 plot_kwargs["vmin"] = clim[0]
                 plot_kwargs["vmax"] = clim[1]
 
-            lons = data[self.dimensions["x"]].values
-            lats = data[self.dimensions["y"]].values
+            lons = data[self.coordinates["x"]].values
+            lats = data[self.coordinates["y"]].values
             values = data.values
 
             logger.debug(f"Rendering plot with {len(lons)} x {len(lats)} grid points")

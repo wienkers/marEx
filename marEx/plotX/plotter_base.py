@@ -173,8 +173,9 @@ class PlotterBase:
             cbar_ax = fig.add_axes(position)
             cb = fig.colorbar(im, cax=cbar_ax, extend=extend)
         else:
-            # For single plots
-            cb = plt.colorbar(im, shrink=0.6, ax=plt.gca(), extend=extend)
+            # For single plots: attach to the mappable's own axes, not plt.gca() (which is
+            # the wrong axes when the caller passed an explicit ax while another figure is current).
+            cb = plt.colorbar(im, shrink=0.6, ax=im.axes, extend=extend)
 
         if var_units:
             cb.ax.set_ylabel(var_units, fontsize=10)
@@ -193,20 +194,27 @@ class PlotterBase:
 
     def single_plot(self, config: PlotConfig, ax: Optional[Axes] = None) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""
-        cmap, norm, clim, var_units, extend = self._setup_common_params(config)
+        # _setup_common_params may replace self.da (e.g. plot_IDs masks it, promoting int IDs
+        # to float64). Restore the original afterwards so later plots from the same instance
+        # see unaltered data.
+        da_original = self.da
+        try:
+            cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
-        fig, ax = self._setup_axes(ax, config.projection)
+            fig, ax = self._setup_axes(ax, config.projection)
 
-        # Call implementation-specific plot function
-        ax, im = self.plot(ax=ax, cmap=cmap, clim=clim, norm=norm)
+            # Call implementation-specific plot function
+            ax, im = self.plot(ax=ax, cmap=cmap, clim=clim, norm=norm)
 
-        if config.title:
-            ax.set_title(config.title, size=12)
+            if config.title:
+                ax.set_title(config.title, size=12)
 
-        self._setup_colorbar(fig, im, config.show_colorbar, var_units, extend)
-        self._add_map_features(ax, config.grid_lines, config.grid_labels)
+            self._setup_colorbar(fig, im, config.show_colorbar, var_units, extend)
+            self._add_map_features(ax, config.grid_lines, config.grid_labels)
 
-        return fig, ax, im
+            return fig, ax, im
+        finally:
+            self.da = da_original
 
     def multi_plot(
         self, config: PlotConfig, col: str = "time", col_wrap: int = 3
@@ -219,10 +227,12 @@ class PlotterBase:
         cmap, norm, clim, var_units, extend = self._setup_common_params(config)
 
         fig = plt.figure(figsize=(6 * ncols, 3 * nrows))
-        axes = fig.subplots(nrows, ncols, subplot_kw={"projection": config.projection}).flatten()
+        # squeeze=False so a single panel still yields a 2D array (a bare Axes has no .flatten()).
+        axes = fig.subplots(nrows, ncols, squeeze=False, subplot_kw={"projection": config.projection}).flatten()
 
-        # Create a single plotter instance to be reused
-        base_plotter = type(self)(self.da)
+        # Create a single plotter instance to be reused. Forward the coordinate mappings so
+        # custom (non-default) dimension/coordinate names keep working in the panels.
+        base_plotter = type(self)(self.da, dimensions=self.dimensions, coordinates=self.coordinates)
         for attr in ["fpath_tgrid", "fpath_ckdtree"]:
             if hasattr(self, attr):
                 setattr(base_plotter, attr, getattr(self, attr))

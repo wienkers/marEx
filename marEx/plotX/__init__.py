@@ -124,6 +124,21 @@ class PlotXAccessor:
 
         logger.debug(f"Creating {final_type} plotter")
 
+        # When the grid is (auto-)detected as unstructured but the user passed no
+        # dimensions, the gridded default {"y": "lat", "x": "lon"} would fail validation
+        # (for unstructured data lat/lon are coordinates, not dimensions). Build a sensible
+        # unstructured default from the actual data dimensions instead.
+        if final_type == "unstructured" and dimensions is None:
+            obj_dims = list(self._obj.dims)
+            time_dim = "time" if "time" in obj_dims else None
+            spatial_dims = [d for d in obj_dims if d != time_dim]
+            dimensions = {}
+            if time_dim is not None:
+                dimensions["time"] = time_dim
+            if spatial_dims:
+                # Unstructured data carries a single non-time spatial dimension (e.g. ncells/cell)
+                dimensions["x"] = spatial_dims[0]
+
         # Create appropriate plotter
         plotter_class = UnstructuredPlotter if final_type.lower() == "unstructured" else GriddedPlotter
         plotter = plotter_class(self._obj, dimensions, coordinates)

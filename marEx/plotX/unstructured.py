@@ -129,6 +129,9 @@ class UnstructuredPlotter(PlotterBase):
 
         self.fpath_tgrid: Optional[Path] = _fpath_tgrid
         self.fpath_ckdtree: Optional[Path] = _fpath_ckdtree
+        # Resolution (degrees) of the pre-computed ckdtree grid. Single knob shared with
+        # PlotConfig.ckdtree_res; callers may override before plotting/animating.
+        self.ckdtree_res: float = 0.3
 
     def specify_grid(
         self,
@@ -149,7 +152,8 @@ class UnstructuredPlotter(PlotterBase):
         """Implement plotting for unstructured data."""
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
-            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=0.3)
+            res = getattr(self, "ckdtree_res", 0.3)
+            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=res)
 
             plot_kwargs = {
                 "transform": ccrs.PlateCarree(),
