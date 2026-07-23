@@ -14,11 +14,13 @@ Two configurations are captured, each exercising a distinct quantile path:
 
 Both use ``method_percentile='approximate'`` (the histogram approximation, the default).
 
-Baselines were captured (from the pre-refactor code) to zarr stores under
-``tests/data/`` -- zarr rather than NetCDF because the pre-fix pipeline emits boolean
-dataset attributes that NetCDF cannot serialise (one of the bugs this work fixes).
-The synthetic input is the small deterministic ``sst_gridded.zarr`` fixture already
-used by ``test_gridded_preprocessing.py``, with the same masked-NaN injection.
+Baselines are captured to zarr stores under ``tests/data/`` (zarr rather than NetCDF
+because the pipeline emits boolean dataset attributes NetCDF cannot serialise). They were
+regenerated from the histogram-quantile fixes (§3.x: edge-based 1D interpolation, top-bin
+clipping, unified NaN policy) and validated positively against ``np.percentile`` -- config A
+threshold mean error ~0.0017 vs the true per-cell percentile. The input is the last
+``N_GOLDEN_STEPS`` of the deterministic ``sst_gridded.zarr`` fixture (kept short so the golden
+stores stay small), with the same masked-NaN injection as ``test_gridded_preprocessing.py``.
 
 Determinism note: the detect pipeline is deterministic for a fixed input chunking;
 the histogram counts are exact integers and the quantile interpolation is a pure
@@ -36,6 +38,11 @@ import marEx
 DATA_DIR = Path(__file__).parent / "data"
 DIMENSIONS = {"time": "time", "x": "lon", "y": "lat"}
 DASK_CHUNKS = {"time": 25}
+# Baselines are captured over the last ~7 years of the fixture. That keeps the golden
+# zarr stores small (the full 41-year outputs were ~61 MB of binaries in a public repo)
+# while still exceeding config B's 5-year shifting-baseline window. Must match the slice
+# used when the goldens were regenerated.
+N_GOLDEN_STEPS = 7 * 365
 
 CONFIGS = {
     "A_harm_global": {"method_anomaly": "detrend_harmonic", "method_extreme": "global_extreme"},
@@ -53,7 +60,7 @@ GOLDEN_VARS = ["dat_anomaly", "mask", "extreme_events", "thresholds"]
 
 
 def _load_sst():
-    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.persist()
+    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(-N_GOLDEN_STEPS, None)).persist()
     # Match the masked-NaN injection used by test_gridded_preprocessing.
     sst = sst.where(~((sst.lat == sst.lat[1]) & (sst.lon == sst.lon[1])), np.nan)
     return sst

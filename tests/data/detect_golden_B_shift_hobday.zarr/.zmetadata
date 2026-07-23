@@ -9,11 +9,12 @@
             "preprocessing_steps": [
                 "Rolling climatology using 5 years",
                 "Smoothed with 11-day window",
-                "Day-of-year thresholds with 3 day window"
+                "Day-of-year thresholds with 3 day window & 5 spatial neighbours"
             ],
             "smooth_days_baseline": 11,
             "threshold_percentile": 95,
             "window_days_hobday": 3,
+            "window_spatial_hobday": 5,
             "window_year_baseline": 5
         },
         ".zgroup": {
@@ -21,9 +22,9 @@
         },
         "dat_anomaly/.zarray": {
             "chunks": [
-                3197,
-                5,
-                10
+                366,
+                10,
+                20
             ],
             "compressor": {
                 "blocksize": 0,
@@ -37,7 +38,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                12785,
+                732,
                 20,
                 40
             ],
@@ -81,9 +82,9 @@
         },
         "extreme_events/.zarray": {
             "chunks": [
-                3197,
-                10,
-                20
+                366,
+                20,
+                40
             ],
             "compressor": {
                 "blocksize": 0,
@@ -97,7 +98,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                12785,
+                732,
                 20,
                 40
             ],
@@ -259,7 +260,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                12785
+                732
             ],
             "zarr_format": 2
         },

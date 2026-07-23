@@ -4,7 +4,7 @@
             "detrend_orders": [
                 1
             ],
-            "force_zero_mean": true,
+            "force_zero_mean": 1,
             "max_anomaly": 5.0,
             "method_anomaly": "detrend_harmonic",
             "method_extreme": "global_extreme",
@@ -14,7 +14,7 @@
                 "Removed polynomial trend orders=[1] & seasonal cycle",
                 "Global percentile threshold applied to all days"
             ],
-            "std_normalise": false,
+            "std_normalise": 0,
             "threshold_percentile": 95
         },
         ".zgroup": {
@@ -22,9 +22,9 @@
         },
         "dat_anomaly/.zarray": {
             "chunks": [
-                3653,
-                5,
-                10
+                639,
+                10,
+                20
             ],
             "compressor": {
                 "blocksize": 0,
@@ -38,7 +38,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                14611,
+                2555,
                 20,
                 40
             ],
@@ -53,7 +53,7 @@
         },
         "extreme_events/.zarray": {
             "chunks": [
-                3653,
+                1278,
                 10,
                 20
             ],
@@ -69,7 +69,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                14611,
+                2555,
                 20,
                 40
             ],
@@ -214,7 +214,7 @@
             "filters": null,
             "order": "C",
             "shape": [
-                14611
+                2555
             ],
             "zarr_format": 2
         },

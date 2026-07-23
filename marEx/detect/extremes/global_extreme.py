@@ -37,7 +37,9 @@ def _identify_extremes_constant(
         if "y" in dimensions:
             rechunk_size = "auto"
         else:
-            rechunk_size = 100 * int(np.sqrt(da[dimensions["x"]].size) * 1.5 / 100)
+            # max(1, ...): for small unstructured grids (< ~4445 cells) the rounded
+            # expression is 0, which is an invalid zero-size chunk.
+            rechunk_size = max(1, 100 * int(np.sqrt(da[dimensions["x"]].size) * 1.5 / 100))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
         chunk_dict = {dimensions[dim]: rechunk_size for dim in ["x", "y"] if dim in dimensions}
         chunk_dict[dimensions["time"]] = -1

@@ -7,10 +7,11 @@
     "preprocessing_steps": [
         "Rolling climatology using 5 years",
         "Smoothed with 11-day window",
-        "Day-of-year thresholds with 3 day window"
+        "Day-of-year thresholds with 3 day window & 5 spatial neighbours"
     ],
     "smooth_days_baseline": 11,
     "threshold_percentile": 95,
     "window_days_hobday": 3,
+    "window_spatial_hobday": 5,
     "window_year_baseline": 5
 }
