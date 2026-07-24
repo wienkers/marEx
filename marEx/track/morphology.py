@@ -289,7 +289,7 @@ def fill_time_gaps(
     return data_bin_filled
 
 
-def refresh_dask_graph(data_bin: xr.DataArray, scratch_dir: str) -> xr.DataArray:
+def refresh_dask_graph(data_bin: xr.DataArray, zarr_path: str) -> xr.DataArray:
     """
     Clear and reset the Dask graph via save/load cycle.
 
@@ -300,20 +300,24 @@ def refresh_dask_graph(data_bin: xr.DataArray, scratch_dir: str) -> xr.DataArray
     ----------
     data_bin : xarray.DataArray
         Data to refresh
+    zarr_path : str
+        Full path of this run's refresh store. Must not be shared with the merge loop's
+        store (see ``update_object_id_field_zarr``) or with a concurrent run.
 
     Returns
     -------
     data_new : xarray.DataArray
-        Data with fresh Dask graph
+        Data with fresh Dask graph. This is a lazy ``open_zarr`` view, so ``zarr_path``
+        must outlive the returned array.
     """
     logger.debug("Refreshing Dask task graph...")
 
     data_bin.name = "temp"
-    data_bin.to_zarr(f"{scratch_dir}/marEx_temp_field.zarr", mode="w")
+    data_bin.to_zarr(zarr_path, mode="w")
     del data_bin
     gc.collect()
 
-    data_new = xr.open_zarr(f"{scratch_dir}/marEx_temp_field.zarr", chunks={}).temp
+    data_new = xr.open_zarr(zarr_path, chunks={}).temp
     return data_new
 
 

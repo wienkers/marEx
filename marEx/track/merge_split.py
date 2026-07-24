@@ -1162,7 +1162,7 @@ def split_and_merge_objects_parallel(
     overlap_threshold: float,
     regional_mode: bool,
     max_iteration: int,
-    scratch_dir: str,
+    temp_field_path: str,
 ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
     """
     Optimised parallel implementation of object splitting and merging.
@@ -1637,7 +1637,7 @@ def split_and_merge_objects_parallel(
         if not bool(has_merge.any().compute().item()):
             return object_id_field
 
-        zarr_path = f"{scratch_dir}/marEx_temp_field.zarr/"
+        zarr_path = temp_field_path
 
         # Initialise zarr store if needed
         if not os.path.exists(zarr_path):

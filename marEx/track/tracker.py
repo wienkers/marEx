@@ -22,6 +22,9 @@ Key terminology:
 
 import logging
 import os
+import shutil
+import time
+import uuid
 import warnings
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
@@ -44,6 +47,38 @@ from .config import TrackerConfig
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Prefixes of the per-run temporary zarr stores written during tracking. The bare
+# "marEx_temp_field.zarr" written by older versions also matches, so stale legacy stores
+# get cleaned up too. Checkpoint artefacts ("marEx_checkpoint_*") deliberately do not match.
+_TEMP_STORE_PREFIXES = ("marEx_temp_field", "marEx_temp_refresh")
+_TEMP_STORE_MAX_AGE_S = 24 * 3600
+
+
+def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_AGE_S) -> None:
+    """Delete temp zarr stores left behind by earlier tracking runs.
+
+    These stores cannot be removed when ``run()`` returns: both ``refresh_dask_graph`` and
+    the merge loop hand back ``xr.open_zarr`` views, so the returned dataset still reads
+    from them lazily until the caller computes. Pruning by age instead bounds disk usage
+    without touching a store a concurrent run may still own.
+    """
+    try:
+        entries = os.listdir(temp_dir)
+    except OSError:
+        return
+    now = time.time()
+    for name in entries:
+        if not name.startswith(_TEMP_STORE_PREFIXES):
+            continue
+        path = os.path.join(temp_dir, name)
+        try:
+            if now - os.path.getmtime(path) > max_age_s:
+                shutil.rmtree(path, ignore_errors=True)
+                logger.debug(f"Pruned stale temp store {path}")
+        except OSError:
+            continue
+
 
 # Module-level state for the distributed.scheduler warning filter. The filter is
 # installed exactly once on the global logger (guarded by ``_DASK_WARNING_FILTER_INSTALLED``)
@@ -475,6 +510,21 @@ class tracker:
         if temp_dir:
             os.makedirs(temp_dir, exist_ok=True)
         self.scratch_dir = temp_dir
+
+        # Per-run temp stores. These used to share one fixed path
+        # ({scratch_dir}/marEx_temp_field.zarr) between refresh_dask_graph and the merge
+        # loop: on unstructured grids refresh created the store first, so the merge loop
+        # skipped its own initialisation and region-wrote into it, leaving time chunks
+        # without merges holding stale pre-filter IDs. Concurrent runs sharing a
+        # scratch_dir corrupted each other the same way.
+        if temp_dir:
+            _prune_stale_temp_stores(temp_dir)
+            run_token = uuid.uuid4().hex[:12]
+            self.temp_refresh_path = os.path.join(temp_dir, f"marEx_temp_refresh_{run_token}.zarr")
+            self.temp_merge_path = os.path.join(temp_dir, f"marEx_temp_field_{run_token}.zarr")
+        else:
+            self.temp_refresh_path = None
+            self.temp_merge_path = None
 
         logger.debug(f"Dimensions: time={self.timedim}, x={self.xdim}, y={self.ydim}")
         logger.debug(f"Coordinates: time={self.timecoord}, x={self.xcoord}, y={self.ycoord}")
@@ -1109,7 +1159,7 @@ class tracker:
         data_new : xarray.DataArray
             Data with fresh Dask graph
         """
-        return _morphology.refresh_dask_graph(data_bin, self.scratch_dir)
+        return _morphology.refresh_dask_graph(data_bin, self.temp_refresh_path)
 
     def filter_small_objects(self, data_bin: xr.DataArray) -> Tuple[xr.DataArray, float, xr.DataArray, int, int]:
         """
@@ -1607,5 +1657,5 @@ class tracker:
             self.overlap_threshold,
             self.regional_mode,
             self.max_iteration,
-            self.scratch_dir,
+            self.temp_merge_path,
         )

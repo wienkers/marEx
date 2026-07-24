@@ -9,8 +9,6 @@ return the values they produced so the orchestrator can reassign them.
 Behaviour and numerics are identical to the original ``tracker`` methods.
 """
 
-import os
-import shutil
 from typing import Optional, Tuple
 
 import numpy as np
@@ -72,17 +70,20 @@ def unify_coordinates(
             # Auto-detect coordinate units for global data
             lon = data_bin[xcoord]
             lon_range = float(lon.max()) - float(lon.min())
-            # A global grid spans [0, 360-dlon], so its range is short of 360 by one grid
-            # step. Scale the tolerance by that step (with the old fixed tolerance as a floor)
-            # so coarse grids (e.g. 2 deg, range 358) are still detected as global.
+            # A global grid spans [0, 360-dlon], so its range falls short of a full turn by
+            # exactly one grid step. Compare against that expected span rather than widening
+            # a window around 360 itself: a +-1.5*dlon window around the full turn is
+            # unbounded, and on a short-range grid with few points dlon grows large enough to
+            # swallow unrelated ranges (a 10 deg grid with 5 points got a 3.75 tolerance and
+            # was mis-detected as radians, since |10 - 2*pi| = 3.72).
             dlon = lon_range / max(int(lon.size) - 1, 1)
 
-            # Check for degrees (range close to 360)
-            if abs(lon_range - 360.0) <= max(1.0, 1.5 * dlon):
+            # Check for degrees (range close to 360 - dlon)
+            if abs(lon_range - (360.0 - dlon)) <= max(1.0, 0.5 * dlon):
                 coordinate_units = "degrees"
 
-            # Check for radians (range close to 2π)
-            elif abs(lon_range - 2 * np.pi) <= max(0.02, 1.5 * dlon):
+            # Check for radians (range close to 2π - dlon)
+            elif abs(lon_range - (2 * np.pi - dlon)) <= max(0.02, 0.5 * dlon):
                 coordinate_units = "radians"
 
             # If neither, throw error
@@ -195,10 +196,6 @@ def setup_unstructured_grid(
         )
 
     scratch_dir = temp_dir
-
-    # Clear any existing temporary storage
-    if os.path.exists(f"{scratch_dir}/marEx_temp_field.zarr/"):
-        shutil.rmtree(f"{scratch_dir}/marEx_temp_field.zarr/")
 
     # Remove coordinate variables to avoid memory issues
     data_bin = data_bin.drop_vars({ycoord, xcoord})
