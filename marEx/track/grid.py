@@ -70,20 +70,24 @@ def unify_coordinates(
             # Auto-detect coordinate units for global data
             lon = data_bin[xcoord]
             lon_range = float(lon.max()) - float(lon.min())
-            # A global grid spans [0, 360-dlon], so its range falls short of a full turn by
-            # exactly one grid step. Compare against that expected span rather than widening
-            # a window around 360 itself: a +-1.5*dlon window around the full turn is
-            # unbounded, and on a short-range grid with few points dlon grows large enough to
-            # swallow unrelated ranges (a 10 deg grid with 5 points got a 3.75 tolerance and
-            # was mis-detected as radians, since |10 - 2*pi| = 3.72).
+            # Global grids come in two conventions: endpoint-exclusive (e.g. 0 to 360-dlon,
+            # so the range is one grid step short of a full turn) and endpoint-inclusive
+            # (the range is exactly a full turn). Accept either, with a half-step tolerance.
+            #
+            # Matching only "close to a full turn" with a +-1.5*dlon window is unbounded: on a
+            # short-range grid with few points dlon grows large enough to swallow unrelated
+            # ranges, and a 10 degree grid with 5 points was mis-detected as radians because
+            # |10 - 2*pi| = 3.72 fell inside a 3.75 tolerance. Matching only the
+            # endpoint-exclusive span is the opposite error: it rejects genuine full-turn
+            # grids whose range is exactly 360 (or 2*pi).
             dlon = lon_range / max(int(lon.size) - 1, 1)
 
-            # Check for degrees (range close to 360 - dlon)
-            if abs(lon_range - (360.0 - dlon)) <= max(1.0, 0.5 * dlon):
+            # Check for degrees (range close to 360, or to 360 - dlon)
+            if min(abs(lon_range - 360.0), abs(lon_range - (360.0 - dlon))) <= max(1.0, 0.5 * dlon):
                 coordinate_units = "degrees"
 
-            # Check for radians (range close to 2π - dlon)
-            elif abs(lon_range - (2 * np.pi - dlon)) <= max(0.02, 0.5 * dlon):
+            # Check for radians (range close to 2π, or to 2π - dlon)
+            elif min(abs(lon_range - 2 * np.pi), abs(lon_range - (2 * np.pi - dlon))) <= max(0.02, 0.5 * dlon):
                 coordinate_units = "radians"
 
             # If neither, throw error
