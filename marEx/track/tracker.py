@@ -21,6 +21,7 @@ Key terminology:
 """
 
 import logging
+import os
 import warnings
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
@@ -31,7 +32,7 @@ from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
-from ..exceptions import create_data_validation_error
+from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
 from . import merge_split as _merge_split
@@ -43,6 +44,38 @@ from .config import TrackerConfig
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Module-level state for the distributed.scheduler warning filter. The filter is
+# installed exactly once on the global logger (guarded by ``_DASK_WARNING_FILTER_INSTALLED``)
+# so that repeated ``tracker(...)`` construction does not accumulate duplicate filters (and
+# pin dead instances). The active debug level is read from module state rather than closed
+# over ``self``; the most recently configured tracker wins.
+_DASK_WARNING_FILTER_INSTALLED = False
+_dask_warning_debug_level = 0
+
+
+def _filter_dask_warnings(record: logging.LogRecord) -> bool:  # pragma: no cover
+    """Filter noisy distributed.scheduler warnings based on the active debug level."""
+    msg = str(record.msg)
+
+    if _dask_warning_debug_level == 0:
+        # Suppress both run_spec and large graph warnings
+        if any(
+            pattern in msg
+            for pattern in [
+                "Detected different `run_spec`",
+                "Sending large graph",
+                "This may cause some slowdown",
+            ]
+        ):
+            return False
+        return True
+    else:
+        # Suppress only run_spec warnings
+        if "Detected different `run_spec`" in msg:
+            return False
+        return True
+
 
 try:
     import jax.numpy as jnp
@@ -423,6 +456,24 @@ class tracker:
         self.checkpoint = checkpoint
         self.debug = debug
 
+        # Resolve the scratch directory used for checkpointing and temporary zarr stores.
+        # This must be available on BOTH grid branches: previously it was only set inside the
+        # unstructured setup, so checkpoint='save'/'load' raised AttributeError on structured
+        # grids (§4.1). The path is kept stable and user-managed so that a later
+        # checkpoint='load' can find the files written by an earlier checkpoint='save' run.
+        if self.checkpoint and not temp_dir:
+            raise ConfigurationError(
+                "Checkpointing requires a temporary directory",
+                details=f"checkpoint={self.checkpoint!r} was requested but temp_dir is None",
+                suggestions=[
+                    "Provide temp_dir: tracker(..., temp_dir='/scratch/user/marex')",
+                    "Disable checkpointing by leaving checkpoint=None",
+                ],
+            )
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+        self.scratch_dir = temp_dir
+
         logger.debug(f"Dimensions: time={self.timedim}, x={self.xdim}, y={self.ydim}")
         logger.debug(f"Coordinates: time={self.timecoord}, x={self.xcoord}, y={self.ycoord}")
 
@@ -589,28 +640,14 @@ class tracker:
             # Configure logging warning filters
             logging.getLogger("distributed.scheduler").setLevel(logging.ERROR)
 
-            def filter_dask_warnings(record):  # pragma: no cover
-                msg = str(record.msg)
-
-                if self.debug == 0:
-                    # Suppress both run_spec and large graph warnings
-                    if any(
-                        pattern in msg
-                        for pattern in [
-                            "Detected different `run_spec`",
-                            "Sending large graph",
-                            "This may cause some slowdown",
-                        ]
-                    ):
-                        return False
-                    return True
-                else:
-                    # Suppress only run_spec warnings
-                    if "Detected different `run_spec`" in msg:
-                        return False
-                    return True
-
-            logging.getLogger("distributed.scheduler").addFilter(filter_dask_warnings)
+            # Record the active debug level in module state and install the module-level
+            # filter exactly once, so repeated tracker construction cannot stack duplicate
+            # filters on the global distributed.scheduler logger.
+            global _DASK_WARNING_FILTER_INSTALLED, _dask_warning_debug_level
+            _dask_warning_debug_level = self.debug
+            if not _DASK_WARNING_FILTER_INSTALLED:
+                logging.getLogger("distributed.scheduler").addFilter(_filter_dask_warnings)
+                _DASK_WARNING_FILTER_INSTALLED = True
 
             # Configure Python warnings
             if self.debug == 0:
@@ -651,6 +688,15 @@ class tracker:
         merges_ds : xarray.Dataset, optional
             Dataset with merge event information (only if return_merges=True)
         """
+        if self.data_bin is None:
+            raise TrackingError(
+                "This tracker instance has already been run",
+                details="run() frees the binary input to save memory, so a tracker is single-use",
+                suggestions=[
+                    "Construct a fresh instance for another run: tracker(data_bin, mask, ...)",
+                ],
+            )
+
         logger.info("Starting complete tracking pipeline")
         log_memory_usage(logger, "Pipeline start")
 
@@ -758,7 +804,7 @@ class tracker:
             # rather than being deferred into the later "Small object filtering" step.
             data_bin_filled = self.fill_holes(self.data_bin).persist()
             wait(data_bin_filled)
-            del self.data_bin  # Free memory
+            self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
 
         # Fill small time-gaps between objects
