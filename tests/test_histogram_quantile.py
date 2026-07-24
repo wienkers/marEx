@@ -198,32 +198,3 @@ def test_global_extreme_exact_small_unstructured_no_zero_chunk():
     )
     thr = thresholds.compute()
     assert np.isfinite(thr.values).any()
-
-
-# ── §3.1b 2D/hobday path edge interpolation accuracy ─────────────────────────
-def test_2d_quantile_edge_interpolation_matches_true_percentile():
-    """§3.1b: the 2D per-doy quantile must interpolate on bin edges (not centres), tracking
-    the true percentile to well within one bin. All timesteps share one day-of-year so that
-    doy pools many samples for a clean comparison against np.percentile."""
-    rng = np.random.default_rng(7)
-    nt, ny, nx = 20000, 3, 4
-    vals = rng.normal(0.0, 1.0, size=(nt, ny, nx)).astype(np.float32)
-    da = xr.DataArray(vals, dims=["time", "y", "x"], coords={"time": np.arange(nt)}, name="dat_anomaly")
-    da = da.assign_coords(dayofyear=("time", np.ones(nt, dtype=int)))
-    da = da.chunk({"time": -1, "y": -1, "x": -1})
-    dims = {"time": "time", "x": "x", "y": "y"}
-
-    # window_days_hobday=3 pools doy {366,1,2}; only doy 1 has samples, so doy 1 sees all of them.
-    thr = H._compute_histogram_quantile_2d(
-        da,
-        0.95,
-        window_days_hobday=3,
-        window_spatial_hobday=None,
-        dimensions=dims,
-        precision=PRECISION,
-        max_anomaly=MAX_ANOMALY,
-    ).compute()
-    thr1 = thr.sel(dayofyear=1).values  # (y, x) -- the only populated day-of-year
-    true_95 = np.percentile(vals, 95, axis=0)
-    max_err = np.max(np.abs(thr1 - true_95))
-    assert max_err < PRECISION / 3, f"2D edge interpolation not accurate: max_err={max_err:.5f}"

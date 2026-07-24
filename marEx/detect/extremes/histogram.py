@@ -72,7 +72,6 @@ def _rolling_histogram_quantile(
     window_days_hobday: int,
     q: float,
     bin_centers: NDArray[np.float64],
-    bin_edges: NDArray[np.float64],
 ) -> NDArray[np.float32]:
     """
     Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
@@ -87,9 +86,7 @@ def _rolling_histogram_quantile(
     q : float
         Quantile to compute (0-1)
     bin_centers : numpy.ndarray
-        Bin centre values (used only for the all-negative fallback).
-    bin_edges : numpy.ndarray
-        Bin edge values (length n_bins + 1) used for within-bin interpolation.
+        Bin centre values for interpolation
 
     Returns
     -------
@@ -141,32 +138,39 @@ def _rolling_histogram_quantile(
     # Extract values for vectorised interpolation
     doy_indices = np.arange(n_doy, dtype=np.int32)
 
-    # Cumulative counts at the boundaries of the containing bin. cumsum[i] counts samples
-    # <= the UPPER edge of bin i, so count_lower is the count at the lower edge of bin
-    # idx_upper (= upper edge of idx_upper-1) and count_upper the count at its upper edge.
+    # Get cumulative counts at the boundaries
     count_lower = np.where(idx_lower >= 0, cumsum[doy_indices, idx_lower], 0)
     count_upper = cumsum[doy_indices, idx_upper]
 
-    # Within-bin interpolation on the bin EDGES (not centres): the quantile lies inside
-    # bin idx_upper, whose value bounds are its histogram edges. Interpolating between bin
-    # centres carried a systematic ~precision/2 low bias relative to the true percentile.
-    # np.maximum(idx_upper, 1): the lowest bin's lower edge is -inf; that case (idx_upper==0)
-    # is overridden below, so avoid -inf arithmetic here (which would emit a NaN warning).
-    edge_lower = bin_edges[np.maximum(idx_upper, 1)]  # lower edge of the containing bin
-    edge_upper = bin_edges[idx_upper + 1]  # upper edge of the containing bin
+    # Bin CENTRES for interpolation -- deliberately not the bin edges used by the 1D path
+    # (_compute_histogram_quantile_1d). Cumulative counts formally correspond to bin upper
+    # edges, so edge-based interpolation looks like the "correct" inverse CDF, and for the 1D
+    # path it is: that path pools the whole time series into these same ~500 bins, so the bins
+    # around the quantile hold many samples, the interpolation fraction is meaningful, and
+    # edge interpolation tracks np.percentile to ~1/5 of a bin.
+    #
+    # This 2D path pools only a per-day-of-year window (tens to a few hundred samples) over the
+    # same bins, so those bins are empty or hold a single sample. The fraction then degenerates
+    # to 0 or 1 and edge interpolation snaps to a bin boundary, adding a systematic half-bin
+    # bias. Switching this path to edges was measured to shift every threshold up by exactly
+    # +precision/2 (uniformly across 11/21/41-day windows) and moved the 41-day result from
+    # 0.0006 to 0.0044 away from the analytic 90th percentile. Keep centres here.
+    bin_lower = bin_centers[idx_lower]
+    bin_upper = bin_centers[idx_upper]
 
     # Compute interpolation fraction based on counts
     count_diff = count_upper - count_lower
     safe_diff = np.where(count_diff > eps, count_diff, 1.0)
-    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.0)
+    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.5)  # If no difference, use midpoint
 
-    threshold = edge_lower + frac * (edge_upper - edge_lower)
+    # Linear interpolation between bin centers
+    threshold = bin_lower + frac * (bin_upper - bin_lower)
 
     # Handle edge cases
     # If total_counts is 0, return NaN
     threshold = np.where(total_counts > 0, threshold, np.nan)
 
-    # If at the first bin (all data is negative), use the first bin centre (=0)
+    # If at the first bin (all data is negative), use the first bin center
     threshold = np.where((idx_upper == 0) & (total_counts > 0), bin_centers[0], threshold)
 
     return threshold.astype(np.float32)
@@ -294,7 +298,7 @@ def _compute_histogram_quantile_2d(
         hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk, bin_edges)
+        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time
