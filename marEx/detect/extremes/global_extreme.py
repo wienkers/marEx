@@ -37,9 +37,14 @@ def _identify_extremes_constant(
         if "y" in dimensions:
             rechunk_size = "auto"
         else:
-            # max(1, ...): for small unstructured grids (< ~4445 cells) the rounded
-            # expression is 0, which is an invalid zero-size chunk.
-            rechunk_size = max(1, 100 * int(np.sqrt(da[dimensions["x"]].size) * 1.5 / 100))
+            # For small unstructured grids (< ~4445 cells) the rounded expression is 0, an
+            # invalid zero-size chunk. Clamping it to 1 is also wrong: a one-cell chunk means
+            # one task per cell, which is precisely the task explosion warned about below.
+            # Floor at 100 cells instead (or the whole grid, if it is smaller than that).
+            # The exact quantile is a per-cell reduction over time, so chunking along cells
+            # cannot change the result -- only the task count.
+            n_cells = da[dimensions["x"]].size
+            rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
         chunk_dict = {dimensions[dim]: rechunk_size for dim in ["x", "y"] if dim in dimensions}
         chunk_dict[dimensions["time"]] = -1
