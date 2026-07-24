@@ -493,9 +493,12 @@ def cluster_rename_objects_and_props(
 
                     # Calculate area-weighted x centroid (longitude) - handle wrapping if needed
                     if not regional_mode:
-                        # Check if object is near both edges (wrapping around periodic boundary)
-                        near_left = np.any(x_indices < 100)
-                        near_right = np.any(x_indices >= nx - 100)
+                        # Check if object is near both edges (wrapping around periodic boundary).
+                        # Scale the margin so it never exceeds a quarter of the grid width (a fixed
+                        # 100-column margin flags every object on grids with <=200 longitude points).
+                        edge_margin = min(100, nx // 4)
+                        near_left = np.any(x_indices < edge_margin)
+                        near_right = np.any(x_indices >= nx - edge_margin)
 
                         if near_left and near_right:
                             # Object wraps around - adjust coordinates

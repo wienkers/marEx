@@ -72,13 +72,17 @@ def unify_coordinates(
             # Auto-detect coordinate units for global data
             lon = data_bin[xcoord]
             lon_range = float(lon.max()) - float(lon.min())
+            # A global grid spans [0, 360-dlon], so its range is short of 360 by one grid
+            # step. Scale the tolerance by that step (with the old fixed tolerance as a floor)
+            # so coarse grids (e.g. 2 deg, range 358) are still detected as global.
+            dlon = lon_range / max(int(lon.size) - 1, 1)
 
             # Check for degrees (range close to 360)
-            if abs(lon_range - 360.0) <= 1.0:
+            if abs(lon_range - 360.0) <= max(1.0, 1.5 * dlon):
                 coordinate_units = "degrees"
 
             # Check for radians (range close to 2π)
-            elif abs(lon_range - 2 * np.pi) <= 0.02:
+            elif abs(lon_range - 2 * np.pi) <= max(0.02, 1.5 * dlon):
                 coordinate_units = "radians"
 
             # If neither, throw error
@@ -95,10 +99,16 @@ def unify_coordinates(
                     context={"detected_range": lon_range, "xdim": xcoord},
                 )
 
-    # Convert lat & lon to degrees
+    # Convert lat & lon to degrees. Use assign_coords (returns a new object) rather than
+    # writing the coordinates in place, which mutated the caller's DataArray and would
+    # double-convert on a second pass.
     if coordinate_units == "radians":
-        data_bin[xcoord] = data_bin[xcoord] * 180.0 / np.pi
-        data_bin[ycoord] = data_bin[ycoord] * 180.0 / np.pi
+        data_bin = data_bin.assign_coords(
+            {
+                xcoord: data_bin[xcoord] * 180.0 / np.pi,
+                ycoord: data_bin[ycoord] * 180.0 / np.pi,
+            }
+        )
 
     return coordinate_units, data_bin
 

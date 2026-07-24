@@ -442,8 +442,10 @@ class tracker:
         self.allow_merging = allow_merging
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
-        self.lat = data_bin[self.ycoord].persist()
-        self.lon = data_bin[self.xcoord].persist()
+        # Read the degree-unit coordinates from self.data_bin (the converted output of
+        # unify_coordinates); the input data_bin is no longer mutated in place (§1.3).
+        self.lat = self.data_bin[self.ycoord].persist()
+        self.lon = self.data_bin[self.xcoord].persist()
         if data_bin.chunks is not None:
             self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
         else:
@@ -849,7 +851,9 @@ class tracker:
         object_areas = object_areas.compute()
         total_area_IDed = float(object_areas.sum().item())
 
-        accepted_area = float(object_areas.where(object_areas > area_threshold, drop=True).sum().item())
+        # Use >= so the accepted-area statistic matches the area filter, which keeps ties
+        # (area == threshold) on both grid types.
+        accepted_area = float(object_areas.where(object_areas >= area_threshold, drop=True).sum().item())
         accepted_area_fraction = accepted_area / total_area_IDed
 
         total_hobday_area = float(raw_area.sum().compute().item())
