@@ -72,6 +72,7 @@ def _rolling_histogram_quantile(
     window_days_hobday: int,
     q: float,
     bin_centers: NDArray[np.float64],
+    bin_edges: NDArray[np.float64],
 ) -> NDArray[np.float32]:
     """
     Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
@@ -86,7 +87,9 @@ def _rolling_histogram_quantile(
     q : float
         Quantile to compute (0-1)
     bin_centers : numpy.ndarray
-        Bin centre values for interpolation
+        Bin centre values (used only for the all-negative fallback).
+    bin_edges : numpy.ndarray
+        Bin edge values (length n_bins + 1) used for within-bin interpolation.
 
     Returns
     -------
@@ -138,27 +141,32 @@ def _rolling_histogram_quantile(
     # Extract values for vectorised interpolation
     doy_indices = np.arange(n_doy, dtype=np.int32)
 
-    # Get cumulative counts at the boundaries
+    # Cumulative counts at the boundaries of the containing bin. cumsum[i] counts samples
+    # <= the UPPER edge of bin i, so count_lower is the count at the lower edge of bin
+    # idx_upper (= upper edge of idx_upper-1) and count_upper the count at its upper edge.
     count_lower = np.where(idx_lower >= 0, cumsum[doy_indices, idx_lower], 0)
     count_upper = cumsum[doy_indices, idx_upper]
 
-    # Bin centers for interpolation
-    bin_lower = bin_centers[idx_lower]
-    bin_upper = bin_centers[idx_upper]
+    # Within-bin interpolation on the bin EDGES (not centres): the quantile lies inside
+    # bin idx_upper, whose value bounds are its histogram edges. Interpolating between bin
+    # centres carried a systematic ~precision/2 low bias relative to the true percentile.
+    # np.maximum(idx_upper, 1): the lowest bin's lower edge is -inf; that case (idx_upper==0)
+    # is overridden below, so avoid -inf arithmetic here (which would emit a NaN warning).
+    edge_lower = bin_edges[np.maximum(idx_upper, 1)]  # lower edge of the containing bin
+    edge_upper = bin_edges[idx_upper + 1]  # upper edge of the containing bin
 
     # Compute interpolation fraction based on counts
     count_diff = count_upper - count_lower
     safe_diff = np.where(count_diff > eps, count_diff, 1.0)
-    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.5)  # If no difference, use midpoint
+    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.0)
 
-    # Linear interpolation between bin centers
-    threshold = bin_lower + frac * (bin_upper - bin_lower)
+    threshold = edge_lower + frac * (edge_upper - edge_lower)
 
     # Handle edge cases
     # If total_counts is 0, return NaN
     threshold = np.where(total_counts > 0, threshold, np.nan)
 
-    # If at the first bin (all data is negative), use the first bin center
+    # If at the first bin (all data is negative), use the first bin centre (=0)
     threshold = np.where((idx_upper == 0) & (total_counts > 0), bin_centers[0], threshold)
 
     return threshold.astype(np.float32)
@@ -286,7 +294,7 @@ def _compute_histogram_quantile_2d(
         hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
+        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk, bin_edges)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time
