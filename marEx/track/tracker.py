@@ -43,7 +43,6 @@ from . import morphology as _morphology
 from . import objects as _objects
 from . import overlap as _overlap
 from . import validation as _validation
-from .config import TrackerConfig
 
 # Get module logger
 logger = get_logger(__name__)
@@ -454,6 +453,10 @@ class tracker:
             self.xcoord = coordinates.get("x", self.xdim)
             self.ycoord = coordinates.get("y", self.ydim)
 
+        # Validate coordinate presence before touching them, so a missing coordinate raises
+        # the descriptive error rather than a bare KeyError from the indexing below (§4.4).
+        _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
+
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
         self.lon_init = data_bin[self.xcoord].persist()
         self.coordinate_units, self.data_bin = _grid.unify_coordinates(
@@ -567,8 +570,11 @@ class tracker:
 
         # Handle cell_areas for both structured and unstructured grids
         if self.unstructured_grid:
-            # Validation already done in _validate_inputs
-            pass
+            # Validation already done in _validate_inputs, but the spatial chunking of
+            # neighbours/cell_areas still has to be enforced here: self.cell_area is
+            # persisted below, before setup_unstructured_grid runs, so a rechunk applied
+            # any later would never reach it (§4.2).
+            neighbours, cell_areas = _validation.validate_unstructured_chunking(neighbours, cell_areas, self.xdim)
         else:
             # Handle structured grids
             if grid_resolution is not None:
@@ -643,34 +649,6 @@ class tracker:
             )
 
         self._configure_warnings()
-
-        # Bundle the resolved scalar configuration into an immutable snapshot.
-        # This is an internal threading vehicle; the individual ``self.X`` attributes
-        # above remain the source of truth and are left untouched. Note ``max_iteration``
-        # is sourced from the local parameter because ``self.max_iteration`` is only set
-        # on the unstructured-grid path.
-        self.config = TrackerConfig(
-            R_fill=self.R_fill,
-            T_fill=self.T_fill,
-            area_filter_quartile=self.area_filter_quartile,
-            area_filter_absolute=self.area_filter_absolute,
-            use_absolute_filtering=self._use_absolute_filtering,
-            allow_merging=self.allow_merging,
-            nn_partitioning=self.nn_partitioning,
-            overlap_threshold=self.overlap_threshold,
-            unstructured_grid=self.unstructured_grid,
-            timedim=self.timedim,
-            xdim=self.xdim,
-            ydim=self.ydim,
-            timecoord=self.timecoord,
-            xcoord=self.xcoord,
-            ycoord=self.ycoord,
-            regional_mode=self.regional_mode,
-            coordinate_units=self.coordinate_units,
-            max_iteration=max_iteration,
-            checkpoint=self.checkpoint,
-            debug=self.debug,
-        )
 
     def _remap_coordinates(self, events_ds: xr.Dataset) -> xr.Dataset:
         """Remap coordinates to original lat/lon values after processing.
@@ -930,9 +908,9 @@ class tracker:
                 accepted_area_fraction=accepted_area_fraction,
                 preprocessed_area_fraction=preprocessed_area_fraction,
             )
-            # Reload to refresh the dask graph
-            data_bin_filtered = load_data_from_checkpoint()
-            object_stats = load_stats_from_checkpoint()
+            # The zarr store is already reloaded above (its contents have not changed since),
+            # and object_stats holds the values just written -- re-reading the npz only
+            # replaced Python scalars with 0-d numpy arrays (§4.6).
 
         return data_bin_filtered, object_stats
 

@@ -21,6 +21,28 @@ from ..logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord: str, ycoord: str) -> None:
+    """Raise a descriptive error if any required coordinate is absent from ``data_bin``.
+
+    Called before the tracker touches ``data_bin[ycoord]`` so that a missing coordinate
+    surfaces as this error rather than a bare ``KeyError`` (§4.4).
+    """
+    if timecoord not in data_bin.coords or xcoord not in data_bin.coords or ycoord not in data_bin.coords:
+        raise create_data_validation_error(
+            "Missing required coordinates in unstructured data",
+            details=(f"Expected coordinates ({timecoord}, {xcoord}, {ycoord}), " f"but found {list(data_bin.coords)}"),
+            suggestions=[
+                "Ensure data_bin contains time, x, and y coordinates",
+                "Check coordinate names in the dataset",
+                "Specify coordinates in the tracker initialisation with `coordinates` parameter.",
+            ],
+            data_info={
+                "actual_coords": list(data_bin.coords),
+                "expected_coords": [timecoord, xcoord, ycoord],
+            },
+        )
+
+
 def validate_inputs(
     data_bin: xr.DataArray,
     mask: xr.DataArray,
@@ -91,20 +113,7 @@ def validate_inputs(
                 )
 
     # Check if timecoord, xcoord, and ycoord are in data_bin coords:
-    if timecoord not in data_bin.coords or xcoord not in data_bin.coords or ycoord not in data_bin.coords:
-        raise create_data_validation_error(
-            "Missing required coordinates in unstructured data",
-            details=(f"Expected coordinates ({timecoord}, {xcoord}, {ycoord}), " f"but found {list(data_bin.coords)}"),
-            suggestions=[
-                "Ensure data_bin contains time, x, and y coordinates",
-                "Check coordinate names in the dataset",
-                "Specify coordinates in the tracker initialisation with `coordinates` parameter.",
-            ],
-            data_info={
-                "actual_coords": list(data_bin.coords),
-                "expected_coords": [timecoord, xcoord, ycoord],
-            },
-        )
+    validate_required_coordinates(data_bin, timecoord, xcoord, ycoord)
 
     # Check if timecoord is an index of timedim
     if timecoord != timedim and (timedim not in data_bin.indexes or data_bin.indexes[timedim].name != timecoord):
@@ -409,8 +418,13 @@ def validate_spatial_chunking(
     return data_bin, mask, lat, lon
 
 
-def validate_unstructured_chunking(neighbours: xr.DataArray, cell_areas: xr.DataArray, xdim: str) -> None:
-    """Validate that neighbours and cell_areas are in single chunks for unstructured grids."""
+def validate_unstructured_chunking(
+    neighbours: xr.DataArray, cell_areas: xr.DataArray, xdim: str
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    """Validate that neighbours and cell_areas are in single chunks for unstructured grids.
+
+    Returns the (possibly rechunked) ``neighbours`` and ``cell_areas``.
+    """
     # Check neighbours spatial dimensions for single chunks
     neighbours_rechunk_needed = False
     neighbours_rechunk_dims = {}
@@ -461,10 +475,10 @@ def validate_unstructured_chunking(neighbours: xr.DataArray, cell_areas: xr.Data
     # Apply rechunking if needed
     if neighbours_rechunk_needed:
         logger.info(f"Rechunking neighbours spatial dimensions: {neighbours_rechunk_dims}")
-        # Note: We don't store the rechunked neighbours directly since it's a parameter
-        # The caller should handle this if needed
+        neighbours = neighbours.chunk(neighbours_rechunk_dims)
 
     if cell_areas_rechunk_needed:
         logger.info(f"Rechunking cell_areas spatial dimensions: {cell_areas_rechunk_dims}")
-        # Note: We don't store the rechunked cell_areas directly since it's a parameter
-        # The caller should handle this if needed
+        cell_areas = cell_areas.chunk(cell_areas_rechunk_dims)
+
+    return neighbours, cell_areas

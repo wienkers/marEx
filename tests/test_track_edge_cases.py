@@ -85,6 +85,39 @@ class TestCheckpointFunctionality:
         loaded_zarr = xr.open_zarr(str(checkpoint_zarr))
         assert "data_bin_preproc" in loaded_zarr, "Preprocessed data not in checkpoint"
 
+    def test_checkpoint_save_stats_match_uncheckpointed_run(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
+        """checkpoint='save' returns the computed stats, not values re-read from the npz (§4.6).
+
+        The save path wrote the stats npz and then immediately re-read it, so the returned
+        tuple held 0-d numpy arrays instead of the scalars the uncheckpointed path returns.
+        run_preprocess is single-use per tracker, so build one instance per run.
+        """
+
+        def _make_tracker(temp_dir):
+            return marEx.tracker(
+                extremes_unstructured.extreme_events,
+                extremes_unstructured.mask,
+                area_filter_quartile=0.5,
+                R_fill=0,
+                T_fill=0,
+                temp_dir=temp_dir,
+                unstructured_grid=True,
+                dimensions={"x": "ncells"},
+                coordinates={"x": "lon", "y": "lat"},
+                coordinate_units="degrees",
+                neighbours=extremes_unstructured.neighbours,
+                cell_areas=extremes_unstructured.cell_areas,
+                quiet=True,
+            )
+
+        _, saved_stats = _make_tracker(temp_checkpoint_dir).run_preprocess(checkpoint="save")
+        _, plain_stats = _make_tracker(temp_checkpoint_dir).run_preprocess()
+
+        for i, (saved, plain) in enumerate(zip(saved_stats, plain_stats)):
+            assert not isinstance(saved, np.ndarray), f"stats[{i}] is a numpy array from the npz round-trip: {saved!r}"
+            assert type(saved) is type(plain), f"stats[{i}] type {type(saved)} differs from uncheckpointed {type(plain)}"
+            assert saved == pytest.approx(plain), f"stats[{i}] value {saved} differs from uncheckpointed {plain}"
+
     def test_checkpoint_load(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
         """Test loading from existing checkpoints (unstructured grids only)."""
         neighbours = extremes_unstructured.neighbours
@@ -951,3 +984,41 @@ class TestEnforceOverlapThreshold:
         # Verify processing completed and filtered correctly
         assert result is not None
         assert len(result) > 0  # Should have at least one valid overlap
+
+
+class TestUnstructuredCellAreaRechunking:
+    """The rechunk from validate_unstructured_chunking must reach the tracker (§4.2).
+
+    setup_unstructured_grid rechunked cell_areas but never returned it, and the tracker
+    persists self.cell_area before that call, so the rechunk was dropped on the floor.
+    """
+
+    def test_multi_chunk_cell_areas_are_single_chunked_on_tracker(self, extremes_unstructured, temp_checkpoint_dir, dask_client):
+        """Multi-chunk cell_areas end up single-chunked on the constructed tracker."""
+        xdim = "ncells"
+        n_cells = extremes_unstructured.cell_areas.sizes[xdim]
+        multi_chunk_areas = extremes_unstructured.cell_areas.chunk({xdim: max(1, n_cells // 4)})
+        assert len(multi_chunk_areas.chunksizes[xdim]) > 1, "precondition: input must be multi-chunk"
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tracker = marEx.tracker(
+                extremes_unstructured.extreme_events,
+                extremes_unstructured.mask,
+                area_filter_quartile=0.5,
+                R_fill=0,
+                T_fill=0,
+                temp_dir=temp_checkpoint_dir,
+                unstructured_grid=True,
+                dimensions={"x": xdim},
+                coordinates={"x": "lon", "y": "lat"},
+                coordinate_units="degrees",
+                neighbours=extremes_unstructured.neighbours,
+                cell_areas=multi_chunk_areas,
+                quiet=True,
+            )
+
+        assert len(tracker.cell_area.chunksizes[xdim]) == 1, (
+            f"tracker.cell_area still has {len(tracker.cell_area.chunksizes[xdim])} chunks "
+            "along the spatial dimension -- the rechunk never reached the tracker"
+        )

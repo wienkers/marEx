@@ -18,7 +18,6 @@ from scipy.sparse import coo_matrix, csr_matrix, eye
 from .._dependencies import warn_missing_dependency
 from ..exceptions import ConfigurationError, create_coordinate_error, create_data_validation_error
 from ..logging_config import get_logger
-from .validation import validate_unstructured_chunking
 
 logger = get_logger(__name__)
 
@@ -208,8 +207,8 @@ def setup_unstructured_grid(
     lon = lon.drop_vars(lon.coords)
     neighbours = neighbours.drop_vars({ycoord, xcoord, "nv"}.intersection(set(neighbours.coords)))
 
-    # Validate spatial chunking for unstructured grid data
-    validate_unstructured_chunking(neighbours, cell_areas, xdim)
+    # Spatial chunking of neighbours/cell_areas is validated by the caller, which needs the
+    # rechunked cell_areas before this point (§4.2).
 
     # Initialise dilation array for unstructured grid
     neighbours_int = neighbours.astype(np.int32) - 1  # Convert to 0-based indexing
