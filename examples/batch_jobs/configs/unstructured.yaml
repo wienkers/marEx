@@ -1,0 +1,97 @@
+# ICON-ESM-ER ocean SST on the native R02B09 mesh (14.9 M cells): the settings of
+# unstructured/01_preprocess_extremes.ipynb and unstructured/02_id_track_events.ipynb.
+# Input and grid file are DKRZ Levante paths; elsewhere point `input.path` and `grid.file` at your own.
+
+output_dir: ${MAREX_SCRATCH}/marEx/examples/unstructured
+scratch_dir: ${MAREX_SCRATCH}/marEx/batch   # streaming detect stages ~460 GB here at its peak
+
+dask_config:
+  distributed.admin.large-graph-warning-threshold: 2GB   # the detect graph on the full mesh is ~1.4 GiB
+
+input:
+  intake:
+    catalog: https://raw.githubusercontent.com/eerie-project/intake_catalogues/main/eerie.yaml
+    entry: [dkrz.disk.model-output, icon-esm-er, hist-1950, v20240618, ocean, native, 2d_daily_mean]
+    kwargs: {chunks: {}}       # the store's own chunks
+  variable: to
+  isel: {depth: 0}             # surface level of potential temperature
+  drop_vars: [cell_sea_land_mask]
+  time: [1985-01-01, 2014-12-31]
+  # Unstructured: CHUNK SPACE. One internal tile holds n_time x (cells in one input chunk), so a whole-mesh chunk
+  # turns the internal rechunk into an all-to-all transpose.
+  chunks: {time: 365, ncells: 15625}
+
+dimensions: {time: time, x: ncells}         # no "y" dimension: marEx treats the data as unstructured
+coordinates: {time: time, x: lon, y: lat}
+
+# Neighbour indices and cell areas of the mesh, attached to the detect output for the tracker
+grid:
+  file: /pool/data/ICON/grids/public/mpim/0016/icon_grid_0016_R02B09_O.nc
+  rename: {cell: ncells, clat: lat, clon: lon}
+  neighbours: neighbor_cell_index
+  cell_areas: cell_area
+
+detect:
+  # 8 workers per 256 GB node, 8 threads and 31 GB each, 48 in all
+  cluster:
+    type: slurm
+    n_workers: 48
+    workers_per_node: 8
+    threads_per_worker: 8
+    node_memory: 256
+    runtime: 100
+  runs:
+    - name: shifting_hobday
+      output: extremes_shifting_hobday.zarr
+      kwargs:
+        method_anomaly: shifting_baseline
+        method_extreme: seasonal_percentile
+        threshold_percentile: 95
+        window_years: 10
+        smooth_days: 21
+        window_days: 11
+        dask_chunks: {time: 5}         # read by the tracker without a rechunk
+        compute_mode: streaming        # stage the anomaly on disk (scratch_dir/staging) instead of in worker memory
+
+track:
+  input: extremes_shifting_hobday.zarr
+  time: [2014-01-01, 2014-12-31]
+  chunks: {time: 5, ncells: -1}        # the tracker needs the whole mesh in every chunk
+  # One whole node: 8 workers x 8 threads x 28 GB
+  cluster:
+    type: local
+    n_workers: 8
+    threads_per_worker: 8
+    memory_limit: 28GB
+  runs:
+    - name: merged
+      output: events_merged.zarr
+      merges: events_merged_merges.nc
+      kwargs:
+        unstructured_grid: true
+        dimensions: {x: ncells}
+        coordinates: {x: lon, y: lat}
+        R_fill: 80                     # neighbour hops
+        area_filter_absolute: 13549    # cells (the gridded run's 600 cells, by area)
+        prefilter_min_cells: 23
+        T_fill: 4
+        allow_merging: true
+        overlap_threshold: 0.25
+        max_iteration: 150
+        nn_partitioning: true
+
+smoke:
+  output_dir: ${MAREX_SCRATCH}/marEx/examples/unstructured_smoke
+  # Space is not subset: the neighbour indices refer to the whole mesh. One year of input, one month tracked.
+  input:
+    time: [2012-01-01, 2012-12-31]
+  detect:
+    cluster: {type: local, n_workers: 4, threads_per_worker: 4, memory_limit: 14GB}
+    runs:
+      - name: harmonic_global
+        output: extremes_shifting_hobday.zarr
+        kwargs: {method_anomaly: detrend_harmonic, method_extreme: global_percentile, threshold_percentile: 95,
+                 dask_chunks: {time: 5}, compute_mode: streaming}
+  track:
+    time: [2012-01-01, 2012-01-31]
+    cluster: {n_workers: 4, threads_per_worker: 4, memory_limit: 14GB}

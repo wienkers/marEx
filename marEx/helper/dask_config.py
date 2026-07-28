@@ -25,11 +25,13 @@ DEFAULT_DASK_CONFIG = {
     # Array processing
     "array.slicing.split_large_chunks": False,
     "array.chunk-size": "24MiB",  # Optimal chunk size for oceanographic data
-    # Worker memory management
-    "distributed.worker.memory.target": 0.4,  # Target memory threshold for spilling to disk
-    "distributed.worker.memory.spill": 0.5,  # Spill to disk threshold
-    "distributed.worker.memory.pause": 0.6,  # Pause worker threshold
-    "distributed.worker.memory.terminate": 0.8,  # Terminate worker threshold
+    # Worker memory management: dask's own thresholds, the ones SLURM-launched workers already run with.
+    # A worker whose unmanaged memory alone sits above `pause` cannot spill its way back down and stalls the
+    # cluster, so a low pause fraction turns ordinary per-task transients into a silent hang.
+    "distributed.worker.memory.target": 0.6,  # Target memory threshold for spilling to disk
+    "distributed.worker.memory.spill": 0.7,  # Spill to disk threshold
+    "distributed.worker.memory.pause": 0.8,  # Pause worker threshold
+    "distributed.worker.memory.terminate": 0.95,  # Terminate worker threshold
     "distributed.worker.memory.recent-to-old-time": "10s",  # Time to consider data old
     "distributed.worker.daemon": False,  # Workers are not daemons
     # Scheduler stability settings

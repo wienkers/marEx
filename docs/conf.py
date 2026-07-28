@@ -29,6 +29,7 @@ TUTORIAL_DIRS = {
     "regional": "regional",
     "unstructured": "unstructured",
     "applications": "applications",
+    "3d": "3d",
 }
 
 

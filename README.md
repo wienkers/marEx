@@ -101,6 +101,7 @@ Runs on one DKRZ Levante node, one per mode unless a row says otherwise, with ou
 | Track, 0.25° global, 3804 days | 24 GiB allocation, 4 × 4 GB dask budget | `persist` OOM-killed in 5 of 5 runs, `streaming` completed in 7 of 7 |
 | Track, same field, 96 GB budget | single run each | pinned 337 GB → 0.34 GB; peak 56.7 → 19.1 GB; wall time within 1 % |
 | Track, ICON R02B09 (14.9 M cells), 1096 days | 16 workers × 12 GB | `persist` 4297 and 4302 s (two runs), `streaming` 4219 s; pinned 751 → 148 GB |
+| Track, 15 years of 6-hourly 0.25° SST (91 GB event field) | 32 GiB job, 3 workers × 9 GB | `persist` OOM-killed, `streaming` completed with a 9.4 GiB peak |
 
 The squeeze result rests on the gridded tracker. Detection did not show a peak-memory saving from streaming. Details, sizing guidance and caveats are in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).
 

@@ -45,13 +45,22 @@ a few grid-specific arguments change.
       ERA5 wind over Europe, 1980-2024: lower-tail extremes of hub-height
       capacity factor tracked into a catalogue of low-wind spells.
 
+   .. grid-item-card:: Ocean extremes in 3-D
+      :link: 3d
+      :link-type: doc
+
+      A century of daily North Atlantic temperature on seven levels down to
+      1415 m: marine heatwaves at every depth with a shifting baseline.
+
 Scripts
 =======
 
-`examples/batch_jobs <https://github.com/wienkers/marEx/tree/main/examples/batch_jobs>`_ holds the gridded detect and
-track notebooks as plain Python scripts with SLURM wrappers, for running the same workflow without Jupyter.
-`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ holds the
-measurement harness behind :doc:`../guide/performance`. An index of every example, with its input and measured run
+`examples/batch_jobs <https://github.com/wienkers/marEx/tree/main/examples/batch_jobs>`_ is a template for running
+detection and tracking as SLURM jobs without Jupyter: two driver scripts configured by one YAML file per dataset, with
+worked configs for the gridded, regional and unstructured examples.
+`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ detects and
+tracks 20 years of 6-hourly global SST inside one 32 GiB job, in both compute modes. It is the source of the 6-hourly rows
+in :doc:`../guide/performance`. An index of every example, with its input and measured run
 time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/examples/README.md>`_.
 
 .. toctree::
@@ -61,3 +70,4 @@ time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/exa
    regional
    unstructured
    wind_drought
+   3d

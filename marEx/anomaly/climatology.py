@@ -9,12 +9,14 @@ cohorts to efficiently compute multi-year rolling day-of-year climatologies.
 from dataclasses import replace
 from typing import Dict, Optional
 
+import dask.array
 import flox.xarray
 import numpy as np
 import pandas as pd
 import xarray as xr
 from dask import persist
 
+from ..core import dimensions as core_dimensions
 from ..core.dimensions import canonical_time_chunks, spatial_dims, tile_spatial_chunks
 from ..core.encoding import clear_store_encoding
 from ..core.numerics import rolling_numerics
@@ -57,6 +59,11 @@ def last_day_pool(time_coord: xr.DataArray, cycle: SeasonalCycle, read_coord: Op
     positions = np.flatnonzero(own | borrowed)
     slots = np.where(borrowed, index + steps_per_day, index)[positions].astype(np.int32)
     return positions, slots, np.arange(first_slot, cycle.length + 1, dtype=np.int32)
+
+
+def _gather_slots(block: np.ndarray, flat_index: np.ndarray) -> np.ndarray:
+    """Read one value per time step from a block whose last two axes are (target_year, cycle)."""
+    return block.reshape(block.shape[:-2] + (-1,))[..., flat_index]
 
 
 def rolling_climatology(
@@ -250,7 +257,12 @@ def rolling_climatology(
     complete = len(data_years) > 0 and n_pairs == len(data_years) * len(cycle.labels)
     reduce_years = data_years if complete else unique_years
 
-    # Use flox with both grouping variables to compute climatologies
+    # Use flox with both grouping variables to compute climatologies. The method is named:
+    # flox's automatic choice searches for cohorts with a label-by-label containment matrix that
+    # grows with the square of the (target year, cycle) group count, client-side before any task
+    # runs (a 60-year daily record peaked near 9 GB against 2 GB with map-reduce). Whether flox
+    # then picks cohorts depends on how many blocks the long-form axis has, not on the record
+    # length, so naming the method also makes the result independent of that heuristic.
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
         target_year_da,
@@ -259,6 +271,7 @@ def rolling_climatology(
         func="nanmean",
         expected_groups=(reduce_years, cycle.labels),
         isbin=(False, False),
+        method="map-reduce",
         dtype=np.float32,
         fill_value=np.nan,
     )
@@ -300,22 +313,43 @@ def rolling_climatology(
         padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
         position = pd.Series(range(len(reduce_years)), index=reduce_years).reindex(unique_years, fill_value=len(reduce_years))
         climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
-    climatologies = climatologies.chunk({cycle_dim: -1})
+    climatologies = climatologies.chunk({"target_year": -1, cycle_dim: -1})
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
     year_indices = year_to_idx[year_vals].values
 
-    # Select appropriate climatology for each time point
-    result = climatologies.isel(
-        {
-            "target_year": xr.DataArray(year_indices, dims=[timedim]),
-            cycle_dim: xr.DataArray(doy_vals - 1, dims=[timedim]),
-        }
+    # Select appropriate climatology for each time point. Both slot axes are whole in every tile,
+    # so the (target_year, cycle) pair is one flat position and the time index is one dask array
+    # that every tile references. Pointwise `isel` with two indexers embeds that index in each
+    # tile's tasks instead: the graph grows as tiles x time steps (about 1 GB on a century of
+    # daily data over 7 x 161 x 321 cells).
+    climatologies = climatologies.transpose(..., "target_year", cycle_dim)
+    # The tile was budgeted on the long-form input, which can be shorter than the record (a one-year window, or a
+    # cycle coarser than the time step), so the gather also splits time to keep each output block within budget.
+    n_spatial = climatologies.ndim - 2
+    tile_cells = int(np.prod([max(chunks) for chunks in climatologies.chunks[:n_spatial]]))
+    flat_index = dask.array.from_array(
+        year_indices * climatologies.sizes[cycle_dim] + (doy_vals - 1),
+        chunks=max(1, core_dimensions.TASK_ELEMENTS // tile_cells),
     )
-
-    # Clean up dimensions and coordinates
-    result = result.drop_vars(["target_year", cycle_dim])
+    spatial_index = tuple(range(n_spatial))
+    result = xr.DataArray(
+        dask.array.blockwise(
+            _gather_slots,
+            spatial_index + (n_spatial + 2,),
+            climatologies.data,
+            spatial_index + (n_spatial, n_spatial + 1),
+            flat_index,
+            (n_spatial + 2,),
+            dtype=climatologies.dtype,
+            concatenate=True,
+        ),
+        dims=climatologies.dims[:-2] + (timedim,),
+        coords={name: coord for name, coord in climatologies.coords.items() if not {"target_year", cycle_dim} & set(coord.dims)},
+        attrs=climatologies.attrs,
+    )
+    result.name = climatologies.name  # an unnamed input stays unnamed rather than taking the dask array's name
 
     result = result.chunk(original_chunk_dict)
     clear_store_encoding(result)  # the caller may write it; a format-2 input's codecs would not survive zarr 3
@@ -398,6 +432,85 @@ def _subdaily_grid_positions(time_coord: xr.DataArray, stride: int) -> Optional[
     return None if positions[-1] == values.size - 1 else positions
 
 
+def _blocked_window_sum(
+    block: np.ndarray, time_axis: int, span: int, stride: int, n_out: int, block_elements: int, **kwargs
+) -> np.ndarray:
+    """Trailing window sums of a time-padded block, a few rows at a time.
+
+    ``block`` holds ``span - 1`` rows of history before its ``n_out`` output rows (and possibly
+    rows after them, which are not used). Output row ``i`` sums every ``stride``-th sample of
+    block rows ``i .. i + span - 1``. Each row block's windows are copied to a C-ordered
+    (rows, ..., span) array before the stepped sum, the layout xarray's ``construct`` gives the
+    whole tile, so the sums are rounded exactly as they would be there; only one row block's
+    copy exists at a time instead of ``span`` copies of the tile.
+    """
+    windows = np.lib.stride_tricks.sliding_window_view(
+        np.take(block, np.arange(n_out + span - 1), axis=time_axis), span, axis=time_axis
+    )
+    per_row = max(1, windows.size // max(1, n_out))
+    rows = max(1, block_elements // per_row)
+    out_shape = windows.shape[:-1]
+    out = None
+    index = [slice(None)] * windows.ndim
+    for start in range(0, n_out, rows):
+        index[time_axis] = slice(start, start + rows)
+        part = np.ascontiguousarray(windows[tuple(index)])[..., ::stride].sum(axis=-1, **kwargs)
+        if out is None:
+            out = np.empty(out_shape, dtype=part.dtype)
+        out[tuple(index[:-1])] = part
+    if out is None:  # no output rows
+        out = np.ascontiguousarray(windows)[..., ::stride].sum(axis=-1, **kwargs)
+    return out
+
+
+def _strided_window_sum(
+    obj: xr.DataArray, timedim: str, steps: int, stride: int, fill_value, block_elements: int = 2**23, **kwargs
+) -> xr.DataArray:
+    """Trailing window sum over ``steps`` samples ``stride`` apart, padded with ``fill_value``.
+
+    The window is the trailing ``(steps - 1) * stride + 1`` steps with every ``stride``-th sample
+    kept, the windows ``obj.rolling(...).construct(...)`` would build. Built through ``construct``
+    on a dask array, each task holds its tile's windows densely, ``span`` copies of the tile. Here
+    each time chunk gets ``span - 1`` steps of history from its neighbours (``fill_value`` before
+    the record) and builds its windows a few rows at a time (about ``block_elements`` window
+    samples per block).
+    """
+    span = (steps - 1) * stride + 1
+    if obj.sizes[timedim] <= span - 1 or not isinstance(obj.data, dask.array.Array):
+        # A record no longer than the history window cannot take its halo from neighbours, and the
+        # dense windows of so short a series cost nothing; an in-memory array has no tiles to protect
+        # and sums its strided view in a different order. Both build the windows as xarray does.
+        window = f"_{timedim}_window"
+        while window in obj.dims or window in obj.coords:
+            window = f"_{window}"
+        windows = obj.rolling({timedim: span}).construct(
+            window, fill_value=fill_value, sliding_window_view_kwargs={"automatic_rechunk": False}
+        )
+        return windows.isel({window: slice(None, None, stride)}).sum(window, skipna=False, **kwargs)
+    data = obj.data
+    t = obj.get_axis_num(timedim)
+    original_chunks = data.chunks
+    # Every time chunk must hold a whole halo; merge neighbours locally, restore the layout below
+    time_chunks = dask.array.overlap.ensure_minimum_chunksize(span - 1, data.chunks[t])
+    if time_chunks != data.chunks[t]:
+        data = data.rechunk({t: time_chunks})
+    depth = {i: (span - 1 if i == t else 0) for i in range(obj.ndim)}
+    boundary = {i: (fill_value if i == t else "none") for i in range(obj.ndim)}
+    padded = dask.array.overlap.overlap(data, depth=depth, boundary=boundary)
+    out_dtype = np.zeros(1, dtype=obj.dtype).sum(**kwargs).dtype
+    out_chunks = data.chunks
+    n_rows = out_chunks[t]
+
+    def func(block, block_info=None):
+        n_out = n_rows[block_info[0]["chunk-location"][t]]
+        return _blocked_window_sum(block, t, span, stride, n_out, block_elements, **kwargs)
+
+    summed = padded.map_blocks(func, chunks=out_chunks, dtype=out_dtype)
+    if summed.chunks != original_chunks:
+        summed = summed.rechunk(original_chunks)
+    return xr.DataArray(summed, dims=obj.dims, coords=obj.coords, name=obj.name)
+
+
 def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int, stride: int = 1, max_missing: float = 0.0) -> xr.DataArray:
     """Centred rolling mean over ``steps`` samples ``stride`` apart that keeps ``da``'s spatial chunks.
 
@@ -429,9 +542,7 @@ def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int, stride:
                 window, fill_value=fill_value, sliding_window_view_kwargs=in_place
             )
         else:
-            span = (steps - 1) * stride + 1
-            windows = obj.rolling({timedim: span}).construct(window, fill_value=fill_value, sliding_window_view_kwargs=in_place)
-            windows = windows.isel({window: slice(None, None, stride)})
+            return _strided_window_sum(obj, timedim, steps, stride, fill_value, **kwargs)
         return windows.sum(window, skipna=False, **kwargs)
 
     total = window_sum(da.fillna(0), 0)

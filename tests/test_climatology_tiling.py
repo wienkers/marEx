@@ -182,3 +182,105 @@ def test_padding_the_years_without_history_does_not_multiply_chunks(monkeypatch)
     values = result.values
     assert np.isnan(values).any() and not np.isnan(values).all(), "fixture has no padded years; test would prove nothing"
     np.testing.assert_array_equal(values, untiled.values)
+
+
+def test_the_grouped_mean_skips_flox_cohort_search(monkeypatch):
+    """flox's automatic method choice builds a label-by-label containment matrix whose size grows
+    with the square of the number of (target year, day) groups. On a century of daily data that
+    alone exhausts a 16 GB client before any task runs, so the climatology reduction must name its
+    method. The day-366 pool is one block along the reduced axis and may still be resolved by flox."""
+    import dask
+    import flox.core
+
+    searched = []
+    real_search = flox.core.find_group_cohorts
+
+    def spy(by, chunks, *args, **kwargs):
+        searched.append([len(c) for c in chunks])
+        return real_search(by, chunks, *args, **kwargs)
+
+    monkeypatch.setattr(flox.core, "find_group_cohorts", spy)
+    da = _synthetic(nt=6 * 365 + 1, nlat=12, nlon=16).chunk({"time": 30, "lat": -1, "lon": -1})
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    with dask.config.set({"array.chunk-size": "256KiB"}):  # splits the long-form array along time
+        rolling_climatology(da, WINDOW_YEARS, dims, dims)
+    assert searched, "flox never resolved a method here: the spy no longer sees the search and proves nothing"
+    multi_block = [chunks for chunks in searched if max(chunks) > 1]
+    assert not multi_block, f"flox searched cohorts over {multi_block} blocks along the reduced axis"
+
+
+def test_the_per_time_step_gather_does_not_repeat_the_time_index_per_tile(monkeypatch):
+    """Each time step reads its (target year, day) slot back out of the climatology. When every
+    tile carries its own copy of that time index, each task's payload grows with the record and the
+    tile count grows with it too (about 1 GB of graph on a century of daily data over
+    7 x 161 x 321 cells). Splitting the field into more tiles adds tasks; what each added task
+    weighs must not depend on the length of the record."""
+    import pickle
+
+    def graph_size(nt, task_elements):
+        monkeypatch.setattr(D, "TASK_ELEMENTS", task_elements)
+        da = xr.DataArray(
+            da_zeros((nt, 24, 32), chunks=(30, -1, -1), dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={
+                "time": xr.date_range("2001-01-01", periods=nt, freq="D"),
+                "lat": np.linspace(-40, 40, 24, dtype=np.float32),
+                "lon": np.linspace(-60, 60, 32, dtype=np.float32),
+            },
+        )
+        dims = {"time": "time", "x": "lon", "y": "lat"}
+        graph = dict(rolling_climatology(da, WINDOW_YEARS, dims, dims).data.__dask_graph__())
+        return len(pickle.dumps(graph, protocol=5)), len(graph)
+
+    per_task = {}
+    for nt in (4 * 365 + 1, 16 * 365 + 4):
+        coarse_bytes, coarse_tasks = graph_size(nt, 50_000_000)
+        fine_bytes, fine_tasks = graph_size(nt, nt * WINDOW_YEARS * 48)  # ~16 tiles
+        assert fine_tasks > coarse_tasks, "the finer budget did not tile the field; the test would prove nothing"
+        per_task[nt] = (fine_bytes - coarse_bytes) / (fine_tasks - coarse_tasks)
+    short, long = sorted(per_task)
+    assert per_task[long] < 1.5 * per_task[short], f"bytes per added task grow with the record: {per_task}"
+
+
+def test_an_unnamed_input_gives_an_unnamed_climatology():
+    da = _synthetic(nt=4 * 365 + 1).chunk({"time": 30})
+    da.name = None
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    assert rolling_climatology(da, WINDOW_YEARS, dims, dims).name is None
+    assert smoothed_rolling_climatology(da, WINDOW_YEARS, 21, dims, dims).name is None
+
+
+def test_the_per_time_step_gather_stays_within_the_task_budget(monkeypatch):
+    """The tile is budgeted on the long-form input, which is shorter than the record when the window is one year or
+    the cycle is coarser than the time step. The gather back onto the record must not grow past the budget there."""
+    import itertools
+
+    import dask.array
+
+    from marEx.core.time_axis import SeasonalCycle
+
+    blocks = []
+    real_blockwise = dask.array.blockwise
+
+    def spy(func, *args, **kwargs):
+        out = real_blockwise(func, *args, **kwargs)
+        if getattr(func, "__name__", "") == "_gather_slots":
+            blocks.append(max(int(np.prod(shape)) for shape in itertools.product(*out.chunks)))
+        return out
+
+    monkeypatch.setattr(dask.array, "blockwise", spy)
+    monkeypatch.setattr(D, "TASK_ELEMENTS", 200_000)
+    nt = 2 * 365
+    da = xr.DataArray(
+        da_zeros((nt, 60, 80), chunks=(30, -1, -1), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": xr.date_range("1990-01-01", periods=nt, freq="D"),
+            "lat": np.arange(60.0),
+            "lon": np.arange(80.0),
+        },
+    )
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    rolling_climatology(da, 1, dims, dims, cycle=SeasonalCycle("month", 12, 30.4))
+    assert blocks, "the spy never saw the gather; the test would prove nothing"
+    assert max(blocks) <= D.TASK_ELEMENTS, f"gather block of {max(blocks)} elements exceeds the budget of {D.TASK_ELEMENTS}"

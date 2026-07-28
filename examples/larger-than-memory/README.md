@@ -1,186 +1,54 @@
-# Larger-than-Memory Demonstrations
+# Larger-than-Memory Detection and Tracking
 
-These scripts test one claim that the unit tests cannot reach:
+`larger_than_memory.ipynb` measures marEx's `compute_mode="streaming"` on a record that does not fit in memory: 6-hourly
+global SST on a 0.25° grid (721 x 1440) from the EERIE IFS-FESOM2-SR control run, detected and tracked inside one 32 GiB
+batch job with a Dask cluster of 3 workers x 2 threads x 9 GB. The record grows rung by rung while the job stays the same.
 
-> A workload that is OOM-killed under `compute_mode="persist"` completes under
-> `compute_mode="streaming"` in the same memory allocation.
+| stage | record | data | data / job | peak memory (anon) | wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| detect | 10 y | 60.7 GB input | 1.8 | 19.4 GiB | 63 min |
+| detect | 20 y | 121.3 GB input | 3.5 | 20.6 GiB | 166 min |
+| track | 5 y of extremes | 30.3 GB event field | 0.9 | 9.4 GiB | 57 min |
+| track | 15 y of extremes | 91.0 GB event field | 2.6 | 9.4 GiB | 139 min |
 
-They are not part of `pytest`. Each leg wants a batch allocation and tens of minutes to hours. The
-fast tests (`tests/test_compute_mode.py`, `tests/test_track_compute_mode.py`) check the wiring, count
-the bytes actually pinned and compare the modes on small fixtures. What they cannot do is force a
-real memory squeeze, so they cannot show feasibility. The user-facing explanation is in the
-performance guide of the documentation.
+Peak memory is flat in record length, and the length shows up in wall time and in what Dask spills to disk. The notebook
+also runs `compute_mode="persist"` in the same job. Detect completed at both lengths with the same extremes, spilling more
+(161 GB against 138 GB at 20 years) and running 15 % longer. The 20-year track was killed by the kernel after 86 minutes:
+its workers stayed under their limits while the client grew to 14.6 GB and the job reached 32 GiB.
 
-## What Was Measured
+## Files
 
-The headline result is the gridded tracker on 3804 daily steps of a 720 x 1440 field (the int32
-event field alone is 15.8 GB), in a 24 GiB job allocation with a 4 x 4 GB = 16 GB dask budget:
-
-| mode | outcome | peak |
-| --- | --- | ---: |
-| `persist` | OOM-killed in 5 of 5 runs (SLURM `OUT_OF_MEMORY`) | none (killed) |
-| `streaming` | completed in 7 of 7 runs, with the same event and merge counts every time | 6.65 to 7.30 GB |
-
-The peak of the streaming runs is near-flat in series length, for the same allocation and budget:
-
-| n_time | whole int32 field | peak | wall |
-| ---: | ---: | ---: | ---: |
-| 951 | 3.9 GB | 6.2 GB | 355 s |
-| 1902 | 7.9 GB | 6.9 GB | 849 s |
-| 3804 | 15.8 GB | 6.65 to 7.30 GB (seven runs) | 1600 to 1676 s |
-
-The field grows 4 times across that span and the peak grows by a small fraction of that. Do not
-read a percentage from the table: the seven runs at 3804 steps spread over 0.65 GB, the size of the
-growth. The wall column is an order of magnitude only, since the runs were on different nodes and the
-event count grows with length.
-
-The same leg across allocations (dask budget held at 4 x 4 GB, one run per cell unless stated):
-
-| allocation | `persist` | `streaming` |
-| ---: | --- | --- |
-| 15, 16, 20 GiB | not run | completed |
-| 24 GiB | OOM-killed, 5 of 5 | completed, 7 of 7 |
-| 28 GiB | did not finish: no OOM, stopped by the 12,000 s deadline | not run |
-| 40 GiB | completed, 2 of 2, but not cleanly | not run |
-
-This does not show a clean allocation threshold for `persist`. One 40 GiB run froze for about
-90 minutes at the same stage where the 28 GiB run stalled, with one worker paused and the others idle,
-and then resumed for a reason these runs do not reveal. A second 40 GiB run, with dask's pause
-threshold switched off, did not freeze, but its nanny restarted a worker ten times. The 28 GiB row is
-unresolved, not a failure. The statement the data support is narrow: at 4 GB per worker, `persist` was
-killed in a 24 GiB allocation while `streaming` completed in the same allocation.
-
-The allocation, not the dask budget, is the number to state. `memory_limit` governs the workers, and
-under `persist` it is the client process that grows (15.8 GiB at its largest in the 40 GiB run,
-against 1.9 GiB for a streaming client).
-
-### The Unstructured Tracker
-
-ICON R02B09 (14.9 M cells), 1096 steps, 4 x 8 GB = 32 GB dask budget on a whole node: `persist` did not
-complete within 5 h on either of two replicates, while `streaming` completed in 3 h 50 min with matching
-output reductions (4359 events, 9404 merges). This is a wall-clock statement. Both `persist` replicates
-were stopped by the harness's own deadline, with no kernel out-of-memory kill (the workers' nanny logged
-9 and 10 memory warnings in the two `persist` runs and 11 in the `streaming` run), so it does not show
-that `persist` cannot fit. At 16 x 12 GB (192 GB total) `persist` completes the same track in about 72 minutes.
-The gridded leg, where the kernel killed `persist`, is what the headline rests on, and the
-unstructured result is supporting evidence.
-
-### Detect Does Not Squeeze
-
-On 9.1 GB of input (2200 days), `detect` peaks near 127 GB in both modes while `streaming` pins 35 KB against
-`persist`'s 9.95 GB. Its peak is a
-transient that does not depend on the mode, so `compute_mode` cannot move it. Use `streaming` for detect
-to shrink what is pinned, not to lower the peak.
-
-## Two Gates, Never One Run
-
-| gate | length | cluster | what it shows |
-| --- | --- | --- | --- |
-| Equivalence | short enough that both modes fit | comfortable | outputs identical across modes |
-| Feasibility | long enough that `persist` cannot fit in the allocation | squeezed | `persist` fails, `streaming` completes |
-
-A feasibility leg has no array-level reference by construction: the `persist` side produced no output.
-What is compared instead are order-invariant reductions of the result (event count, merge count, sum of
-the ID field, number of non-zero cells, maximum ID). The array-level check lives in the test suite, at
-fixture scale and zero tolerance.
-
-## Guard Rails
-
-Each of these exists because its absence has produced a wrong answer.
-
-- **The effective per-worker memory limit is asserted.** Dask can read the memory of the whole
-  machine and not the cap of the batch job. Without an explicit `memory_limit` the squeeze never binds,
-  `persist` completes, and the leg passes for the wrong reason. `build_cluster` asks the workers for
-  their limit and exits non-zero rather than run a meaningless test.
-- **Failures are classified from evidence.** A wall-clock kill is not proof of an out-of-memory
-  condition. The runner looks for `KilledWorker`, `MemoryError` and the nanny's memory warnings, and
-  reports `timeout_inconclusive` when none occurred.
-- **Pinned bytes are counted.** An array is still a dask collection after `.persist()`, so checking
-  for one proves nothing. The accountant wraps the persist entry points and attributes every byte to
-  the marEx line that requested it, including modules that did `from dask import persist`, which a
-  patch of `dask.persist` alone would miss.
-- **Spilling stays enabled.** Switching it off deadlocks the cluster, raises the peak (169.5 GB with
-  spilling off against 118.7 GB with it on, on the same workload and budget) and kills both modes. `--no-spill` exists
-  only as a labelled control.
-- **The spill figure says UNMEASURED when it cannot be read**, and is only printed when every requested
-  worker answered. On one 3804-step `streaming` leg it read 0 bytes across 333 samples, each covering all 4 workers.
-  That shows the metric reports honestly where nothing should spill. It does not show that nothing could
-  have spilled: a spill shorter than the 5 s sampling interval is invisible, and dask's second path to
-  disk (the process-memory threshold) was not tracked per worker.
-- **A breadcrumb summary is written before the work starts**, so a leg killed by the wall clock still
-  records what it attempted.
-- **Squeeze by worker count and record length, never by absurd per-worker memory.** Workers keep 4 to
-  12 GB so that per-task working sets stay comfortable and only aggregate memory can bind.
-- **Never size a squeeze from a measured peak.** Peak memory depends on the room given: the same
-  `persist` workload peaked at 13.1 GB with a 16 GB budget and at 22.1 GB with a 32 GB budget. Size it from the arithmetic
-  invariant, the whole int32 field `n_time x n_cells x 4 B`.
-
-## Sizing
-
-Byte counts are uncompressed `n_time x n_cells x itemsize`. The slab is the working set of one internal
-reduction tile, `n_time x cells in one input spatial chunk x 4 B`.
-
-| leg | data | dimensions | input size | input chunk | slab or whole field |
-| --- | --- | --- | ---: | --- | ---: |
-| gridded detect | OSTIA SST, first 2200 days | 2200 x 720 x 1440 | 9.1 GB | `{time:30, lat:-1, lon:-1}` | slab 9.1 GB |
-| unstructured detect (probe) | ICON-ESM-ER, first 200 days | 200 x 14,886,338 | 11.9 GB | `{time:21, ncells:100_000}` | slab 0.08 GB |
-| unstructured detect (`f2_*`, not run) | ICON-ESM-ER, 8 yr | 2922 x 14,886,338 | 174.0 GB | `{time:21, ncells:100_000}` | slab 1.17 GB |
-| gridded track | binary extremes, OSTIA | 3804 x 720 x 1440 | 3.9 GB (bool) | `{time:25, lat:-1, lon:-1}` | int32 field 15.8 GB |
-| unstructured track | binary extremes, ICON | 1096 x 14,886,338 | 16.3 GB (bool) | `{time:4, ncells:-1}` | int32 field 65.3 GB |
-
-The gridded detect path is a poor squeeze: it is compute-bound and not memory-bound (at 2200 steps on
-48 GB both modes were stopped by a 12,000 s deadline), so it says nothing about `compute_mode`. It
-is run at 2200 days for equivalence and for the peak figure above. The full eight-year unstructured
-detect leg (`f2_*`) has not been run. The gridded-track legs (`g1_*`, `g2_*`, `sc_*`) and the
-unstructured-track legs (`u2_*`, `u3_*`, `f4_*`) carry the results above.
+| file | what it does |
+| --- | --- |
+| `larger_than_memory.ipynb` | reads the rung summaries in `ltm_results.json` and plots memory against record length |
+| `ltm_run.py` | runs one rung (detect or track, `--years N`, `--mode streaming` or `persist`) and writes a JSON summary of what it cost |
+| `ltm.sbatch` | the 32 GiB batch job a rung runs in |
 
 ## Running
 
 ```bash
-./slurm/submit.sh preflight      # small probes: does each configuration run at all? Always first.
-./slurm/submit.sh headline       # g2_*: persist twice and streaming once, 24 GiB, 4 x 4 GB
-./slurm/submit.sh allocation     # the same leg at 15 to 40 GiB
-./slurm/submit.sh scaling        # sc_*: streaming peak against series length
-./slurm/submit.sh calibration    # g1_* (gridded, 4 x 8 GB) and u2_* (unstructured)
-./slurm/submit.sh unstructured   # u3_*: persist twice and streaming once, whole node
-./slurm/submit.sh equivalence    # short legs that compare the modes
-./slurm/submit.sh variants       # tracker settings
-./slurm/submit.sh <leg-name>     # any single leg
-
-python report.py <measurements-dir>
+sbatch --account=<project> ltm.sbatch detect --years 10 --workers 3 --threads 2 --memory-limit 9GB
+sbatch --account=<project> ltm.sbatch track  --years 10 --workers 3 --threads 2 --memory-limit 9GB
+SMOKE=1 python ltm_run.py detect --years 2    # one latitude band, minutes: check the plumbing first
 ```
 
-`submit.sh` needs `SLURM_ACCOUNT` set (see "Adapting to Another System").
+The tracker reads the detect output of the same length, so run detect first. Detection uses a 5-year shifting baseline, so a
+10-year detect rung gives the tracker 5 years of extremes.
 
-Pre-flight is the cheapest insurance against spending a headline leg on a failure that has nothing to
-do with `compute_mode`.
-
-Each leg writes `<label>_summary.json` (dimensions, chunking, cluster budget, the asserted effective
-per-worker limit, outcome and failure classification, peak and mean cluster memory, bytes pinned per
-marEx source line, spill, nanny events, wall clock and output fingerprints) and a
-`<label>_memseries.npy` memory trace. `report.py` collates them into the results table.
+Memory is read from the job's cgroup v2 counters, not from Dask: `anon` covers the client, the workers and everything else in
+the job, and the page cache is excluded because the kernel reclaims it on demand. The summary is written before the work
+starts and again at the end, so a killed run still leaves a record. `--stall-minutes N` ends a run whose scheduler makes no
+progress for N minutes and records it as `stalled`. Keep it at 0 for the tracker, whose merge loop runs on the client.
 
 ## Adapting to Another System
 
-Every path is an argument or an environment variable, and nothing is hardwired to one account.
-
 | setting | how | default |
 | --- | --- | --- |
-| SLURM account | `SLURM_ACCOUNT` (or `SQUEEZE_ACCOUNT`) | none: `submit.sh` refuses to run without it |
+| input store | `MAREX_LTM_STORE` | `$MAREX_SCRATCH/marEx_data/input/fesom_sst6h/fesom_sst_6hourly_1971-2050.zarr` |
+| outputs, staging, spill | `--out-dir` | `$MAREX_SCRATCH/marEx/ltm` |
 | Python | `MAREX_PYTHON` | `python` on `PATH` |
-| input stores | `MAREX_LTM_DATA` directory, or `--input` per script | `/scratch/<initial>/$USER/marEx_data` (OSTIA under `input/ostia/`, detect outputs under `output/detect_binaries/`) |
-| summaries, scratch, job logs | `SQUEEZE_OUT`, `SQUEEZE_SCRATCH`, `SQUEEZE_LOGS` | under `/work/$SLURM_ACCOUNT/$USER/marEx` and `/scratch/<initial>/$USER/marEx` |
-| ICON grid file | `--grid-file` or `MAREX_ICON_GRID` | the DKRZ `/pool` copy |
-| EERIE catalogue | `MAREX_EERIE_CATALOGUE`, or `--input` to skip it | the public catalogue URL (the `dkrz.disk.model-output` entry is DKRZ-only) |
 
-The partitions and per-leg budgets in `slurm/submit.sh` are Levante's. On another cluster, keep the
-guard rails, above all the memory-limit assertion, and change the partitions, the input stores and the
-budgets.
-
-## Smoke Runs
-
-`SMOKE=1` truncates each script's series (64 steps for the trackers, 365 for detect, unless `--nt`
-is given), sets a 10 minute self-deadline and, in `submit.sh`, a 15 minute wall. It checks the plumbing,
-the paths and the asserted memory limit, not any result in this document. Give a smoke leg a method
-that fits its short series, for example `--method-anomaly detrend_harmonic --method-extreme global_percentile`
-for detect.
+Always pass `--memory-limit`. A Dask `LocalCluster` sizes itself from the machine's memory, not the batch job's, so without
+it the limit never binds and the run says nothing about the job's memory. `ltm_run.py` writes the limit each worker reports
+into the summary. Leave room for staging and spill on the output file system: at 20 years detect spilled 138 GB with
+`streaming` and 161 GB with `persist`.

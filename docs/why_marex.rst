@@ -68,6 +68,9 @@ general, lower peak memory. The measured evidence is the gridded tracker on a
   ``persist`` had not finished after 5 h in two runs and ``streaming`` finished
   in 3 h 50 min. At 16 x 12 GB both finished in about 72 min, and pinned bytes
   fell from 751 GB to 148 GB.
+* On 6-hourly 0.25 degree SST in a 32 GiB job (3 x 9 GB), ``streaming`` tracked a
+  91 GB ID field with a 9.4 GiB peak and ``persist`` was OOM-killed, one run each.
+  Detection on 121 GB of input completed in both modes, ``persist`` 15 % slower.
 
 Detection with ``streaming`` produced the same arrays as ``persist`` at full
 scale (40 years of daily 0.25 degree data in about an hour on one node, 4 workers

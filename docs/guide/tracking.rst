@@ -495,6 +495,11 @@ Measured on DKRZ Levante, single runs unless stated:
   the same allocation, with peak memory of 6.65 to 7.30 GB. This is the larger-than-memory
   result. The ID field alone is 15.8 GB against the 24 GiB allocation, so the margin is
   modest, and no allocation threshold for ``persist`` is claimed.
+* The gridded tracker on 15 years of 6-hourly 0.25 degree SST extremes (a 91.0 GB ID field) in a 32 GiB
+  job with 3 x 9 GB workers: ``streaming`` completed in 139 minutes with a peak anon of 9.4 GiB,
+  within 1 % of the peak for a field a third the size. ``persist`` was OOM-killed after 86 minutes. Its
+  workers stayed under their limits, and the client, which runs the merge loop, grew to 14.6 GB.
+  One run each.
 * ICON R02B09 (14.9 million cells), 1096 days, 16 x 12 GB: pinned bytes fell from 751 GB to
   148 GB, but peak memory fell only 6.5 %, and ``persist`` completes at this budget (about
   72 minutes). With 4 x 8 GB, ``persist`` did not finish within the 5 hour limit in two runs,
@@ -504,8 +509,7 @@ Measured on DKRZ Levante, single runs unless stated:
 The gridded peak reduction therefore does not transfer to the unstructured tracker. Plan
 around pinned bytes, and size the cluster with a margin: ``P2PConsistencyError``,
 ``KilledWorker`` and a timeout are symptoms, and the cause is usually a worker over its
-termination threshold (80 % of its memory limit under ``start_local_cluster``, 95 % at dask's
-default).
+termination threshold (95 % of its memory limit).
 
 Staging, disk and chunking requirements
 ---------------------------------------
