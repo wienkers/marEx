@@ -1,0 +1,28 @@
+{
+  "_source": "DERIVED from runs_green_on_main: the push run on main failed (jobs_rerun_attempt2_failed at attempt 1); a newer green workflow_dispatch run on main at the same sha",
+  "total_count": 2,
+  "workflow_runs": [
+    {
+      "id": 41052242349,
+      "run_number": 143,
+      "run_attempt": 1,
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242349"
+    },
+    {
+      "id": 41052242346,
+      "run_number": 140,
+      "run_attempt": 1,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242346"
+    }
+  ]
+}

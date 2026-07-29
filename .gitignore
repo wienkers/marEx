@@ -37,6 +37,7 @@ docs/runs/
 
 # Local working/review docs
 REPORT_*.md
+ASTRA_*.md
 
 # SLURM job output (archived under /work/bk1377/b382615/marex_fable/logs/; see SLURM_LOG_DIR)
 slurm-*.out

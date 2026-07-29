@@ -77,11 +77,11 @@ class DependencyTracker:
             if len(missing) == 1:
                 dep_name = missing[0]
                 install_cmd = self._get_install_command(dep_name)
-                raise ImportError(f"{feature} requires {dep_name}. " f"Install with: {install_cmd}")
+                raise ImportError(f"{feature} requires {dep_name}. Install with: {install_cmd}")
             else:
                 dep_list = ", ".join(missing)
                 install_cmd = "pip install marEx[full]"
-                raise ImportError(f"{feature} requires the following dependencies: {dep_list}. " f"Install with: {install_cmd}")
+                raise ImportError(f"{feature} requires the following dependencies: {dep_list}. Install with: {install_cmd}")
 
     def warn_missing_dependency(self, dep_name: str, feature: str = "Some functionality") -> None:
         """

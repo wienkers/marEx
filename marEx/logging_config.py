@@ -245,6 +245,11 @@ def _configure_external_loggers() -> None:
     for logger_name in external_loggers:
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
+    # `distributed.worker` is silenced above, but its memory children carry the
+    # "worker exceeded 95% memory budget" warnings that explain a killed worker.
+    for logger_name in ("distributed.worker.memory", "distributed.nanny.memory"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 
 def get_memory_usage() -> Dict[str, float]:
     """
@@ -332,7 +337,7 @@ def log_timing(
 
         # More detailed timing in verbose mode
         if is_verbose_mode():
-            logger.debug(f"Completed {operation} - Duration: {duration:.3f}s, " f"Performance: {1/duration:.2f} ops/sec")
+            logger.debug(f"Completed {operation} - Duration: {duration:.3f}s, Performance: {1 / duration:.2f} ops/sec")
         else:
             logger.log(level, f"Completed {operation} in {duration:.2f}s")
 
@@ -488,11 +493,11 @@ def log_function_call(logger: Optional[logging.Logger] = None, level: int = logg
             # Create parameter summary (limit length for readability)
             args_repr = [repr(arg) for arg in args[:3]]  # First 3 args only
             if len(args) > 3:
-                args_repr.append(f"... +{len(args)-3} more")
+                args_repr.append(f"... +{len(args) - 3} more")
 
             kwargs_repr = [f"{k}={repr(v)}" for k, v in list(kwargs.items())[:3]]
             if len(kwargs) > 3:
-                kwargs_repr.append(f"... +{len(kwargs)-3} more")
+                kwargs_repr.append(f"... +{len(kwargs) - 3} more")
 
             params = ", ".join(args_repr + kwargs_repr)
             if len(params) > 200:
@@ -542,7 +547,7 @@ def log_dask_info(
 
             nbytes = da_or_ds.nbytes if hasattr(da_or_ds, "nbytes") else "unknown"
 
-            log_msg = f"Dask object - Shape: {da_or_ds.shape}, " f"Chunks: {chunks_info}, " f"Size: {nbytes}"
+            log_msg = f"Dask object - Shape: {da_or_ds.shape}, Chunks: {chunks_info}, Size: {nbytes}"
 
             if message:
                 log_msg = f"{message} - {log_msg}"

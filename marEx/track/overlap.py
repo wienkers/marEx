@@ -174,7 +174,11 @@ def find_overlapping_objects(
     """
     # Check just for overlap with next time slice.
     #  Keep a running list of all object IDs that overlap
-    object_id_field_next = object_id_field.shift({timedim: -1}, fill_value=0)
+    if object_id_field.sizes[timedim] == 1:
+        # A lone slice has no next slice (and dask cannot pad a length-1 axis): all fill.
+        object_id_field_next = xr.zeros_like(object_id_field)
+    else:
+        object_id_field_next = object_id_field.shift({timedim: -1}, fill_value=0)
 
     # Calculate overlaps in parallel
     input_dims = [xdim] if unstructured_grid else [ydim, xdim]

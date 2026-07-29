@@ -292,8 +292,9 @@ def identify_objects(
         )
 
         # Per-slice object counts -> cumulative offset (slice t gets the sum of all earlier counts).
+        # Exclusive cumulative sum, not a shift: padding a length-1 time axis fails in dask.
         per_slice_counts = local_ids.max(dim=[ydim, xdim])
-        offsets = per_slice_counts.cumsum(timedim).shift({timedim: 1}, fill_value=0)
+        offsets = per_slice_counts.cumsum(timedim) - per_slice_counts
         object_id_field = xr.where(local_ids > 0, local_ids + offsets, 0).rename("ID_field").astype(np.int32)
 
         # _anchor, not _hold: this array is read TWICE -- by the .max().compute() on the

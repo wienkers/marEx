@@ -93,7 +93,7 @@ class ObjectIDRegionWriter:
 
         if data.sizes[self.timedim] != end - start:
             raise ValueError(
-                f"region [{start}, {end}) expects {end - start} steps along {self.timedim}, " f"got {data.sizes[self.timedim]}"
+                f"region [{start}, {end}) expects {end - start} steps along {self.timedim}, got {data.sizes[self.timedim]}"
             )
 
         ds = data.to_dataset(name=self.name)

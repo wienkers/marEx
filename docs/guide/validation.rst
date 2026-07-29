@@ -15,7 +15,7 @@ first environment listed below, passed 2078 tests with 4 skipped and no failures
 Reference-Output Tests
 ======================
 
-``tests/test_pipeline_golden.py`` pins :func:`marEx.preprocess_data` on two configurations of a
+``tests/detect/test_pipeline_golden.py`` pins :func:`marEx.preprocess_data` on two configurations of a
 deterministic gridded fixture, using the last seven years (2555 daily steps):
 
 * ``detrend_harmonic`` with ``global_percentile``, which exercises the one-dimensional histogram path.
@@ -30,7 +30,7 @@ it could not hide a change in the algorithm. Integer and label outputs have no t
 The reference runs fix ``precision=0.01`` and a pinned range, so they characterise the numerics
 and do not move when the default bin choice changes. ``test_legacy_bins_reproduce_the_goldens`` isolates
 the histogram path: it reproduces the references with the legacy bin layout, so a failure there
-points at the histogram code and not at the surrounding pipeline. ``tests/test_track_golden.py``
+points at the histogram code and not at the surrounding pipeline. ``tests/track/test_tracker_outputs.py``
 does the same for the tracker, against a stored event dataset and merge dataset.
 
 Reference outputs have been regenerated when a change altered numerics on purpose, for example when
@@ -45,12 +45,12 @@ Chunk-Invariance Tests
 A result that depends on how the data happens to be chunked is hard to trust, so chunking is varied
 on purpose.
 
-* **Detect.** ``tests/test_detect_chunk_invariance.py`` runs every anomaly method against both
+* **Detect.** ``tests/detect/test_chunk_layout.py`` runs every anomaly method against both
   threshold methods, on the exact and the approximate path, across four time chunkings (whole, 17, 30
   and 60 steps) and three spatial layouts (including one with a deliberately small tile budget that
   forces several tiles). The outputs must be equal with no tolerance. This is verified on the test
   fixtures, for every anomaly and threshold method.
-* **Tracker.** ``tests/test_merge_chunk_invariance.py`` varies the time chunking of the unstructured
+* **Tracker.** ``tests/track/test_merge_split.py`` varies the time chunking of the unstructured
   merge loop on synthetic cases. On an unstructured mesh the tracker is independent of chunking
   except for equidistant tie-breaks: when a cell is exactly as far from two candidate parents, the
   choice between them can differ between layouts. In the one real record where this was measured it
@@ -58,7 +58,7 @@ on purpose.
   year of 0.25° data gave identical tracked events across time chunks of 5 and 15 steps and across
   ``persist`` and ``streaming`` (a separate at-scale check, not part of the suite). Bit-identity is
   therefore not claimed for the unstructured tracker across chunkings.
-* **Dimensions.** ``tests/test_3d_preprocessing.py`` includes a slice-equivalence check: a run on a
+* **Dimensions.** ``tests/detect/test_extra_dim.py`` includes a slice-equivalence check: a run on a
   three-dimensional field must equal the runs on each level separately.
 
 These tests check structure as well as values. Identical values do not show that the task graph is
@@ -70,9 +70,9 @@ assert chunk layouts.
 Compute-Mode Equivalence
 ========================
 
-``tests/test_compute_mode_equivalence.py`` compares ``lazy`` and ``streaming`` with ``persist`` for five
+``tests/detect/test_compute_mode_equivalence.py`` compares ``lazy`` and ``streaming`` with ``persist`` for five
 method combinations (ten comparisons) plus two on an unstructured mesh, with no tolerance.
-``tests/test_track_compute_mode.py`` does the equivalent for the tracker and also counts the bytes
+``tests/track/test_track_compute_mode.py`` does the equivalent for the tracker and also counts the bytes
 each mode actually pins, because checking whether an array is a dask collection says nothing about
 whether it was persisted.
 
@@ -113,14 +113,14 @@ on the xarray version. Python 3.11 and 3.12 were not run in these two environmen
 The continuous-integration workflow is configured for selected test files on Linux, macOS and
 Windows (Python 3.10 on Linux only, 3.11 to 3.13 on all three), and for a coverage run over
 ``tests/`` on Linux and Python 3.11. The 2078 passed tests quoted at the top of this page come
-from a full-suite run outside it. ``tests/test_api_surface.py`` fixes the public surface, so a
+from a full-suite run outside it. ``tests/test_api.py`` fixes the public surface, so a
 removed name or a threshold parameter appearing on :func:`marEx.anomaly.compute` fails a test.
 
 Percentile Accuracy
 -------------------
 
 The approximate and exact percentile paths use different conventions, and
-``tests/test_percentile_agreement.py`` pins the relationship. The seasonal approximate threshold
+``tests/extremes/test_percentile_accuracy.py`` pins the relationship. The seasonal approximate threshold
 returns, to within 1.5 histogram bins, the sample of rank ``floor(q * n) + 1``. For the
 percentiles tested that is NumPy's ``higher`` (upper tail) or ``lower`` (lower tail)
 interpolation, but not for every ``q`` and ``n``: at the 90.9th percentile of 110 samples the

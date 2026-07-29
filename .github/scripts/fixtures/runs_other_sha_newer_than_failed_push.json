@@ -1,0 +1,28 @@
+{
+  "_source": "DERIVED from runs_green_on_main: the push run on main at the sha failed; a newer green push run on main at a different head_sha",
+  "total_count": 2,
+  "workflow_runs": [
+    {
+      "id": 41052242350,
+      "run_number": 144,
+      "run_attempt": 1,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "0000000000000000000000000000000000000000",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242350"
+    },
+    {
+      "id": 41052242346,
+      "run_number": 140,
+      "run_attempt": 1,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242346"
+    }
+  ]
+}

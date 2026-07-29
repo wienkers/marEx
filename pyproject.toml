@@ -98,22 +98,13 @@ full = [
 
 # Development tools
 dev = [
+    "ruff",
+    "pre-commit>=2.20.0",
     "pytest>=7.0.0",
     "pytest-cov",
     "pytest-xdist",
-    "black>=22.0.0",
-    "flake8>=4.0.0",
-    "flake8-pyproject",
-    "isort>=5.0.0",
-    "mypy>=0.991",
-    "pre-commit>=2.20.0",
     "coverage[toml]>=6.0.0",
-    "nbqa",
-    "bandit[toml]>=1.7.0",
     "psutil",
-    "sphinx>=5.0.0",
-    "sphinx-rtd-theme",
-    "myst-parser",
     "jupyter",
     "ipykernel",
 ]
@@ -150,21 +141,37 @@ namespaces = false
 version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
 
-[tool.black]
+[tool.ruff]
 line-length = 132
-target-version = ['py310']
+target-version = "py310"
+extend-include = ["*.ipynb"]
 
-[tool.isort]
-profile = "black"
-line_length = 132
-
-[tool.flake8]
-max-line-length = 132
-extend-ignore = ["E203", "W503", "E402", "D205", "D400"]
-per-file-ignores = [
-    "__init__.py:F401",
-    "tests/*:D",
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C4", "D"]
+ignore = [
+    "E203",
+    "E402",
+    "D205",
+    "D400",
+    # Fire on existing code (counts at adoption); fixing is out of scope.
+    "B905",  # zip() without strict=: 53
+    "C420",  # dict comprehension for iterable: 14
+    "C408",  # dict()/list() call: 3
+    "B904",  # raise without from inside except: 3
+    "B018",  # useless expression: 2 (1 py, 1 notebook)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["D"]
+# Notebooks were never flake8-linted (only black/isort via nbqa): keep them format-only on these
+"*.ipynb" = ["D", "E501", "F401"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.isort]
+known-first-party = ["marEx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -172,10 +179,12 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = [
-    "-v",
+    "-ra",
     "--tb=short",
     "--strict-markers",
-    "--disable-warnings",
+    # The larger-than-memory tests run in their own CI job; an explicit -m on the command line wins.
+    "-m",
+    "not larger_than_memory",
 ]
 log_cli_level = "WARNING"
 log_cli_format = "%(levelname)s %(name)s: %(message)s"
@@ -190,6 +199,8 @@ markers = [
     "benchmark: marks tests as benchmark tests",
     "nocov: marks tests to be excluded from coverage reporting",
     "numba_issue: marks tests that have Numba compatibility issues with coverage",
+    "smoke: fast end-to-end checks run against the built wheel in CI ('-m smoke')",
+    "larger_than_memory: inputs larger than the test cluster's summed worker memory",
 ]
 
 [tool.coverage.run]
@@ -199,9 +210,13 @@ concurrency = ["thread", "multiprocessing"]  # Handle both threads and processes
 sigterm = true  # Handle SIGTERM gracefully
 omit = [
     "*/tests/*",
-    "*/test_*.py",
-    "setup.py",
+    "*/examples/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+    "*/_coverage_init.py",
     "*/_dependencies.py",
+    "*/plotX/unstructured.py",
 ]
 
 [tool.coverage.report]
@@ -209,16 +224,15 @@ exclude_lines = [
     "pragma: no cover",
     "@jit",
     "@njit",
-    "@numba\\.jit",  # Add comprehensive Numba exclusions
+    "@numba\\.jit",
     "@numba\\.njit",
     "@numba\\.vectorize",
     "@numba\\.guvectorize",
     "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
     "raise AssertionError",
     "raise NotImplementedError",
     "except ImportError:",
+    "except (ImportError, ValueError):",
     "if 0:",
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
@@ -229,42 +243,3 @@ precision = 2
 
 [tool.coverage.html]
 directory = "htmlcov"
-
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-check_untyped_defs = true
-disallow_untyped_decorators = false
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
-# Ignore missing imports for scientific packages that often lack stubs
-ignore_missing_imports = true
-# Exclude test files and notebooks for now
-exclude = [
-    "tests/",
-    "examples/",
-    "build/",
-    "dist/",
-]
-
-[[tool.mypy.overrides]]
-module = [
-    "numpy.*",
-    "scipy.*",
-    "pandas.*",
-    "xarray.*",
-    "dask.*",
-    "matplotlib.*",
-    "cartopy.*",
-    "skimage.*",
-    "numba.*",
-    "jax.*",
-]
-ignore_missing_imports = true

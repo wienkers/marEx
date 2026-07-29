@@ -1,313 +1,286 @@
-name: Release to PyPI
+name: Release
 
+# A `v*` tag publishes to PyPI once ci.yml's `CI OK` job has passed on the tagged commit on main.
+# workflow_dispatch is a DRY RUN: it validates `version` and runs the CI check on `sha`; every job
+# that builds, publishes or releases is restricted to tag pushes and is skipped.
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0, v2.1.3, etc.
-  workflow_dispatch:  # Allow manual triggering
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-character commit SHA to run the CI check on"
+        required: true
+        type: string
+      version:
+        description: "Version to validate, e.g. 5.0.0rc0"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write  # For trusted publishing to PyPI
+  contents: read
 
 jobs:
-  validate-tag:
-    name: Validate Release Tag
+  validate:
+    name: Validate version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
-
-    - name: Validate and parse version
-      id: version
-      run: |
-        if [[ "${GITHUB_REF}" =~ ^refs/tags/v([0-9]+\.[0-9]+(\.[0-9]+)?.*)$ ]]; then
-          VERSION="${BASH_REMATCH[1]}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-          # Check if this is a prerelease (contains alpha, beta, rc, or dev)
-          if [[ "${VERSION}" =~ (alpha|beta|rc|dev) ]]; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Parse the version
+        id: version
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          python -m pip install --upgrade packaging
+          if [ "$EVENT" = "push" ]; then
+            case "$REF" in
+              refs/tags/v*) RAW="${REF#refs/tags/v}" ;;
+              *) echo "not a v* tag: $REF"; exit 1 ;;
+            esac
           else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            RAW="$INPUT_VERSION"
           fi
+          RAW="$RAW" python - <<'PY'
+          import os
+          from packaging.version import InvalidVersion, Version
 
-          echo "Valid version tag: v${VERSION}"
-        else
-          echo "Invalid version tag: ${GITHUB_REF}"
-          exit 1
-        fi
+          raw = os.environ["RAW"]
+          try:
+              v = Version(raw)
+          except InvalidVersion:
+              raise SystemExit(f"not a valid version: {raw!r}")
+          if v.local:
+              raise SystemExit(f"a release version has no local segment: {raw!r}")
+          print(f"version {raw!r} -> {v.public}, prerelease={v.is_prerelease}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={v.public}\n")
+              fh.write(f"is_prerelease={str(v.is_prerelease).lower()}\n")
+          PY
 
-  run-tests:
-    name: Run Full Test Suite
+  ci-check:
+    name: CI check
+    needs: validate
     runs-on: ubuntu-latest
-    needs: validate-tag
-
+    # The check polls for 90 min: ci.yml's own test job may take its full 75 min timeout, smoke runs
+    # after build, and the runners can queue. This job's timeout sits above that deadline + 2 min
+    # grace, so the check prints its verdict before the runner kills it.
+    timeout-minutes: 100
+    permissions:
+      actions: read
+      contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
-
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-        cache-dependency-path: 'pyproject.toml'
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e ".[dev,full]"
-
-    - name: Configure Dask for CI
-      run: |
-        mkdir -p ~/.dask
-        echo "distributed:" > ~/.dask/config.yaml
-        echo "  worker:" >> ~/.dask/config.yaml
-        echo "    memory:" >> ~/.dask/config.yaml
-        echo "      target: 0.8" >> ~/.dask/config.yaml
-        echo "      spill: 0.9" >> ~/.dask/config.yaml
-        echo "      pause: 0.95" >> ~/.dask/config.yaml
-        echo "      terminate: 0.98" >> ~/.dask/config.yaml
-        echo "  admin:" >> ~/.dask/config.yaml
-        echo "    log-format: '%(name)s - %(levelname)s - %(message)s'" >> ~/.dask/config.yaml
-        echo "array:" >> ~/.dask/config.yaml
-        echo "  chunk-size: 64MiB" >> ~/.dask/config.yaml
-
-    - name: Run comprehensive test suite
-      run: |
-        pytest tests/ -v --tb=short -m "not slow" --durations=10
-
-    - name: Run code quality checks
-      run: |
-        black --check marEx/
-        isort --check-only marEx/
-        flake8 marEx/
+      # The workflow's own ref: the tag on push, the dispatched branch on a dry run, so the check
+      # script always comes from the release.yml that is running.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Require a green ci.yml push run on main for this commit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            SHA="$(git rev-parse HEAD)"
+          else
+            SHA="$INPUT_SHA"
+            if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "inputs.sha must be a full 40-character lowercase commit SHA, got '$SHA'"
+              exit 1
+            fi
+          fi
+          echo "checking commit $SHA"
+          python .github/scripts/ci_check.py --repo "$REPO" --sha "$SHA" --deadline 5400 --grace 120
 
   build:
-    name: Build Distribution Packages
+    name: Build
+    needs: [validate, ci-check]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    needs: [validate-tag, run-tests]
-
+    timeout-minutes: 15
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0  # Needed for setuptools_scm
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build and check
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.validate.outputs.version }}
+        run: |
+          python -m pip install --upgrade pip build twine packaging
+          python -m build
+          twine check dist/*
+          ls -la dist
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from packaging.version import Version
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-        cache-dependency-path: 'pyproject.toml'
+          expected = os.environ["EXPECTED"]
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == 1 and len(sdists) == 1, (wheels, sdists)
+          built = {str(Version(wheels[0].name.split("-")[1])), str(Version(sdists[0].name[: -len(".tar.gz")].rsplit("-", 1)[1]))}
+          assert built == {expected}, f"built version(s) {sorted(built)} != tag version {expected}"
+          print(f"built version {expected} matches the tag")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
 
-    - name: Install build dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build twine
-
-    - name: Build source and wheel distributions
-      run: |
-        python -m build
-
-    - name: Check distribution packages
-      run: |
-        twine check dist/*
-
-    - name: List built packages
-      run: |
-        ls -la dist/
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: dist-packages
-        path: dist/
-        retention-days: 30
-
-  test-install:
-    name: Test Package Installation
-    runs-on: ${{ matrix.os }}
+  install-check:
+    name: Install check (${{ matrix.os }}, py3.12)
     needs: build
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
-
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
-      with:
-        python-version: ${{ matrix.python-version }}
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Create a clean venv outside the checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ -d "$RUNNER_TEMP/venv/Scripts" ]; then
+            echo "$RUNNER_TEMP/venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install the wheel and test dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install dist/*.whl pytest pytest-xdist psutil
+          pip check
+      - name: Test the installed wheel, not the checkout
+        shell: bash
+        run: |
+          rm -rf marEx
+          python -c "import marEx; print(marEx.__file__); assert 'site-packages' in marEx.__file__, marEx.__file__"
+          python -m pytest -m smoke -q
+      - name: Install the sdist into a second venv and test it (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-sdist"
+          SDIST_PY="$RUNNER_TEMP/venv-sdist/bin/python"
+          "$SDIST_PY" -m pip install --upgrade pip
+          "$SDIST_PY" -m pip install dist/*.tar.gz pytest pytest-xdist psutil
+          "$SDIST_PY" -m pip check
+          "$SDIST_PY" -c "import marEx, sys; print(marEx.__file__); assert marEx.__file__.startswith(sys.prefix), marEx.__file__"
+          "$SDIST_PY" -m pytest -m smoke -q
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: install-check-logs-${{ matrix.os }}
+          path: "**/*.log"
+          if-no-files-found: ignore
+          retention-days: 7
 
-    - name: Download build artifacts
-      uses: actions/download-artifact@v8
-      with:
-        name: dist-packages
-        path: dist/
-
-    - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libhdf5-dev libnetcdf-dev libproj-dev proj-data proj-bin libgeos-dev
-
-    - name: Install system dependencies (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        brew install hdf5 netcdf proj geos
-
-    - name: Test wheel installation
-      shell: bash
-      run: |
-        python -m pip install --upgrade pip
-        # Install from wheel (use bash shell for cross-platform glob expansion)
-        pip install dist/*.whl
-
-    - name: Test import and basic functionality
-      run: |
-        python -c "
-        import marEx
-        print(f'marEx version: {marEx.__version__}')
-
-        # Test basic imports
-        from marEx import detect, track, helper
-        from marEx.plotX import base, gridded, unstructured
-
-        print('All imports successful!')
-        "
-
-  publish-pypi:
+  publish:
     name: Publish to PyPI
+    needs: [validate, ci-check, build, install-check]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [validate-tag, build, test-install]
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/marEx
-
+    permissions:
+      id-token: write
     steps:
-    - name: Download build artifacts
-      uses: actions/download-artifact@v8
-      with:
-        name: dist-packages
-        path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
 
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        verbose: true
-        print-hash: true
-
-  create-github-release:
-    name: Create GitHub Release
+  github-release:
+    name: GitHub release
+    needs: [validate, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [validate-tag, publish-pypi]
-
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Extract the CHANGELOG.md section for this version
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python - <<'PY' > release-notes.md
+          import os
+          import re
 
-    - name: Download build artifacts
-      uses: actions/download-artifact@v8
-      with:
-        name: dist-packages
-        path: dist/
-
-    - name: Generate changelog
-      id: changelog
-      run: |
-        # Get the previous tag
-        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-        if [ -n "$PREVIOUS_TAG" ]; then
-          echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
-          CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${PREVIOUS_TAG}..HEAD --no-merges)
-        else
-          echo "No previous tag found, generating changelog from first commit"
-          CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
-        fi
-
-        # Prepare changelog for GitHub release
-        cat << EOF > changelog.md
-        ## What's Changed
-
-        ${CHANGELOG}
-
-        ## Installation
-
-        \`\`\`bash
-        pip install marEx==${{ needs.validate-tag.outputs.version }}
-        \`\`\`
-
-        ## Full Changelog
-
-        **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}
-        EOF
-
-        # Set output for use in release creation
-        echo "changelog<<EOF" >> $GITHUB_OUTPUT
-        cat changelog.md >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        name: Release v${{ needs.validate-tag.outputs.version }}
-        body: ${{ steps.changelog.outputs.changelog }}
-        prerelease: ${{ needs.validate-tag.outputs.is_prerelease == 'true' }}
-        files: |
-          dist/*
-        generate_release_notes: true
-        make_latest: ${{ needs.validate-tag.outputs.is_prerelease == 'false' }}
-
-  trigger-docs:
-    name: Trigger ReadTheDocs Build
-    runs-on: ubuntu-latest
-    needs: [validate-tag, publish-pypi]
-
-    steps:
-    - name: Trigger ReadTheDocs build
-      run: |
-        if [ -n "${{ secrets.READTHEDOCS_WEBHOOK_URL }}" ]; then
-          curl -X POST -d "branches=main" -d "token=${{ secrets.READTHEDOCS_WEBHOOK_TOKEN }}" \
-            ${{ secrets.READTHEDOCS_WEBHOOK_URL }}
-          echo "✅ ReadTheDocs build triggered for v${{ needs.validate-tag.outputs.version }}"
-        else
-          echo "ℹ️  No ReadTheDocs webhook configured. Docs will build automatically on next push."
-        fi
-
-  announce-release:
-    name: Post-Release Notifications
-    runs-on: ubuntu-latest
-    needs: [validate-tag, create-github-release, trigger-docs]
-    if: needs.validate-tag.outputs.is_prerelease == 'false'  # Only for stable releases
-
-    steps:
-    - name: Notify release completion
-      run: |
-        echo "🎉 marEx v${{ needs.validate-tag.outputs.version }} has been successfully released!"
-        echo "📦 PyPI: https://pypi.org/project/marEx/${{ needs.validate-tag.outputs.version }}/"
-        echo "📋 GitHub: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-        echo "📚 Docs: https://marex.readthedocs.io/"
-
-        # You can add additional notification steps here, such as:
-        # - Slack notifications
-        # - Discord webhooks
-        # - Email notifications
-        # - Update documentation sites
+          version = os.environ["VERSION"]
+          heading = re.compile(rf"^## \[?v?{re.escape(version)}\]?(\s|$)")
+          section, inside = [], False
+          with open("CHANGELOG.md", encoding="utf-8") as fh:
+              for line in fh:
+                  if line.startswith("## "):
+                      if inside:
+                          break
+                      inside = bool(heading.match(line))
+                      continue
+                  if inside:
+                      section.append(line)
+          body = "".join(section).strip()
+          if body:
+              print(body)
+          else:
+              print(f"CHANGELOG.md has no section for {version}.")
+          PY
+          cat release-notes.md
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+        run: |
+          FLAGS=(--verify-tag --title "$TAG" --notes-file release-notes.md --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then
+            FLAGS+=(--prerelease --latest=false)
+          fi
+          gh release create "$TAG" dist/* "${FLAGS[@]}"

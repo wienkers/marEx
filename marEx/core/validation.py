@@ -287,8 +287,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
                 "Check data quality and loading procedures",
                 "Consider using data.fillna() or data.interpolate_na() methods",
                 "Verify coordinate/dimension alignment in your dataset",
-                "If your field carries a land/sea or missing-data mask, ensure it is "
-                "applied consistently across every time step",
+                "If your field carries a land/sea or missing-data mask, ensure it is applied consistently across every time step",
             ],
             data_info={
                 "total_invalid_values": total_invalid_in_valid_region,

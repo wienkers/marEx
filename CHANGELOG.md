@@ -67,6 +67,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Fixed
 
+- `tracker`: tracking a single time step no longer fails with a `ZeroDivisionError`, on gridded or unstructured data. Results for two or more time steps are unchanged.
 - `shifting_baseline`: the rolling climatology no longer copies the full time index into every spatial tile when it maps each timestep back to its climatology slot. The graph sent to the scheduler grew with tiles x timesteps (about 1 GB for a century of daily data on 7 x 161 x 321 cells, 40 MB now); results are unchanged.
 - `shifting_baseline` on long records: the rolling climatology always reduces with flox's map-reduce instead of letting flox search for cohorts, a client-side step whose memory grows with the square of the number of years (a century of daily data exhausted a 16 GB session before any task ran). Where flox used to pick map-reduce, results are unchanged. Where it picked cohorts, which depends on how the data is tiled rather than on record length, anomalies can differ by float rounding and approximate-percentile thresholds by up to one histogram bin (`precision`).
 - Sub-daily input: the climatology smoothing window no longer holds a dense copy of every window in each task. On 6-hourly data at the default `smooth_days` a task peaked at over 20 times its tile (about 5 times at daily cadence), so a detect that fit in memory at daily cadence could exhaust its workers at 6-hourly cadence; it now peaks about where the daily one does. Results are unchanged.
@@ -94,6 +95,9 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - A tuple or list time chunk in `dask_chunks` no longer fails on outputs with a seasonal cycle axis (`dayofyear`, `month`, `hourofyear`); the cycle axis takes the largest block.
 - plotX: a global grid with a cell straddling the map projection's seam (180 degrees from its central longitude) no longer crashes `single_plot` or animations (the cell is drawn split at the seam); an ID field with no objects plots an empty map with a warning instead of raising.
 - plotX: `plot_IDs=True` accepts a colormap name (`cmap="viridis"`), as `PlotConfig` documents; it raised an `AttributeError`. A named map is sampled to one colour per ID, and a colormap with fewer colours than IDs (which raised a `ValueError`) cycles its colours. A qualitative map (for example `tab10`) keeps neighbouring IDs distinct; a continuous one gives them near-identical shades. Animation centroid markers follow the objects present in `object_ids` (or in the animated field when it is itself an ID field); on an anomaly movie they were picked by matching anomaly values against object IDs.
+- Higher-order detrending without a linear term (for example `detrend_orders=[2, 3]`) reports its instability warning through the marEx logger instead of printing it, so it respects `configure_logging` (it is kept in quiet mode and silenced with `console_output=False`).
+- Dask worker memory warnings (`distributed.worker.memory`, `distributed.nanny.memory`) stay visible under marEx logging; they were silenced along with the rest of `distributed.worker`, hiding the message that explains a killed worker.
+- `configure_dask` (and so `start_local_cluster`) no longer fails off DKRZ when no `scratch_dir` is given: the DKRZ scratch path is used only where `/scratch` exists, and the system temporary directory otherwise.
 
 ### Performance
 

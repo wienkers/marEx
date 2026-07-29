@@ -971,7 +971,6 @@ def split_and_merge_objects(
                 # Process all merging objects in this timestep
                 #   Parents exist in this timestep, but
                 for child_id in merging_children:
-
                     # Get mask of child object
                     child_mask_2d = (data_t == child_id).values
 
@@ -1118,8 +1117,7 @@ def split_and_merge_objects(
                     missing_ids = set(new_object_id) - set(new_object_ids_still.values)
                     if len(missing_ids) > 0:
                         logger.warning(
-                            f"Missing newly created child_ids {missing_ids} "
-                            f"because parents have split/morphed in the meantime..."
+                            f"Missing newly created child_ids {missing_ids} because parents have split/morphed in the meantime..."
                         )
 
                 # After processing all merging objects in this iteration
@@ -1137,7 +1135,6 @@ def split_and_merge_objects(
         # one-timestep chunk takes that reference from the previous chunk: skipping it left the
         # slice unconsolidated, so the result depended on the time chunking.
         if chunk_data.sizes[timedim] >= 2 or updated_chunks:
-
             # Get last and second-to-last timesteps
             last_t_data = chunk_data.isel({timedim: -1})
             if chunk_data.sizes[timedim] >= 2:
@@ -1833,7 +1830,7 @@ def split_and_merge_objects_parallel(
 
     n_records = sum(len(r) for r in records_by_chunk.values())
     logger.info(
-        f"Merge loop converged after {iteration} iterations: {n_records} merge records, " f"max accepted parents {max_parents_run}"
+        f"Merge loop converged after {iteration} iterations: {n_records} merge records, max accepted parents {max_parents_run}"
     )
 
     # -- compaction: minted IDs become contiguous after the input's maximum ------------------

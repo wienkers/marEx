@@ -1272,7 +1272,8 @@ def _compute_histogram_quantile_2d(
             # all-to-all shuffle of the seasonal path, so casting afterwards moved 4x the bytes
             # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
             # indices are small non-negative integers.
-            .astype(np.uint16).chunk(chunk_dict)
+            .astype(np.uint16)
+            .chunk(chunk_dict)
         )
 
         # Construct 2D histogram using flox (in doy & anomaly)

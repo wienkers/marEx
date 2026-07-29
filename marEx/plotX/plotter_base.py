@@ -133,7 +133,9 @@ class PlotterBase:
                 },
             )
 
-    def _setup_common_params(self, config: PlotConfig) -> Tuple[
+    def _setup_common_params(
+        self, config: PlotConfig
+    ) -> Tuple[
         Union[str, ListedColormap],
         Optional[Union[BoundaryNorm, Normalize]],
         Optional[Tuple[float, float]],

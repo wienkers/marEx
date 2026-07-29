@@ -321,8 +321,7 @@ class Materialiser:
                 "silently changes its values rather than raising."
             ),
             suggestions=[
-                "Give each staged array its own label, e.g. append a loop iteration index: "
-                f"'{label}_iter0', '{label}_iter1', ...",
+                f"Give each staged array its own label, e.g. append a loop iteration index: '{label}_iter0', '{label}_iter1', ...",
                 "If the earlier array is genuinely dead, drop it from the registry before re-staging",
             ],
             context={"label": label},

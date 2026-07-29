@@ -15,8 +15,6 @@ try:
     from matplotlib.axes import Axes
     from matplotlib.collections import QuadMesh
     from matplotlib.colors import BoundaryNorm, Normalize
-
-    HAS_PLOTTING_DEPS = True
 except ImportError:
     # These will be checked in the base class
     ccrs = None
@@ -24,7 +22,6 @@ except ImportError:
     QuadMesh = None
     BoundaryNorm = None
     Normalize = None
-    HAS_PLOTTING_DEPS = False
 
 from ..logging_config import get_logger, log_timing
 from .base import PlotterBase

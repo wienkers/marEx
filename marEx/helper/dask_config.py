@@ -10,7 +10,7 @@ dependencies within ``marEx.helper``.
 
 from getpass import getuser
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Dict, Optional, Union
 
 import dask
@@ -51,6 +51,19 @@ DEFAULT_DASK_CONFIG = {
 DKRZ_SCRATCH_PATH = Path("/scratch") / getuser()[0] / getuser() / "clients"
 
 
+def _resolve_scratch_path(scratch_dir: Optional[Union[str, Path]] = None) -> Path:
+    """Scratch directory for Dask: the caller's, else DKRZ scratch when it exists, else the system temp dir."""
+    if scratch_dir:
+        return Path(scratch_dir)
+    # Only use the DKRZ path where its top-level root (/scratch) exists; creating it elsewhere
+    # would fail (or try to write at the filesystem root).
+    if Path(*DKRZ_SCRATCH_PATH.parts[:2]).exists():
+        return DKRZ_SCRATCH_PATH
+    fallback = Path(gettempdir())
+    logger.info(f"{Path(*DKRZ_SCRATCH_PATH.parts[:2])} not found; using {fallback} for Dask scratch")
+    return fallback
+
+
 def configure_dask(
     scratch_dir: Optional[Union[str, Path]] = None,
     config: Optional[Dict[str, Any]] = None,
@@ -73,8 +86,8 @@ def configure_dask(
     logger.info("Configuring Dask for HPC environment")
 
     # Use provided scratch directory or default to DKRZ scratch
-    scratch_path = Path(scratch_dir) if scratch_dir else DKRZ_SCRATCH_PATH
-    logger.debug(f"Using scratch directory: {scratch_path}")
+    scratch_path = _resolve_scratch_path(scratch_dir)
+    logger.info(f"Using scratch directory: {scratch_path}")
 
     # Create temporary directory
     if not scratch_path.exists():

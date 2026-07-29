@@ -1,22 +1,40 @@
-"""Test configuration and fixtures for marEx package."""
+"""Test configuration and fixtures for marEx package.
 
-# Configure coverage environment BEFORE any other imports
-from .coverage_config import setup_coverage_environment
+One bounded Dask cluster per xdist worker (``client``), the library's own memory thresholds,
+and memory warnings that stay visible. Everything set on dask's config is scoped to the
+session and restored afterwards.
+"""
 
-setup_coverage_environment()
-
+import contextlib
 import gc
 import logging
 import os
 import time
+import traceback
+import uuid
+from pathlib import Path
 
 import dask
 import numpy as np
+import psutil
 import pytest
 from dask.distributed import Client, LocalCluster
+from dask.utils import format_bytes, parse_bytes
+
+logger = logging.getLogger(__name__)
+
+N_CLUSTER_WORKERS = 2
+MEMORY_LOGGERS = ("distributed.worker.memory", "distributed.nanny.memory")
+CLIENT_FIXTURES = frozenset(("client",))
+# Module-private fixtures that return their own distributed Client. A test that requests one
+# computes on that Client, so it is not pinned to the threaded scheduler either.
+PRIVATE_CLIENT_FIXTURES = frozenset(("inprocess_client", "ltm_client"))
+
+# The session client, once a test has asked for it. Autouse fixtures read it from here so that
+# modules which never request it do not start a cluster.
+_SESSION = {}
 
 
-# Configure logging to suppress noisy distributed messages
 def pytest_configure(config):
     """Configure pytest with custom logging settings."""
     # Configure matplotlib to use non-interactive backend for CI/testing
@@ -25,142 +43,102 @@ def pytest_configure(config):
 
     matplotlib.use("Agg")
 
-    # Suppress all distributed logging to ERROR level or higher
-    # This removes all the noisy INFO messages from distributed components
-    distributed_loggers = [
-        "distributed",  # Root distributed logger
-        "distributed.protocol.core",
-        "distributed.comm.tcp",
-        "distributed.worker",
-        "distributed.scheduler",
-        "distributed.nanny",
-        "distributed.core",
-        "distributed.batched",
-        "distributed.http.proxy",
-        "distributed.client",
-        "distributed.utils",
-        "distributed.comm.core",
-        "distributed.shuffle",
-        "distributed.stealing",
-        "distributed.metrics",
-    ]
-
-    for logger_name in distributed_loggers:
-        logging.getLogger(logger_name).setLevel(logging.CRITICAL)
-
-    # Also suppress tornado logging which can be noisy
+    # Tornado's access log is noise; the distributed loggers are left alone so that memory
+    # warnings ("Worker ... exceeded 95% memory budget") stay visible.
     logging.getLogger("tornado").setLevel(logging.ERROR)
 
-    # Create a custom filter to catch any remaining protocol messages
-    class DistributedFilter(logging.Filter):
-        def filter(self, record):
-            # Filter out specific message patterns
-            message = record.getMessage()
-            if "Failed to serialize" in message:
-                return False
-            if "Starting worker" in message and record.levelname == "INFO":
-                return False
-            if "Registered to:" in message and record.levelname == "INFO":
-                return False
-            if "dashboard at:" in message and record.levelname == "INFO":
-                return False
-            return True
 
-    # Add the filter to the root logger to catch everything
-    logging.getLogger().addFilter(DistributedFilter())
+def _n_xdist():
+    return int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
 
 
-@pytest.fixture(scope="session")
-def dask_client():
-    """Create a Dask LocalCluster for tests."""
-    import os
+def _usable_cpus():
+    """CPUs this process may run on; ``os.cpu_count()`` reports the whole node under SLURM."""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
 
-    # Detect if running under coverage
-    is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
 
-    if is_coverage:
-        # For coverage: use threads scheduler with a single-threaded LocalCluster
-        # This ensures all code executes in the main process where coverage is active
-        # but still provides a distributed client for operations like wait()
-        cluster = LocalCluster(
-            n_workers=1,
-            threads_per_worker=1,
-            processes=False,  # Use threads, not processes
-            memory_limit="8GB",
-            dashboard_address=None,
-            silence_logs=True,
-        )
-        client = Client(cluster)
-        yield client
+def _cgroup_memory_limit():
+    """Smallest cgroup memory limit on the path from this process's cgroup to the root, or None.
 
-        # Cleanup
-        client.close()
-        cluster.close()
-    else:
-        # Normal testing: use distributed client
-        dask.config.set(scheduler="distributed")
+    A SLURM job's limit sits on the job's cgroup, a few levels above the task's own, whose
+    ``memory.max`` reads ``max``; Dask and psutil see neither and report the whole node.
+    """
+    try:
+        lines = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        return None
+    limits = []
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "":  # cgroup v2
+            root, name = Path("/sys/fs/cgroup"), "memory.max"
+        elif "memory" in controllers.split(","):  # cgroup v1
+            root, name = Path("/sys/fs/cgroup/memory"), "memory.limit_in_bytes"
+        else:
+            continue
+        node = root / path.lstrip("/")
+        while True:
+            try:
+                value = (node / name).read_text().strip()
+            except OSError:
+                value = ""
+            if value.isdigit():
+                limits.append(int(value))
+            if node == root or root not in node.parents:
+                break
+            node = node.parent
+    return min(limits) if limits else None
 
-        # Configure Dask for testing
-        dask.config.set(
-            {
-                "distributed.worker.daemon": False,
-                "distributed.admin.log-format": "%(name)s - %(levelname)s - %(message)s",
-                "distributed.worker.memory.target": 0.8,
-                "distributed.worker.memory.spill": 0.9,
-                "distributed.worker.memory.pause": 0.95,
-                "distributed.worker.memory.terminate": 0.98,
-                # Add more aggressive memory management
-                "distributed.worker.memory.recent-to-old-time": "3s",
-                "distributed.worker.memory.rebalance.measure": "managed_in_memory",
-                # Optimise task scheduling for memory-intensive workflows
-                "distributed.scheduler.allowed-failures": 20,  # Increased from 10
-                "distributed.comm.timeouts.connect": "120s",  # Increased from 60s
-                "distributed.comm.timeouts.tcp": "120s",  # Increased from 60s
-                # Add additional robustness for coverage runs
-                "distributed.worker.multiprocessing.initializer": None,
-                "distributed.worker.multiprocessing.initialize": None,
-                "distributed.comm.retry.count": 5,
-                "distributed.comm.retry.delay.min": "1s",
-                "distributed.comm.retry.delay.max": "10s",
-                "distributed.scheduler.work-stealing": False,  # Disable work stealing for stability
-            }
-        )
 
-        cluster = LocalCluster(
-            n_workers=2,  # Reduced from 4 for better stability
-            threads_per_worker=1,
-            memory_limit="6GB",  # Increased from 3GB for better stability
-            dashboard_address=None,  # Disable dashboard in CI
-            silence_logs=True,
-            # Add explicit process handling for coverage compatibility
-            processes=True,
-            protocol="tcp",
-        )
+def _memory_ceiling():
+    """The memory this run may use: the smallest of RAM, the cgroup limit and SLURM's grant."""
+    sources = {"psutil": psutil.virtual_memory().total}
+    cgroup = _cgroup_memory_limit()
+    if cgroup is not None:
+        sources["cgroup"] = cgroup
+    slurm = os.environ.get("SLURM_MEM_PER_NODE", "")
+    if slurm.isdigit():
+        sources["SLURM_MEM_PER_NODE"] = int(slurm) * 2**20
+    source = min(sources, key=sources.get)
+    return sources[source], source
 
-        client = Client(cluster)
 
-        yield client
+def worker_memory_limit(n_xdist=None):
+    """Per-worker ``memory_limit`` in bytes for the test cluster, and where it came from.
 
-        # Cleanup
-        client.close()
-        cluster.close()
+    ``MAREX_TEST_WORKER_MEMORY`` (bytes or a dask string such as ``"2.5GB"``) wins; otherwise
+    60 % of the usable memory is shared between every worker of every xdist process.
+    """
+    requested = os.environ.get("MAREX_TEST_WORKER_MEMORY")
+    if requested:
+        return parse_bytes(requested), "MAREX_TEST_WORKER_MEMORY"
+    total, source = _memory_ceiling()
+    n_xdist = n_xdist or _n_xdist()
+    limit = int(0.6 * total / (n_xdist * N_CLUSTER_WORKERS))
+    return limit, f"0.6 x {format_bytes(total)} ({source}) / ({n_xdist} xdist x {N_CLUSTER_WORKERS} workers)"
+
+
+def _threaded_num_workers():
+    # The seasonal histogram path runs one budgeted tile (~50M elements, several int
+    # intermediates) per thread: one thread per core SIGKILLed a 16 GB interactive node, and
+    # every xdist process spawning a full pool oversubscribes the machine. An explicit
+    # ``DASK_NUM_WORKERS`` may lower the cap, never raise it.
+    cap = max(1, min(4, _usable_cpus() // _n_xdist()))
+    requested = dask.config.get("num_workers", None)
+    return min(cap, int(requested)) if requested else cap
 
 
 @pytest.fixture(scope="session", autouse=True)
 def configure_dask():
-    """Configure Dask for testing environment."""
-    # Use synchronous scheduler for small computations
-    dask.config.set(
+    """Configure Dask for testing environment; restored when the session ends."""
+    with dask.config.set(
         {
-            # Cap the local threaded scheduler. Its default is one thread per core, and the
-            # seasonal histogram path runs one budgeted tile (~50M elements, several int
-            # intermediates) per thread: 16 at once SIGKILLed a 16 GB interactive node
-            # (RC=137), and `-n 4` workers each spawning a full pool oversubscribe the
-            # sbatch node 4x. Distributed clients ignore this setting.
-            "num_workers": min(4, os.cpu_count() or 1),
+            # Distributed clients ignore this; it bounds the local threaded scheduler.
+            "num_workers": _threaded_num_workers(),
             "array.chunk-size": "32MB",
             "array.slicing.split_large_chunks": True,
-            "distributed.worker.memory.recent-to-old-time": "10s",
             # Add optimisation settings for complex computations
             "optimization.fuse.ave-width": 2,
             "optimization.fuse.max-width": 4,
@@ -168,7 +146,131 @@ def configure_dask():
             # Optimise for memory-intensive reductions
             "array.chunk-options.split-every": {"reduction-dimension": 4},
         }
+    ):
+        yield
+
+
+def pytest_report_header(config):
+    n = getattr(config.option, "numprocesses", None)
+    limit, origin = worker_memory_limit(n if isinstance(n, int) and n > 0 else 1)
+    return f"marEx test cluster: {N_CLUSTER_WORKERS} workers x {format_bytes(limit)} per xdist process, from {origin}"
+
+
+@pytest.fixture(scope="session")
+def client(configure_dask, tmp_path_factory):
+    """The one Dask cluster of this xdist process: 2 single-threaded worker processes, bounded memory."""
+    limit, origin = worker_memory_limit()
+    cluster = LocalCluster(
+        n_workers=N_CLUSTER_WORKERS,
+        threads_per_worker=1,
+        processes=True,
+        memory_limit=limit,
+        local_directory=str(tmp_path_factory.mktemp("dask-worker-space")),
+        dashboard_address=None,
+        silence_logs=logging.WARNING,
     )
+    session_client = Client(cluster)
+    try:
+        session_client.wait_for_workers(N_CLUSTER_WORKERS, timeout=60)
+        # Dask caps a requested limit at what it believes the machine has, so read back the
+        # limit the workers actually run under rather than trusting the request.
+        effective = sorted(w["memory_limit"] for w in session_client.scheduler_info()["workers"].values())
+        logger.info(f"Test cluster: {N_CLUSTER_WORKERS} workers, memory_limit {format_bytes(limit)} per worker ({origin})")
+        assert effective == [limit] * N_CLUSTER_WORKERS, (
+            f"workers run with memory_limit {[format_bytes(e) for e in effective]}, requested {format_bytes(limit)} ({origin})"
+        )
+        with capture_memory_warnings(session_client):  # fails here unless worker and nanny warnings arrive
+            pass
+        _SESSION["client"] = session_client
+        yield session_client
+    finally:
+        _SESSION.pop("client", None)
+        session_client.close()
+        cluster.close()
+
+
+def _held(session_client):
+    """The session client's live futures: key -> its future state (a new object for a key made again after a release).
+
+    Keeping a state object does not keep its future alive: the client counts references to the key.
+    """
+    return dict(session_client.futures.copy())
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _client_holds_no_futures():
+    """A module that leaves futures on the session client fails; the client itself stays up.
+
+    A future counts against the module when it is held at the end and is not the same future that was
+    already held at the start: a leak is reported by the module that made it, and a later module that
+    leaks the same key again, after the first copy was released, is reported too.
+
+    The start snapshot is taken after collecting garbage. Without that, an earlier module's leak held only
+    by an uncollected reference cycle would still be in the snapshot, and this module re-leaking the same
+    key would reuse that future and go unreported.
+    """
+    session_client = _SESSION.get("client")
+    before = {}
+    if session_client is not None:
+        gc.collect()
+        before = _held(session_client)
+    yield
+    session_client = _SESSION.get("client")
+    if session_client is None:
+        return
+    gc.collect()
+
+    def new(held):
+        return {key for key, state in held.items() if before.get(key) is not state}
+
+    # A dropped future is released on the client's event loop, not at once: let that drain.
+    deadline = time.monotonic() + 10
+    while new(held := _held(session_client)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    leaked = sorted(str(key) for key in new(held))
+    assert not leaked, f"{len(leaked)} futures still held by the session client after this module: {leaked[:5]}"
+
+
+# The pin a test that does not request the cluster runs under (``_threaded_unless_the_cluster_is_requested``).
+THREADED = {"scheduler": "threads", "array.rechunk.method": "tasks"}
+
+
+def on_client(client):
+    """True when dask's current scheduler is ``client``."""
+    return getattr(dask.base.get_scheduler(), "__self__", None) is client
+
+
+def check(failures, case, func):
+    """Run one table row's assertions; record the first that fails, or the error the row raised, under its case id."""
+    try:
+        func()
+    except (AssertionError, pytest.fail.Exception) as e:
+        failures.append(f"{case}: {str(e).strip().splitlines()[0] if str(e).strip() else 'assertion failed'}")
+    except Exception as e:  # noqa: BLE001 - a row that raises is a failing row; the others still run
+        failures.append(f"{case}: raised {type(e).__name__}: {e}")
+
+
+def assert_no_failures(failures):
+    assert not failures, f"{len(failures)} row(s) failed: " + " | ".join(failures)
+
+
+def released(run, what="the run"):
+    """Return ``run()``; if it raises, raise an ``AssertionError`` carrying the error and where it came from, as text.
+
+    The traceback of a failed run holds its persisted results (a tracker's intermediates, a pipeline's
+    output), which would leak futures past the module and turn the real failure into a teardown error.
+    ``run`` keeps them in its own frame; only strings leave it: the error's type and message, and the
+    last three frames of its traceback.
+    """
+    try:
+        return run()
+    except Exception as e:  # noqa: BLE001 - re-raised below without its traceback
+        failure = f"{type(e).__name__}: {e}"
+        frames = traceback.extract_tb(e.__traceback__)[-3:]
+        # The locations also go on the first line: a table row (``check``) keeps only that line.
+        at = "; ".join(f"{Path(f.filename).name}:{f.lineno} in {f.name}" for f in frames)
+        where = "".join(traceback.format_list(frames))
+    raise AssertionError(f"{what} raised {failure} (at {at})\n{where}")
 
 
 # Statistical Test Helper Functions
@@ -271,7 +373,7 @@ def assert_reasonable_bounds(
         tolerance_abs = abs(expected_value * tolerance_relative)
         lower_bound = expected_value - tolerance_abs
         upper_bound = expected_value + tolerance_abs
-        tolerance_desc = f"±{tolerance_relative*100:.1f}%"
+        tolerance_desc = f"±{tolerance_relative * 100:.1f}%"
 
     assert lower_bound <= value <= upper_bound, (
         f"{description} {value} is outside reasonable bounds "
@@ -300,7 +402,7 @@ def assert_count_in_reasonable_range(count, expected_count, tolerance=2):
     upper_bound = expected_count + tolerance
 
     assert lower_bound <= count <= upper_bound, (
-        f"Count {count} is outside reasonable range [{lower_bound}, {upper_bound}] " f"(expected: {expected_count} ± {tolerance})"
+        f"Count {count} is outside reasonable range [{lower_bound}, {upper_bound}] (expected: {expected_count} ± {tolerance})"
     )
 
 
@@ -353,79 +455,172 @@ def assert_statistical_consistency(
     )
 
 
-@pytest.fixture(scope="module")
-def dask_client_per_module():
-    """Dask client scoped per test module for isolation."""
-    import os
-
-    # Detect if running under coverage
-    is_coverage = os.environ.get("COVERAGE_PROCESS_START") or os.environ.get("PYTEST_COVERAGE")
-
-    if is_coverage:
-        # For coverage: use threads scheduler with a single-threaded LocalCluster
-        cluster = LocalCluster(
-            n_workers=1,
-            threads_per_worker=1,
-            processes=False,  # Use threads, not processes
-            memory_limit="8GB",
-            dashboard_address=None,
-            silence_logs=True,
-        )
-        client = Client(cluster)
-        yield client
-
-        # Cleanup
-        client.close()
-        cluster.close()
-    else:
-        # Normal testing
-        client = None
-        try:
-            client = Client(
-                n_workers=2,
-                threads_per_worker=1,
-                memory_limit="7GB",
-                silence_logs=logging.WARNING,
-                dashboard_address=None,
-                # Add more conservative settings for parallel execution
-                timeout="300s",
-                heartbeat_interval="30s",
-            )
-            # Let client fully initialise
-            client.wait_for_workers(2, timeout=60)
-            yield client
-        finally:
-            if client:
-                try:
-                    # Ensure all computations are finished before closing
-                    client.cancel(client.list_datasets(), force=True)
-                    client.restart()  # Clean restart before close
-                    time.sleep(1)  # Brief pause
-                    client.close(timeout=10)
-                    client.cluster.close(timeout=10)
-                except Exception as e:
-                    print(f"Warning: Error during Dask client cleanup: {e}")
-            gc.collect()
-            time.sleep(0.5)
+PROBE_TEXT = "marex-memory-capture-probe"
 
 
-# Create module-specific fixtures
-@pytest.fixture(scope="module")
-def dask_client_unstructured(dask_client_per_module):
-    """Dedicated Dask client for unstructured tests."""
-    return dask_client_per_module
+class _RecordList(logging.Handler):
+    """Collect LogRecords at or above ``level``; capture probes only when ``probes``."""
+
+    def __init__(self, level=logging.WARNING, probes=False):
+        super().__init__(level=level)
+        self.records = []
+        self.probes = probes
+
+    def emit(self, record):
+        if self.probes or PROBE_TEXT not in record.getMessage():
+            self.records.append(record)
 
 
-@pytest.fixture(scope="module")
-def dask_client_integration(dask_client_per_module):
-    """Dedicated Dask client for integration tests."""
-    return dask_client_per_module
+# Memory-warning captures currently open, and the test phase running now, for the report.
+_ACTIVE_CAPTURES = []
+_PHASE = {}
 
 
-@pytest.fixture(scope="module")
-def dask_client_gridded(dask_client_per_module):
-    """Dedicated Dask client for gridded tests."""
-    return dask_client_per_module
+def _report_text(records):
+    return "\n".join(f"{r.name} {r.levelname}: {r.getMessage()}" for r in records)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Put the memory warnings recorded so far into the report of the phase that just ran."""
+    outcome = yield
+    records = [r for handler in _ACTIVE_CAPTURES for r in handler.records]
+    if records:
+        outcome.get_result().sections.append((f"distributed memory warnings ({call.when})", _report_text(records)))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    _PHASE["item"] = item
+    yield
+    _PHASE.pop("item", None)
+
+
+def _probe(handler, client, label, nanny, timeout):
+    """Emit one identifiable WARNING from every worker (and on the parent's nanny logger), wait for all.
+
+    A worker's probe is re-sent each second until it arrives: the first ``forward_logging`` of a
+    client subscribes to its topic asynchronously, and a record published before the scheduler
+    has the subscription is dropped.
+    """
+    token = f"{PROBE_TEXT} {label} {uuid.uuid4().hex}"
+    pending = {f"{token} from {address}": address for address in client.scheduler_info()["workers"]}
+    if nanny:
+        pending[f"{token} from nanny"] = None
+        logging.getLogger(MEMORY_LOGGERS[1]).warning(f"{token} from nanny")
+    deadline, resend = time.monotonic() + timeout, 0.0
+    while True:
+        pending = {m: a for m, a in pending.items() if m not in {r.getMessage() for r in list(handler.records)}}
+        if not pending:
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"memory-warning capture is not live: no probe record within {timeout} s for {sorted(pending)}")
+        if time.monotonic() >= resend:
+            for message, address in pending.items():
+                if address is not None:
+                    client.run(logging.getLogger(MEMORY_LOGGERS[0]).warning, message, workers=[address])
+            resend = time.monotonic() + 1.0
+        time.sleep(0.02)
+    handler.records[:] = [r for r in handler.records if PROBE_TEXT not in r.getMessage()]
+
+
+@contextlib.contextmanager
+def capture_memory_warnings(client, probe=True, timeout=30):
+    """Collect the ``distributed.{worker,nanny}.memory`` WARNINGs raised while the block runs.
+
+    Workers are separate processes, so their records are forwarded to this process with
+    ``client.forward_logging``; a ``LocalCluster``'s nannies run here, so their logger is
+    read directly. With ``probe``, one identifiable WARNING is injected from every worker and
+    on the nanny logger before the block runs and must arrive within ``timeout`` seconds,
+    otherwise the capture is not live and this raises; on exit every worker is flushed the same
+    way, so a warning raised inside the block cannot arrive after ``.records`` is read. The
+    probes are removed: ``.records`` holds only what the block produced. Anything recorded is
+    attached to the current test's report.
+    """
+    handler = _RecordList(logging.WARNING, probes=probe)
+    _ACTIVE_CAPTURES.append(handler)
+    for name in MEMORY_LOGGERS:
+        logging.getLogger(name).addHandler(handler)
+    try:
+        client.forward_logging(MEMORY_LOGGERS[0], level=logging.WARNING)
+        if probe:
+            _probe(handler, client, "entry", nanny=True, timeout=timeout)
+        yield handler
+        if probe:
+            _probe(handler, client, "exit", nanny=False, timeout=timeout)
+    finally:
+        for name in MEMORY_LOGGERS:
+            logging.getLogger(name).removeHandler(handler)
+        _ACTIVE_CAPTURES.remove(handler)
+        item = _PHASE.get("item")
+        if handler.records and item is not None:
+            item.add_report_section("call", "distributed memory warnings", _report_text(handler.records))
+
+
+@pytest.fixture(autouse=True)
+def _report_memory_warnings(request):
+    """Attach any distributed memory warning raised during a test that uses the session client."""
+    if not CLIENT_FIXTURES.intersection(request.fixturenames):
+        yield
+        return
+    with capture_memory_warnings(request.getfixturevalue("client"), probe=False):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _threaded_unless_the_cluster_is_requested(request):
+    """A test that does not ask for the session client runs on dask's threaded scheduler.
+
+    Once a test has started the session client it is every later test's default scheduler in
+    this process, so without this a test's speed, and the rechunk method dask picks for it,
+    would depend on which tests ran before it: a table of small computes ran several times
+    slower through two single-threaded worker processes. Rechunks are pinned to ``tasks``
+    because dask picks P2P whenever a distributed client exists, and P2P needs a worker. The
+    threaded scheduler keeps the ``num_workers`` cap set in ``configure_dask``. A test that
+    requests a module's own client fixture (``PRIVATE_CLIENT_FIXTURES``) is left on that client.
+    """
+    if (CLIENT_FIXTURES | PRIVATE_CLIENT_FIXTURES).intersection(request.fixturenames):
+        yield
+        return
+    with dask.config.set({"scheduler": "threads", "array.rechunk.method": "tasks"}):
+        yield
+
+
+class _PinnedHandlers(list):
+    """A handler list that keeps its ``pinned`` handlers through ``clear()``, which ``configure_logging`` calls."""
+
+    def __init__(self, handlers, pinned):
+        super().__init__(handlers)
+        self.pinned = list(getattr(handlers, "pinned", [])) + [pinned]
+        self.append(pinned)
+
+    def clear(self):
+        super().clear()
+        self.extend(self.pinned)
+
+
+@pytest.fixture
+def marex_records():
+    """``marex_records(level)`` -> the list of LogRecords the ``marEx`` logger handles from now on.
+
+    ``caplog`` cannot see them: ``configure_logging`` sets ``propagate = False`` on the package
+    logger, and clears its handlers. The capture survives that; the logger's level is set to
+    ``level`` here and is whatever ``configure_logging`` sets after that. Level, propagation and
+    handlers are restored on teardown.
+    """
+    target = logging.getLogger("marEx")
+    saved = (target.level, target.propagate, target.handlers)
+
+    def capture(level=logging.DEBUG):
+        handler = _RecordList(level)
+        target.handlers = _PinnedHandlers(target.handlers, handler)
+        target.setLevel(min(level, target.getEffectiveLevel()))
+        return handler.records
+
+    yield capture
+    target.setLevel(saved[0])
+    target.propagate = saved[1]
+    target.handlers = saved[2]
 
 
 class _MarExWarningCapture(logging.Handler):

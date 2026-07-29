@@ -99,7 +99,7 @@ def unify_coordinates(
                 )
                 raise create_coordinate_error(
                     f"Cannot auto-detect coordinate units from range {lon_range:.3f}",
-                    details=(f"Expected ranges: ~360 degrees or ~{2*np.pi:.3f} radians. " f"Found range: {lon_range:.3f}"),
+                    details=(f"Expected ranges: ~360 degrees or ~{2 * np.pi:.3f} radians. Found range: {lon_range:.3f}"),
                     suggestions=[
                         *regional_suggestion,
                         "Specify coordinate_units='degrees' or coordinate_units='radians' explicitly",

@@ -18,8 +18,6 @@ try:
     from matplotlib.collections import QuadMesh, TriMesh
     from matplotlib.colors import BoundaryNorm, Normalize
     from matplotlib.tri import Triangulation
-
-    HAS_PLOTTING_DEPS = True
 except ImportError:
     # These will be checked in the base class
     ccrs = None
@@ -29,7 +27,6 @@ except ImportError:
     BoundaryNorm = None
     Normalize = None
     Triangulation = None
-    HAS_PLOTTING_DEPS = False
 
 from ..exceptions import DataValidationError, VisualisationError
 from .base import PlotterBase

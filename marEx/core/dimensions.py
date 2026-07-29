@@ -393,7 +393,9 @@ def canonical_time_chunks(
     working set stays near :data:`TASK_ELEMENTS`, unless the caller's own spatial
     chunk is kept (:func:`_kept_input_tile`), which allows up to
     :data:`KEEP_INPUT_CHUNK_FACTOR` times that. Each cell is reduced independently,
-    so the spatial layout never moves values.
+    so the spatial tiling does not move values. The memory layout of the input can:
+    values are layout-independent only up to reduction-order float differences (a
+    transposed input differs by up to ~6e-5 on ``fixed_baseline``).
     """
     timedim = dimensions["time"]
     if input_elements_per_cell is None:

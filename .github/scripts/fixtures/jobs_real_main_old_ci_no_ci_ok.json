@@ -1,0 +1,83 @@
+{
+  "_source": "REAL, trimmed: gh api 'repos/wienkers/marEx/actions/runs/30740138582/attempts/1/jobs?per_page=100' (2026-10-30); old ci.yml on main, no 'CI OK' job",
+  "total_count": 11,
+  "jobs": [
+    {
+      "id": 91475947290,
+      "name": "Code Quality Checks",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120155,
+      "name": "Test Suite (windows-latest, 3.11)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120164,
+      "name": "Test Suite (windows-latest, 3.12)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120169,
+      "name": "Test Suite (ubuntu-latest, 3.10)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120170,
+      "name": "Test Suite (ubuntu-latest, 3.11)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120172,
+      "name": "Test Suite (ubuntu-latest, 3.12)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120180,
+      "name": "Test Suite (macos-latest, 3.12)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91476120182,
+      "name": "Test Suite (macos-latest, 3.11)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91482572253,
+      "name": "Build and Test Package",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91482572259,
+      "name": "Coverage Report",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 91488971705,
+      "name": "All Checks Passed",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

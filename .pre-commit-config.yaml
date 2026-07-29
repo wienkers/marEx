@@ -27,66 +27,12 @@ repos:
       - id: debug-statements
         description: Check for debugger imports and py37+ `breakpoint()` calls in python
 
-  # Python code formatting
-  - repo: https://github.com/psf/black
-    rev: 24.4.2
+  # Python linting and formatting (replaces black, isort, flake8, nbqa)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.2
     hooks:
-      - id: black
-        description: Format Python code with Black
-        language_version: python3
-        args: [--line-length=132, --target-version=py310]
-
-  # Import sorting
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        description: Sort Python imports
-        args: [--profile=black, --line-length=132]
-
-  # Python linting
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.1.0
-    hooks:
-      - id: flake8
-        description: Lint Python code with flake8
-        additional_dependencies:
-          - flake8-docstrings
-          - flake8-bugbear
-          - flake8-comprehensions
-          - flake8-pyproject
-
-  # Type checking with mypy (optional - disabled by default due to extensive issues)
-  # Uncomment the following section when ready to address type annotations
-  # - repo: https://github.com/pre-commit/mirrors-mypy
-  #   rev: v1.10.1
-  #   hooks:
-  #     - id: mypy
-  #       description: Static type checking with mypy
-  #       args: [--ignore-missing-imports, --no-strict-optional, --check-untyped-defs]
-  #       additional_dependencies:
-  #         - types-requests
-  #         - types-PyYAML
-  #       # Only run on marEx package, exclude tests for now
-  #       files: ^marEx/.*\.py$
-
-  # Jupyter notebook cleaning
-  - repo: https://github.com/nbQA-dev/nbQA
-    rev: 1.8.5
-    hooks:
-      - id: nbqa-black
-        description: Format Jupyter notebooks with black
-        args: [--line-length=132, --target-version=py310]
-      - id: nbqa-isort
-        description: Sort imports in Jupyter notebooks
-        args: [--profile=black, --line-length=132]
-
-  # Security checks (disabled due to false positives in scientific computing context)
-  # - repo: https://github.com/PyCQA/bandit
-  #   rev: 1.7.9
-  #   hooks:
-  #     - id: bandit
-  #       description: Security linting with bandit
-  #       args: [--skip, B404,B603,B607]  # Skip subprocess warnings for scientific computing
-  #       exclude: ^tests/
-  #       files: ^marEx/.*\.py$
+      - id: ruff-check
+        args: [--fix]
+        types_or: [python, pyi, jupyter]
+      - id: ruff-format
+        types_or: [python, pyi, jupyter]

@@ -1,0 +1,60 @@
+name: Compatibility
+
+# Oldest supported pins and newest releases. Informational: not part of ci-ok.
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compat:
+    name: Compat (${{ matrix.leg }}, py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The declared floors (dask 2025.9.0) and the zarr 2 path.
+          - leg: minimum
+            python-version: "3.10"
+          # Newest releases (zarr 3) with every optional extra except jax/jaxlib
+          # (`full` and `performance` pull jax): test, hpc, plotting, dev, docs.
+          - leg: newest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (minimum)
+        if: matrix.leg == 'minimum'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c ci/requirements-minimum.txt -e ".[test]"
+          pip list
+      - name: Install (newest)
+        if: matrix.leg == 'newest'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade -e ".[test,hpc,plotting,dev,docs]"
+          pip list
+      - name: Run tests (minimum)
+        if: matrix.leg == 'minimum'
+        shell: bash
+        run: |
+          python -m pytest -n 2 -m "not larger_than_memory" --durations=25
+      - name: Run tests (newest, deprecations shown)
+        if: matrix.leg == 'newest'
+        shell: bash
+        run: |
+          python -m pytest -n 2 -m "not larger_than_memory" -W default::DeprecationWarning -W default::FutureWarning --durations=25

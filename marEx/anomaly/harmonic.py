@@ -102,7 +102,7 @@ def _compute_anomaly_detrended(
 
     # Warn if using higher-order detrending without linear component
     if 1 not in detrend_orders and len(detrend_orders) > 1:
-        print("Warning: Higher-order detrending without linear term may be unstable")
+        logger.warning("Higher-order detrending without linear term may be unstable")
 
     # The harmonic basis below is annual + semi-annual only. On a sub-daily axis the
     # entire diurnal cycle therefore survives into `dat_anomaly` -- silently wrong

@@ -81,7 +81,7 @@ def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord
     if timecoord not in data_bin.coords or xcoord not in data_bin.coords or ycoord not in data_bin.coords:
         raise create_data_validation_error(
             "Missing required coordinates in unstructured data",
-            details=(f"Expected coordinates ({timecoord}, {xcoord}, {ycoord}), " f"but found {list(data_bin.coords)}"),
+            details=(f"Expected coordinates ({timecoord}, {xcoord}, {ycoord}), but found {list(data_bin.coords)}"),
             suggestions=[
                 "Ensure data_bin contains time, x, and y coordinates",
                 "Check coordinate names in the dataset",
@@ -156,7 +156,7 @@ def validate_inputs(
             except Exception:
                 raise create_data_validation_error(
                     "Invalid dimensions for gridded data",
-                    details=(f"Expected 3D array with dimensions ({timedim}, {ydim}, {xdim}), " f"got {list(data_bin.dims)}"),
+                    details=(f"Expected 3D array with dimensions ({timedim}, {ydim}, {xdim}), got {list(data_bin.dims)}"),
                     suggestions=[
                         "Ensure data has time, latitude, and longitude dimensions",
                         "Check dimension mapping and coordinate names",
