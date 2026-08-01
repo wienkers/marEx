@@ -177,10 +177,15 @@ def _compute_anomaly_detrended(
         if dim in da.coords:
             result_coords[dim] = da.coords[dim]
 
-    model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords)
+    # Persist the *fit* rather than the detrended series. The fit is a full reduction over
+    # the input but is only (coeff, y, x) -- tens of MB -- whereas the detrended series is
+    # the size of the input. With the coefficients materialised, the detrend below is a
+    # cheap elementwise expression, so the pipeline-level persist of dat_anomaly is the
+    # only full-size copy that ever exists (review findings 2.5, 2.6).
+    model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords).persist()
 
     # Remove trend and seasonal cycle
-    da_detrend = (da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)).persist()
+    da_detrend = da.drop_vars({"decimal_year"}) - model_da.dot(model_fit_da).astype(np.float32)
 
     # Force zero mean if requested
     if force_zero_mean:

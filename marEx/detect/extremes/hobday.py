@@ -14,7 +14,7 @@ import numpy as np
 import xarray as xr
 
 from ...logging_config import get_logger
-from .histogram import _compute_histogram_quantile_2d
+from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
 
 # Get module logger
 logger = get_logger(__name__)
@@ -78,13 +78,21 @@ def _identify_extremes_hobday(
             "If your time-series is very short, consider using method_percentile='exact'."
         )
 
-    # Add day-of-year coordinate (compute it to avoid chunked groupby issues)
-    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear.compute()).chunk(dict(zip(da.dims, da.chunks))).persist()
+    # Add day-of-year coordinate (compute it to avoid chunked groupby issues).
+    # No persist and no rechunk here: the rechunk restated the array's own chunks (a no-op)
+    # and the persist duplicated the pipeline-level anomaly persist, pinning a second
+    # full-size copy -- ~38 GB at 0.25 deg / 25 yr (review finding 3.14).
+    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear.compute())
 
     # Group by day-of-year and compute percentile
     if method_percentile == "exact":
         # Use apply_ufunc to compute DOY percentiles per spatial chunk in pure numpy.
-        da_ufunc = da.chunk({dimensions["time"]: -1})
+        # Tile the spatial dims alongside time:-1. Rechunking only time leaves a
+        # spatially-unchunked pipeline anomaly as a single (time, y, x) task, which is a
+        # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
+        # for exactly this reason. Per-cell percentiles are independent of the tiling, so
+        # this changes task granularity only (review finding 3.10).
+        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"])
         dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
         half_w = window_days_hobday // 2
 

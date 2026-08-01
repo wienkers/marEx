@@ -15,6 +15,7 @@ from typing import Dict, Optional
 import flox.xarray
 import numpy as np
 import xarray as xr
+from dask import persist
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
@@ -120,16 +121,14 @@ def _rolling_histogram_quantile(
     # It is q*n here since we're working with cumulative counts
     quantile_position = q * total_counts
 
-    # Vectorised search for the bins containing the quantile position
-    # searchsorted with side='right' gives the first bin where cumsum > quantile_position
-    idx_upper = np.zeros(n_doy, dtype=np.int32)
-
-    for i in range(n_doy):
-        if total_counts[i] <= 0:  # No data
-            idx_upper[i] = 0
-        else:
-            # Find first bin where cumulative count exceeds target position
-            idx_upper[i] = np.searchsorted(cumsum[i], quantile_position[i], side="right")
+    # Vectorised search for the bins containing the quantile position.
+    # ``searchsorted(row, v, side="right")`` on a non-decreasing row is exactly the count
+    # of entries <= v, so the whole 366-iteration Python loop of searchsorted calls (run
+    # once per cell inside an apply_ufunc(vectorize=True)) collapses to one comparison
+    # against the broadcast quantile positions (review finding 3.13).
+    idx_upper = (cumsum <= quantile_position[:, None]).sum(axis=1).astype(np.int32)
+    # Days with no data keep index 0 rather than the all-zero row's full-width count.
+    idx_upper[total_counts <= 0] = 0
 
     # Clip to valid range
     idx_upper = np.clip(idx_upper, 0, n_bins - 1)
@@ -260,8 +259,11 @@ def _compute_histogram_quantile_2d(
             coords=da.coords,
             name="da_bin",
         )
-        .chunk(chunk_dict)
-        .astype(np.uint16)
+        # Cast BEFORE the rechunk. np.digitize returns int64, and the rechunk below is the
+        # all-to-all shuffle of the hobday path, so casting afterwards moved 4x the bytes
+        # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
+        # indices are small non-negative integers (review finding 3.5).
+        .astype(np.uint16).chunk(chunk_dict)
     )
 
     # Construct 2D histogram using flox (in doy & anomaly)
@@ -416,12 +418,15 @@ def _compute_histogram_quantile_1d(
     top_clip = float((bin_edges[-2] + bin_edges[-1]) / 2)
 
     # Compute histogram
-    hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim]).persist()
+    hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim])
 
-    # Convert to PDF and CDF
-    hist_sum = hist.sum(dim=f"{da.name}_bin") + 1e-10
-    pdf = hist / hist_sum
-    cdf = pdf.cumsum(dim=f"{da.name}_bin").persist()
+    # Convert to PDF and CDF. Only the CDF (and the tiny per-cell totals) are persisted:
+    # `hist` is an intermediate of the same graph and is never read once `cdf` exists, so
+    # persisting it too doubled the bin-resolved footprint (~4 GB each at 720x1440)
+    # (review finding 3.7).
+    total_counts = hist.sum(dim=f"{da.name}_bin")
+    pdf = hist / (total_counts + 1e-10)
+    cdf, total_counts = persist(pdf.cumsum(dim=f"{da.name}_bin"), total_counts)
 
     eps = 1e-10
 
@@ -452,7 +457,11 @@ def _compute_histogram_quantile_1d(
     # Set threshold to NaN only for spatial points that are NaN at *every* timestep,
     # so a cell that is valid for part of the year (e.g. seasonal sea ice) still gets a
     # real threshold rather than a permanent NaN. (Consistent with the 2D path.)
-    nan_mask = da.isnull().all(dim=dim)
+    # The mask comes free from the histogram totals: the histogram drops NaN and counts
+    # every finite sample (values above the range are clipped in, above), so a zero total
+    # is exactly "NaN at every timestep". Recomputing it from `da` re-ran the whole
+    # upstream anomaly graph plus this function's spatial re-tiling (review finding 3.8).
+    nan_mask = total_counts == 0
     threshold = threshold.where(~nan_mask).drop_vars(f"{da.name}_bin").persist()
 
     # Validate threshold against bounds
