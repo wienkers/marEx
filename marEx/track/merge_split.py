@@ -422,6 +422,33 @@ def cluster_rename_objects_and_props(
             if len(present_indices) == 0:
                 return areas, centroid_lats, centroid_lons
 
+            # Group the slice's pixels by ID in one pass, instead of rebuilding a
+            # full-slice `slice_data == event_id` mask for every present ID -- that was
+            # O(n_present x ny x nx) per timestep, ~1e8-1e9 operations at scale
+            # (review finding 5.10).
+            #
+            # The segments are produced by a *stable* sort of the flat pixel positions, so
+            # each ID's pixels arrive in exactly the row-major order np.nonzero gave, and
+            # the reductions below run over identical arrays in an identical order. This
+            # rewrite is therefore bit-identical, not merely equivalent in real arithmetic:
+            # it does not need the Phase-2 float tolerance.
+            flat_ids = slice_data.ravel()
+            flat_areas = cell_areas_slice.ravel()
+            max_id_value = int(all_event_ids.max()) if n_ids > 0 else 0
+            id_lookup = np.full(max_id_value + 1, -1, dtype=np.int64)
+            in_range = (all_event_ids >= 0) & (all_event_ids <= max_id_value)
+            id_lookup[all_event_ids[in_range]] = np.flatnonzero(in_range)
+
+            codes = np.where(
+                (flat_ids > 0) & (flat_ids <= max_id_value),
+                id_lookup[np.clip(flat_ids, 0, max_id_value)],
+                -1,
+            )
+            pixel_positions = np.flatnonzero(codes >= 0)  # ascending, i.e. row-major
+            order = np.argsort(codes[pixel_positions], kind="stable")
+            pixel_positions = pixel_positions[order]
+            segment_bounds = np.concatenate(([0], np.cumsum(np.bincount(codes[codes >= 0], minlength=n_ids))))
+
             if is_unstructured:
                 # Unstructured grid: area-weighted centroid using spherical geometry
 
@@ -431,22 +458,21 @@ def cluster_rename_objects_and_props(
 
                 # Process each present ID
                 for id_idx in present_indices:
-                    event_id = all_event_ids[id_idx]
-                    mask = slice_data == event_id
+                    cells = pixel_positions[segment_bounds[id_idx] : segment_bounds[id_idx + 1]]
 
-                    if not np.any(mask):
+                    if cells.size == 0:
                         continue  # pragma: no cover
 
                     # Calculate physical area
-                    areas_masked = cell_areas_slice[mask]
+                    areas_masked = flat_areas[cells]
                     total_area = np.sum(areas_masked)
                     areas[id_idx] = total_area
 
                     # Calculate area-weighted centroid using spherical geometry
-                    cos_lat = np.cos(lat_rad[mask])
-                    x = cos_lat * np.cos(lon_rad[mask])
-                    y = cos_lat * np.sin(lon_rad[mask])
-                    z = np.sin(lat_rad[mask])
+                    cos_lat = np.cos(lat_rad[cells])
+                    x = cos_lat * np.cos(lon_rad[cells])
+                    y = cos_lat * np.sin(lon_rad[cells])
+                    z = np.sin(lat_rad[cells])
 
                     # Weighted average in Cartesian coordinates
                     weighted_x = np.sum(areas_masked * x)
@@ -478,19 +504,16 @@ def cluster_rename_objects_and_props(
 
                 # Process each present ID
                 for id_idx in present_indices:
-                    event_id = all_event_ids[id_idx]
+                    pixels = pixel_positions[segment_bounds[id_idx] : segment_bounds[id_idx + 1]]
 
-                    # Get binary mask for this event
-                    binary_mask = slice_data == event_id
-
-                    if not np.any(binary_mask):
+                    if pixels.size == 0:
                         continue  # pragma: no cover
 
-                    # Get indices where object exists
-                    y_indices, x_indices = np.nonzero(binary_mask)
+                    # Get indices where object exists (row-major, matching np.nonzero)
+                    y_indices, x_indices = pixels // nx, pixels % nx
 
                     # Get cell areas for these indices
-                    pixel_areas = cell_areas_slice[binary_mask]
+                    pixel_areas = flat_areas[pixels]
                     total_area = np.sum(pixel_areas)
                     areas[id_idx] = total_area
 
@@ -783,10 +806,9 @@ def split_and_merge_objects(
                         # Nearest-neighbor partitioning
                         # --> For every (Original) Child Cell in the ID Field, Find the closest (t-1) Parent _Cell_
                         if unstructured_grid:
-                            # Prepare parent masks
-                            parent_masks = np.zeros((len(parent_ids), data_t_minus_1.shape[0]), dtype=bool)
-                            for idx, parent_id in enumerate(parent_ids):
-                                parent_masks[idx] = (data_t_minus_1 == parent_id).values
+                            # Prepare parent masks (one broadcast comparison, see below)
+                            prev_values = data_t_minus_1.values
+                            parent_masks = prev_values[None, :] == np.asarray(parent_ids).reshape(-1, 1)
 
                             # Calculate maximum search distance
                             max_area = np.max(object_props.areas(parent_ids)) / mean_cell_area
@@ -804,17 +826,12 @@ def split_and_merge_objects(
                                 max_distance=max(max_distance, 20) * 2,  # Set minimum threshold, in cells
                             )
                         else:
-                            # Prepare parent masks for structured grid
-                            parent_masks = np.zeros(
-                                (
-                                    len(parent_ids),
-                                    data_t_minus_1.shape[0],
-                                    data_t_minus_1.shape[1],
-                                ),
-                                dtype=bool,
-                            )
-                            for idx, parent_id in enumerate(parent_ids):
-                                parent_masks[idx] = (data_t_minus_1 == parent_id).values
+                            # Prepare parent masks for structured grid. One broadcast
+                            # comparison against the raw values instead of a Python loop of
+                            # per-parent xarray comparisons, each of which built and
+                            # materialised its own full-slice DataArray (finding 5.15).
+                            prev_values = data_t_minus_1.values
+                            parent_masks = prev_values[None, :, :] == np.asarray(parent_ids).reshape(-1, 1, 1)
 
                             # Calculate maximum search distance
                             max_area = np.max(object_props.areas(parent_ids))

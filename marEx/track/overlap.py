@@ -346,21 +346,21 @@ def consolidate_object_ids(
             if first_child_id not in object_props:
                 continue
 
-            # Rename all other children to first_child_id
-            for child_id in children_for_parent[1:]:
-                child_id = int(child_id)
-                # Skip if child doesn't exist in properties
-                if child_id not in object_props:
-                    continue
+            # Rename all other children to first_child_id. One vectorised pass over the
+            # slice for the whole group rather than a full-slice .where() per child
+            # (review finding 5.13).
+            other_children = [int(c) for c in children_for_parent[1:] if int(c) in object_props]
+            if other_children:
+                values = data_t_minus_1.values
+                data_t_minus_1 = data_t_minus_1.copy(
+                    data=np.where(np.isin(values, other_children), first_child_id, values).astype(values.dtype)
+                )
+                for child_id in other_children:
+                    # Remove redundant child_id from object_props
+                    object_props.drop(child_id)
 
-                # Rename child_id to first_child_id in data_t_minus_1
-                data_t_minus_1 = data_t_minus_1.where(data_t_minus_1 != child_id, first_child_id)
-
-                # Remove redundant child_id from object_props
-                object_props.drop(child_id)
-
-                # Track the mapping
-                id_mappings[child_id] = first_child_id
+                    # Track the mapping
+                    id_mappings[child_id] = first_child_id
 
             # Recalculate properties for the consolidated object
             consolidated_mask = data_t_minus_1 == first_child_id

@@ -51,12 +51,13 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
     """Load and cache triangulation data globally."""
     fpath_tgrid = str(fpath_tgrid)  # Convert Path to string for dict key
     if fpath_tgrid not in _GRID_CACHE["triangulation"]:
-        # Only load required variables
-        grid_data = xr.open_dataset(
-            fpath_tgrid,
-            chunks={},
-            drop_variables=[v for v in xr.open_dataset(fpath_tgrid).variables if v not in ["vertex_of_cell", "clon", "clat"]],
-        )
+        # Only load required variables. Open the file once to discover which variables to
+        # drop: the previous form opened it a second time inside the comprehension and
+        # never closed that handle (review finding 8.10).
+        keep = {"vertex_of_cell", "clon", "clat"}
+        with xr.open_dataset(fpath_tgrid) as probe:
+            drop = [v for v in probe.variables if v not in keep]
+        grid_data = xr.open_dataset(fpath_tgrid, chunks={}, drop_variables=drop)
 
         if "vertex_of_cell" not in grid_data.variables or "clon" not in grid_data.variables or "clat" not in grid_data.variables:
             raise DataValidationError(

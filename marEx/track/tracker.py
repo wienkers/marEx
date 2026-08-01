@@ -832,7 +832,11 @@ class tracker:
         with log_timing(logger, "Spatial hole filling"):
             # Force compute here (persist + wait) so this step's time is attributed to it,
             # rather than being deferred into the later "Small object filtering" step.
-            data_bin_filled = self.fill_holes(self.data_bin).persist()
+            # raw_area rides along in the same persist: it is only consumed much later, for
+            # one scalar diagnostic, and by then self.data_bin has been released -- so on
+            # its own it forced a second full read of the entire raw input
+            # (review finding 4.3).
+            data_bin_filled, raw_area = persist(self.fill_holes(self.data_bin), raw_area)
             wait(data_bin_filled)
             self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
@@ -1486,9 +1490,11 @@ class tracker:
             object_id_field, object_props, overlap_objects_list, merge_events
         )
 
-        # Rechunk final output
+        # Rechunk final output. The time dimension is deliberately left alone here: run()
+        # rechunks the returned dataset to {time: 1} immediately afterwards, so setting it
+        # to timechunks first only layered a superseded rechunk over the graph
+        # (review finding 4.7).
         chunk_dict = {
-            self.timedim: self.timechunks,
             "ID": -1,
             "component": -1,
             "sibling_ID": -1,

@@ -123,7 +123,6 @@ def identify_objects(
             for i in range(t):
                 # Get indices of True values
                 true_indices = np.where(arr[i])[0].astype(np.int32)
-                mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(true_indices)}
 
                 # Find connected components
                 valid_mask = (neighbours_int != -1) & arr[i][neighbours_int]
@@ -131,13 +130,17 @@ def identify_objects(
                 row_ind = row_ind.astype(np.int32)
                 col_ind = col_ind.astype(np.int32)
 
-                # Map to compact indices for graph algorithm
-                mapped_row_ind = []
-                mapped_col_ind = []
-                for r, c in zip(neighbours_int[row_ind, col_ind], col_ind):
-                    if r in mapping and c in mapping:
-                        mapped_row_ind.append(mapping[r])
-                        mapped_col_ind.append(mapping[c])
+                # Map to compact indices for the graph algorithm. np.where returns
+                # true_indices already sorted, so the old-index -> compact-index map is a
+                # binary search rather than a Python dict walked once per graph edge (up to
+                # 3 x ncells iterations inside the dask task, which dominated unstructured
+                # labelling on ICON-size grids -- review finding 6.5).
+                edge_rows = neighbours_int[row_ind, col_ind]
+                # The neighbour end is True by construction of valid_mask; only the cell end
+                # needs testing, which is exactly what the dict membership check did.
+                keep = arr[i][col_ind]
+                mapped_row_ind = np.searchsorted(true_indices, edge_rows[keep])
+                mapped_col_ind = np.searchsorted(true_indices, col_ind[keep])
 
                 # Create graph and find connected components
                 graph = csr_matrix(
@@ -740,23 +743,45 @@ def calculate_object_properties(
             ids: NDArray[np.int32],
         ) -> Dict[str, List[Union[int, float]]]:
             """Calculate object properties for a chunk of data."""
+            # Ask regionprops for the bounding box as well, so the antimeridian test below
+            # is a column comparison rather than a full-slice mask per object.
+            wrap_check = check_centroids and not regional_mode
+            props_requested = list(properties)
+            bbox_added = wrap_check and "bbox" not in props_requested
+            if bbox_added:
+                props_requested.append("bbox")
+
             # Use regionprops_table for standard properties
-            props_slice = regionprops_table(ids, properties=properties)
+            props_slice = regionprops_table(ids, properties=props_requested)
 
             # Handle centroid calculation for objects that wrap around edges
-            if check_centroids and not regional_mode and len(props_slice["label"]) > 0:
-                # Get original centroids
-                centroids = list(zip(props_slice["centroid-0"], props_slice["centroid-1"]))
-                centroids_wrapped = []
+            if wrap_check and len(props_slice["label"]) > 0:
+                # Only objects whose bounding box reaches within edge_margin of BOTH x-edges
+                # can need the wrap adjustment; calculate_centroid returns the regionprops
+                # centroid unchanged for every other object. The bbox is tight, so
+                # "has a pixel left of edge_margin" is exactly "bbox min column < margin"
+                # -- building an `ids == ID` mask for every object in every timestep just to
+                # discover that was the cost here (review finding 6.4).
+                nx = ids.shape[1]
+                edge_margin = min(100, nx // 4)
+                near_left = np.asarray(props_slice["bbox-1"]) < edge_margin
+                near_right = np.asarray(props_slice["bbox-3"]) > nx - edge_margin
+                wrapping = np.nonzero(near_left & near_right)[0]
 
-                # Process each object
-                for ID_idx, ID in enumerate(props_slice["label"]):
-                    binary_mask = ids == ID
-                    centroids_wrapped.append(calculate_centroid(binary_mask, regional_mode, centroids[ID_idx]))
+                if wrapping.size > 0:
+                    centroid_y = np.asarray(props_slice["centroid-0"], dtype=np.float64)
+                    centroid_x = np.asarray(props_slice["centroid-1"], dtype=np.float64)
+                    for ID_idx in wrapping:
+                        binary_mask = ids == props_slice["label"][ID_idx]
+                        centroid_y[ID_idx], centroid_x[ID_idx] = calculate_centroid(
+                            binary_mask, regional_mode, (centroid_y[ID_idx], centroid_x[ID_idx])
+                        )
+                    props_slice["centroid-0"] = centroid_y
+                    props_slice["centroid-1"] = centroid_x
 
-                # Update centroid values
-                props_slice["centroid-0"] = [c[0] for c in centroids_wrapped]
-                props_slice["centroid-1"] = [c[1] for c in centroids_wrapped]
+            if bbox_added:
+                for bbox_key in ("bbox-0", "bbox-1", "bbox-2", "bbox-3"):
+                    props_slice.pop(bbox_key, None)
 
             return props_slice
 
