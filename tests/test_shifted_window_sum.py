@@ -82,6 +82,34 @@ def test_preserves_input_chunking(window, periodic):
     assert out.chunks[0] == da.chunks[0], f"tiling shredded to {out.chunks[0]}"
 
 
+@pytest.mark.parametrize("window", ODD_WINDOWS)
+@pytest.mark.parametrize("length", [50, 97, 43, 22, 21])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_uneven_final_chunk(window, length, periodic):
+    """Production tiles do not divide the grid evenly, so the last chunk is a remainder.
+
+    `chunk_dict[d] = min(da.sizes[d], tile_side)` leaves e.g. (20, 20, 10) for a length-50
+    dim, and the remainder can be *narrower than the window* (length 21 -> (20, 1)). The
+    periodic case is the sharp one: the wrap pad feeds into that short chunk.
+    """
+    da = _counts((length, 3), (20, 3), seed=3)
+    out = _shifted_window_sum(da, "s", window, periodic=periodic)
+
+    assert out.chunks[0] == da.chunks[0], f"tiling changed to {out.chunks[0]}"
+    if periodic:
+        pad = window // 2
+        expected = (
+            da.pad({"s": (pad, pad)}, mode="wrap")
+            .rolling({"s": window}, center=True, min_periods=1)
+            .sum()
+            .isel({"s": slice(pad, pad + length)})
+            .values
+        )
+    else:
+        expected = da.rolling({"s": window}, center=True, min_periods=1).sum().values
+    np.testing.assert_array_equal(out.values, expected.astype(out.dtype))
+
+
 def test_two_dim_smoothing_does_not_explode_the_graph():
     """Both spatial passes together, on the shape the gridded hobday path actually builds.
 
