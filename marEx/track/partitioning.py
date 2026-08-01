@@ -416,9 +416,14 @@ def partition_nn_grid(
     # Centroid fall-back for child pixels with no parent pixel within max_distance
     # (reuses the same wrapped distance-to-centroid kernel as the nn_partitioning=False path).
     if not assigned.all():
-        centroid_dist = wrapped_euclidian_distance_mask_parallel(child_mask, parent_centroids, Nx, wrap)
-        fallback = np.argmin(centroid_dist, axis=1).astype(np.int32)
-        parent_assignments[~assigned] = fallback[~assigned]
+        # Only the still-unassigned pixels need centroid distances. Passing the whole child
+        # mask computed (n_child_pixels x n_parents) distances and then discarded all but
+        # the unassigned rows (review finding 5.21). Both this mask and the kernel enumerate
+        # pixels with np.nonzero, so the returned rows line up with ~assigned by construction.
+        unassigned_mask = np.zeros_like(child_mask)
+        unassigned_mask[y_idx[~assigned], x_idx[~assigned]] = True
+        centroid_dist = wrapped_euclidian_distance_mask_parallel(unassigned_mask, parent_centroids, Nx, wrap)
+        parent_assignments[~assigned] = np.argmin(centroid_dist, axis=1).astype(np.int32)
 
     return child_ids[parent_assignments].astype(np.int32)
 
@@ -470,22 +475,34 @@ def partition_nn_unstructured(
     n_points = len(child_mask)
     n_parents = len(parent_masks)
 
-    # Pre-allocate arrays
-    distances = np.full(n_points, np.inf, dtype=np.float32)
+    # Pre-allocate arrays. Hop distances are integers in [0, max_distance], so the
+    # "not yet reached" sentinel is a finite value one past the maximum rather than
+    # np.inf: this function is compiled with fastmath=True, under which LLVM is licensed
+    # to assume no infinities and folds ``x == np.inf`` to False. That silently broke the
+    # unclaimed-overlap test below -- verified against the same source run unjitted.
+    unset_distance = np.int32(max_distance + 1)
+    distances = np.full(n_points, unset_distance, dtype=np.int32)
     parent_assignments = np.full(n_points, -1, dtype=np.int32)
     visited = np.zeros((n_parents, n_points), dtype=np.bool_)
 
+    # Explicit per-parent BFS queues. A (parent, point) pair enters its queue at most
+    # once, so one row of length n_points per parent is sufficient and the traversal
+    # below costs O(visited) instead of re-scanning every parent's whole visited set at
+    # every level (review finding 5.16).
+    queue = np.empty((n_parents, n_points), dtype=np.int32)
+    level_start = np.zeros(n_parents, dtype=np.int32)
+    level_end = np.zeros(n_parents, dtype=np.int32)
+
     # Initialise with direct overlaps
     for parent_idx in range(n_parents):
-        overlap_mask = parent_masks[parent_idx] & child_mask
-        if np.any(overlap_mask):
-            visited[parent_idx, overlap_mask] = True
-            unclaimed_overlap = distances[overlap_mask] == np.inf
-            if np.any(unclaimed_overlap):
-                overlap_points = np.where(overlap_mask)[0].astype(np.int32)
-                valid_points = overlap_points[unclaimed_overlap]
-                distances[valid_points] = 0
-                parent_assignments[valid_points] = parent_idx
+        for point in range(n_points):
+            if parent_masks[parent_idx, point] and child_mask[point]:
+                visited[parent_idx, point] = True
+                queue[parent_idx, level_end[parent_idx]] = point
+                level_end[parent_idx] += 1
+                if distances[point] == unset_distance:
+                    distances[point] = 0
+                    parent_assignments[point] = parent_idx
 
     # Pre-compute trig values for efficiency
     lat_rad = np.deg2rad(lat)
@@ -501,30 +518,29 @@ def partition_nn_unstructured(
         updates_made = False
 
         for parent_idx in range(n_parents):
-            # Get current frontier points
-            frontier_mask = visited[parent_idx]
-            if not np.any(frontier_mask):
+            # Expand only the level just added. Every neighbour of an earlier level is
+            # already visited by this parent, so this reaches exactly the same points.
+            start, end = level_start[parent_idx], level_end[parent_idx]
+            if start == end:
                 continue
 
-            # Process neighbors
-            for i in range(3):  # For each neighbor direction
-                neighbors = neighbours_int[i, frontier_mask]
-                valid_neighbors = neighbors >= 0
-                if not np.any(valid_neighbors):
-                    continue
-
-                valid_points = neighbors[valid_neighbors]
-                unvisited = ~visited[parent_idx, valid_points]
-                new_points = valid_points[unvisited]
-
-                if len(new_points) > 0:
-                    visited[parent_idx, new_points] = True
-                    update_mask = distances[new_points] > current_distance
-                    if np.any(update_mask):
-                        points_to_update = new_points[update_mask]
-                        distances[points_to_update] = current_distance
-                        parent_assignments[points_to_update] = parent_idx
+            new_end = end
+            for k in range(start, end):
+                cell = queue[parent_idx, k]
+                for i in range(3):  # For each neighbor direction
+                    neighbour = neighbours_int[i, cell]
+                    if neighbour < 0 or visited[parent_idx, neighbour]:
+                        continue
+                    visited[parent_idx, neighbour] = True
+                    queue[parent_idx, new_end] = neighbour
+                    new_end += 1
+                    if distances[neighbour] > current_distance:
+                        distances[neighbour] = current_distance
+                        parent_assignments[neighbour] = parent_idx
                         updates_made = True
+
+            level_start[parent_idx] = end
+            level_end[parent_idx] = new_end
 
         if not updates_made:
             break
@@ -545,7 +561,11 @@ def partition_nn_unstructured(
             dlon = parent_lon_rad - lon_rad[point]
             a = np.sin(dlat / 2) ** 2 + cos_lat[point] * cos_parent_lat * np.sin(dlon / 2) ** 2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-            parent_assignments[point] = np.argmin(dist).astype(np.int32)
+            # np.int32(...) rather than .astype(): numba's np.argmin returns a plain int64
+            # scalar, which has no .astype, so the previous form made this whole function
+            # fail to compile -- it raised TypingError on every call, taken branch or not.
+            # Matches partition_nn_unstructured_optimised, which always had it right.
+            parent_assignments[point] = np.int32(np.argmin(dist))
 
     # Return only the assignments for points in child_mask
     child_points = np.where(child_mask)[0].astype(np.int32)
@@ -593,41 +613,51 @@ def partition_nn_unstructured_optimised(
     parent_frontiers_working = parent_frontiers.copy()
     child_mask_working = child_mask.copy()
 
+    n_points = len(child_mask_working)
     n_parents = np.max(parent_frontiers_working[parent_frontiers_working < 255]) + 1
+
+    # Explicit BFS frontier queue. Every point is claimed at most once (a claimed point
+    # is never revisited), so a single queue of length n_points holds the entire
+    # traversal. Expanding only the level just added replaces re-scanning the whole
+    # field once per parent per direction per level, which was O(n_parents x
+    # max_distance x n_points) -- ~1e9 operations per merge event at ICON scale
+    # (review finding 5.16).
+    queue = np.empty(n_points, dtype=np.int32)
+    n_queued = 0
+    # Seed in parent-major order so that, within a level, a lower parent index still
+    # claims a contested point first -- the tie-break the scan-based version had.
+    for parent_idx in range(n_parents):
+        for point in range(n_points):
+            if parent_frontiers_working[point] == parent_idx:
+                queue[n_queued] = point
+                n_queued += 1
 
     # Graph traversal - expanding frontiers
     current_distance = 0
     any_unassigned = np.any(child_mask_working & (parent_frontiers_working == 255))
+    level_start = 0
+    level_end = n_queued
 
     while current_distance < max_distance and any_unassigned:
         current_distance += 1
         updates_made = False
 
-        for parent_idx in range(n_parents):
-            # Skip if no frontier points for this parent
-            if not np.any(parent_frontiers_working == parent_idx):
-                continue
-
-            # Process neighbours for current parent's frontier
+        new_end = level_end
+        for k in range(level_start, level_end):
+            cell = queue[k]
+            parent_idx = parent_frontiers_working[cell]
             for i in range(3):
-                neighbors = neighbours_int[i, parent_frontiers_working == parent_idx]
-                valid_neighbors = neighbors >= 0
-
-                if not np.any(valid_neighbors):
+                neighbour = neighbours_int[i, cell]
+                if neighbour < 0 or parent_frontiers_working[neighbour] != 255:
                     continue
-
-                valid_points = neighbors[valid_neighbors]
-                unvisited = parent_frontiers_working[valid_points] == 255
-
-                if not np.any(unvisited):
-                    continue
-
-                # Update new frontier points
-                new_points = valid_points[unvisited]
-                parent_frontiers_working[new_points] = parent_idx
-
-                if np.any(child_mask_working[new_points]):
+                parent_frontiers_working[neighbour] = parent_idx
+                queue[new_end] = neighbour
+                new_end += 1
+                if child_mask_working[neighbour]:
                     updates_made = True
+
+        level_start = level_end
+        level_end = new_end
 
         if not updates_made:
             break

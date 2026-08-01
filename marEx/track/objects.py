@@ -395,13 +395,14 @@ class ObjectPropsStore:
     ``consolidate_object_ids``).
     """
 
-    __slots__ = ("_area", "_cy", "_cx")
+    __slots__ = ("_area", "_cy", "_cx", "_sorted_ids")
 
     def __init__(self, area=None, cy=None, cx=None):
         """Create a store, optionally seeded with ``area``/``cy``/``cx`` dicts (keyed by int ID)."""
         self._area = {} if area is None else area
         self._cy = {} if cy is None else cy
         self._cx = {} if cx is None else cx
+        self._sorted_ids = None  # lazily built cache for contains_many; invalidated on mutation
 
     @classmethod
     def from_dataset(cls, object_props: xr.Dataset) -> "ObjectPropsStore":
@@ -435,6 +436,24 @@ class ObjectPropsStore:
         """Whether ``object_id`` is currently present in the store."""
         return int(object_id) in self._area
 
+    def contains_many(self, ids) -> NDArray[np.bool_]:
+        """Vectorised membership test: equivalent to ``[i in self for i in ids]``, elementwise.
+
+        Callers filter multi-million-row overlap lists with this; a Python-level ``in`` per
+        row dominated ``enforce_overlap_threshold`` at scale (review finding 5.14). The
+        sorted key array is cached and invalidated by :meth:`set` / :meth:`drop`.
+        """
+        query = np.asarray(ids).astype(np.int64)
+        if self._sorted_ids is None:
+            self._sorted_ids = np.fromiter(self._area.keys(), dtype=np.int64, count=len(self._area))
+            self._sorted_ids.sort()
+        known = self._sorted_ids
+        if known.size == 0 or query.size == 0:
+            return np.zeros(query.shape, dtype=bool)
+        idx = np.searchsorted(known, query)
+        np.clip(idx, 0, known.size - 1, out=idx)
+        return known[idx] == query
+
     def max_id(self) -> int:
         """Largest current object ID (0 if the store is empty)."""
         return max(self._area) if self._area else 0
@@ -459,6 +478,8 @@ class ObjectPropsStore:
     def set(self, object_id, area, cy, cx) -> None:
         """Insert or update the area + (y, x) centroid for ``object_id``."""
         oid = int(object_id)
+        if oid not in self._area:
+            self._sorted_ids = None  # key set changed
         self._area[oid] = area
         self._cy[oid] = float(cy)
         self._cx[oid] = float(cx)
@@ -466,6 +487,8 @@ class ObjectPropsStore:
     def drop(self, object_id) -> None:
         """Remove ``object_id`` from the store (no-op if absent)."""
         oid = int(object_id)
+        if oid in self._area:
+            self._sorted_ids = None  # key set changed
         self._area.pop(oid, None)
         self._cy.pop(oid, None)
         self._cx.pop(oid, None)
@@ -530,7 +553,15 @@ def calculate_object_properties(
             # For single time slice, use 1 as time steps
             time_steps = 1
 
-        ID_buffer_size = max(int(max_ID / time_steps) * 4 + 2, max_ID)
+        # Per-timestep property buffer. The estimate is 4x the mean number of objects per
+        # timestep, plus slack. The old floor was `max_ID`, i.e. the total object count over
+        # the whole run, which made these buffers O(time x total objects) and is consistent
+        # with the recorded unstructured-tracking OOM (review finding 6.3). The floor is now
+        # a constant, so it still gives small runs generous headroom (where max_ID <= 100 it
+        # is exactly the old value) without scaling with the length of the run. Overflow is
+        # not silent: the `result[0, :n_ids] = areas` fill below raises if a timestep holds
+        # more objects than the buffer.
+        ID_buffer_size = max(int(max_ID / time_steps) * 4 + 2, min(max_ID, 100))
 
         def object_properties_chunk(
             ids: NDArray[np.int32],

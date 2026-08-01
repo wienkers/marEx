@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import xarray as xr
+from dask.base import is_dask_collection
 from numba import njit, prange
 from numpy.typing import NDArray
 
@@ -162,6 +163,13 @@ def find_overlapping_objects(
             * For structured grid: number of overlapping pixels (int32)
             * For unstructured grid: total overlapping area in m^2 (float32)
     """
+    # Materialise cell_area once. It is bound into the functools.partial below, so it is
+    # shipped to every task: a dask-backed array there means each task re-gathers it, and
+    # check_overlap_slice reads .values on every call (review finding 6.7). The structured
+    # branch never touches it, so only pay this on unstructured grids.
+    if unstructured_grid and is_dask_collection(getattr(cell_area, "data", None)):
+        cell_area = cell_area.compute()
+
     # Check just for overlap with next time slice.
     #  Keep a running list of all object IDs that overlap
     object_id_field_next = object_id_field.shift({timedim: -1}, fill_value=0)
@@ -226,8 +234,10 @@ def enforce_overlap_threshold(
     if len(overlap_objects_list) == 0:
         return np.empty((0, 3), dtype=np.float32 if unstructured_grid else np.int32)
 
-    # Filter out overlaps where either ID doesn't exist in object_props (O(1) membership per pair)
-    valid_mask = np.array([(overlap[0] in object_props) and (overlap[1] in object_props) for overlap in overlap_objects_list])
+    # Filter out overlaps where either ID doesn't exist in object_props. One vectorised
+    # membership test over both ID columns rather than a Python comprehension per row --
+    # this list runs to millions of rows on a full-length run (review finding 5.14).
+    valid_mask = object_props.contains_many(overlap_objects_list[:, 0]) & object_props.contains_many(overlap_objects_list[:, 1])
 
     if not np.any(valid_mask):
         return np.empty((0, 3), dtype=np.float32 if unstructured_grid else np.int32)

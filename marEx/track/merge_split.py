@@ -23,7 +23,7 @@ method wrappers.
 
 import gc
 import os
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import dask.array as da
 import numpy as np
@@ -88,7 +88,8 @@ def cluster_rename_objects_and_props(
     # Cluster the overlap_pairs into groups of IDs that are actually the same object
     # Get IDs from overlap pairs
     # Step 1: Find all IDs that actually exist in the data
-    max_ID = int(object_id_field_unique.max().compute().values.item())
+    # (max_ID is taken from the sorted unique IDs computed below rather than from a
+    # separate .max() pass over the whole field -- review finding 5.8.)
 
     # Get unique IDs from overlap list
     if len(overlap_objects_list) > 0:
@@ -105,6 +106,11 @@ def cluster_rename_objects_and_props(
     field_ids = da.unique(object_id_field_unique.data).compute()
     field_ids = field_ids[field_ids > 0]  # Remove 0 (background)
 
+    # da.unique returns them sorted, so the largest ID present in the field is the last
+    # entry -- the same value the separate full-field .max() pass produced (0 for an
+    # empty field), for none of the cost.
+    max_ID = int(field_ids[-1]) if field_ids.size > 0 else 0
+
     # Combine and get all valid IDs
     all_valid_ids = np.unique(np.concatenate([overlap_ids, field_ids]))
 
@@ -119,14 +125,14 @@ def cluster_rename_objects_and_props(
 
     # Step 3: Convert overlap pairs to dense indices
     if len(overlap_objects_list) > 0:
-        # Map to dense indices
-        overlap_pairs_dense = np.array(
-            [
-                [original_to_dense[int(pair[0])], original_to_dense[int(pair[1])]]
-                for pair in overlap_objects_list
-                if int(pair[0]) in original_to_dense and int(pair[1]) in original_to_dense
-            ]
-        )
+        # Map to dense indices with one binary search over the sorted ID array instead of
+        # a per-pair Python dict lookup across a multi-million-row list (finding 5.9).
+        # all_valid_ids is the sorted union that includes every positive entry of this
+        # array, so the only rows the dict version dropped were those holding a
+        # non-positive (background) ID -- which is exactly what `keep` drops here.
+        pairs = overlap_objects_list[:, :2].astype(np.int64)
+        keep = (pairs > 0).all(axis=1)
+        overlap_pairs_dense = np.searchsorted(all_valid_ids, pairs[keep])
 
         # Create sparse graph with dense indices
         row_indices, col_indices = overlap_pairs_dense.T
@@ -632,19 +638,10 @@ def split_and_merge_objects(
     # convert back to a Dataset at the function boundary for cluster_rename_objects_and_props.
     object_props = _objects.ObjectPropsStore.from_dataset(object_props)
 
-    # Find overlapping objects
-    overlap_objects_list = _overlap.find_overlapping_objects(
-        object_id_field_unique,
-        timedim,
-        unstructured_grid,
-        ydim,
-        xdim,
-        cell_area,
-    )  # List object pairs that overlap by at least overlap_threshold percent
-    overlap_objects_list = _overlap.enforce_overlap_threshold(
-        overlap_objects_list, object_props, unstructured_grid, overlap_threshold
-    )
-    logger.info("Finished finding overlapping objects")
+    # No up-front overlap pass here: the serial loop below computes overlaps per timestep
+    # from the consolidated field, and the full-run list is recomputed after the loop.
+    # The result of an up-front pass was persisted and then overwritten unread
+    # (review finding 5.7).
 
     # Initialise merge tracking lists
     merge_times = []  # When the merge occurred
@@ -1790,14 +1787,26 @@ def split_and_merge_objects_parallel(
             unstructured_grid,
             ydim,
             xdim,
+            # Only the merging IDs are ever looked up below, so restrict the search
+            # instead of broadcasting a (time x buffer x max_objects) boolean over every
+            # possible ID -- multi-GB chunks for a map of a few hundred entries
+            # (review finding 6.8).
+            all_objects=False,
         )
         logger.debug("Finished Mapping Children to Time Indices")
 
+        # Bucket the merging objects by time index in a single pass. The previous form
+        # rescanned the whole merging set once per timestep, twice over (finding 5.12).
+        objects_by_time: List[List[int]] = [[] for _ in range(n_time)]
+        for merging_object in merging_objects:
+            t_idx = time_index_map.get(merging_object, -1)
+            if 0 <= t_idx < n_time:
+                objects_by_time[t_idx].append(merging_object)
+
         # Create uniform array of merging objects for each timestep
-        max_merges = max(len([b for b in merging_objects if time_index_map.get(b, -1) == t]) for t in range(n_time))
+        max_merges = max(len(objects_at_t) for objects_at_t in objects_by_time)
         uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int32)
-        for t in range(n_time):
-            objects_at_t = [b for b in merging_objects if time_index_map.get(b, -1) == t]
+        for t, objects_at_t in enumerate(objects_by_time):
             if objects_at_t:  # Only fill if there are objects at this time
                 uniform_merging_objects_array[t, : len(objects_at_t)] = np.array(objects_at_t, dtype=np.int32)
 
@@ -1982,6 +1991,12 @@ def split_and_merge_objects_parallel(
         # 3. Update merge events
         new_merging_objects = set()
         merge_counts = merge_counts.compute()
+        # Materialise the three small persisted ledgers once. Indexing them lazily inside
+        # the loop below cost a blocking scheduler round-trip per merge event -- thousands
+        # of them per merge-loop iteration for arrays of a few MB (review finding 5.11).
+        merge_child_ids_local = merge_child_ids.compute()
+        merge_parent_ids_local = merge_parent_ids.compute()
+        merge_areas_local = merge_areas.compute()
 
         for t in time_indices:
             count = int(merge_counts.isel({timedim: t}).item())
@@ -1991,12 +2006,12 @@ def split_and_merge_objects_parallel(
                 # Extract valid IDs and areas for each merge event
                 for merge_idx in range(count):
                     # Get child IDs
-                    child_ids = merge_child_ids.isel({timedim: t, "merge": merge_idx}).compute().values
+                    child_ids = merge_child_ids_local.isel({timedim: t, "merge": merge_idx}).values
                     child_ids = child_ids[child_ids >= 0]
 
                     # Get parent IDs and areas
-                    parent_ids = merge_parent_ids.isel({timedim: t, "merge": merge_idx}).compute().values
-                    areas = merge_areas.isel({timedim: t, "merge": merge_idx}).compute().values
+                    parent_ids = merge_parent_ids_local.isel({timedim: t, "merge": merge_idx}).values
+                    areas = merge_areas_local.isel({timedim: t, "merge": merge_idx}).values
                     valid_mask = parent_ids >= 0
                     parent_ids = parent_ids[valid_mask]
                     areas = areas[valid_mask]
