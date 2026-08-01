@@ -68,6 +68,39 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
     return da.chunk(chunks)
 
 
+def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
+    """Centred window sum along ``dim`` that preserves the input's integer dtype.
+
+    Equivalent to ``da.rolling({dim: window}, center=True, min_periods=1).sum()`` -- with a
+    wrap-pad first when ``periodic`` -- for odd ``window``, but built from shifted views so
+    the counts never leave their integer dtype. bottleneck's rolling sum promotes to float64
+    and allocates a halo, which on the bin-resolved histogram is the dominant memory spike.
+
+    Zero padding is what makes the non-periodic case exact: summing a full window over a
+    zero-padded array is the same number as summing the partial window ``min_periods=1``
+    admits at the edges.
+    """
+    left, right = (window - 1) // 2, window // 2
+    if periodic:
+        padded = da.pad({dim: (left, right)}, mode="wrap")
+    else:
+        padded = da.pad({dim: (left, right)}, mode="constant", constant_values=0)
+
+    # Drop the padded dimension coordinate so the shifted slices add positionally rather
+    # than aligning on (now meaningless) padded labels; restore the original afterwards.
+    coord = da.coords[dim] if dim in da.coords else None
+    padded = padded.drop_vars(dim, errors="ignore")
+
+    n = da.sizes[dim]
+    total = padded.isel({dim: slice(0, n)})
+    for offset in range(1, window):
+        total = total + padded.isel({dim: slice(offset, offset + n)})
+
+    if coord is not None:
+        total = total.assign_coords({dim: coord})
+    return total
+
+
 def _rolling_histogram_quantile(
     hist_chunk: NDArray[np.int32],
     window_days_hobday: int,
@@ -285,17 +318,32 @@ def _compute_histogram_quantile_2d(
         pad_size = window_spatial_hobday // 2
         lon_dim, lat_dim = dimensions.get("x"), dimensions.get("y")
 
-        hist_rolled = hist_raw
+        # Integer-preserving window sums. xarray's .rolling().sum() goes through
+        # bottleneck, which promotes these uint16 chunks to float64 and carries a halo
+        # overlap -- ~0.4-0.8 GB transient per task over the (y, x, 366, ~502) histogram,
+        # the dominant memory spike of the default gridded hobday path (review finding
+        # 3.6). Summing explicit shifted views keeps the counts in an integer dtype and
+        # is exactly equal to the rolling sum for odd windows: a zero-padded full window
+        # equals a min_periods=1 partial window, and a wrap-padded one equals the periodic
+        # case. Even windows keep the old path, whose centre alignment they depend on.
+        use_integer_window = window_spatial_hobday % 2 == 1
+        hist_rolled = hist_raw.astype(np.uint32) if use_integer_window else hist_raw
 
         # Periodic padding in longitude, rolling mean in both dimensions, then trim
         if lon_dim in hist_raw.dims:
-            hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
-            hist_rolled = hist_rolled.rolling({lon_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
-            hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
+            if use_integer_window:
+                hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial_hobday, periodic=True)
+            else:
+                hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
+                hist_rolled = hist_rolled.rolling({lon_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+                hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
 
         # Standard rolling in latitude
         if lat_dim in hist_raw.dims:
-            hist_rolled = hist_rolled.rolling({lat_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+            if use_integer_window:
+                hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial_hobday, periodic=False)
+            else:
+                hist_rolled = hist_rolled.rolling({lat_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
 
         hist_raw = hist_rolled
 

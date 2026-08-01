@@ -486,16 +486,48 @@ def filter_small_objects(
             out[: min(len(areas), area_buffer)] = areas[:area_buffer]
             return out
 
-        padded_areas = xr.apply_ufunc(
-            slice_object_areas,
-            data_bin,
-            input_core_dims=[[ydim, xdim]],
-            output_core_dims=[["object_buffer"]],
-            dask_gufunc_kwargs={"output_sizes": {"object_buffer": area_buffer}},
-            output_dtypes=[np.int64],
-            vectorize=True,
-            dask="parallelized",
-        )
+        def slice_areas_and_filter(bitmap_binary: NDArray[np.bool_]) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
+            """Areas *and* keep-mask from a single labelling pass (absolute-threshold mode)."""
+            labels, n_labels = scipy_label(bitmap_binary, structure=_EIGHT_CONNECTIVITY)
+            if not regional_mode:
+                labels = _merge_lon_seam(labels, n_labels)
+            counts = np.bincount(labels.ravel())
+            areas = counts[1:][counts[1:] > 0]  # drop background; compact post-merge gaps
+            out = np.zeros(area_buffer, dtype=np.int64)
+            out[: min(len(areas), area_buffer)] = areas[:area_buffer]
+            keep = counts >= area_filter_absolute
+            keep[0] = False  # Don't keep background (label 0)
+            return keep[labels], out
+
+        # With an absolute threshold the keep-decision is known before the area census, so
+        # one labelling pass can produce both. The quartile mode still needs two, because
+        # its threshold is a percentile of the census (review finding 6.10). Both outputs
+        # are persisted together so the shared pass is actually shared -- computing them
+        # separately would label every slice twice again.
+        data_bin_filtered = None
+        if use_absolute_filtering:
+            data_bin_filtered, padded_areas = xr.apply_ufunc(
+                slice_areas_and_filter,
+                data_bin,
+                input_core_dims=[[ydim, xdim]],
+                output_core_dims=[[ydim, xdim], ["object_buffer"]],
+                dask_gufunc_kwargs={"output_sizes": {"object_buffer": area_buffer}},
+                output_dtypes=[np.bool_, np.int64],
+                vectorize=True,
+                dask="parallelized",
+            )
+            data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
+        else:
+            padded_areas = xr.apply_ufunc(
+                slice_object_areas,
+                data_bin,
+                input_core_dims=[[ydim, xdim]],
+                output_core_dims=[["object_buffer"]],
+                dask_gufunc_kwargs={"output_sizes": {"object_buffer": area_buffer}},
+                output_dtypes=[np.int64],
+                vectorize=True,
+                dask="parallelized",
+            )
         padded_areas = np.atleast_2d(padded_areas.compute().values)  # (time, area_buffer)
         if np.any(padded_areas[:, -1] != 0):  # pragma: no cover
             raise TrackingError(
@@ -539,15 +571,16 @@ def filter_small_objects(
             keep[0] = False  # Don't keep background (label 0)
             return keep[labels]
 
-        data_bin_filtered = xr.apply_ufunc(
-            slice_filter,
-            data_bin,
-            input_core_dims=[[ydim, xdim]],
-            output_core_dims=[[ydim, xdim]],
-            output_dtypes=[np.bool_],
-            vectorize=True,
-            dask="parallelized",
-        )
+        if data_bin_filtered is None:  # quartile mode: the threshold needed the census first
+            data_bin_filtered = xr.apply_ufunc(
+                slice_filter,
+                data_bin,
+                input_core_dims=[[ydim, xdim]],
+                output_core_dims=[[ydim, xdim]],
+                output_dtypes=[np.bool_],
+                vectorize=True,
+                dask="parallelized",
+            )
 
         object_areas = xr.DataArray(object_areas_np, dims=["ID"])
 
