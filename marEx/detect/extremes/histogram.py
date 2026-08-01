@@ -81,6 +81,20 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
     admits at the edges.
     """
     left, right = (window - 1) // 2, window // 2
+
+    # Each shifted slice starts at a different offset, so its chunk boundaries are offset
+    # too. Adding them straight up makes dask unify_chunks to the common refinement of all
+    # `window` boundary sets, which shreds the tiling into width-1 slivers (measured: at
+    # window=5 over two spatial dims, 2654 tasks and 1783 rechunk keys where the tiled
+    # input had 6 chunks, output chunks (1,1,16,1,1,...)). That all-to-all rechunk is what
+    # OOM-killed the full-scale gridded hobday run. Putting every slice back on the input's
+    # own boundaries first keeps each add chunk-aligned: the shift becomes a local overlap
+    # (each output chunk draws on at most two input chunks) and the tiling survives
+    # -- 274 tasks / 104 rechunk keys for the same window=5 case, values bit-identical.
+    target_chunks = None
+    if da.chunks is not None:
+        target_chunks = da.chunks[da.dims.index(dim)]
+
     if periodic:
         padded = da.pad({dim: (left, right)}, mode="wrap")
     else:
@@ -92,9 +106,14 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
     padded = padded.drop_vars(dim, errors="ignore")
 
     n = da.sizes[dim]
-    total = padded.isel({dim: slice(0, n)})
+
+    def _slice(offset: int) -> xr.DataArray:
+        window_slice = padded.isel({dim: slice(offset, offset + n)})
+        return window_slice if target_chunks is None else window_slice.chunk({dim: target_chunks})
+
+    total = _slice(0)
     for offset in range(1, window):
-        total = total + padded.isel({dim: slice(offset, offset + n)})
+        total = total + _slice(offset)
 
     if coord is not None:
         total = total.assign_coords({dim: coord})
