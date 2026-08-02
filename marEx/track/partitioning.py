@@ -723,7 +723,6 @@ def partition_centroid_unstructured(
     new_labels : np.ndarray
         1D array containing assigned child_ids for cells in child_mask
     """
-    n_cells = len(child_mask)
     n_parents = len(parent_centroids)
 
     # Convert to radians for spherical calculations
@@ -731,23 +730,35 @@ def partition_centroid_unstructured(
     lon_rad = np.deg2rad(lon)
     parent_coords_rad = np.deg2rad(parent_centroids)
 
-    new_labels = np.zeros(n_cells, dtype=child_ids.dtype)
+    # Return one label per cell IN child_mask, matching this function's docstring, the
+    # sibling partition_nn_unstructured, and the caller's `data_t[child_mask] = new_labels`.
+    # It previously allocated one entry per mesh cell and left non-child entries at 0, so
+    # the assignment raised ValueError as soon as the child was smaller than the mesh --
+    # i.e. always. The unstructured centroid path had simply never been executed.
+    # Iterating the child points directly is also far less work: on the R02B09 mesh this
+    # is ~200 k cells rather than 14.9 M.
+    child_points = np.where(child_mask)[0]
+    n_child = len(child_points)
+    new_labels = np.zeros(n_child, dtype=child_ids.dtype)
 
     # Process each child cell in parallel
-    for i in prange(n_cells):
-        if not child_mask[i]:
-            continue
+    for i in prange(n_child):
+        cell = child_points[i]
 
-        min_dist = np.inf
+        # Finite sentinel, not np.inf: every kernel here is compiled with fastmath=True,
+        # which lets LLVM assume no infinities. A running minimum happens to survive that,
+        # but the max possible great-circle distance is pi radians, so 4.0 is unambiguously
+        # larger and carries no such dependency.
+        min_dist = 4.0
         closest_parent = 0
 
         # Calculate great circle distance to each parent centroid
         for j in range(n_parents):
-            dlat = parent_coords_rad[j, 0] - lat_rad[i]
-            dlon = parent_coords_rad[j, 1] - lon_rad[i]
+            dlat = parent_coords_rad[j, 0] - lat_rad[cell]
+            dlon = parent_coords_rad[j, 1] - lon_rad[cell]
 
             # Use haversine formula for great circle distance
-            a = np.sin(dlat / 2) ** 2 + np.cos(lat_rad[i]) * np.cos(parent_coords_rad[j, 0]) * np.sin(dlon / 2) ** 2
+            a = np.sin(dlat / 2) ** 2 + np.cos(lat_rad[cell]) * np.cos(parent_coords_rad[j, 0]) * np.sin(dlon / 2) ** 2
             dist = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
             if dist < min_dist:

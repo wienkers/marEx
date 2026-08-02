@@ -718,12 +718,21 @@ class tracker:
         merges_ds : xarray.Dataset, optional
             Dataset with merge event information (only if return_merges=True)
         """
-        if self.data_bin is None:
+        # The single-use guard must not fire when the preprocessed data is being reloaded
+        # from a checkpoint: run_preprocess(checkpoint="load") returns straight from the
+        # zarr store and never reads self.data_bin. That is exactly the documented
+        # two-cluster pattern -- run_preprocess(checkpoint="save") on a large cluster,
+        # close it, then run(checkpoint="load") on a differently-sized one -- and the
+        # unconditional guard made it impossible (the unstructured 02 notebook, which had
+        # never been executed, died here).
+        effective_checkpoint = checkpoint if checkpoint is not None else self.checkpoint
+        if self.data_bin is None and effective_checkpoint != "load":
             raise TrackingError(
                 "This tracker instance has already been run",
                 details="run() frees the binary input to save memory, so a tracker is single-use",
                 suggestions=[
                     "Construct a fresh instance for another run: tracker(data_bin, mask, ...)",
+                    "Or reuse the preprocessed result: run(checkpoint='load') after run_preprocess(checkpoint='save')",
                 ],
             )
 
