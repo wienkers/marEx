@@ -30,7 +30,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
-from dask import persist
+from dask import is_dask_collection, persist
 from dask.distributed import wait
 from numpy.typing import NDArray
 
@@ -647,6 +647,29 @@ class tracker:
                 self.xcoord,
                 self.ycoord,
             )
+
+        # Materialise the small per-cell coordinate and area arrays rather than leaving them
+        # as persisted dask collections. persist() binds a collection to whichever client was
+        # active at construction AND replaces its graph with futures, so once that client is
+        # closed the data is orphaned with nothing left to recompute from. That is exactly
+        # what the documented two-cluster pattern does -- run_preprocess(checkpoint="save"),
+        # close the cluster, then run(checkpoint="load") on a differently-sized one -- and it
+        # died in calculate_object_properties with
+        # "FutureCancelledError: ... cancelled for reason: lost dependencies".
+        #
+        # It only ever bit unstructured grids, which is why nothing caught it: there these
+        # are genuinely dask-backed (14 886 338 elements each on ICON R02B09), whereas on a
+        # gridded store lat/lon are small numpy coords and persist() was a silent no-op.
+        #
+        # This removes work rather than adding it. Every consumer reads them as numpy:
+        # overlap.py already materialises cell_area for precisely this reason, and grid.py
+        # calls .compute() on lat_init/lon_init. The arrays also stop being pinned in worker
+        # memory for the whole run. Done here, at the end of __init__, because
+        # validate_inputs() and setup_unstructured_grid() both reassign self.lat/self.lon.
+        for _attr in ("lat", "lon", "lat_init", "lon_init", "cell_area"):
+            _value = getattr(self, _attr, None)
+            if _value is not None and is_dask_collection(getattr(_value, "data", None)):
+                setattr(self, _attr, _value.compute())
 
         self._configure_warnings()
 

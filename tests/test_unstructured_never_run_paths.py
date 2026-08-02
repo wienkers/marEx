@@ -12,8 +12,14 @@ is a Phase-2 regression -- `partition_centroid_unstructured` is byte-identical a
    made the documented two-cluster pattern impossible:
    `run_preprocess(checkpoint="save")` -> close cluster -> `run(checkpoint="load")`.
    The load path returns straight from the zarr store and never reads `data_bin`.
+3. `tracker.__init__` `persist()`-ed `lat`/`lon`/`lat_init`/`lon_init`/`cell_area`, binding
+   them to whichever client was active at construction and replacing their graphs with
+   futures. Closing that client -- what the two-cluster pattern does -- orphaned them, and
+   tracking died with `FutureCancelledError: ... lost dependencies`. Invisible on gridded
+   data, where those coords are small numpy arrays and `persist()` is a no-op.
 """
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -129,3 +135,93 @@ class TestCheckpointLoadBypassesSingleUseGuard:
         with pytest.raises(Exception) as excinfo:
             trk.run()
         assert "already been run" not in str(excinfo.value)
+
+
+class TestTwoClusterPatternUnstructured:
+    """The documented pattern: preprocess on one cluster, track on another.
+
+    Unstructured only. On a gridded store `lat`/`lon` are small numpy coords, so the
+    `persist()` that caused this was a silent no-op and the same test passes either way --
+    it cannot discriminate. Here they are genuinely dask-backed (405 cells in the fixture,
+    14 886 338 on ICON R02B09), which is what binds them to a client.
+    """
+
+    @pytest.mark.slow
+    def test_run_checkpoint_load_survives_a_cluster_restart(self):
+        from distributed import Client, LocalCluster
+
+        data = xr.open_zarr(
+            str(Path(__file__).parent / "data" / "extremes_unstructured.zarr"),
+            chunks={"time": 2, "ncells": -1},
+        )
+        # The condition under test: these must really be dask-backed, or the test is vacuous.
+        assert data.cell_areas.chunks is not None
+        assert data.lat.chunks is not None
+
+        tmp = tempfile.mkdtemp(prefix="marex_twocluster_")
+        cluster_one = Client(LocalCluster(n_workers=2, threads_per_worker=1, memory_limit="3GB", processes=True))
+        try:
+            trk = marEx.tracker(
+                data.extreme_events,
+                data.mask,
+                R_fill=2,
+                area_filter_quartile=0.1,
+                T_fill=0,
+                allow_merging=True,
+                unstructured_grid=True,
+                dimensions={"x": "ncells"},
+                coordinates={"x": "lon", "y": "lat"},
+                regional_mode=False,
+                coordinate_units="degrees",
+                quiet=True,
+                neighbours=data.neighbours,
+                cell_areas=data.cell_areas,
+                temp_dir=tmp,
+            )
+            trk.run_preprocess(checkpoint="save")
+        finally:
+            cluster_one.close()
+
+        cluster_two = Client(LocalCluster(n_workers=2, threads_per_worker=1, memory_limit="3GB", processes=True))
+        try:
+            # Raised FutureCancelledError("... lost dependencies") before the fix.
+            events = trk.run(checkpoint="load")
+            assert int(events.ID.size) > 0
+        finally:
+            cluster_two.close()
+
+    def test_coordinate_state_is_not_left_as_dask_futures(self):
+        """Cheap structural guard for the same bug, with no cluster restart.
+
+        If these come back dask-backed, they are again bound to a client and the
+        two-cluster pattern is broken -- whether or not the slow test above ran.
+        """
+        from dask import is_dask_collection
+
+        data = xr.open_zarr(
+            str(Path(__file__).parent / "data" / "extremes_unstructured.zarr"),
+            chunks={"time": 2, "ncells": -1},
+        )
+        tmp = tempfile.mkdtemp(prefix="marex_coordstate_")
+        trk = marEx.tracker(
+            data.extreme_events,
+            data.mask,
+            R_fill=2,
+            area_filter_quartile=0.1,
+            T_fill=0,
+            allow_merging=False,
+            unstructured_grid=True,
+            dimensions={"x": "ncells"},
+            coordinates={"x": "lon", "y": "lat"},
+            regional_mode=False,
+            coordinate_units="degrees",
+            quiet=True,
+            neighbours=data.neighbours,
+            cell_areas=data.cell_areas,
+            temp_dir=tmp,
+        )
+        for attr in ("lat", "lon", "lat_init", "lon_init", "cell_area"):
+            value = getattr(trk, attr, None)
+            if value is None:
+                continue
+            assert not is_dask_collection(getattr(value, "data", None)), f"{attr} is still dask-backed"
