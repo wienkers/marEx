@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
+from dask import is_dask_collection
 
 import marEx
 from marEx.exceptions import ConfigurationError, DataValidationError
@@ -1018,7 +1019,30 @@ class TestUnstructuredCellAreaRechunking:
                 quiet=True,
             )
 
-        assert len(tracker.cell_area.chunksizes[xdim]) == 1, (
-            f"tracker.cell_area still has {len(tracker.cell_area.chunksizes[xdim])} chunks "
-            "along the spatial dimension -- the rechunk never reached the tracker"
+        # The tracker now materialises cell_area at the end of __init__ (it was a persisted
+        # dask collection bound to the constructing client, which broke the two-cluster
+        # pattern -- see tests/test_unstructured_never_run_paths.py). Materialising is
+        # strictly stronger than the single-chunk rechunk this test was written to guard:
+        # a numpy-backed array is contiguous by construction. Assert the invariant in a
+        # representation-agnostic way so it holds under either.
+        #
+        # Honest note on coverage: because .compute() yields a contiguous array whatever the
+        # input chunking, this assertion can no longer *discriminate* the original §4.2 bug
+        # (a rechunk that never reached the tracker). It is not hiding that bug -- the bug
+        # class is gone, since nothing downstream can now observe multi-chunk cell_area --
+        # but this test is a contiguity guard, not a rechunk-plumbing guard, from here on.
+        chunksizes = tracker.cell_area.chunksizes
+        if xdim in chunksizes:
+            assert len(chunksizes[xdim]) == 1, (
+                f"tracker.cell_area still has {len(chunksizes[xdim])} chunks along the "
+                "spatial dimension -- it is neither materialised nor single-chunked"
+            )
+        else:
+            assert not is_dask_collection(getattr(tracker.cell_area, "data", None))
+            assert tracker.cell_area.sizes[xdim] == n_cells
+
+        # Values must survive whichever route was taken.
+        np.testing.assert_allclose(
+            np.asarray(tracker.cell_area.values),
+            np.asarray(multi_chunk_areas.compute().values),
         )
