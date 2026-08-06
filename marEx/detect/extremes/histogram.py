@@ -12,6 +12,7 @@ logging).
 import warnings
 from typing import Dict, Optional
 
+import dask
 import flox.xarray
 import numpy as np
 import xarray as xr
@@ -405,21 +406,31 @@ def _compute_histogram_quantile_2d(
     upper_bound = bin_edges[-2]
     lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
-    # Check if any values are too high (ignore NaN values)
+    # One scheduler round-trip for the whole bounds check. Each predicate used to be its
+    # own ``if ...any():`` -- DataArray.__bool__ computes -- plus a ``.max()``/``.min()``
+    # inside the warning body, so up to four traversals of a graph that re-executes the
+    # entire upstream anomaly whenever it is not pinned. The four reductions share their
+    # upstream, so computing them together costs a single pass. ``too_low`` stays lazy as
+    # an array: only its ``.any()`` becomes a scalar, because the clamp below still needs
+    # the elementwise mask.
+    #
+    # The predicates here deliberately lack the ``& notnull()`` guard the 1D path carries.
+    # NaN comparisons are False either way; adding it would alter the clamp mask.
     too_high = threshold > upper_bound
-    if too_high.any():
+    too_low = threshold < lower_bound
+    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
+
+    if bool(any_high):
         warnings.warn(
-            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
             f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
             UserWarning,
             stacklevel=2,
         )
 
-    # Check if any values are too low (ignore NaN values)
-    too_low = threshold < lower_bound
-    if too_low.any():
+    if bool(any_low):
         warnings.warn(
-            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
             "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
@@ -535,21 +546,24 @@ def _compute_histogram_quantile_1d(
     upper_bound = bin_edges[-2]
     lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
 
-    # Check if any values are too high (ignore NaN values)
+    # One scheduler round-trip for the whole bounds check -- see the matching comment in
+    # the 2D path. The four reductions share their upstream, so computing them together
+    # costs a single pass instead of one traversal per predicate.
     too_high = (threshold > upper_bound) & threshold.notnull()
-    if too_high.any():
+    too_low = (threshold < lower_bound) & threshold.notnull()
+    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
+
+    if bool(any_high):
         warnings.warn(
-            f"Quantile values exceed expected range: max={threshold.max().compute():.4f} > {upper_bound:.4f}. "
+            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
             f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
             UserWarning,
             stacklevel=2,
         )
 
-    # Check if any values are too low (ignore NaN values)
-    too_low = (threshold < lower_bound) & threshold.notnull()
-    if too_low.any():
+    if bool(any_low):
         warnings.warn(
-            f"Quantile values below expected range in some locations: min={threshold.min().compute():.4f} < {lower_bound:.4f}. "
+            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
             "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
             "Double check the computed threshold values are correct.",
             UserWarning,
