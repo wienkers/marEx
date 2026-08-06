@@ -52,6 +52,94 @@ except ImportError:
     Image = None
 
 
+# Frame geometry.
+#
+# Every frame in a movie must have identical pixel dimensions -- h264 rejects a stream whose
+# frame size changes mid-way -- which is why ``bbox_inches="tight"`` is not used when saving
+# frames: it crops to content, so the dimensions drift with the data.
+#
+# A single hardcoded ``figsize`` satisfies that constraint but wastes most of the frame: a
+# global map is roughly 2:1, so drawing it on a fixed 7x5 canvas left ~45% of the frame as
+# white margin. The fix is not to crop per frame (that reintroduces the drift) but to choose
+# ONE figure aspect up front, from the projected extent of the domain, and use it for every
+# frame. The domain does not change between frames, so the dimensions stay constant.
+_FRAME_DPI = 300
+_FIG_WIDTH_INCHES = 7.0
+# Fraction of the figure the axes box occupies, from matplotlib's default subplot margins
+# (left=0.125, right=0.9, bottom=0.11, top=0.88). The top margin also holds the date title.
+_AXES_WIDTH_FRACTION = 0.775
+_AXES_HEIGHT_FRACTION = 0.77
+# A ``shrink=0.6`` colorbar plus its padding takes roughly a fifth of the width from the map.
+_COLORBAR_WIDTH_FRACTION = 0.80
+# Guard rails against a domain so extreme that the canvas stops being usable -- a narrow zonal
+# band would otherwise ask for a frame a few dozen pixels tall. Keep these wide: a legitimate
+# 4:1 domain (say 200 deg by 50 deg) lands near 0.25, so a floor of 0.30 would clamp ordinary
+# data and quietly reintroduce the whitespace this sizing exists to remove.
+_MIN_FIG_ASPECT = 0.15
+_MAX_FIG_ASPECT = 2.00
+_DEFAULT_FIG_ASPECT = 5.0 / 7.0
+
+
+def _even_height(height_inches: float) -> float:
+    """Round a figure height so ``height * _FRAME_DPI`` lands on an even pixel count.
+
+    h264 needs even dimensions. ``make_frame`` already crops odd frames as a safety net, but
+    landing on even avoids re-opening and rewriting every frame.
+    """
+    pixels = max(2, int(round(height_inches * _FRAME_DPI)))
+    if pixels % 2:
+        pixels += 1
+    return pixels / _FRAME_DPI
+
+
+def _domain_figsize(projection, x_values, y_values, show_colorbar: bool):
+    """Pick a figure size whose aspect matches the domain *as the projection will draw it*.
+
+    The aspect has to come from projected coordinates, not raw lon/lat: Robinson draws a
+    global domain at about 2:1, while the underlying lon/lat rectangle is 360x180 = 2:1 only
+    by coincidence, and any other projection differs. Returns the module default unchanged if
+    the extent cannot be established, so an unusual grid degrades to previous behaviour
+    rather than raising from inside a render.
+    """
+    default = (_FIG_WIDTH_INCHES, _even_height(_FIG_WIDTH_INCHES * _DEFAULT_FIG_ASPECT))
+    if x_values is None or y_values is None:
+        return default
+
+    try:
+        x = np.asarray(x_values, dtype=float).ravel()
+        y = np.asarray(y_values, dtype=float).ravel()
+        if x.size == 0 or y.size == 0:
+            return default
+
+        # Sample the interior, not just the four corners: for a curved projection the
+        # projected bounding box of a lon/lat rectangle is not attained at its corners
+        # (Robinson bulges at the equator and tapers towards the poles).
+        lon_samples = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), 25)
+        lat_samples = np.linspace(float(np.nanmin(y)), float(np.nanmax(y)), 25)
+        grid_lon, grid_lat = np.meshgrid(lon_samples, lat_samples)
+
+        projected = projection.transform_points(ccrs.PlateCarree(), grid_lon.ravel(), grid_lat.ravel())
+        px, py = projected[:, 0], projected[:, 1]
+        finite = np.isfinite(px) & np.isfinite(py)
+        if finite.sum() < 2:
+            return default
+
+        x_range = float(np.ptp(px[finite]))
+        y_range = float(np.ptp(py[finite]))
+        if not (x_range > 0.0 and y_range > 0.0):
+            return default
+
+        map_aspect = y_range / x_range
+    except Exception:
+        # Figure sizing must never be the reason an animation fails.
+        return default
+
+    axes_width_fraction = _AXES_WIDTH_FRACTION * (_COLORBAR_WIDTH_FRACTION if show_colorbar else 1.0)
+    height = _FIG_WIDTH_INCHES * axes_width_fraction * map_aspect / _AXES_HEIGHT_FRACTION
+    height = min(max(height, _FIG_WIDTH_INCHES * _MIN_FIG_ASPECT), _FIG_WIDTH_INCHES * _MAX_FIG_ASPECT)
+    return (_FIG_WIDTH_INCHES, _even_height(height))
+
+
 def _animate(
     plotter,
     config,
@@ -128,6 +216,16 @@ def _animate(
         "x_coord": x_coord,
         "y_coord": y_coord,
     }
+
+    # Size the canvas once, from the domain, and reuse it for every frame. Computed here
+    # rather than in ``make_frame`` precisely so that all frames share one value -- deriving
+    # it per frame would reintroduce the varying-dimension problem that h264 rejects.
+    plot_params["figsize"] = _domain_figsize(
+        plot_params["projection"] or ccrs.Robinson(),
+        plotter.da[x_coord].values if x_coord in plotter.da.coords else None,
+        plotter.da[y_coord].values if y_coord in plotter.da.coords else None,
+        bool(config.show_colorbar),
+    )
 
     # Set up grid information if needed. The unstructured plotter always carries
     # ``fpath_tgrid``/``fpath_ckdtree`` attributes (possibly None), so only treat the data as
@@ -267,7 +365,9 @@ def make_frame(
     projection = plot_params.get("projection") or ccrs.Robinson()
 
     # Object-oriented Figure/canvas: does not touch the (non-thread-safe) pyplot global state.
-    fig = Figure(figsize=(7, 5))
+    # ``figsize`` is computed once per animation by ``_domain_figsize`` and passed in, so every
+    # frame shares it; the fallback keeps a standalone call to this function working.
+    fig = Figure(figsize=plot_params.get("figsize") or (_FIG_WIDTH_INCHES, _FIG_WIDTH_INCHES * _DEFAULT_FIG_ASPECT))
     FigureCanvasAgg(fig)
     try:
         ax = fig.add_subplot(1, 1, 1, projection=projection)
@@ -428,12 +528,12 @@ def make_frame(
             zorder=4,
         )
 
-        # Save the frame at a fixed figure size (no ``bbox_inches="tight"``, which would make
-        # frame dimensions content-dependent and break ffmpeg). Crop to even dimensions for
-        # h264, and skip any resize/re-encode when the frame is already even.
+        # Save at the shared figure size (no ``bbox_inches="tight"``, which would make frame
+        # dimensions content-dependent and break ffmpeg). ``_domain_figsize`` already targets
+        # an even pixel height, so the crop below is a safety net rather than the usual path.
         filename = f"time_{time_ind:04d}.jpg"
         frame_path = temp_dir / filename
-        fig.savefig(str(frame_path), dpi=300)
+        fig.savefig(str(frame_path), dpi=_FRAME_DPI)
 
         image = Image.open(str(frame_path))
         width, height = image.size
