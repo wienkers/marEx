@@ -99,7 +99,10 @@ def _identify_extremes_hobday(
         # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
         # for exactly this reason. Per-cell percentiles are independent of the tiling, so
         # this changes task granularity only (review finding 3.10).
-        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"])
+        # Each cell yields 366 day-of-year percentiles, so budget the tile against that as
+        # well as against the time slab: a series shorter than 366 days would otherwise get
+        # a tile whose output exceeds the budget the tile was sized by.
+        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=366)
         dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
         half_w = window_days_hobday // 2
 

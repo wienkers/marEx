@@ -243,3 +243,71 @@ def test_1d_quantile_matches_captured_reference():
         np.nan_to_num(got, nan=sentinel),
         np.nan_to_num(expected, nan=sentinel),
     )
+
+
+def test_spatial_tile_budget_bounds_the_output_not_just_the_input():
+    """The tile must be budgeted against the array produced, not only the one consumed.
+
+    A task reads ``ntime x tile_area`` and writes ``output_elements_per_cell x tile_area``.
+    Sizing on ``ntime`` alone bounds only the read, and since ``tile_area = target //
+    ntime`` the write is then ``target * output_per_cell / ntime`` -- over budget exactly
+    when the series is shorter than the per-cell output, and growing as it gets shorter.
+    """
+    target = 1_000_000
+    ntime = 100
+    output_per_cell = 500  # e.g. n_bins; deliberately > ntime
+
+    da = xr.DataArray(
+        np.zeros((ntime, 200, 200), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+    ).chunk({"time": -1, "lat": -1, "lon": -1})
+
+    tiled = H._chunk_spatial_for_histogram(da, "time", target_elements=target, output_elements_per_cell=output_per_cell)
+    cells = tiled.chunks[1][0] * tiled.chunks[2][0]
+
+    # Both sides of the reduction stay within the budget. The tolerance absorbs the
+    # integer rounding of the tile side (round(sqrt(area))**2 can exceed area slightly);
+    # it is a few percent, not the 5x the input-only budget gives here.
+    tol = 1.1
+    assert ntime * cells <= target * tol, "input slab over budget"
+    assert output_per_cell * cells <= target * tol, "produced array over budget"
+
+    # And the old input-only budget genuinely violated it, so this test can fail.
+    input_only = H._chunk_spatial_for_histogram(da, "time", target_elements=target)
+    old_cells = input_only.chunks[1][0] * input_only.chunks[2][0]
+    assert output_per_cell * old_cells > target * tol
+
+
+def test_spatial_tile_budget_unchanged_for_long_series():
+    """ntime >> output_per_cell is the normal case: the tiling must not move."""
+    da = xr.DataArray(
+        np.zeros((5000, 180, 360), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+    ).chunk({"time": -1, "lat": -1, "lon": -1})
+
+    before = H._chunk_spatial_for_histogram(da, "time").chunks
+    after = H._chunk_spatial_for_histogram(da, "time", output_elements_per_cell=502).chunks
+    assert before == after
+
+
+def test_output_budget_does_not_change_quantile_values():
+    """The budget change is a pure rechunk, so thresholds must be bit-identical."""
+    rng = np.random.default_rng(20260807)
+    ntime = 120  # short on purpose: this is where the two budgets diverge
+    da = xr.DataArray(
+        rng.normal(size=(ntime, 240)).astype(np.float32),
+        dims=("time", "x"),
+        coords={"time": xr.date_range("2000-01-01", periods=ntime, freq="D")},
+        name="dat",
+    ).chunk({"time": -1, "x": 60})
+
+    orig = H._HISTOGRAM_TASK_ELEMENTS
+    try:
+        H._HISTOGRAM_TASK_ELEMENTS = 10**12  # one tile: the unchunked reference
+        reference = H._compute_histogram_quantile_1d(da, 0.95, dim="time").compute()
+        H._HISTOGRAM_TASK_ELEMENTS = ntime * 40  # small budget -> the output bound binds
+        tiled = H._compute_histogram_quantile_1d(da, 0.95, dim="time").compute()
+    finally:
+        H._HISTOGRAM_TASK_ELEMENTS = orig
+
+    np.testing.assert_array_equal(tiled.values, reference.values)

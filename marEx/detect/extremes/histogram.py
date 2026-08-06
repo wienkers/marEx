@@ -33,7 +33,12 @@ logger = get_logger(__name__)
 _HISTOGRAM_TASK_ELEMENTS = 50_000_000
 
 
-def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: int = _HISTOGRAM_TASK_ELEMENTS) -> xr.DataArray:
+def _chunk_spatial_for_histogram(
+    da: xr.DataArray,
+    dim: str,
+    target_elements: int = _HISTOGRAM_TASK_ELEMENTS,
+    output_elements_per_cell: int = 1,
+) -> xr.DataArray:
     """Tile the non-reduced dimensions of ``da`` for memory-safe histogram reduction.
 
     The histogram-quantile kernels reduce over ``dim`` (typically time), which must stay
@@ -41,6 +46,10 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
     per-task element count stays near ``target_elements`` -- independent of the caller's
     chunking or the field resolution. This is a pure rechunk: every spatial cell's reduced
     axis lies wholly within one tile, so it changes only task granularity, never values.
+
+    Both sides of the reduction are budgeted. A task reads ``ntime x tile_area`` elements
+    and writes ``output_elements_per_cell x tile_area``; the tile is sized against whichever
+    is larger, so neither exceeds ``target_elements``.
 
     Parameters
     ----------
@@ -50,6 +59,10 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
         Name of the dimension that is reduced (kept unchunked).
     target_elements : int, optional
         Approximate number of array elements per spatial tile.
+    output_elements_per_cell : int, optional
+        Elements the reduction produces per spatial cell -- ``n_bins`` for a histogram,
+        ``366`` for a per-day-of-year percentile. Defaults to 1 (output no larger than the
+        input), which reproduces the previous, input-only budget.
 
     Returns
     -------
@@ -61,7 +74,24 @@ def _chunk_spatial_for_histogram(da: xr.DataArray, dim: str, target_elements: in
         return da.chunk({dim: -1})
 
     ntime = max(int(da.sizes[dim]), 1)
-    tile_area = max(1, target_elements // ntime)
+
+    # Budget against BOTH the array consumed and the array produced.
+    #
+    # The reduction reads an `ntime x tile_area` slab and writes an
+    # `output_elements_per_cell x tile_area` result (n_bins for the 1-D histogram path, 366
+    # for the per-day-of-year percentile path). Sizing on `ntime` alone bounds only the
+    # slab, and because `tile_area = target // ntime` the OUTPUT is then
+    # `target * output_elements_per_cell / ntime` elements -- over budget exactly when
+    # `ntime < output_elements_per_cell`, and growing without bound as the series gets
+    # shorter. That is backwards: a shorter run would silently allocate a bigger task.
+    #
+    # Taking the max bounds both sides by `target_elements`. For the long series this path
+    # is normally used on (ntime >> n_bins) the tiling is unchanged.
+    #
+    # Pure rechunk: every cell's reduced axis stays wholly inside one tile, so this changes
+    # task granularity only, never values.
+    divisor = max(ntime, max(1, int(output_elements_per_cell)))
+    tile_area = max(1, target_elements // divisor)
     side = max(1, int(round(tile_area ** (1.0 / len(spatial_dims)))))
 
     chunks = {d: min(int(da.sizes[d]), side) for d in spatial_dims}
@@ -551,7 +581,10 @@ def _compute_histogram_quantile_1d(
     # time series lies wholly within its own tile (time stays unchunked), the per-cell
     # histogram counts -- and therefore the resulting quantiles -- are independent of
     # this tiling: the operation is bit-for-bit identical to the unchunked computation.
-    da = _chunk_spatial_for_histogram(da, dim)
+    # Each cell yields n_bins counts, so budget the tile against that as well as against
+    # the time slab -- otherwise a series shorter than n_bins produces a tile whose
+    # histogram is larger than the budget it was sized by.
+    da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1)
 
     # Clip finite data into the last bin (its centre) so out-of-range-high values are
     # counted in the top bin instead of being dropped by xhistogram, which renormalised
