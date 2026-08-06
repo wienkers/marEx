@@ -9,6 +9,8 @@ Targets the §3 findings the gridded golden fixture does *not* exercise:
 - §3.4 a cell that is NaN only at some timesteps must still receive a real threshold.
 """
 
+from pathlib import Path
+
 import numpy as np
 import xarray as xr
 
@@ -198,3 +200,46 @@ def test_global_extreme_exact_small_unstructured_no_zero_chunk():
     )
     thr = thresholds.compute()
     assert np.isfinite(thr.values).any()
+
+
+def _anomaly_fixture_1d(n_time=400, n_y=6, n_x=7, seed=0):
+    """A deterministic dask-backed anomaly field for the 1D quantile bit-identity oracle.
+
+    Deliberately spans several spatial chunks with time unchunked, which is the shape the
+    1D driver reduces over.
+    """
+    rng = np.random.default_rng(seed)
+    data = rng.normal(0.0, 1.0, size=(n_time, n_y, n_x)).astype(np.float32)
+    da = xr.DataArray(
+        data,
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": np.arange(n_time),
+            "lat": np.arange(n_y, dtype=np.float32),
+            "lon": np.arange(n_x, dtype=np.float32),
+        },
+        name="da",
+    )
+    return da.chunk({"time": -1, "lat": 3, "lon": 7})
+
+
+_REFERENCE_NPY = Path(__file__).parent / "data" / "histogram_quantile_1d_reference.npy"
+
+
+def test_1d_quantile_matches_captured_reference():
+    """Bit-identity oracle for the 1D quantile path.
+
+    The reference was captured from the two-phase (persist-the-CDF) implementation before
+    that path was restructured. Any change to the quantile arithmetic -- notably a cumsum
+    that drops from float64 to float32 -- moves these values, and this test is the gate
+    that catches it. Phase-2 rules apply: no tolerance.
+    """
+    got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
+    expected = np.load(_REFERENCE_NPY)
+    assert got.dtype == expected.dtype, f"dtype moved {expected.dtype} -> {got.dtype}"
+    assert got.shape == expected.shape
+    sentinel = -999.0
+    np.testing.assert_array_equal(
+        np.nan_to_num(got, nan=sentinel),
+        np.nan_to_num(expected, nan=sentinel),
+    )
