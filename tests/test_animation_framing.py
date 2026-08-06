@@ -22,7 +22,7 @@ from marEx.plotX.animation import (
     _DEFAULT_FIG_ASPECT,
     _FIG_WIDTH_INCHES,
     _FRAME_DPI,
-    _MAX_FIG_ASPECT,
+    _MAX_FRAME_PIXELS,
     _MIN_FIG_ASPECT,
     _domain_figsize,
     _even_height,
@@ -104,11 +104,10 @@ class TestDomainFigsize:
         "proj",
         [ccrs.Robinson(), ccrs.PlateCarree(), ccrs.Mollweide(), ccrs.EqualEarth()],
     )
-    def test_aspect_stays_within_guard_rails(self, proj):
+    def test_aspect_stays_above_the_floor(self, proj):
         for lon, lat in [(GLOBAL_LON, GLOBAL_LAT), (REGIONAL_LON, REGIONAL_LAT)]:
             figsize = _domain_figsize(proj, lon, lat, show_colorbar=False)
-            aspect = figsize[1] / figsize[0]
-            assert _MIN_FIG_ASPECT <= aspect <= _MAX_FIG_ASPECT
+            assert figsize[1] / figsize[0] >= _MIN_FIG_ASPECT
 
     def test_result_is_deterministic(self):
         """Same domain must give the same canvas -- this is what keeps frames uniform."""
@@ -153,3 +152,40 @@ class TestDomainFigsizeDegradesQuietly:
                 return np.full((x.size, 3), np.inf)
 
         assert _domain_figsize(NonFiniteProjection(), GLOBAL_LON, GLOBAL_LAT, show_colorbar=False) == DEFAULT_SIZE
+
+
+class TestFrameFitsWithinH264Limits:
+    """H.264 levels cap a single dimension at 4096 px.
+
+    libx264 encodes an oversized frame without complaining, so the failure surfaces at
+    playback in a browser -- which is precisely where these movies are served. Assert the
+    pixel ceiling directly: asserting the *aspect* against its own constant is a tautology
+    that would have let a 2100x4200 frame through.
+    """
+
+    # 10 deg lon by 80 deg lat is an ordinary regional strip (a boundary current), and it
+    # projects to aspect ~8 -- comfortably past the ceiling before clamping.
+    TALL_NARROW = (np.arange(-5.0, 5.0, 0.1), np.arange(-40.0, 40.0, 0.1))
+
+    @pytest.mark.parametrize("proj", [ccrs.PlateCarree(), ccrs.Mollweide(), ccrs.Robinson()])
+    @pytest.mark.parametrize("colorbar", [True, False])
+    def test_tall_narrow_domain_stays_within_the_pixel_cap(self, proj, colorbar):
+        width_px, height_px = _pixels(_domain_figsize(proj, *self.TALL_NARROW, show_colorbar=colorbar))
+        assert width_px <= _MAX_FRAME_PIXELS
+        assert height_px <= _MAX_FRAME_PIXELS
+
+    def test_the_cap_actually_binds_for_this_domain(self):
+        """Guards the guard: if this stops clamping, the test above proves nothing."""
+        _, height_px = _pixels(_domain_figsize(ccrs.PlateCarree(), *self.TALL_NARROW, show_colorbar=False))
+        assert height_px == _MAX_FRAME_PIXELS
+
+    def test_clamped_height_is_still_even(self):
+        _, height_px = _pixels(_domain_figsize(ccrs.PlateCarree(), *self.TALL_NARROW, show_colorbar=False))
+        assert height_px % 2 == 0
+
+    def test_every_realistic_domain_is_within_the_cap(self):
+        for proj in (ccrs.Robinson(), ccrs.PlateCarree(), ccrs.Mollweide(), ccrs.EqualEarth()):
+            for lon, lat in [(GLOBAL_LON, GLOBAL_LAT), (REGIONAL_LON, REGIONAL_LAT), self.TALL_NARROW]:
+                for colorbar in (True, False):
+                    for dim in _pixels(_domain_figsize(proj, lon, lat, colorbar)):
+                        assert dim <= _MAX_FRAME_PIXELS

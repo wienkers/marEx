@@ -18,6 +18,7 @@ import numpy as np
 import xarray as xr
 
 from ..exceptions import DependencyError, VisualisationError
+from ..logging_config import get_logger
 
 # Handle optional dependencies for plotting
 try:
@@ -51,6 +52,8 @@ except ImportError:
     HAS_PIL = False
     Image = None
 
+logger = get_logger(__name__)
+
 
 # Frame geometry.
 #
@@ -71,12 +74,18 @@ _AXES_WIDTH_FRACTION = 0.775
 _AXES_HEIGHT_FRACTION = 0.77
 # A ``shrink=0.6`` colorbar plus its padding takes roughly a fifth of the width from the map.
 _COLORBAR_WIDTH_FRACTION = 0.80
-# Guard rails against a domain so extreme that the canvas stops being usable -- a narrow zonal
-# band would otherwise ask for a frame a few dozen pixels tall. Keep these wide: a legitimate
-# 4:1 domain (say 200 deg by 50 deg) lands near 0.25, so a floor of 0.30 would clamp ordinary
-# data and quietly reintroduce the whitespace this sizing exists to remove.
+# Lower guard rail against a domain so wide it stops being usable -- a narrow zonal band would
+# otherwise ask for a frame a few dozen pixels tall. Keep it low: a legitimate 4:1 domain (say
+# 200 deg by 50 deg) lands near 0.25, so a floor of 0.30 would clamp ordinary data and quietly
+# reintroduce the whitespace this sizing exists to remove.
 _MIN_FIG_ASPECT = 0.15
-_MAX_FIG_ASPECT = 2.00
+# Upper guard rail is a PIXEL ceiling, not an aspect one. H.264 levels cap a single dimension
+# at 4096 px, and browsers and most hardware decoders enforce it -- but libx264 encodes larger
+# without complaint, so an oversized frame fails at playback rather than at write time, in the
+# browser, which is exactly where these files end up. A tall narrow domain reaches it easily:
+# 10 deg lon by 80 deg lat projects to aspect ~8. Expressed as an aspect this was 2.00, which
+# yields 7 x 14 in at 300 dpi = 2100x4200 -- just over the line.
+_MAX_FRAME_PIXELS = 4096
 _DEFAULT_FIG_ASPECT = 5.0 / 7.0
 
 
@@ -102,14 +111,21 @@ def _domain_figsize(projection, x_values, y_values, show_colorbar: bool):
     rather than raising from inside a render.
     """
     default = (_FIG_WIDTH_INCHES, _even_height(_FIG_WIDTH_INCHES * _DEFAULT_FIG_ASPECT))
-    if x_values is None or y_values is None:
+
+    def _fallback(reason: str):
+        # Silent degradation is this package's most expensive recurring failure mode: the
+        # frames would simply come back with the old whitespace and nothing would say why.
+        logger.debug(f"Animation frame sizing fell back to the default canvas ({reason}); frames may show extra margin")
         return default
+
+    if x_values is None or y_values is None:
+        return _fallback("x/y coordinates not available on the DataArray")
 
     try:
         x = np.asarray(x_values, dtype=float).ravel()
         y = np.asarray(y_values, dtype=float).ravel()
         if x.size == 0 or y.size == 0:
-            return default
+            return _fallback("empty coordinate array")
 
         # Sample the interior, not just the four corners: for a curved projection the
         # projected bounding box of a lon/lat rectangle is not attained at its corners
@@ -122,21 +138,22 @@ def _domain_figsize(projection, x_values, y_values, show_colorbar: bool):
         px, py = projected[:, 0], projected[:, 1]
         finite = np.isfinite(px) & np.isfinite(py)
         if finite.sum() < 2:
-            return default
+            return _fallback("projection returned no finite points for this domain")
 
         x_range = float(np.ptp(px[finite]))
         y_range = float(np.ptp(py[finite]))
         if not (x_range > 0.0 and y_range > 0.0):
-            return default
+            return _fallback("domain has zero extent in a projected dimension")
 
         map_aspect = y_range / x_range
-    except Exception:
+    except Exception as exc:
         # Figure sizing must never be the reason an animation fails.
-        return default
+        return _fallback(f"{type(exc).__name__} while projecting the domain")
 
     axes_width_fraction = _AXES_WIDTH_FRACTION * (_COLORBAR_WIDTH_FRACTION if show_colorbar else 1.0)
     height = _FIG_WIDTH_INCHES * axes_width_fraction * map_aspect / _AXES_HEIGHT_FRACTION
-    height = min(max(height, _FIG_WIDTH_INCHES * _MIN_FIG_ASPECT), _FIG_WIDTH_INCHES * _MAX_FIG_ASPECT)
+    # ``_MAX_FRAME_PIXELS`` is even, so clamping here survives ``_even_height`` unchanged.
+    height = min(max(height, _FIG_WIDTH_INCHES * _MIN_FIG_ASPECT), _MAX_FRAME_PIXELS / _FRAME_DPI)
     return (_FIG_WIDTH_INCHES, _even_height(height))
 
 
