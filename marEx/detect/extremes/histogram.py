@@ -228,6 +228,58 @@ def _rolling_histogram_quantile(
     return threshold.astype(np.float32)
 
 
+def _histogram_quantile_block(
+    hist_block: NDArray[np.integer],
+    bin_edges: NDArray[np.float64],
+    q: float,
+) -> NDArray[np.float64]:
+    """Interpolate the q-th quantile from per-cell histogram counts.
+
+    ``hist_block`` has the bin axis last (``apply_ufunc`` moves core dimensions there) and
+    any number of leading spatial axes. Fully vectorised over those leading axes -- no
+    ``np.vectorize`` loop -- so this stays a single numpy pass per task.
+
+    A transcription of the two-phase dask expression it replaces, kept to the same
+    arithmetic in the same order and the same dtypes: ``hist_block`` is integer, so the PDF
+    and its cumulative sum are float64, ``bin_edges`` is float64, and the result is float64
+    (unlike the 2-D path, this one never casts down to float32). Doing the interpolation
+    per-cell removes the ``space x n_bins`` CDF that the two-phase version had to
+    materialise in order to index it with a concrete ``idx_upper``.
+    """
+    eps = 1e-10
+    total = hist_block.sum(axis=-1, keepdims=True)
+    pdf = hist_block / (total + eps)
+    cdf = np.cumsum(pdf, axis=-1)
+
+    # First bin whose cumulative CDF reaches q. ``cdf[i]`` is the fraction of samples <=
+    # the UPPER edge of bin i, so the quantile is interpolated WITHIN that bin between its
+    # histogram edges -- on edges, not bin centres, which removes a systematic
+    # half-bin-width low bias. argmax on an all-False row yields 0, which the clamp below
+    # maps to 1, exactly as the dask expression did.
+    n_bins = len(bin_edges) - 1
+    idx_upper = np.argmax(cdf >= (q - eps), axis=-1)
+    # Clamp so idx_upper-1 >= 0 and idx_upper+1 indexes a valid (finite) upper edge.
+    idx_upper = np.clip(idx_upper, 1, n_bins - 1)
+    idx_lower = idx_upper - 1
+
+    cdf_lower = np.take_along_axis(cdf, idx_lower[..., None], axis=-1)[..., 0]
+    cdf_upper = np.take_along_axis(cdf, idx_upper[..., None], axis=-1)[..., 0]
+    edge_lower = bin_edges[idx_upper]
+    edge_upper = bin_edges[idx_upper + 1]
+
+    # idx_upper is the FIRST bin to reach q, so cdf_upper >= q > cdf_lower and the
+    # denominator is strictly positive (guarded for degenerate all-NaN/constant cells,
+    # which are NaN-masked below anyway).
+    denom = cdf_upper - cdf_lower
+    frac = (q - cdf_lower) / np.where(denom > eps, denom, 1.0)
+    threshold = edge_lower + frac * (edge_upper - edge_lower)
+
+    # A zero total is exactly "NaN at every timestep": the histogram drops NaN and counts
+    # every finite sample (out-of-range-high values are clipped in by the caller). Cells
+    # valid for only part of the year still get a real threshold.
+    return np.where(total[..., 0] == 0, np.nan, threshold)
+
+
 def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
@@ -510,49 +562,26 @@ def _compute_histogram_quantile_1d(
     # Compute histogram
     hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim])
 
-    # Convert to PDF and CDF. Only the CDF (and the tiny per-cell totals) are persisted:
-    # `hist` is an intermediate of the same graph and is never read once `cdf` exists, so
-    # persisting it too doubled the bin-resolved footprint (~4 GB each at 720x1440)
-    # (review finding 3.7).
-    total_counts = hist.sum(dim=f"{da.name}_bin")
-    pdf = hist / (total_counts + 1e-10)
-    cdf, total_counts = materialiser.pin(pdf.cumsum(dim=f"{da.name}_bin"), total_counts)
-
-    eps = 1e-10
-
-    # Locate the bin containing the q-th quantile: the first bin whose cumulative CDF
-    # reaches q. ``cdf[i]`` is the fraction of samples <= the UPPER edge of bin i, so the
-    # quantile is interpolated WITHIN that bin between its histogram edges. Interpolating
-    # on edges (not bin centres) removes a systematic half-bin-width low bias: the earlier
-    # code interpolated between bin centres, which was ~precision/2 less accurate than the
-    # true percentile (and the previous strict-`>` variant degenerated to a bin centre).
-    n_bins = len(bin_edges) - 1
-    idx_upper = (cdf >= (q - eps)).argmax(dim=f"{da.name}_bin")
-    # Clamp so idx_upper-1 >= 0 and idx_upper+1 indexes a valid (finite) upper edge.
-    idx_upper = xr.where(idx_upper < 1, 1, xr.where(idx_upper > n_bins - 1, n_bins - 1, idx_upper)).compute()
-    idx_lower = idx_upper - 1
-
-    cdf_lower = cdf.isel({f"{da.name}_bin": idx_lower})  # CDF at the bin's lower edge
-    cdf_upper = cdf.isel({f"{da.name}_bin": idx_upper})  # CDF at the bin's upper edge
-    edge_lower = xr.DataArray(bin_edges[idx_upper.values], dims=idx_upper.dims, coords=idx_upper.coords)
-    edge_upper = xr.DataArray(bin_edges[idx_upper.values + 1], dims=idx_upper.dims, coords=idx_upper.coords)
-
-    # Within-bin linear interpolation of the inverse CDF. idx_upper is the FIRST bin to
-    # reach q, so cdf_upper >= q > cdf_lower and the denominator is strictly positive
-    # (guarded for degenerate all-NaN/constant cells, which are masked below anyway).
-    denom = cdf_upper - cdf_lower
-    frac = (q - cdf_lower) / xr.where(denom > eps, denom, 1.0)
-    threshold = edge_lower + frac * (edge_upper - edge_lower)
-
-    # Set threshold to NaN only for spatial points that are NaN at *every* timestep,
-    # so a cell that is valid for part of the year (e.g. seasonal sea ice) still gets a
-    # real threshold rather than a permanent NaN. (Consistent with the 2D path.)
-    # The mask comes free from the histogram totals: the histogram drops NaN and counts
-    # every finite sample (values above the range are clipped in, above), so a zero total
-    # is exactly "NaN at every timestep". Recomputing it from `da` re-ran the whole
-    # upstream anomaly graph plus this function's spatial re-tiling (review finding 3.8).
-    nan_mask = total_counts == 0
-    threshold = materialiser.pin_one(threshold.where(~nan_mask).drop_vars(f"{da.name}_bin"))
+    # Interpolate the quantile inside a single apply_ufunc over the bin dimension rather
+    # than materialising the CDF and indexing it with a concrete idx_upper. The CDF is
+    # space x n_bins -- ~30 GB on the 14.9 M-cell ICON mesh and independent of n_time --
+    # so the old two-phase shape put a space-scaled ceiling under every compute_mode, and
+    # forced a scheduler round-trip mid-function. The 2-D path in this module has always
+    # had this shape; this converges the 1-D path onto it. The NaN mask is folded into the
+    # kernel, so `hist` is traversed exactly once (review findings 3.7, 3.8).
+    threshold = xr.apply_ufunc(
+        _histogram_quantile_block,
+        hist,
+        kwargs={"bin_edges": bin_edges, "q": q},
+        input_core_dims=[[f"{da.name}_bin"]],
+        output_core_dims=[[]],
+        dask="parallelized",
+        output_dtypes=[np.float64],
+        keep_attrs=True,
+    )
+    if f"{da.name}_bin" in threshold.coords:
+        threshold = threshold.drop_vars(f"{da.name}_bin")
+    threshold = materialiser.pin_one(threshold)
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]

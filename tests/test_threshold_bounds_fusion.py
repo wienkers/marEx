@@ -56,18 +56,32 @@ def _default_bin_edges(precision=0.01, max_anomaly=5.0):
 class TestBoundsCheckRoundTrips:
     """The bounds check must cost one fused round-trip, not one per predicate."""
 
-    def test_1d_bounds_check_makes_at_most_four_round_trips(self):
-        """Measured 5 before the fusion, 4 after.
+    def test_1d_bounds_check_makes_at_most_two_round_trips(self):
+        """Measured 5 originally, 4 after the bounds fusion, 2 now.
 
-        The remaining four are the CDF persist, the ``idx_upper`` compute, the threshold
-        persist and one fused bounds check. The first two are the ``space x n_bins`` CDF
-        ceiling and are removed separately, when the 1D quantile is fused into a single
-        ``apply_ufunc``; this bound tightens to 2 then.
+        The two that remain are the threshold persist and one fused bounds check. The two
+        that went are the CDF persist and the ``idx_upper`` compute, both removed when the
+        1D quantile was fused into a single ``apply_ufunc`` -- together they were the
+        ``space x n_bins`` CDF ceiling.
         """
         da = _anomaly_fixture()
         with CountComputes() as cb:
             _compute_histogram_quantile_1d(da, q=0.95, dim="time")
-        assert cb.n <= 4, f"expected <= 4 scheduler round-trips, got {cb.n}"
+        assert cb.n <= 2, f"expected <= 2 scheduler round-trips, got {cb.n}"
+
+    def test_1d_makes_a_single_round_trip_in_lazy_mode(self):
+        """In lazy mode nothing is pinned, so only the fused bounds check remains.
+
+        This is the assertion that would catch a re-introduced CDF persist: it is
+        space-scaled (~30 GB on the ICON mesh) and no amount of time-chunking shrinks it,
+        so it must not come back under any compute_mode.
+        """
+        from marEx.detect.compute_mode import Materialiser
+
+        da = _anomaly_fixture()
+        with CountComputes() as cb:
+            _compute_histogram_quantile_1d(da, q=0.95, dim="time", materialiser=Materialiser("lazy"))
+        assert cb.n <= 1, f"expected <= 1 scheduler round-trip in lazy mode, got {cb.n}"
 
     def test_2d_bounds_check_makes_at_most_four_round_trips(self):
         """Measured 5 before the fusion, 4 after.
