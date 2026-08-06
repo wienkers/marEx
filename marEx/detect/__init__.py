@@ -33,6 +33,9 @@ from .anomaly.fixed_baseline import _compute_anomaly_detrend_fixed_baseline, _co
 from .anomaly.harmonic import _compute_anomaly_detrended
 from .anomaly.shifting_baseline import _compute_anomaly_shifting_baseline
 
+# Materialisation policy (compute_mode) for larger-than-memory runs
+from .compute_mode import ComputeMode, Materialiser, clear_staging, create_staging_dir
+
 # Public extremes API (dispatcher)
 from .extremes.base import identify_extremes
 
@@ -61,6 +64,11 @@ __all__ = [
     "identify_extremes",
     "rolling_climatology",
     "smoothed_rolling_climatology",
+    # Materialisation policy
+    "ComputeMode",
+    "Materialiser",
+    "clear_staging",
+    "create_staging_dir",
     # Public-by-test helper
     "add_decimal_year",
 ]

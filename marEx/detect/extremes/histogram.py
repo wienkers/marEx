@@ -16,12 +16,12 @@ import dask
 import flox.xarray
 import numpy as np
 import xarray as xr
-from dask import persist
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 from ...logging_config import get_logger
+from ..compute_mode import Materialiser
 
 # Get module logger
 logger = get_logger(__name__)
@@ -237,6 +237,7 @@ def _compute_histogram_quantile_2d(
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -266,6 +267,11 @@ def _compute_histogram_quantile_2d(
     xarray.DataArray
         Computed quantile value for each spatial location
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     if bin_edges is None:
         # Create optimised asymmetric bins
         bin_edges = np.concatenate(
@@ -400,7 +406,7 @@ def _compute_histogram_quantile_2d(
     # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
     # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
-    threshold = threshold.where(~nan_mask).persist()
+    threshold = materialiser.pin_one(threshold.where(~nan_mask))
 
     # Validate threshold values against bounds
     upper_bound = bin_edges[-2]
@@ -449,6 +455,7 @@ def _compute_histogram_quantile_1d(
     bin_edges: Optional[NDArray[np.float64]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -475,6 +482,11 @@ def _compute_histogram_quantile_1d(
     xarray.DataArray
         Computed quantile value for each spatial location
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     if bin_edges is None:
         # Create optimised asymmetric bins
         bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
@@ -504,7 +516,7 @@ def _compute_histogram_quantile_1d(
     # (review finding 3.7).
     total_counts = hist.sum(dim=f"{da.name}_bin")
     pdf = hist / (total_counts + 1e-10)
-    cdf, total_counts = persist(pdf.cumsum(dim=f"{da.name}_bin"), total_counts)
+    cdf, total_counts = materialiser.pin(pdf.cumsum(dim=f"{da.name}_bin"), total_counts)
 
     eps = 1e-10
 
@@ -540,7 +552,7 @@ def _compute_histogram_quantile_1d(
     # is exactly "NaN at every timestep". Recomputing it from `da` re-ran the whole
     # upstream anomaly graph plus this function's spatial re-tiling (review finding 3.8).
     nan_mask = total_counts == 0
-    threshold = threshold.where(~nan_mask).drop_vars(f"{da.name}_bin").persist()
+    threshold = materialiser.pin_one(threshold.where(~nan_mask).drop_vars(f"{da.name}_bin"))
 
     # Validate threshold against bounds
     upper_bound = bin_edges[-2]
@@ -570,6 +582,6 @@ def _compute_histogram_quantile_1d(
             stacklevel=2,
         )
         # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = threshold.where(~too_low, lower_bound).persist()
+        threshold = materialiser.pin_one(threshold.where(~too_low, lower_bound))
 
     return threshold

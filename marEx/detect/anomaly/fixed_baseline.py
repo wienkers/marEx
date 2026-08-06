@@ -15,6 +15,7 @@ import xarray as xr
 
 from ...exceptions import ConfigurationError
 from ...logging_config import get_logger
+from ..compute_mode import Materialiser
 from ..validation import _infer_dims_coords
 from .harmonic import _compute_anomaly_detrended
 
@@ -27,6 +28,7 @@ def _compute_anomaly_fixed_baseline(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     reference_period: Optional[Tuple[int, int]] = None,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed baseline method with full time series climatology.
@@ -53,6 +55,11 @@ def _compute_anomaly_fixed_baseline(
     xarray.Dataset
         Dataset containing anomalies and mask
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
@@ -104,7 +111,7 @@ def _compute_anomaly_fixed_baseline(
     # such day. Reindex to 366 and forward-fill the missing tail group from day 365.
     # In the common (leap-containing) case both operations are no-ops. The dayofyear
     # dim is rechunked to a single chunk so the dask ffill is valid.
-    daily_climatology = daily_climatology.reindex(dayofyear=np.arange(1, 367)).chunk({"dayofyear": -1}).ffill("dayofyear").persist()
+    daily_climatology = daily_climatology.reindex(dayofyear=np.arange(1, 367)).chunk({"dayofyear": -1}).ffill("dayofyear")
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
@@ -144,6 +151,7 @@ def _compute_anomaly_detrend_fixed_baseline(
     coordinates: Optional[Dict[str, str]] = None,
     force_zero_mean: bool = True,
     reference_period: Optional[Tuple[int, int]] = None,
+    materialiser: Optional[Materialiser] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed detrended baseline method.
@@ -174,6 +182,11 @@ def _compute_anomaly_detrend_fixed_baseline(
     xarray.Dataset
         Dataset containing anomalies and mask
     """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
@@ -197,6 +210,7 @@ def _compute_anomaly_detrend_fixed_baseline(
         dimensions=dimensions,
         coordinates=coordinates,
         reference_period=reference_period,
+        materialiser=materialiser,
     )
 
     return final_result
