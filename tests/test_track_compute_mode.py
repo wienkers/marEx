@@ -98,3 +98,235 @@ class TestStagingLifetime:
         assert int(events.ID_field.max().compute()) >= 0
         marEx.clear_staging(events)
         assert not Path(staged).exists()
+
+
+class TestCrossModeEquivalence:
+    """streaming must be BIT-IDENTICAL to persist. Integer label fields; no tolerance."""
+
+    @staticmethod
+    def _run_both(data_bin, mask, tmp_path):
+        """Run persist and streaming on the SAME chunking and return their computed outputs.
+
+        Comparing at matching chunking matters: the gridded merge loop's end-of-chunk
+        consolidation is boundary-dependent (that is the entire premise of
+        ``preserve_chunks``), so comparing streaming-at-chunking-X against
+        persist-at-chunking-Y could legitimately differ for reasons unrelated to the mode.
+        """
+        persist_tr = marEx.tracker(data_bin, mask, **TRACKER_KWARGS)
+        persist_events, persist_merges = persist_tr.run(return_merges=True)
+        persist_events = persist_events.compute()
+        persist_merges = persist_merges.compute()
+
+        stream_tr = marEx.tracker(
+            data_bin,
+            mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        stream_events, stream_merges = stream_tr.run(return_merges=True)
+        stream_events = stream_events.compute()
+        stream_merges = stream_merges.compute()
+        return persist_events, persist_merges, stream_events, stream_merges
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_exactly(self, extremes, tmp_path, dask_client):
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+
+        persist_tr = marEx.tracker(data_bin, extremes.mask, **TRACKER_KWARGS)
+        persist_events, persist_merges = persist_tr.run(return_merges=True)
+        persist_events = persist_events.compute()
+        persist_merges = persist_merges.compute()
+
+        stream_tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        stream_events, stream_merges = stream_tr.run(return_merges=True)
+        stream_events = stream_events.compute()
+        stream_merges = stream_merges.compute()
+
+        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_odd_ntime(self, extremes, tmp_path, dask_client):
+        """Odd-length series equivalence.
+
+        The fixture is 32 steps (even), and every OTHER case in this module chunks time
+        with a plain ``.chunk({"time": k})``. For any such call, ``chunks = (k,)*(n//k) +
+        (n % k,)`` and ``max(chunks) == k`` whenever ``n >= k`` -- so re-chunking by that
+        max reproduces the exact same tuple, regardless of whether ``n`` is odd or even.
+        Verified directly: instrumenting ``Materialiser.stage`` at all four
+        ``preserve_chunks=True`` call sites in ``marEx/track`` (data_bin_filled,
+        data_bin_filtered, object_id_field, relabeled_id_field) with n_time=25 and
+        n_time=31 under CHUNK_SIZE shows before/after chunks IDENTICAL at every site --
+        the uniform-rechunk-to-max never moves a boundary here, so this case does NOT
+        exercise the ``preserve_chunks`` guard (contrary to an earlier assumption).
+
+        It still earns its keep as equivalence coverage for an odd-length series, which
+        the always-even 32-step fixture otherwise never exercises.
+
+        A genuinely ragged input chunking (e.g. ``(5, 3, 5, 3, 5, 3, 5, 3)``, which DOES
+        move a boundary under the uniform-rechunk-to-max: verified it becomes
+        ``(5, 5, 5, 5, 5, 5, 2)``) was tried as a way to make the guard load-bearing and
+        testable. It does not reach the guard at all: ``ObjectIDRegionWriter._initialise``
+        (``marEx/track/region_writer.py``) writes the *preserved* (ragged) chunking
+        straight to zarr as the store's chunk grid, and zarr rejects interior ragged
+        chunks outright -- ``ValueError: Zarr requires uniform chunk sizes except for
+        final chunk`` -- independent of ``preserve_chunks``'s value. persist mode has no
+        such constraint (no zarr write) and completes fine on the identical ragged input.
+        So streaming mode cannot process a genuinely ragged time chunking at all, which
+        means ``preserve_chunks=True`` at the four ``marEx/track`` call sites has no input
+        under which it is reachable: inputs shaped like the ones streaming can actually
+        run on never trigger it (this test and its siblings), and inputs that would
+        trigger it crash streaming before the guard matters. Not fixed here -- this is a
+        test-only task; see the task report for the full finding.
+        """
+        data_bin = extremes.extreme_events.isel(time=slice(0, 31)).chunk(CHUNK_SIZE)
+        assert data_bin.sizes["time"] == 31
+
+        persist_events, persist_merges, stream_events, stream_merges = self._run_both(data_bin, extremes.mask, tmp_path)
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_many_time_chunks(self, extremes, tmp_path, dask_client):
+        """>= 21 time chunks: two consecutive periodic flushes in the merge loop.
+
+        The merge loop flushes when ``chunk_idx % 10 == 0`` (and more than one chunk is
+        retained). With time chunk width 1 over the 32-step fixture there are 32 chunks,
+        so real flushes occur at chunk_idx 10 (writing chunks 0-9, retaining chunk 10) and
+        20 (writing chunks 10-19, retaining chunk 20) -- chunk 10 is written by the LATER
+        flush, not its own. With the default CHUNK_SIZE (16 chunks) only chunk_idx 0 occurs
+        (and is a no-op, since a single retained chunk never satisfies
+        ``len(updated_chunks) > 1``), so this path is otherwise untested.
+        """
+        chunk = {"time": 1, "lat": -1, "lon": -1}
+        data_bin = extremes.extreme_events.chunk(chunk)
+        assert len(data_bin.chunks[0]) >= 21
+
+        persist_events, persist_merges, stream_events, stream_merges = self._run_both(data_bin, extremes.mask, tmp_path)
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_single_time_chunk(self, extremes, tmp_path, dask_client):
+        """Single time chunk: finalise() is called with exactly one write."""
+        chunk = {"time": -1, "lat": -1, "lon": -1}
+        data_bin = extremes.extreme_events.chunk(chunk)
+        assert len(data_bin.chunks[0]) == 1
+
+        persist_events, persist_merges, stream_events, stream_merges = self._run_both(data_bin, extremes.mask, tmp_path)
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+
+
+class TestBytesPinned:
+    """Assert laziness by BYTES PINNED, not is_dask_collection.
+
+    An array is STILL a dask collection after .persist() -- that check passes on a fully
+    materialised dataset and proves nothing. Only a byte count is evidence.
+
+    NOTE the instrumentation gap this repo has already been bitten by: marEx/track's
+    modules do `from dask import persist`, which binds the ORIGINAL function at import
+    time, so patching dask.persist alone misses those call sites entirely. The recorder
+    below rebinds the module-level names too.
+    """
+
+    def _recorder(self, monkeypatch):
+        import sys
+
+        import dask
+
+        pinned = []
+        orig_dask = dask.persist
+        orig_da = xr.DataArray.persist
+        orig_ds = xr.Dataset.persist
+        depth = {"n": 0}
+
+        def _record(objs):
+            if depth["n"]:
+                return
+            for o in objs:
+                nb = getattr(o, "nbytes", 0)
+                if isinstance(nb, int):
+                    pinned.append(nb)
+
+        def wrap(record_objs, call):
+            _record(record_objs)
+            depth["n"] += 1
+            try:
+                return call()
+            finally:
+                depth["n"] -= 1
+
+        def dask_persist(*a, **k):
+            return wrap(a, lambda: orig_dask(*a, **k))
+
+        def da_persist(self, **k):
+            return wrap((self,), lambda: orig_da(self, **k))
+
+        def ds_persist(self, **k):
+            return wrap((self,), lambda: orig_ds(self, **k))
+
+        monkeypatch.setattr(dask, "persist", dask_persist)
+        monkeypatch.setattr(xr.DataArray, "persist", da_persist)
+        monkeypatch.setattr(xr.Dataset, "persist", ds_persist)
+        for name, mod in list(sys.modules.items()):
+            if name.startswith("marEx") and getattr(mod, "persist", None) is orig_dask:
+                monkeypatch.setattr(mod, "persist", dask_persist)
+        return pinned
+
+    @pytest.mark.slow
+    def test_persist_mode_pins_at_least_two_fields(self, extremes, tmp_path, dask_client, monkeypatch):
+        """Control for the streaming test below.
+
+        A recorder that silently records nothing would make the streaming assertion
+        (``total < 2 * field_bytes``) pass trivially -- that would be evidence the
+        instrument is broken, not that streaming is lazy. Run the SAME recorder against
+        persist mode and confirm it sees at least as much as the streaming bound rules
+        out. persist is documented to pin >= 7 whole int32 fields plus 5 bool fields
+        (measured at scale, job 26764480); on this tiny fixture the same shapes must still
+        clear 2 whole int32 fields.
+        """
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        field_bytes = data_bin.size * 4  # int32 whole field
+
+        pinned = self._recorder(monkeypatch)
+        tr = marEx.tracker(data_bin, extremes.mask, **TRACKER_KWARGS)
+        tr.run()
+        total = sum(pinned)
+
+        assert total >= 2 * field_bytes, (
+            f"persist pinned only {total} bytes, less than 2x one whole int32 field "
+            f"({field_bytes}). The recorder is not seeing persist's own pins -- the "
+            f"streaming test's 'far less than persist' comparison would be meaningless."
+        )
+
+    @pytest.mark.slow
+    def test_streaming_pins_far_less_than_persist(self, extremes, tmp_path, dask_client, monkeypatch):
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        field_bytes = data_bin.size * 4  # int32 whole field
+
+        pinned = self._recorder(monkeypatch)
+        tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        tr.run()
+        total = sum(pinned)
+
+        # persist mode pins >= 7 whole int32 fields plus 5 bool fields (measured at
+        # scale, job 26764480). Streaming must stay far under a single field.
+        assert total < 2 * field_bytes, (
+            f"streaming pinned {total} bytes, more than 2x one whole int32 field "
+            f"({field_bytes}). The materialiser is not reaching every site."
+        )
