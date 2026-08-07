@@ -311,3 +311,32 @@ def test_output_budget_does_not_change_quantile_values():
         H._HISTOGRAM_TASK_ELEMENTS = orig
 
     np.testing.assert_array_equal(tiled.values, reference.values)
+
+
+def test_2d_tile_budget_is_constant_in_series_length():
+    """The 2-D path holds time whole, so its tile must also be budgeted against ntime.
+
+    Sizing only on the ``366 x n_bins`` output leaves the slab each task READS growing
+    linearly with the length of the series -- a per-task working set that scales with input
+    size. Budgeting on ``max(ntime, 366 * n_bins)`` makes it constant in both directions.
+    """
+    n_bins = 502
+    out_per_cell = 366 * n_bins
+
+    def cells(ntime):
+        return max(1, H._HISTOGRAM_TASK_ELEMENTS // max(ntime, out_per_cell))
+
+    # Realistic series: the output term dominates, so tiling is unchanged.
+    assert cells(1_825) == cells(5_475) == cells(20_000)
+    assert cells(5_475) == H._HISTOGRAM_TASK_ELEMENTS // out_per_cell
+
+    # Absurdly long series: the tile shrinks so the read slab stays inside the budget.
+    huge = out_per_cell * 4
+    assert cells(huge) < cells(5_475)
+    assert huge * cells(huge) <= H._HISTOGRAM_TASK_ELEMENTS
+
+    # The bound holds across the whole range: neither side ever exceeds the budget.
+    for ntime in (10, 366, 5_475, 100_000, out_per_cell, out_per_cell * 10):
+        c = cells(ntime)
+        assert ntime * c <= H._HISTOGRAM_TASK_ELEMENTS, f"read slab over budget at ntime={ntime}"
+        assert out_per_cell * c <= H._HISTOGRAM_TASK_ELEMENTS, f"histogram over budget at ntime={ntime}"

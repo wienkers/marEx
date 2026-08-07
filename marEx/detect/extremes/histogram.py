@@ -378,7 +378,19 @@ def _compute_histogram_quantile_2d(
     # "hobday scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
     spatial_dims_present = [dimensions[d] for d in ("y", "x") if d in dimensions]
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // (366 * max(1, n_bins)))
+
+    # Budget against BOTH sides, as _chunk_spatial_for_histogram does. The output side is
+    # `366 x n_bins` elements per cell. The INPUT side is `ntime` per cell, because time is
+    # held whole below (chunk_dict sets it to -1) -- so sizing on the output alone leaves
+    # the slab this task reads growing linearly with the length of the series, i.e. with
+    # input size. Taking the max makes the per-task working set constant in both the
+    # spatial extent (already tiled) and the number of timesteps.
+    #
+    # For any realistic series this is a no-op: 366 * n_bins is ~183k at the default
+    # binning, so `ntime` only binds beyond ~500 years of daily data. It is a guarantee,
+    # not a retuning.
+    ntime_2d = max(1, int(da.sizes[dimensions["time"]]))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime_2d, 366 * max(1, n_bins)))
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
     # The spatial smoothing below rolls a window of `window_spatial_hobday` over each
     # spatial dim, which requires every chunk to be at least that wide; never tile below it.
