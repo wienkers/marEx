@@ -1687,6 +1687,8 @@ class tracker:
             self.nn_partitioning,
             self.overlap_threshold,
             self.regional_mode,
+            materialiser=self.materialiser,
+            id_field_path=(os.path.join(str(self.staging_dir), "merge_id_field.zarr") if self.staging_dir else None),
         )
 
     def split_and_merge_objects_parallel(

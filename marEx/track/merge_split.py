@@ -45,6 +45,7 @@ from .partitioning import (
     partition_nn_unstructured_optimised,
     wrapped_euclidian_distance_mask_parallel,
 )
+from .region_writer import ObjectIDRegionWriter
 
 logger = get_logger(__name__)
 
@@ -636,6 +637,9 @@ def split_and_merge_objects(
     nn_partitioning: bool,
     overlap_threshold: float,
     regional_mode: bool,
+    *,
+    materialiser=None,
+    id_field_path=None,
 ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
     """
     Implement object splitting and merging logic.
@@ -674,7 +678,15 @@ def split_and_merge_objects(
     next_new_id = object_props.max_id() + 1  # Start new IDs after highest existing ID
 
     Nx = object_id_field_unique[xdim].size
-    object_id_field_unique = object_id_field_unique.persist()
+    # In streaming mode the accumulator lives on disk. The input field is NOT pinned:
+    # each chunk reads its own disjoint time slice, and the upstream object_id_field is
+    # already anchored (tracker.py), so slice reads are cheap.
+    streaming = materialiser is not None and materialiser.is_streaming
+    if streaming:
+        writer = ObjectIDRegionWriter(object_id_field_unique, id_field_path, timedim)
+    else:
+        writer = None
+        object_id_field_unique = object_id_field_unique.persist()
     updated_chunks = []
 
     # Process each time chunk with timestep-first approach
@@ -971,17 +983,29 @@ def split_and_merge_objects(
         if chunk_idx % 10 == 0:
             logger.info(f"Processing splitting and merging in chunk {chunk_idx} of {len(object_id_field_unique.chunks[0])}")
 
-            # Periodically update main array to manage memory
-            if len(updated_chunks) > 1:  # Keep the last chunk for potential reference
+            # Periodically flush finished chunks to manage memory. The LAST chunk is
+            # always retained: the next chunk reads its final two timesteps as t-1/t-2
+            # (see the invariant in region_writer.py). Do not flush it.
+            if len(updated_chunks) > 1:
                 for start, end, processed_chunk_data in updated_chunks[:-1]:
-                    object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+                    if writer is not None:
+                        writer.write(start, end, processed_chunk_data)
+                    else:
+                        object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
                 updated_chunks = updated_chunks[-1:]  # Keep only the last chunk
-                object_id_field_unique = object_id_field_unique.persist()
+                if writer is None:
+                    object_id_field_unique = object_id_field_unique.persist()
 
     # Apply final chunk updates
     for start, end, processed_chunk_data in updated_chunks:
-        object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
-    object_id_field_unique = object_id_field_unique.persist()
+        if writer is not None:
+            writer.write(start, end, processed_chunk_data)
+        else:
+            object_id_field_unique[{timedim: slice(start, end)}] = processed_chunk_data
+    if writer is not None:
+        object_id_field_unique = writer.finalise()
+    else:
+        object_id_field_unique = object_id_field_unique.persist()
 
     # Recompute final overlapping objects
     overlap_objects_list = _overlap.find_overlapping_objects(
