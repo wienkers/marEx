@@ -112,7 +112,7 @@ print(dict(ds.sst.sizes), [c[0] for c in ds.sst.chunks], [len(c) for c in ds.sst
 | --- | --- |
 | spatial (`lat`/`lon` or `ncells`) | **WHOLE — `-1`.** Non-negotiable; see §1. |
 | time | **This is your only knob.** Small: 4–25 timesteps. |
-| `compute_mode` | The lever for a **long** series (gridded only, §3.1, §5.2). Chunk time, not space. |
+| `compute_mode` | The lever for a **long** series (both grid types, §3.1, §5.2). Chunk time, not space. |
 
 *[reasoned]* Because space must stay whole, one chunk is `time_chunk × n_cells`. On a 14.9 M
 cell mesh a single timestep is ~60 MB as float32 and ~15 MB as the int32 ID field, so a time
@@ -145,16 +145,24 @@ rejects it. `persist` mode is unaffected. `tracker.__init__` now checks this upf
 raises `ConfigurationError` naming the offending chunk pattern, instead of letting the run
 reach a confusing low-level zarr `ValueError` after potentially hours of earlier work.
 
-**Scope: unstructured tracking is REJECTED, not silently partial.** The unstructured
-merge/split loop (`split_and_merge_objects_parallel`) keeps its own
-`update_object_id_field_zarr` closure and zarr writer, entirely outside the `Materialiser`.
-But the *shared* preprocessing stages (`run_preprocess()` in `tracker.py`, and
-`objects.py`'s `_anchor`) do stage on both grid types — so accepting
-`compute_mode="streaming"` with `unstructured_grid=True` would silently stream only part of
-the pipeline, with zero test or benchmark coverage of that partial combination.
-`tracker.__init__` now rejects the combination outright with `ConfigurationError`,
-suggesting `compute_mode="persist"` instead. Unifying the two writers so unstructured can
-use streaming too is separate, unstarted work.
+**Scope: unstructured tracking is now SUPPORTED.** It was previously rejected outright,
+because the merge/split loop (`split_and_merge_objects_parallel`) kept its own
+`update_object_id_field_zarr` closure outside the `Materialiser` while the *shared*
+preprocessing stages did stage — so the combination would have streamed only part of the
+pipeline. That loop is threaded now: its labelled field, its per-iteration `updates_array`,
+and the post-merge ID field all route through the `Materialiser`, and
+`compute_mode="streaming"` accepts `unstructured_grid=True`.
+
+**One thing to know if you touch that loop.** The merge iteration's eight-array `persist()`
+is **load-bearing for correctness, not memory**, and must stay unconditional. Those arrays
+are lazy expressions over the ID field, and `update_object_id_field_zarr` *rewrites the zarr
+store that field reads from*; left lazy they are recomputed after the rewrite, against
+updated IDs, and the merge ledgers change. Routing them through `Materialiser.pin` (a no-op
+outside `persist`) produced 10 events where `persist` produced 11 on the unstructured
+fixture. The general rule: **`pin` is only safe when the expression's inputs are
+immutable.** `stage` is safe in the same position, because it writes the array out
+immediately rather than leaving it lazy over a mutating store — which is why
+`updates_array` could move to `stage` and the other seven could not.
 
 ---
 
@@ -181,7 +189,7 @@ e.g. `(30, 30, …, 6, 24, 30, …)` along time — and `to_zarr` rejects that o
 | | `detect` (`preprocess_data`) | `track` (`tracker`) |
 | --- | --- | --- |
 | **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **Yes** — `compute_mode="streaming"` *[measured]* — see §5.2 |
-| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **No** — `compute_mode="streaming"` is rejected at construction time, see §3.1 |
+| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **Yes** — `compute_mode="streaming"` *[measured at `n_time=32` on ICON R02B09; no full-length run]* — see §3.1, §5.2 |
 
 For `track`, "larger-than-memory" means **long in time**, not large in space: one spatial
 field is always held whole, deliberately (§5.2).
@@ -209,7 +217,7 @@ and is identical in every mode. If your per-worker `memory_limit` is below that 
 mode dies and no setting helps. Size workers against the per-task working set (§2.1) first,
 then choose a mode.
 
-### 5.2 `track`: DELIVERED for gridded (`compute_mode="streaming"`), unstructured still open
+### 5.2 `track`: DELIVERED for both grid types (`compute_mode="streaming"`)
 
 **Scope first: space stays whole, by design.** Chunking the spatial dimension in `track`
 would mean reworking connected-component labelling and the dilation matrix, and it is not

@@ -389,6 +389,12 @@ def filter_small_objects(
             neighbours_int=neighbours_int,
             xdim=xdim,
             regional_mode=regional_mode,
+            materialiser=materialiser,
+            # A DISTINCT label: tracker.run_tracking() also calls identify_objects, and on
+            # the unstructured path both run in one job. Sharing "object_id_field" would
+            # make the second stage overwrite the first's store -- Materialiser now raises
+            # on that rather than corrupting, so a shared label would fail the run outright.
+            stage_label="filter_object_id_field",
         )
 
         # Get the maximum ID to dimension arrays

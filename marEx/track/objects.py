@@ -94,6 +94,7 @@ def identify_objects(
     regional_mode: bool,
     *,
     materialiser=None,
+    stage_label: str = "object_id_field",
 ) -> Tuple[xr.DataArray, None, int]:
     """
     Identify connected regions in binary data.
@@ -192,7 +193,7 @@ def identify_objects(
         # and, on the unstructured path, again by the merge loop. Staging it in streaming
         # mode keeps it off the cluster instead of pinning n_time x ncells x 4 B. Renamed
         # BEFORE anchoring so the staged store carries the same variable name in every mode.
-        object_id_field = _anchor(object_id_field.rename("ID_field"), "object_id_field", materialiser)
+        object_id_field = _anchor(object_id_field.rename("ID_field"), stage_label, materialiser)
         N_objects = 1  # Placeholder (IDs aren't unique across time)
 
     elif time_connectivity:
@@ -229,7 +230,7 @@ def identify_objects(
             # field on disk rather than pinned, computing it would re-run the entire
             # 3D relabel. dask_image.ndmeasure.label numbers objects 1..N contiguously,
             # so max(labels) == N, and an empty field gives 0 == 0.
-            object_id_field = _anchor(_wrap(object_id_field), "object_id_field", materialiser)
+            object_id_field = _anchor(_wrap(object_id_field), stage_label, materialiser)
             N_objects = int(object_id_field.max().compute().item())
         else:
             # persist mode: pin the raw label output and its count together so the one
@@ -289,7 +290,7 @@ def identify_objects(
         # _anchor, not _hold: this array is read TWICE -- by the .max().compute() on the
         # next line and by the caller via the return. Leaving it unanchored in streaming
         # mode would re-run the whole labelling graph for the second consumer.
-        object_id_field = _anchor(object_id_field, "object_id_field", materialiser)
+        object_id_field = _anchor(object_id_field, stage_label, materialiser)
         N_objects = int(object_id_field.max().compute().item())
 
     return object_id_field, None, N_objects
