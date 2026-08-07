@@ -838,6 +838,14 @@ class tracker:
         logger.debug(f"Final dataset dimensions: {events_ds.dims}")
         log_memory_usage(logger, "Pipeline completion")
 
+        # Streaming mode returns a dataset that reads lazily from the staged zarr stores,
+        # so the staging directory deliberately OUTLIVES this call. The caller writes its
+        # output first, then calls marEx.clear_staging(events_ds). Note the atexit backstop
+        # does NOT survive SIGKILL -- a wall-clock kill leaves the directory behind -- so
+        # sweep temp_dir periodically.
+        if self.staging_dir is not None:
+            events_ds.attrs["marex_staging_dir"] = str(self.staging_dir)
+
         if self.allow_merging and return_merges:
             logger.debug("Returning both events and merge datasets")
             return events_ds, merges_ds
@@ -1642,6 +1650,7 @@ class tracker:
             self.lat,
             self.lon,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     # ============================

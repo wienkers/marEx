@@ -78,3 +78,23 @@ class TestTrackerComputeModeValidation:
         assert tr.materialiser.is_streaming is True
         assert tr.staging_dir is not None
         assert Path(tr.staging_dir).exists()
+
+
+class TestStagingLifetime:
+    @pytest.mark.slow
+    def test_streaming_output_advertises_its_staging_dir(self, extremes, tmp_path, dask_client):
+        tr = marEx.tracker(
+            extremes.extreme_events.chunk(CHUNK_SIZE),
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        events = tr.run()
+        staged = events.attrs.get("marex_staging_dir")
+        assert staged is not None, "streaming output must advertise its staging dir"
+        assert Path(staged).exists(), "staging dir must OUTLIVE run(); the result reads from it"
+        # The result must still be readable -- this is the trap clear_staging-on-return causes.
+        assert int(events.ID_field.max().compute()) >= 0
+        marEx.clear_staging(events)
+        assert not Path(staged).exists()

@@ -65,6 +65,8 @@ def cluster_rename_objects_and_props(
     lat: xr.DataArray,
     lon: xr.DataArray,
     regional_mode: bool,
+    *,
+    materialiser=None,
 ) -> xr.Dataset:
     """
     Cluster the object pairs and relabel to determine final event IDs.
@@ -186,7 +188,13 @@ def cluster_rename_objects_and_props(
         vectorize=True,
         dask="parallelized",
         output_dtypes=[np.int32],
-    ).persist()
+    )
+    if materialiser is None:
+        split_merged_relabeled_object_id_field = split_merged_relabeled_object_id_field.persist()
+    else:
+        split_merged_relabeled_object_id_field = materialiser.stage(
+            split_merged_relabeled_object_id_field, "relabeled_id_field", preserve_chunks=True
+        )
 
     # Relabel the object_props to match the new IDs (and add time dimension)
 
@@ -680,7 +688,8 @@ def split_and_merge_objects(
     Nx = object_id_field_unique[xdim].size
     # In streaming mode the accumulator lives on disk. The input field is NOT pinned:
     # each chunk reads its own disjoint time slice, and the upstream object_id_field is
-    # already anchored (tracker.py), so slice reads are cheap.
+    # already anchored (objects.py's _anchor helper, which calls materialiser.stage), so
+    # slice reads are cheap.
     streaming = materialiser is not None and materialiser.is_streaming
     if streaming:
         writer = ObjectIDRegionWriter(object_id_field_unique, id_field_path, timedim)
