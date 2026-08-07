@@ -30,7 +30,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
-from dask import is_dask_collection, persist
+from dask import is_dask_collection
 from dask.distributed import wait
 from numpy.typing import NDArray
 
@@ -751,6 +751,33 @@ class tracker:
                     category=UserWarning,
                 )
 
+    def _stage_preserving_chunks(self, obj: xr.DataArray, label: str) -> xr.DataArray:
+        """Stage `obj`, restoring its chunk layout if staging changed it.
+
+        Streaming staging rechunks to the largest chunk per dimension before writing
+        (zarr rejects ragged chunks), so a ragged input comes back with different chunk
+        boundaries. Downstream the merge loop iterates chunk boundaries and hands state
+        across them, so the layout must not move. A no-op whenever the layouts agree,
+        which is every case where the input was already uniform.
+
+        Parameters
+        ----------
+        obj : xarray.DataArray
+            The array to stage.
+        label : str
+            Short identifier passed through to :meth:`Materialiser.stage`.
+
+        Returns
+        -------
+        xarray.DataArray
+            The staged array, rechunked back to `obj`'s original chunk layout if
+            staging altered it.
+        """
+        staged = self.materialiser.stage(obj, label)
+        if obj.chunks is not None and staged.chunks is not None and staged.chunks != obj.chunks:
+            staged = staged.chunk(dict(zip(obj.dims, obj.chunks)))
+        return staged
+
     # ============================
     # Main Public Methods
     # ============================
@@ -908,7 +935,7 @@ class tracker:
             # one scalar diagnostic, and by then self.data_bin has been released -- so on
             # its own it forced a second full read of the entire raw input
             # (review finding 4.3).
-            data_bin_filled, raw_area = persist(self.fill_holes(self.data_bin), raw_area)
+            data_bin_filled, raw_area = self.materialiser.pin(self.fill_holes(self.data_bin), raw_area)
             wait(data_bin_filled)
             self.data_bin = None  # Free memory (tracker instance is now single-run)
             log_memory_usage(logger, "After spatial hole filling", logging.DEBUG)
@@ -916,7 +943,7 @@ class tracker:
         # Fill small time-gaps between objects
         logger.info(f"Filling temporal gaps with T_fill={self.T_fill}")
         with log_timing(logger, "Temporal gap filling"):
-            data_bin_filled = self.fill_time_gaps(data_bin_filled).persist()
+            data_bin_filled = self._stage_preserving_chunks(self.fill_time_gaps(data_bin_filled), "data_bin_filled")
             wait(data_bin_filled)  # Force compute so this step's time is attributed correctly
             log_memory_usage(logger, "After temporal gap filling", logging.DEBUG)
 
@@ -945,7 +972,7 @@ class tracker:
                 data_bin_filtered = load_data_from_checkpoint()
         else:
             logger.debug("Persisting preprocessed data in memory")
-            data_bin_filtered = data_bin_filtered.persist()
+            data_bin_filtered = self._stage_preserving_chunks(data_bin_filtered, "data_bin_filtered")
             wait(data_bin_filtered)
 
         # Compute area of processed data
@@ -1529,7 +1556,11 @@ class tracker:
         """
         # Identify objects at each time step
         object_id_field, _, _ = self.identify_objects(data_bin, time_connectivity=False)
-        object_id_field = object_id_field.persist()
+        # pin, NOT stage: this is the same array identify_objects already anchored
+        # (objects.py:250, Task 5). Staging it again would write a second copy of the
+        # whole field to zarr. In persist mode dask.persist on an already-persisted
+        # collection returns the same futures, so the default is unchanged.
+        object_id_field = self.materialiser.pin_one(object_id_field)
         del data_bin
         logger.info("Finished object identification")
 
@@ -1553,9 +1584,11 @@ class tracker:
         object_id_field, object_props, overlap_objects_list, merge_events = split_and_merge(object_id_field, object_props)
         logger.info("Finished splitting and merging objects")
 
-        # Persist results (This helps avoid block-wise task fusion run_spec issues with dask)
-        results = persist(object_id_field, object_props, overlap_objects_list, merge_events)
-        object_id_field, object_props, overlap_objects_list, merge_events = results
+        # The whole-field object_id_field is already anchored by split_and_merge
+        # (Tasks 6/7). The other three are small. NOTE: the fusion comment above -- if
+        # the golden or graph test moves, restore object_id_field to this call.
+        results = self.materialiser.pin(object_props, overlap_objects_list, merge_events)
+        object_props, overlap_objects_list, merge_events = results
 
         # Cluster & rename objects to get globally unique event IDs
         split_merged_events_ds = self.cluster_rename_objects_and_props(
