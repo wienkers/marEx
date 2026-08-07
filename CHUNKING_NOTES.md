@@ -255,7 +255,16 @@ wall-clock-killed run left **4.8 GB** orphaned — so sweep `scratch_dir` period
 
 ### A counter-intuitive one worth stating explicitly
 
-**Shortening a run does not reliably make it cheaper per task.** Some internal tiling is sized
-as `budget // n_time`, so a shorter series yields a *larger* spatial tile. If you shrink a
-failing run to debug it and it fails *sooner*, this is why — you have changed two things at
-once. Prefer reducing spatial resolution, or the tile size, over reducing the number of years.
+**Shortening a run does not reliably make it cheaper per task**, so it is a poor debugging
+move. Internal tiling divides a fixed element budget by the length of the reduced axis, so a
+shorter series yields a *larger* spatial tile — the opposite of the intuition that a smaller
+run is a smaller run. Prefer reducing spatial resolution, or the tile size, over reducing the
+number of years, and change **one** thing at a time: shrinking a failing run and having it
+fail sooner tells you nothing, because you moved two variables.
+
+The tile is now budgeted against **both** sides of the reduction — the slab it reads and the
+per-cell output it writes (`n_bins` counts for a histogram, 366 for a per-day-of-year
+percentile) — so neither exceeds the budget. Earlier versions bounded only the read, which
+meant a series shorter than the per-cell output silently allocated an over-budget task. The
+"shorter is not smaller" intuition above still applies to the tile *shape*; the unbounded case
+does not.
