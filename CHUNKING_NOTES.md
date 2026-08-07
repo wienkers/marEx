@@ -132,17 +132,29 @@ offered: the merge loop is sequential in time, so accepting recompute buys nothi
 integer output are bit-identical between `persist`, `streaming`, and the pre-`compute_mode`
 baseline. See §5.2 for the numbers.
 
-**Precondition: `temp_dir` needs uniformly time-chunked input.** `.chunk({"time": k})` is
-always fine (the ragged final chunk zarr allows is fine too). A genuinely ragged chunking —
-reachable from a store with irregular on-disk chunks, or a `concat` — makes streaming fail
-inside the zarr region write: `ObjectIDRegionWriter._initialise` does not rechunk-to-uniform
-the way `detect`'s `_stage_to_zarr` deliberately does, so zarr rejects it. `persist` mode is
-unaffected. Read this as a precondition today; an upfront validating `ConfigurationError`
-(instead of a confusing zarr error) is a known follow-up, not yet implemented.
+**Disk cost.** Streaming writes roughly 5 stores of 2 bool + 3 int32 whole fields, about
+14 bytes per cell-timestep uncompressed — ~55 GB uncompressed at the A/B's
+`n_time=3804 x 720 x 1440`; less on disk, since the ID fields are mostly zeros.
 
-**Scope: unstructured tracking is not covered.** It keeps its own
-`update_object_id_field_zarr` closure and defaults `materialiser=None`, i.e. previous
-behaviour. Unifying the two writers is separate, unstarted work.
+**Precondition, enforced at construction: `temp_dir` needs uniformly time-chunked input.**
+`.chunk({"time": k})` is always fine (the ragged final chunk zarr allows is fine too). A
+genuinely ragged chunking — reachable from a store with irregular on-disk chunks, or a
+`concat` — makes `ObjectIDRegionWriter._initialise` fail inside the zarr region write: it
+does not rechunk-to-uniform the way `detect`'s `_stage_to_zarr` deliberately does, so zarr
+rejects it. `persist` mode is unaffected. `tracker.__init__` now checks this upfront and
+raises `ConfigurationError` naming the offending chunk pattern, instead of letting the run
+reach a confusing low-level zarr `ValueError` after potentially hours of earlier work.
+
+**Scope: unstructured tracking is REJECTED, not silently partial.** The unstructured
+merge/split loop (`split_and_merge_objects_parallel`) keeps its own
+`update_object_id_field_zarr` closure and zarr writer, entirely outside the `Materialiser`.
+But the *shared* preprocessing stages (`run_preprocess()` in `tracker.py`, and
+`objects.py`'s `_anchor`) do stage on both grid types — so accepting
+`compute_mode="streaming"` with `unstructured_grid=True` would silently stream only part of
+the pipeline, with zero test or benchmark coverage of that partial combination.
+`tracker.__init__` now rejects the combination outright with `ConfigurationError`,
+suggesting `compute_mode="persist"` instead. Unifying the two writers so unstructured can
+use streaming too is separate, unstarted work.
 
 ---
 
@@ -169,7 +181,7 @@ e.g. `(30, 30, …, 6, 24, 30, …)` along time — and `to_zarr` rejects that o
 | | `detect` (`preprocess_data`) | `track` (`tracker`) |
 | --- | --- | --- |
 | **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **Yes** — `compute_mode="streaming"` *[measured]* — see §5.2 |
-| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **Not yet** — out of scope, see §3.1 |
+| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **No** — `compute_mode="streaming"` is rejected at construction time, see §3.1 |
 
 For `track`, "larger-than-memory" means **long in time**, not large in space: one spatial
 field is always held whole, deliberately (§5.2).
@@ -260,10 +272,13 @@ unexplained drift.
   longer actually shared there under streaming. This is a streaming-only performance cost
   (extra recompute), not a correctness issue — the A/B above is bit-identical regardless.
 
-**Unstructured tracking is unaffected — still not solved.** It keeps its own
-`update_object_id_field_zarr` closure outside the `Materialiser`, and defaults to
-`materialiser=None` (previous behaviour). Unifying the two writers is separate, unstarted
-work, deliberately out of scope for this effort (see NEXT.md).
+**Unstructured tracking is unaffected — still not solved, and now rejected rather than
+silently partial.** It keeps its own `update_object_id_field_zarr` closure outside the
+`Materialiser`, so `compute_mode="streaming"` with `unstructured_grid=True` is rejected at
+construction time with `ConfigurationError` (see §3.1): the shared preprocessing stages
+would stream but the unstructured merge/split core would not, and that combination has zero
+coverage. Unifying the two writers is separate, unstarted work, deliberately out of scope
+for this effort (see NEXT.md).
 
 *[measured]* The practical limit for unstructured today, unchanged by this work: tracking of a
 1096-timestep ICON run did not complete on a single node — merge iteration 1 with 681 objects

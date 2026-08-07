@@ -27,6 +27,11 @@ def extremes():
     return xr.open_zarr(str(TEST_DATA_DIR / "extremes_gridded.zarr"), chunks={})
 
 
+@pytest.fixture(scope="module")
+def extremes_unstructured():
+    return xr.open_zarr(str(TEST_DATA_DIR / "extremes_unstructured.zarr"), chunks={})
+
+
 class TestMaterialiserIsStreaming:
     def test_is_streaming_true_only_for_streaming(self, tmp_path):
         assert Materialiser("streaming", tmp_path).is_streaming is True
@@ -78,6 +83,62 @@ class TestTrackerComputeModeValidation:
         assert tr.materialiser.is_streaming is True
         assert tr.staging_dir is not None
         assert Path(tr.staging_dir).exists()
+
+    def test_streaming_is_rejected_for_unstructured_grid(self, extremes_unstructured, tmp_path, dask_client_unstructured):
+        """Streaming stages the shared preprocessing stages but not the unstructured
+        merge/split core (its own separate zarr writer), so the combination is rejected
+        outright rather than silently streaming only part of the pipeline."""
+        with pytest.raises(ConfigurationError, match="unstructured"):
+            marEx.tracker(
+                extremes_unstructured.extreme_events.chunk({"time": 2, "ncells": -1}),
+                extremes_unstructured.mask,
+                R_fill=2,
+                area_filter_quartile=0.5,
+                compute_mode="streaming",
+                temp_dir=str(tmp_path),
+                unstructured_grid=True,
+                dimensions={"x": "ncells"},
+                coordinates={"x": "lon", "y": "lat"},
+                coordinate_units="degrees",
+                neighbours=extremes_unstructured.neighbours,
+                cell_areas=extremes_unstructured.cell_areas,
+                quiet=True,
+            )
+
+    def test_streaming_accepts_uniform_time_chunking_with_smaller_final_chunk(self, extremes, tmp_path):
+        """`.chunk({"time": k})` always yields (k, k, ..., r) with r <= k -- this is the
+        normal case for nearly every real input and must NOT be rejected."""
+        data_bin = extremes.extreme_events.chunk({"time": 5, "lat": -1, "lon": -1})
+        assert data_bin.sizes["time"] % 5 != 0, "fixture must not divide evenly, so a smaller final chunk exists"
+        tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        assert tr.materialiser.is_streaming is True
+
+    def test_streaming_rejects_ragged_time_chunking(self, extremes, tmp_path):
+        """A genuinely ragged chunking (e.g. from open_mfdataset over uneven per-year
+        files) must be rejected at construction time, not fail inside the zarr write."""
+        n_time = extremes.sizes["time"]
+        ragged = tuple([3, 5] * ((n_time // 8) + 1))[: n_time // 8 * 2]
+        remainder = n_time - sum(ragged)
+        if remainder > 0:
+            ragged = ragged + (remainder,)
+        assert sum(ragged) == n_time
+        assert len(ragged) > 1
+        data_bin = extremes.extreme_events.chunk({"lat": -1, "lon": -1}).chunk({"time": ragged})
+
+        with pytest.raises(ConfigurationError, match="uniform"):
+            marEx.tracker(
+                data_bin,
+                extremes.mask,
+                compute_mode="streaming",
+                temp_dir=str(tmp_path),
+                **TRACKER_KWARGS,
+            )
 
 
 class TestStagingLifetime:
@@ -283,7 +344,7 @@ class TestBytesPinned:
         return pinned
 
     @pytest.mark.slow
-    def test_persist_mode_pins_at_least_two_fields(self, extremes, tmp_path, dask_client, monkeypatch):
+    def test_persist_mode_pins_at_least_two_fields(self, extremes, dask_client, monkeypatch):
         """Control for the streaming test below.
 
         A recorder that silently records nothing would make the streaming assertion

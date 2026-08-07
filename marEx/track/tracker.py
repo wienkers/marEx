@@ -80,6 +80,36 @@ def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_A
             continue
 
 
+def _is_uniform_time_chunking(chunks: Tuple[int, ...]) -> bool:
+    """Check that a chunk tuple is uniform except for a possibly-smaller final chunk.
+
+    This is exactly the shape ``.chunk({"time": k})`` always produces: ``(k, k, ..., k, r)``
+    with ``r <= k``. :class:`~marEx.track.region_writer.ObjectIDRegionWriter` requires this
+    for the zarr region writes streaming mode relies on. A genuinely ragged chunking --
+    e.g. from ``open_mfdataset`` over uneven per-year files, giving ``(365, 365, 366, 365)``
+    -- reaches the zarr write intact and fails there with a low-level ``ValueError``,
+    possibly after hours of earlier processing.
+    """
+    if len(chunks) <= 1:
+        return True
+    first = chunks[0]
+    if any(c != first for c in chunks[:-1]):
+        return False
+    return chunks[-1] <= first
+
+
+def _format_chunk_pattern(chunks: Tuple[int, ...], max_show: int = 10) -> str:
+    """Render a chunk tuple for an error message, truncated so it never dumps thousands
+    of numbers into an exception.
+    """
+    if len(chunks) <= max_show:
+        return str(tuple(chunks))
+    half = max_show // 2
+    head = ", ".join(str(c) for c in chunks[:half])
+    tail = ", ".join(str(c) for c in chunks[-half:])
+    return f"({head}, ..., {tail}) [{len(chunks)} chunks total]"
+
+
 # Module-level state for the distributed.scheduler warning filter. The filter is
 # installed exactly once on the global logger (guarded by ``_DASK_WARNING_FILTER_INSTALLED``)
 # so that repeated ``tracker(...)`` construction does not accumulate duplicate filters (and
@@ -159,6 +189,34 @@ class tracker:
         Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
+    compute_mode : {'persist', 'streaming'}, default='persist'
+        Materialisation policy for whole-field intermediates during tracking.
+
+        * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
+          whenever the run fits (measured peak ~57 GB at n_time=3804, 0.25 deg global).
+        * 'streaming': stages the ID field, the filled/filtered fields, and the merge
+          loop's output accumulator to zarr under ``temp_dir`` instead of pinning them,
+          so memory scales with cluster size rather than series length (measured peak
+          20.4 GB on the same run, bytes pinned 337 -> 1.47 GB). Requires ``temp_dir``.
+          Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields, ~14 bytes per
+          cell-timestep uncompressed (~55 GB uncompressed at that same n_time=3804 x
+          720 x 1440 run; less on disk, since the ID fields are mostly zeros).
+
+          **Restrictions**: gridded grids only -- rejected for ``unstructured_grid=True``,
+          since the unstructured merge/split loop uses its own separate zarr writer that
+          is not wired through this mode. Also requires the input's time chunking to be
+          uniform (every chunk equal except a possibly-smaller last one, exactly what
+          ``.chunk({'time': k})`` always produces); a genuinely ragged chunking is
+          rejected at construction time rather than failing inside the zarr write.
+
+          **Staging-lifetime contract**: the returned dataset reads *lazily* from the
+          staged zarr store, so the staging directory deliberately **outlives**
+          ``run()``. Write your output first, then call
+          ``marEx.clear_staging(events_ds)`` -- the path is on
+          ``events_ds.attrs["marex_staging_dir"]``. An ``atexit`` hook cleans up on
+          normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
+          wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
+          §3.1/§5.2 for the full contract and measurements.
     T_fill : int, default=2
         The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
     allow_merging : bool, default=True
@@ -389,7 +447,6 @@ class tracker:
         area_filter_quartile: Optional[float] = None,
         area_filter_absolute: Optional[int] = None,
         temp_dir: Optional[str] = None,
-        compute_mode: Literal["persist", "streaming"] = "persist",
         T_fill: int = 2,
         allow_merging: bool = True,
         nn_partitioning: bool = False,
@@ -407,6 +464,8 @@ class tracker:
         quiet: Optional[bool] = None,
         regional_mode: bool = False,
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
+        *,
+        compute_mode: Literal["persist", "streaming"] = "persist",
     ) -> None:
         """Initialise the tracker with parameters and data."""
         # Configure logging if verbose/quiet parameters are provided
@@ -549,6 +608,50 @@ class tracker:
                 ],
                 context={"provided_mode": compute_mode},
             )
+
+        # streaming currently covers the gridded code path only. The unstructured merge/split
+        # loop (split_and_merge_objects_parallel) writes its own zarr store via
+        # update_object_id_field_zarr / temp_merge_path and is not wired through the
+        # Materialiser, so accepting this combination would silently stream only PART of the
+        # pipeline (the shared preprocessing stages in run_preprocess() and objects.py's
+        # _anchor do stage; the unstructured core does not). That partial combination has zero
+        # test and zero benchmark coverage. See CHUNKING_NOTES.md §3.1/§5.2.
+        if compute_mode == "streaming" and self.unstructured_grid:
+            raise ConfigurationError(
+                "compute_mode='streaming' does not support unstructured grids",
+                details=(
+                    "Streaming currently supports gridded grids only. The unstructured "
+                    "merge/split loop (split_and_merge_objects_parallel) uses its own separate "
+                    "zarr writer that is not wired through the Materialiser, so this combination "
+                    "would silently stream only part of the pipeline."
+                ),
+                suggestions=[
+                    "Use compute_mode='persist' for unstructured grids",
+                ],
+                context={"provided_mode": compute_mode, "unstructured_grid": self.unstructured_grid},
+            )
+
+        # streaming's zarr region writer (ObjectIDRegionWriter) requires uniform chunking
+        # along the time dimension: every chunk equal except possibly a smaller final one.
+        # `.chunk({"time": k})` always produces exactly that shape, so this never rejects the
+        # common case. A genuinely ragged chunking (e.g. open_mfdataset over uneven per-year
+        # files) would otherwise reach the zarr write intact and fail there with a confusing
+        # low-level zarr ValueError, after potentially hours of earlier processing.
+        if compute_mode == "streaming":
+            time_chunks = data_bin.chunks[data_bin.dims.index(self.timedim)]
+            if not _is_uniform_time_chunking(time_chunks):
+                raise ConfigurationError(
+                    "compute_mode='streaming' requires uniform time chunking",
+                    details=(
+                        f"Every chunk along {self.timedim!r} must be equal except the last, which "
+                        f"may be smaller. Got: {_format_chunk_pattern(time_chunks)}"
+                    ),
+                    suggestions=[
+                        f"Rechunk uniformly, e.g. data_bin.chunk({{'{self.timedim}': k}})",
+                        "Use compute_mode='persist' if the input cannot be rechunked uniformly",
+                    ],
+                    context={"provided_mode": compute_mode, "time_chunks": _format_chunk_pattern(time_chunks)},
+                )
 
         self.compute_mode = compute_mode
         self.staging_dir = create_staging_dir(temp_dir) if compute_mode == "streaming" else None

@@ -32,7 +32,7 @@ of the time coordinate. This is deliberate, not an oversight.
 """
 
 from pathlib import Path
-from typing import Union
+from typing import List, Tuple, Union
 
 import xarray as xr
 
@@ -63,6 +63,8 @@ class ObjectIDRegionWriter:
         self._template = template
         self._initialised = False
         self._n_written = 0
+        self._n_time = template.sizes[timedim]
+        self._regions: List[Tuple[int, int]] = []
 
     def _initialise(self) -> None:
         """Write schema and coordinates, but no field data."""
@@ -103,9 +105,15 @@ class ObjectIDRegionWriter:
         ds = ds.drop_vars(list(ds.coords))
         ds.to_zarr(self.path, region={self.timedim: slice(start, end)})
         self._n_written += 1
+        self._regions.append((start, end))
 
     def finalise(self) -> xr.DataArray:
         """Re-open the completed store lazily.
+
+        Checks that the written regions exactly tile ``[0, n_time)`` -- no gaps, no
+        overlaps -- before returning. A dropped or duplicated region would otherwise leave
+        zarr fill values (zeros) silently standing in for real data: data-shaped
+        corruption rather than a crash, and invisible to ``_n_written > 0`` alone.
 
         Returns
         -------
@@ -114,6 +122,21 @@ class ObjectIDRegionWriter:
         """
         if not self._n_written:
             raise RuntimeError(f"finalise() called but no regions were written to {self.path}")
+
+        covered = 0
+        for start, end in sorted(self._regions):
+            if start != covered:
+                raise RuntimeError(
+                    f"ID field regions written to {self.path} do not tile [0, {self._n_time}) along "
+                    f"{self.timedim}: {'gap' if start > covered else 'overlap'} at index {covered} "
+                    f"(next region starts at {start}). Written regions: {sorted(self._regions)}"
+                )
+            covered = end
+        if covered != self._n_time:
+            raise RuntimeError(
+                f"ID field regions written to {self.path} cover [0, {covered}), not the full "
+                f"[0, {self._n_time}) along {self.timedim}. Written regions: {sorted(self._regions)}"
+            )
 
         reopened = xr.open_zarr(self.path, consolidated=True, chunks={})[self.name]
 

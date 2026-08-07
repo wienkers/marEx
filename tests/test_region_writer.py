@@ -77,3 +77,36 @@ class TestObjectIDRegionWriter:
         writer = ObjectIDRegionWriter(_field(), tmp_path / "f.zarr", "time")
         with pytest.raises(RuntimeError, match="no regions"):
             writer.finalise()
+
+    def test_full_coverage_passes(self, tmp_path):
+        """Regions that exactly tile [0, n_time) must finalise without error."""
+        template = _field()
+        writer = ObjectIDRegionWriter(template, tmp_path / "f.zarr", "time")
+        source = template.compute()
+        for start in range(0, 8, 2):
+            writer.write(start, start + 2, source.isel(time=slice(start, start + 2)))
+        out = writer.finalise()
+        xr.testing.assert_identical(out.compute(), source)
+
+    def test_gap_in_coverage_raises(self, tmp_path):
+        """A dropped region must raise rather than silently leave zarr fill values."""
+        template = _field()
+        writer = ObjectIDRegionWriter(template, tmp_path / "f.zarr", "time")
+        source = template.compute()
+        # Skip [2, 4): write [0, 2), [4, 6), [6, 8).
+        writer.write(0, 2, source.isel(time=slice(0, 2)))
+        writer.write(4, 6, source.isel(time=slice(4, 6)))
+        writer.write(6, 8, source.isel(time=slice(6, 8)))
+        with pytest.raises(RuntimeError, match="gap"):
+            writer.finalise()
+
+    def test_overlap_in_coverage_raises(self, tmp_path):
+        """A region written twice (or overlapping another) must raise."""
+        template = _field()
+        writer = ObjectIDRegionWriter(template, tmp_path / "f.zarr", "time")
+        source = template.compute()
+        writer.write(0, 4, source.isel(time=slice(0, 4)))
+        writer.write(2, 6, source.isel(time=slice(2, 6)))
+        writer.write(6, 8, source.isel(time=slice(6, 8)))
+        with pytest.raises(RuntimeError, match="overlap"):
+            writer.finalise()
