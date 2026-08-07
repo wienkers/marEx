@@ -287,6 +287,193 @@ class TestCrossModeEquivalence:
         xr.testing.assert_identical(stream_merges, persist_merges)
 
 
+class TestSharedLabellingPass:
+    """The absolute-threshold filter labels every slice ONCE, in every mode.
+
+    ``morphology.filter_small_objects`` derives the keep-mask and the area census from a
+    single ``apply_ufunc`` and materialises both together so the labelling pass is shared.
+    Under streaming that joint materialisation was a no-op ``pin``, so the census's
+    ``.compute()`` ran the pass and the caller's ``stage`` of the filtered field ran it
+    again -- a whole extra per-slice labelling of the entire field.
+    """
+
+    ABSOLUTE_KWARGS = {k: v for k, v in TRACKER_KWARGS.items() if k != "area_filter_quartile"}
+
+    def _count_labels(self, monkeypatch, counter_path):
+        """Count labelling calls THROUGH A FILE, not an in-memory list.
+
+        The counting wrapper is captured by cloudpickle into the nested ufunc closure and
+        shipped to the worker, so a list in its closure is pickled BY VALUE -- the worker
+        appends to a copy and the client sees zero. Verified: the list version reported 0
+        calls against 32 real slices. A path pickles fine and the file is shared, which
+        works under threads and processes alike.
+        """
+        from marEx.track import morphology
+
+        orig = morphology.scipy_label
+
+        def counting(*args, **kwargs):
+            with open(counter_path, "ab") as handle:
+                handle.write(b"x")
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(morphology, "scipy_label", counting)
+
+    @staticmethod
+    def _count(counter_path):
+        return counter_path.stat().st_size if counter_path.exists() else 0
+
+    @pytest.mark.slow
+    def test_streaming_labels_no_more_slices_than_persist(self, extremes, tmp_path, dask_client, monkeypatch):
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        kwargs = dict(self.ABSOLUTE_KWARGS, area_filter_absolute=400)
+
+        counter = tmp_path / "labels.count"
+        self._count_labels(monkeypatch, counter)
+        marEx.tracker(data_bin, extremes.mask, **kwargs).run()
+        persist_calls = self._count(counter)
+
+        counter.unlink(missing_ok=True)
+        marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **kwargs,
+        ).run()
+        streaming_calls = self._count(counter)
+
+        # Control: a patch that saw nothing would make the bound below vacuous.
+        assert persist_calls >= data_bin.sizes["time"], (
+            f"the counter saw only {persist_calls} labelling calls in persist mode, fewer "
+            f"than the {data_bin.sizes['time']} slices in the fixture -- the monkeypatch is "
+            f"not reaching the ufunc body, so the streaming bound proves nothing."
+        )
+        assert streaming_calls <= persist_calls, (
+            f"streaming labelled {streaming_calls} slices against persist's {persist_calls}. "
+            f"The joint materialisation of (keep-mask, area census) is not shared under "
+            f"streaming, so the whole field is labelled twice."
+        )
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_with_absolute_filter(self, extremes, tmp_path, dask_client):
+        """Equivalence on the absolute-threshold path, which `stage_many` rewrote.
+
+        Every other equivalence test here uses ``area_filter_quartile``, which routes
+        through the two-pass branch and never reaches the joint materialisation.
+        """
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        kwargs = dict(self.ABSOLUTE_KWARGS, area_filter_absolute=400)
+
+        persist_tr = marEx.tracker(data_bin, extremes.mask, **kwargs)
+        persist_events, persist_merges = persist_tr.run(return_merges=True)
+        persist_events, persist_merges = persist_events.compute(), persist_merges.compute()
+
+        stream_tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **kwargs,
+        )
+        stream_events, stream_merges = stream_tr.run(return_merges=True)
+        stream_events, stream_merges = stream_events.compute(), stream_merges.compute()
+
+        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+
+
+class TestNoMergingPath:
+    """``allow_merging=False``: the ``elif time_connectivity:`` branch of objects.py.
+
+    Every other test in this module runs with ``allow_merging=True``, which routes
+    through ``split_and_merge``. With merging off the tracker instead calls
+    ``identify_objects(time_connectivity=True)``, a 13th whole-field pin site that the
+    original Phase 4 profile (job 26764480) missed and that no bit-identity gate covered.
+    """
+
+    def _run_both(self, data_bin, mask, tmp_path):
+        kwargs = dict(TRACKER_KWARGS, allow_merging=False)
+        persist_tr = marEx.tracker(data_bin, mask, **kwargs)
+        persist_events = persist_tr.run().compute()
+
+        stream_tr = marEx.tracker(
+            data_bin,
+            mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **kwargs,
+        )
+        stream_events = stream_tr.run().compute()
+        return persist_events, stream_events
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_without_merging(self, extremes, tmp_path, dask_client):
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        persist_events, stream_events = self._run_both(data_bin, extremes.mask, tmp_path)
+
+        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+
+        # N_events_final is an ATTR, so the comparison above drops it -- and it is the one
+        # output this branch's fix can move: streaming derives the count as max(labels) off
+        # the staged store instead of from dask_image.label's num_features. Verified those
+        # agree (max == num_features == distinct-nonzero, with wrap merging active), but the
+        # equivalence assertion above cannot see it, so compare it explicitly.
+        assert stream_events.attrs["N_events_final"] == persist_events.attrs["N_events_final"], (
+            f"event count differs by mode: streaming {stream_events.attrs['N_events_final']} vs "
+            f"persist {persist_events.attrs['N_events_final']}. objects.py's streaming branch "
+            f"reads N_objects as max(labels) off the staged field; if dask_image.label ever "
+            f"stops numbering objects 1..N contiguously, pin its num_features instead."
+        )
+
+    @pytest.mark.slow
+    def test_streaming_without_merging_pins_far_less_than_persist(self, extremes, tmp_path, dask_client, monkeypatch):
+        """The no-merging path must stage the 3D-labelled field, not pin it.
+
+        The bound is tighter than the merging test's ``2 x field_bytes``: with merging
+        off there is no merge loop, so streaming has no whole-field pin left to make at
+        all and anything approaching one field means the branch is still un-threaded.
+        """
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        field_bytes = data_bin.size * 4  # int32 whole field
+
+        pinned = TestBytesPinned()._recorder(monkeypatch)
+        tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **dict(TRACKER_KWARGS, allow_merging=False),
+        )
+        tr.run()
+        total = sum(pinned)
+
+        assert total < 0.5 * field_bytes, (
+            f"streaming with allow_merging=False pinned {total} bytes, more than half a "
+            f"whole int32 field ({field_bytes}). objects.py's `elif time_connectivity:` "
+            f"branch is still pinning the whole labelled field."
+        )
+
+    @pytest.mark.slow
+    def test_persist_without_merging_pins_a_whole_field(self, extremes, dask_client, monkeypatch):
+        """Control for the test above: a recorder that sees nothing would pass it trivially."""
+        data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
+        field_bytes = data_bin.size * 4
+
+        pinned = TestBytesPinned()._recorder(monkeypatch)
+        tr = marEx.tracker(data_bin, extremes.mask, **dict(TRACKER_KWARGS, allow_merging=False))
+        tr.run()
+        total = sum(pinned)
+
+        assert total >= field_bytes, (
+            f"persist with allow_merging=False pinned only {total} bytes, less than one "
+            f"whole int32 field ({field_bytes}). The recorder is not seeing the pins, so "
+            f"the streaming bound above is meaningless."
+        )
+
+
 class TestBytesPinned:
     """Assert laziness by BYTES PINNED, not is_dask_collection.
 

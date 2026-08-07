@@ -202,20 +202,42 @@ def identify_objects(
             object_id_field, N_objects = label(data_bin, structure=neighbours)
         else:
             object_id_field, N_objects = label(data_bin, structure=neighbours, wrap_axes=(2,))  # Wrap in x-direction !
-        results = persist(object_id_field, N_objects)
-        object_id_field, N_objects = results
-        N_objects = N_objects.compute()
 
-        object_id_field = (
-            xr.DataArray(
-                object_id_field,
-                coords=data_bin.coords,
-                dims=data_bin.dims,
-                attrs=data_bin.attrs,
+        def _wrap(field):
+            return (
+                xr.DataArray(
+                    field,
+                    coords=data_bin.coords,
+                    dims=data_bin.dims,
+                    attrs=data_bin.attrs,
+                )
+                .rename("ID_field")
+                .astype(np.int32)
             )
-            .rename("ID_field")
-            .astype(np.int32)
-        )
+
+        if materialiser is not None and materialiser.is_streaming:
+            # Stage the whole labelled field to disk instead of pinning it in RAM. This
+            # is the branch reached only when allow_merging=False and the grid is
+            # structured -- the 13th pin site the original Phase 4 profile missed.
+            #
+            # Staging needs the wrapped DataArray, so wrap first. N_objects is then read
+            # back off the STAGED store rather than from `label`'s second return value:
+            # that value is a separate node over the same labelling graph, and with the
+            # field on disk rather than pinned, computing it would re-run the entire
+            # 3D relabel. dask_image.ndmeasure.label numbers objects 1..N contiguously,
+            # so max(labels) == N, and an empty field gives 0 == 0.
+            object_id_field = _anchor(_wrap(object_id_field), "object_id_field", materialiser)
+            N_objects = int(object_id_field.max().compute().item())
+        else:
+            # persist mode: pin the raw label output and its count together so the one
+            # labelling pass serves both, exactly as before Phase 4.
+            if materialiser is None:
+                results = persist(object_id_field, N_objects)
+            else:
+                results = materialiser.pin(object_id_field, N_objects)
+            object_id_field, N_objects = results
+            N_objects = N_objects.compute()
+            object_id_field = _wrap(object_id_field)
 
     else:
         # Structured grid, 2D-per-time-slice labelling (no time connectivity).

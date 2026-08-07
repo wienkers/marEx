@@ -537,12 +537,22 @@ def filter_small_objects(
                 vectorize=True,
                 dask="parallelized",
             )
-            # Both _hold: data_bin_filtered is staged by the caller (tracker.py:908),
-            # and padded_areas is (time, object_buffer), not whole-field.
+            # ONE materialisation for both outputs, so the shared labelling pass really is
+            # shared. `pin` was wrong here under streaming, where it is a no-op: the
+            # census's .compute() below then ran the pass, and the caller's stage of
+            # data_bin_filtered ran it a second time over the whole field (measured on the
+            # 32-step fixture: 64 slice labellings against persist's 32). `stage_many`
+            # writes both into one zarr in a single graph execution, and registers
+            # data_bin_filtered under its own name so the caller's stage short-circuits.
+            # In persist mode this is dask.persist of the pair -- exactly as before.
             if materialiser is None:
                 data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
             else:
-                data_bin_filtered, padded_areas = materialiser.pin(data_bin_filtered, padded_areas)
+                data_bin_filtered, padded_areas = materialiser.stage_many(
+                    {"data_bin_filtered": data_bin_filtered, "padded_areas": padded_areas},
+                    "small_object_filter",
+                    preserve_chunks=True,
+                )
         else:
             padded_areas = xr.apply_ufunc(
                 slice_object_areas,
