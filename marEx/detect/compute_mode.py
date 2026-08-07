@@ -224,7 +224,7 @@ class Materialiser:
         (out,) = self.pin(obj)
         return out
 
-    def stage(self, obj: xr.DataArray, label: str) -> xr.DataArray:
+    def stage(self, obj: xr.DataArray, label: str, preserve_chunks: bool = False) -> xr.DataArray:
         """
         Anchor an object that several downstream consumers read.
 
@@ -234,6 +234,12 @@ class Materialiser:
             The array to anchor.
         label : str
             Short identifier, used as the staged store's filename in streaming mode.
+        preserve_chunks : bool, default False
+            In ``streaming`` mode only, restore ``obj``'s chunk layout after staging if
+            ``_stage_to_zarr``'s uniform rechunk changed it. Default ``False`` leaves
+            detect's existing, documented behaviour (staging may change chunk layout)
+            completely unchanged; callers with downstream logic that depends on chunk
+            boundaries not moving (e.g. the tracker's merge loop) should pass ``True``.
 
         Returns
         -------
@@ -245,7 +251,10 @@ class Materialiser:
             return obj.persist()
         if self.mode == "lazy":
             return obj
-        return self._stage_to_zarr(obj, label)
+        staged = self._stage_to_zarr(obj, label)
+        if preserve_chunks and obj.chunks is not None and staged.chunks is not None and staged.chunks != obj.chunks:
+            staged = staged.chunk(dict(zip(obj.dims, obj.chunks)))
+        return staged
 
     def _stage_to_zarr(self, obj: xr.DataArray, label: str) -> xr.DataArray:
         """
