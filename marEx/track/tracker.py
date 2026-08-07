@@ -35,6 +35,7 @@ from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
+from ..detect.compute_mode import Materialiser, create_staging_dir
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid
@@ -388,6 +389,7 @@ class tracker:
         area_filter_quartile: Optional[float] = None,
         area_filter_absolute: Optional[int] = None,
         temp_dir: Optional[str] = None,
+        compute_mode: Literal["persist", "streaming"] = "persist",
         T_fill: int = 2,
         allow_merging: bool = True,
         nn_partitioning: bool = False,
@@ -513,6 +515,44 @@ class tracker:
         if temp_dir:
             os.makedirs(temp_dir, exist_ok=True)
         self.scratch_dir = temp_dir
+
+        # compute_mode: two modes only. `lazy` is rejected rather than silently
+        # accepted -- the merge loop is inherently sequential, so accepting recompute
+        # buys nothing there, and detect's lazy performance figures were never
+        # measured at scale.
+        if compute_mode == "lazy":
+            raise ConfigurationError(
+                "compute_mode='lazy' is not supported by the tracker",
+                details="The merge/split loop is sequential in time; recompute buys nothing",
+                suggestions=[
+                    "Use compute_mode='persist' (default) when the run fits in cluster RAM",
+                    "Use compute_mode='streaming' with temp_dir for long time series",
+                ],
+                context={"provided_mode": compute_mode},
+            )
+        if compute_mode not in ("persist", "streaming"):
+            raise ConfigurationError(
+                f"Unknown compute_mode '{compute_mode}'",
+                details="Invalid compute_mode parameter",
+                suggestions=[
+                    "Use 'persist' (default) or 'streaming'",
+                ],
+                context={"provided_mode": str(compute_mode), "valid_modes": ["persist", "streaming"]},
+            )
+        if compute_mode == "streaming" and not temp_dir:
+            raise ConfigurationError(
+                "compute_mode='streaming' requires temp_dir",
+                details="Streaming mode stages the whole-field intermediates to zarr on disk",
+                suggestions=[
+                    "Pass temp_dir pointing at large transient storage, e.g. tracker(..., temp_dir='/scratch/user/marex')",
+                    "Use compute_mode='persist' if no scratch space is available",
+                ],
+                context={"provided_mode": compute_mode},
+            )
+
+        self.compute_mode = compute_mode
+        self.staging_dir = create_staging_dir(temp_dir) if compute_mode == "streaming" else None
+        self.materialiser = Materialiser(compute_mode, self.staging_dir)
 
         # Per-run temp stores. These used to share one fixed path
         # ({scratch_dir}/marEx_temp_field.zarr) between refresh_dask_graph and the merge

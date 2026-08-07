@@ -184,6 +184,11 @@ class Materialiser:
         """bool: True when this mode leaves intermediates unmaterialised in cluster RAM."""
         return self.mode != "persist"
 
+    @property
+    def is_streaming(self) -> bool:
+        """True when intermediates are staged to disk rather than pinned in RAM."""
+        return self.mode == "streaming"
+
     def pin(self, *objs: Any) -> Tuple[Any, ...]:
         """
         Materialise bounded intermediates. A no-op outside ``persist`` mode.
