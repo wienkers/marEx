@@ -188,8 +188,11 @@ def identify_objects(
 
         # Ensure ID = 0 on invalid regions
         object_id_field = object_id_field.where(mask, other=0)
-        object_id_field = object_id_field.persist()
-        object_id_field = object_id_field.rename("ID_field")
+        # _anchor, matching the structured branch: this whole field is read by the caller
+        # and, on the unstructured path, again by the merge loop. Staging it in streaming
+        # mode keeps it off the cluster instead of pinning n_time x ncells x 4 B. Renamed
+        # BEFORE anchoring so the staged store carries the same variable name in every mode.
+        object_id_field = _anchor(object_id_field.rename("ID_field"), "object_id_field", materialiser)
         N_objects = 1  # Placeholder (IDs aren't unique across time)
 
     elif time_connectivity:

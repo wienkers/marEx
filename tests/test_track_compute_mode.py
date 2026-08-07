@@ -84,26 +84,28 @@ class TestTrackerComputeModeValidation:
         assert tr.staging_dir is not None
         assert Path(tr.staging_dir).exists()
 
-    def test_streaming_is_rejected_for_unstructured_grid(self, extremes_unstructured, tmp_path, dask_client_unstructured):
-        """Streaming stages the shared preprocessing stages but not the unstructured
-        merge/split core (its own separate zarr writer), so the combination is rejected
-        outright rather than silently streaming only part of the pipeline."""
-        with pytest.raises(ConfigurationError, match="unstructured"):
-            marEx.tracker(
-                extremes_unstructured.extreme_events.chunk({"time": 2, "ncells": -1}),
-                extremes_unstructured.mask,
-                R_fill=2,
-                area_filter_quartile=0.5,
-                compute_mode="streaming",
-                temp_dir=str(tmp_path),
-                unstructured_grid=True,
-                dimensions={"x": "ncells"},
-                coordinates={"x": "lon", "y": "lat"},
-                coordinate_units="degrees",
-                neighbours=extremes_unstructured.neighbours,
-                cell_areas=extremes_unstructured.cell_areas,
-                quiet=True,
-            )
+    def test_streaming_is_accepted_for_unstructured_grid(self, extremes_unstructured, tmp_path, dask_client_unstructured):
+        """Unstructured input used to be REJECTED under streaming, because the merge/split
+        core kept its own zarr writer outside the Materialiser and the combination would
+        have streamed only part of the pipeline. That core is threaded now, so the
+        rejection is gone; this pins the reversal so it cannot regress silently."""
+        tr = marEx.tracker(
+            extremes_unstructured.extreme_events.chunk({"time": 2, "ncells": -1}),
+            extremes_unstructured.mask,
+            R_fill=2,
+            area_filter_quartile=0.5,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            unstructured_grid=True,
+            dimensions={"x": "ncells"},
+            coordinates={"x": "lon", "y": "lat"},
+            coordinate_units="degrees",
+            neighbours=extremes_unstructured.neighbours,
+            cell_areas=extremes_unstructured.cell_areas,
+            quiet=True,
+        )
+        assert tr.materialiser.is_streaming is True
+        assert tr.unstructured_grid is True
 
     def test_streaming_accepts_uniform_time_chunking_with_smaller_final_chunk(self, extremes, tmp_path):
         """`.chunk({"time": k})` always yields (k, k, ..., r) with r <= k -- this is the
@@ -578,3 +580,106 @@ class TestBytesPinned:
             f"streaming pinned {total} bytes, more than 2x one whole int32 field "
             f"({field_bytes}). The materialiser is not reaching every site."
         )
+
+
+class TestStageLabelReuse:
+    """A label may not be reused for a different array.
+
+    ``_stage_to_zarr`` writes ``<staging_dir>/<label>.zarr`` with ``mode="w"``. Staging a
+    second, different array under the same label rewrites the store that the first staged
+    array is still lazily reading, so that array silently starts returning the second
+    one's values. The ``_staged`` registry makes it worse by holding a strong reference
+    that keeps the stale array alive to be read.
+
+    No caller does this today. It becomes reachable the moment anything stages inside a
+    loop -- e.g. threading the Materialiser through the unstructured merge loop, which
+    produces a fresh ``updates_array`` per iteration. Such a caller must use per-iteration
+    labels, and this makes that a loud failure instead of wrong numbers.
+    """
+
+    def _array(self, value):
+        import dask.array as dask_array
+
+        return xr.DataArray(dask_array.full((4, 3), value, chunks=(2, 3)), dims=("time", "x"))
+
+    def test_restaging_the_same_array_is_a_noop(self, tmp_path):
+        mat = Materialiser("streaming", tmp_path)
+        first = mat.stage(self._array(1), "field")
+        again = mat.stage(first, "field")
+        assert again is first, "re-anchoring the identical staged array must not rewrite the store"
+
+    def test_restaging_a_different_array_under_one_label_is_rejected(self, tmp_path):
+        mat = Materialiser("streaming", tmp_path)
+        staged = mat.stage(self._array(1), "field")
+
+        with pytest.raises(ConfigurationError, match="different array"):
+            mat.stage(self._array(2), "field")
+
+        # The first array still reads its own values: the guard fired before any write.
+        assert int(staged.sum().compute()) == 12
+
+    def test_persist_mode_is_unaffected(self, tmp_path):
+        """persist never writes a store, so it has no label to collide on."""
+        mat = Materialiser("persist")
+        mat.stage(self._array(1), "field")
+        mat.stage(self._array(2), "field")  # must not raise
+
+
+class TestUnstructuredCrossModeEquivalence:
+    """streaming must be BIT-IDENTICAL to persist on the UNSTRUCTURED path too.
+
+    This is the gate for threading the Materialiser through
+    ``split_and_merge_objects_parallel``. It exercises the merge loop with several time
+    chunks, so the per-iteration ``updates_array`` staging and the post-merge field anchor
+    are both driven more than once -- a single-chunk run would leave the label-collision
+    hazard those per-iteration labels exist to avoid completely untested.
+    """
+
+    UNSTRUCTURED_KWARGS = {
+        "R_fill": 1,
+        "area_filter_absolute": 5,
+        "T_fill": 2,
+        "allow_merging": True,
+        "overlap_threshold": 0.8,
+        "nn_partitioning": True,
+        "unstructured_grid": True,
+        "dimensions": {"x": "ncells"},
+        "coordinates": {"x": "lon", "y": "lat"},
+        "regional_mode": False,
+        "coordinate_units": "degrees",
+        "quiet": True,
+    }
+
+    @pytest.fixture(scope="class")
+    def merging_data(self):
+        return xr.open_zarr(str(TEST_DATA_DIR / "extremes_unstructured_merging.zarr"), chunks={})
+
+    @pytest.mark.slow
+    def test_streaming_matches_persist_unstructured(self, merging_data, tmp_path, dask_client_unstructured):
+        data_bin = merging_data.extreme_events.chunk({"time": 2, "ncells": -1})
+        assert len(data_bin.chunks[0]) >= 20, "many time chunks: drives the merge loop repeatedly"
+
+        common = dict(
+            self.UNSTRUCTURED_KWARGS,
+            neighbours=merging_data.neighbours,
+            cell_areas=merging_data.cell_areas,
+        )
+
+        persist_tr = marEx.tracker(data_bin, merging_data.mask, temp_dir=str(tmp_path / "persist"), **common)
+        persist_events, persist_merges = persist_tr.run(return_merges=True)
+        persist_events, persist_merges = persist_events.compute(), persist_merges.compute()
+
+        stream_tr = marEx.tracker(
+            data_bin,
+            merging_data.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path / "streaming"),
+            **common,
+        )
+        stream_events, stream_merges = stream_tr.run(return_merges=True)
+        stream_events, stream_merges = stream_events.compute(), stream_merges.compute()
+
+        # assert_identical, not assert_allclose: no tolerance is granted.
+        xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
+        xr.testing.assert_identical(stream_merges, persist_merges)
+        assert stream_events.attrs["N_events_final"] == persist_events.attrs["N_events_final"]

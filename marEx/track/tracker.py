@@ -609,27 +609,14 @@ class tracker:
                 context={"provided_mode": compute_mode},
             )
 
-        # streaming currently covers the gridded code path only. The unstructured merge/split
-        # loop (split_and_merge_objects_parallel) writes its own zarr store via
-        # update_object_id_field_zarr / temp_merge_path and is not wired through the
-        # Materialiser, so accepting this combination would silently stream only PART of the
-        # pipeline (the shared preprocessing stages in run_preprocess() and objects.py's
-        # _anchor do stage; the unstructured core does not). That partial combination has zero
-        # test and zero benchmark coverage. See CHUNKING_NOTES.md §3.1/§5.2.
-        if compute_mode == "streaming" and self.unstructured_grid:
-            raise ConfigurationError(
-                "compute_mode='streaming' does not support unstructured grids",
-                details=(
-                    "Streaming currently supports gridded grids only. The unstructured "
-                    "merge/split loop (split_and_merge_objects_parallel) uses its own separate "
-                    "zarr writer that is not wired through the Materialiser, so this combination "
-                    "would silently stream only part of the pipeline."
-                ),
-                suggestions=[
-                    "Use compute_mode='persist' for unstructured grids",
-                ],
-                context={"provided_mode": compute_mode, "unstructured_grid": self.unstructured_grid},
-            )
+        # streaming previously covered the gridded path only, and unstructured input was
+        # rejected here: the merge/split loop was not wired through the Materialiser, so the
+        # combination would have streamed only PART of the pipeline. The unstructured merge
+        # core is now threaded too -- its whole-field pins (the labelled field, the merge
+        # loop's `updates_array`, and the post-merge field) all route through the
+        # Materialiser -- so the rejection is gone and unstructured input is accepted.
+        #
+        # The ragged-time-chunk precondition below still applies to BOTH grid types.
 
         # streaming's zarr region writer (ObjectIDRegionWriter) requires uniform chunking
         # along the time dimension: every chunk equal except possibly a smaller final one.
@@ -1845,4 +1832,5 @@ class tracker:
             self.regional_mode,
             self.max_iteration,
             self.temp_merge_path,
+            materialiser=self.materialiser,
         )

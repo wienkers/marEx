@@ -262,11 +262,46 @@ class Materialiser:
             # reads the store only to write the same bytes back over it. Identity, not
             # equality: a derived array must still be staged on its own.
             return obj
+        self._reject_relabel(label, obj)
         staged = self._stage_to_zarr(obj, label)
         if preserve_chunks and obj.chunks is not None and staged.chunks is not None and staged.chunks != obj.chunks:
             staged = staged.chunk(dict(zip(obj.dims, obj.chunks)))
         self._staged[label] = staged
         return staged
+
+    def _reject_relabel(self, label: str, obj: Any) -> None:
+        """
+        Refuse to stage a *different* array under a name already in use.
+
+        Staging writes ``<staging_dir>/<label>.zarr`` with ``mode="w"``. Doing that twice
+        under one label silently rewrites the store that the FIRST staged array is still
+        lazily reading, so that array starts returning the second one's bytes -- wrong
+        answers, no error. The registry makes this worse rather than better, because it
+        holds a strong reference that keeps the stale array alive to be read.
+
+        No caller does this today (every label is staged at exactly one site, and the two
+        `thresholds` sites are mutually exclusive methods). The hazard is real for any
+        caller that stages inside a loop -- e.g. the unstructured merge loop, which would
+        want a per-iteration array. Such a caller must pass a per-iteration label; this
+        turns the silent corruption into an immediate, explanatory failure.
+        """
+        previous = self._staged.get(label)
+        if previous is None or previous is obj:
+            return
+        raise ConfigurationError(
+            f"Materialiser.stage({label!r}) called with a different array than the one already staged",
+            details=(
+                "Staging writes <staging_dir>/<label>.zarr with mode='w'. Re-using a label for a "
+                "different array overwrites the store the earlier array still reads from, which "
+                "silently changes its values rather than raising."
+            ),
+            suggestions=[
+                "Give each staged array its own label, e.g. append a loop iteration index: "
+                f"'{label}_iter0', '{label}_iter1', ...",
+                "If the earlier array is genuinely dead, drop it from the registry before re-staging",
+            ],
+            context={"label": label},
+        )
 
     def stage_many(self, objs: dict, label: str, preserve_chunks: bool = False) -> Tuple[xr.DataArray, ...]:
         """
@@ -308,6 +343,7 @@ class Materialiser:
             # Registered under the VARIABLE name, not `label`: the caller that re-anchors
             # one of these (the tracker re-staging data_bin_filtered) names the array, not
             # the joint store, so that call short-circuits instead of re-writing.
+            self._reject_relabel(name, staged)
             self._staged[name] = staged
             out.append(staged)
         return tuple(out)
