@@ -25,6 +25,18 @@ from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 
+
+def _anchor(obj, label, materialiser):
+    """Stage `obj` -- it has two or more consumers. Plain persist when unsupplied.
+
+    The `materialiser is None` default keeps every existing caller -- including the
+    unstructured path, which Phase 4 does not touch -- on exactly the previous behaviour.
+    """
+    if materialiser is None:
+        return obj.persist()
+    return materialiser.stage(obj, label, preserve_chunks=True)
+
+
 # 8-connectivity structuring element for per-2D-slice connected-component labelling.
 _EIGHT_CONNECTIVITY = np.ones((3, 3), dtype=int)
 
@@ -80,6 +92,8 @@ def identify_objects(
     neighbours_int: Optional[xr.DataArray],
     xdim: str,
     regional_mode: bool,
+    *,
+    materialiser=None,
 ) -> Tuple[xr.DataArray, None, int]:
     """
     Identify connected regions in binary data.
@@ -247,7 +261,10 @@ def identify_objects(
         offsets = per_slice_counts.cumsum(timedim).shift({timedim: 1}, fill_value=0)
         object_id_field = xr.where(local_ids > 0, local_ids + offsets, 0).rename("ID_field").astype(np.int32)
 
-        object_id_field = object_id_field.persist()
+        # _anchor, not _hold: this array is read TWICE -- by the .max().compute() on the
+        # next line and by the caller via the return. Leaving it unanchored in streaming
+        # mode would re-run the whole labelling graph for the second consumer.
+        object_id_field = _anchor(object_id_field, "object_id_field", materialiser)
         N_objects = int(object_id_field.max().compute().item())
 
     return object_id_field, None, N_objects

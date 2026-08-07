@@ -1200,6 +1200,7 @@ class tracker:
             self.xdim,
             self.mask,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     def refresh_dask_graph(self, data_bin: xr.DataArray) -> xr.DataArray:
@@ -1258,6 +1259,7 @@ class tracker:
             self.cell_area,
             self.timedim,
             self.ydim,
+            materialiser=self.materialiser,
         )
 
     # ============================
@@ -1292,6 +1294,7 @@ class tracker:
             getattr(self, "neighbours_int", None),
             self.xdim,
             self.regional_mode,
+            materialiser=self.materialiser,
         )
 
     def calculate_centroid(

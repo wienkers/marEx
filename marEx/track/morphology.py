@@ -33,6 +33,17 @@ from .overlap import sparse_bool_power
 logger = get_logger(__name__)
 
 
+def _hold(obj, materialiser):
+    """Pin `obj` -- single consumer, or already anchored upstream.
+
+    A no-op in streaming mode; that is the point. Staging here would write a second
+    copy of an array that is already on disk.
+    """
+    if materialiser is None:
+        return obj.persist()
+    return materialiser.pin_one(obj)
+
+
 def compute_area(
     data_bin: xr.DataArray,
     unstructured_grid: bool,
@@ -225,6 +236,8 @@ def fill_time_gaps(
     xdim: str,
     mask: xr.DataArray,
     regional_mode: bool,
+    *,
+    materialiser=None,
 ) -> xr.DataArray:
     """
     Fill temporal gaps between objects.
@@ -271,7 +284,13 @@ def fill_time_gaps(
     )
 
     # Remove padding
-    data_bin_filled = data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)}).persist()
+    # _hold, not _anchor: the only consumer is the fill_holes call immediately below,
+    # and the caller stages the RESULT (tracker.py:879). Staging here too would write
+    # the whole field to zarr twice.
+    data_bin_filled = _hold(
+        data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)}),
+        materialiser,
+    )
 
     # Fill newly-created spatial holes
     data_bin_filled = fill_holes(
@@ -336,6 +355,8 @@ def filter_small_objects(
     cell_area: xr.DataArray,
     timedim: str,
     ydim: Optional[str],
+    *,
+    materialiser=None,
 ) -> Tuple[xr.DataArray, float, xr.DataArray, int, int]:
     """
     Remove objects smaller than a threshold area.
@@ -516,7 +537,12 @@ def filter_small_objects(
                 vectorize=True,
                 dask="parallelized",
             )
-            data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
+            # Both _hold: data_bin_filtered is staged by the caller (tracker.py:908),
+            # and padded_areas is (time, object_buffer), not whole-field.
+            if materialiser is None:
+                data_bin_filtered, padded_areas = persist(data_bin_filtered, padded_areas)
+            else:
+                data_bin_filtered, padded_areas = materialiser.pin(data_bin_filtered, padded_areas)
         else:
             padded_areas = xr.apply_ufunc(
                 slice_object_areas,
