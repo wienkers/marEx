@@ -118,10 +118,11 @@ cell mesh a single timestep is ~60 MB as float32 and ~15 MB as the int32 ID fiel
 chunk of 4 is ~240 MB. That is why the unstructured example uses `{"time": 4, "ncells": -1}`
 while the gridded one can afford more.
 
-### 3.1 The tracker does not stream
+### 3.1 The tracker does not stream (yet)
 
-Its merge/split loop is **sequential in time with global mutable state**, and it persists the
-whole ID field. This is a structural property, not a tuning problem: see §5.
+It holds the whole `n_time × space` ID field in memory, so today `n_time` is bounded by RAM.
+The merge/split loop itself already works a window at a time, so this is a fixable ceiling
+rather than a property of the algorithm — see §5.2.
 
 ---
 
@@ -147,8 +148,11 @@ e.g. `(30, 30, …, 6, 24, 30, …)` along time — and `to_zarr` rejects that o
 
 | | `detect` (`preprocess_data`) | `track` (`tracker`) |
 | --- | --- | --- |
-| **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **No** |
-| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **No** |
+| **gridded** | **Yes** — `compute_mode="streaming"` *[measured]* | **Not yet** — see §5.2 |
+| **unstructured** | **Yes, by construction** — same code path *[reasoned: no at-scale streaming run]* | **Not yet** |
+
+For `track`, "larger-than-memory" means **long in time**, not large in space: one spatial
+field is always held whole, deliberately (§5.2).
 
 ### 5.1 `detect`: solved, with a caveat
 
@@ -173,23 +177,40 @@ and is identical in every mode. If your per-worker `memory_limit` is below that 
 mode dies and no setting helps. Size workers against the per-task working set (§2.1) first,
 then choose a mode.
 
-### 5.2 `track`: not solved, and the blocker is structural
+### 5.2 `track`: not solved today, but less structural than it looks
 
-Three properties, each of which alone would prevent streaming:
+**Scope first: space stays whole, by design.** Chunking the spatial dimension in `track`
+would mean reworking connected-component labelling and the dilation matrix, and it is not
+worth it — a single spatial field is small even at high resolution (0.25° global = 1.04 M
+cells ≈ 4 MB as int32; ICON R02B09 = 14.9 M cells ≈ 60 MB). So the target for `track` is
+**arbitrarily long in time**, at whatever resolution fits one field. That is the case that
+matters in practice.
 
-1. **The merge/split loop is sequential in time with global mutable state.** Object IDs must
-   be reconciled across timesteps in order, so there is no independent unit of work to stream.
-2. **Space cannot be chunked** (§1), so the only decomposition axis is time — the one axis
-   the algorithm is sequential along.
-3. **The whole ID field is persisted.** `update_object_id_field_zarr` is a partial
-   foundation for an on-disk ID field, but only partial.
+**The sequential-in-time loop is not the obstacle it appears to be.** A time-sequential
+algorithm streams perfectly well provided it holds only a window, and the gridded loop
+already does:
 
-So the realistic goal for `track` is **"ID field on disk with windowed access"**, not
-streaming. That is a separate piece of work, not a `compute_mode` parameter.
+- it loads **one time chunk at a time** and processes timesteps within it;
+- its scratch list of processed chunks is **flushed and truncated periodically**;
+- the state carried between timesteps is the `t-1`/`t-2` slices plus per-event lists that
+  grow with the **number of merge events**, not with `n_time × n_cells`.
+
+**What actually caps it is the output accumulator.** Results are written back into a
+whole-`n_time × space` dask array that is held in memory and re-persisted as the loop
+proceeds. That is a ceiling in `n_time`, and it is a bounded piece of work to replace with
+incremental writes to disk — the mechanism already exists in the sibling code path
+(`update_object_id_field_zarr`), currently used only on unstructured grids.
+
+Alongside it sit the same input-sized pins `detect` had before `compute_mode`: the
+preprocessed binary field, the filled/filtered fields, and the ID field.
+
+So the realistic goal is **"ID field on disk with windowed access"** plus the `compute_mode`
+treatment for the remaining pins — not a rewrite of the algorithm.
 
 *[measured]* The practical limit today: unstructured tracking of a 1096-timestep ICON run did
 not complete on a single node — merge iteration 1 with 681 objects ran 4 h 22 m and had
-processed 256 of 1096 timesteps.
+processed 256 of 1096 timesteps. Note that run used the *parallel* path, so the existence of
+a parallel/zarr code path does **not** by itself mean tracking is larger-than-memory.
 
 ### 5.3 How to scale today
 
