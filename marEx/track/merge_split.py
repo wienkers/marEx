@@ -1691,12 +1691,33 @@ def split_and_merge_objects_parallel(
             object_id_field.name = "temp"
             object_id_field.to_zarr(zarr_path, mode="w")
 
+        def write_receipt(ds_chunk: xr.Dataset) -> xr.DataArray:
+            """One byte per timestep, standing in for the chunk this pass just wrote.
+
+            ``update_time_chunk`` is SIDE-EFFECTING: each chunk writes its own zarr region
+            and the returned array is thrown away (``del result`` below). Returning the
+            field itself made ``result.persist()`` materialise a whole int32 field purely
+            to force those writes -- measured at **19.1 GB, 54.8 % of everything this path
+            pins**, on the n_time=32 ICON slice. A receipt forces the writes identically,
+            because each output block still depends on its own input block, for n_time
+            bytes instead of n_time x ncells x 4.
+
+            Must be returned from EVERY branch, including the no-merge early return, or
+            ``map_blocks`` raises on a template mismatch for exactly the chunks that skip
+            the write.
+            """
+            return xr.DataArray(
+                np.zeros(ds_chunk.sizes[timedim], dtype=np.int8),
+                dims=[timedim],
+                coords={timecoord: ds_chunk[timecoord].values},
+            )
+
         def update_time_chunk(ds_chunk: xr.Dataset, lookup_dict: Dict[int, int]) -> xr.DataArray:
             """Process a single chunk with optimised memory usage."""
             # Skip processing if no merges in this chunk
             needs_update = bool(ds_chunk["has_merge"].any().compute().item())
             if not needs_update:
-                return ds_chunk["object_field"]
+                return write_receipt(ds_chunk)
 
             # Extract data from the chunk
             chunk_data = ds_chunk["object_field"]
@@ -1741,7 +1762,7 @@ def split_and_merge_objects_parallel(
                 region={timedim: slice(time_idx_start, time_idx_end)},
             )
 
-            return chunk_data  # Return original data for dask graph consistency
+            return write_receipt(ds_chunk)  # Not the field: see write_receipt's docstring
 
         # Create time indices for slicing
         time_coords = object_id_field[timecoord].values
@@ -1759,12 +1780,19 @@ def split_and_merge_objects_parallel(
             }
         ).chunk({timedim: timechunks})
 
-        # Process chunks in parallel
+        # Process chunks in parallel. The template is the RECEIPT shape, not the field --
+        # this pass exists for its zarr writes, not its return value.
+        receipt_template = xr.DataArray(
+            np.zeros(len(time_coords), dtype=np.int8),
+            dims=[timedim],
+            coords={timecoord: time_coords},
+        ).chunk({timedim: timechunks})
+
         result = xr.map_blocks(
             update_time_chunk,
             ds,
             kwargs={"lookup_dict": id_lookup},
-            template=object_id_field,
+            template=receipt_template,
         )
 
         # Force computation to ensure all writes complete

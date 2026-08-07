@@ -878,3 +878,53 @@ class TestUnstructuredTracking:
         assert tracker_original.area_filter_quartile == tracker_custom.area_filter_quartile
         assert tracker_original.T_fill == tracker_custom.T_fill
         assert tracker_original.allow_merging == tracker_custom.allow_merging
+
+    @pytest.mark.slow
+    def test_unstructured_merge_writer_across_many_time_chunks(self, dask_client_unstructured):
+        """Exercise ``update_object_id_field_zarr`` over MANY time chunks, not one.
+
+        Every other unstructured test feeds the tracker an unchunked field, so the merge
+        loop's zarr writer runs its ``map_blocks`` exactly once, over a single chunk.
+        Instrumented and counted: the whole of this file produced **1 write-branch call
+        and 0 no-merge calls**, i.e. the writer's early-return branch -- the one taken when
+        a chunk contains no merges -- was never executed by any test.
+
+        That branch matters because the writer is a *side-effecting* pass: it writes each
+        chunk to a zarr region and its return value is discarded. Both branches must return
+        the same shape or ``map_blocks`` raises on a template mismatch, and it would raise
+        only for chunks that skip the write -- invisible to a single-chunk test.
+
+        Chunking the merging fixture at ``time=2`` gives **245 no-merge calls and 5 write
+        calls**, so both branches are covered. The pinned values were captured at
+        ``d40b760`` before the writer's template was changed, and reproduced exactly after.
+        """
+        data = self.extremes_data_merging
+        data_bin = data.extreme_events.chunk({"time": 2, "ncells": -1})
+        assert len(data_bin.chunks[0]) >= 20, "fixture must give many time chunks for this test to mean anything"
+
+        tracker = marEx.tracker(
+            data_bin,
+            data.mask,
+            R_fill=1,
+            area_filter_absolute=5,
+            temp_dir=self.temp_dir,
+            T_fill=2,
+            allow_merging=True,
+            overlap_threshold=0.8,
+            nn_partitioning=True,
+            unstructured_grid=True,
+            dimensions={"x": "ncells"},
+            coordinates={"x": "lon", "y": "lat"},
+            regional_mode=False,
+            coordinate_units="degrees",
+            quiet=True,
+            neighbours=data.neighbours,
+            cell_areas=data.cell_areas,
+        )
+        tracked_ds = tracker.run()
+
+        # Regression values captured at d40b760, i.e. BEFORE the writer stopped returning
+        # the whole field. Reproduced exactly afterwards, which is what makes the change
+        # safe: the writes still land on every chunk, including the ones that skip.
+        assert tracked_ds.attrs["N_events_final"] == 11
+        assert int(tracked_ds.ID_field.sum().compute()) == 15288
