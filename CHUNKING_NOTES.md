@@ -136,6 +136,24 @@ baseline. See §5.2 for the numbers.
 14 bytes per cell-timestep uncompressed — ~55 GB uncompressed at the A/B's
 `n_time=3804 x 720 x 1440`; less on disk, since the ID fields are mostly zeros.
 
+**`merge_ledger` is staged too, and it is not a whole field.** It is a *returned* data_var of
+shape `(time, ID, sibling_ID)`, so it grows with the series length independently of the fields
+above. It used to end on a bare `.persist()`, which pinned it in every mode — at `n_time=3804`
+that was 1,135,311,408 B, **77 % of everything `streaming` still held**, and by a wide margin
+the largest remaining pin (next largest: 200 MB). It now routes through the same
+`Materialiser`, taking streaming's pinned total from 1.47 GB to 0.340 GB (§5.2).
+
+Staging it costs approximately nothing on disk: the ledger is overwhelmingly `-1` fill and
+blosc reduces a constant chunk to a few hundred bytes, so the 1.135 GB dense array is a few MB
+of zarr — the same is true of any `events_ds` a caller writes out. That is *modelled*, not a
+`du` of the staged store: `streaming` cleans its staging directory on normal exit, so the A/B
+could not measure it after the fact. Sub-1 % is the robust part; do not quote a precise figure.
+
+The consequence worth stating plainly: this removed the **pin**, not the growth. The ledger
+still grows with series length, and that is now a RAM concern confined to `persist` mode. Do
+not reach for a sparse representation on disk-size grounds — that argument was checked and it
+does not hold.
+
 **Precondition, enforced at construction: `temp_dir` needs uniformly time-chunked input.**
 `.chunk({"time": k})` is always fine (the ragged final chunk zarr allows is fine too). A
 genuinely ragged chunking — reachable from a store with irregular on-disk chunks, or a
@@ -253,16 +271,28 @@ baseline captured before this work started.
 | side | wall | peak | spill | marEx-attributable pinned |
 | --- | --- | --- | --- | --- |
 | baseline | 1093.7 s | 57.85 GB | 0.00 GB | 352.75 GB (33 calls, 19 sites) |
-| persist (new) | 1081.7 s | 56.99 GB | 0.00 GB | 336.97 GB (33 calls, 12 sites) |
-| streaming (new) | 1082.1 s | 20.43 GB | 0.00 GB | **1.47 GB** (8 calls, 8 sites) |
+| persist (first pass) | 1081.7 s | 56.99 GB | 0.00 GB | 336.97 GB (33 calls, 12 sites) |
+| streaming (first pass) | 1082.1 s | 20.43 GB | 0.00 GB | 1.47 GB (8 calls, 8 sites) |
+| persist (current) | 1103.8 s | 56.66 GB | 0.00 GB | 336.97 GB (33 calls, 12 sites) |
+| streaming (current) | 1099.5 s | 19.09 GB | 0.00 GB | **0.340 GB** (7 calls, 7 sites) |
 
-**Peak dropped 57.0 → 20.4 GB, a 64 % reduction — that is the headline, backed by pinned bytes
-falling 229x (336.97 → 1.47 GB).** Spill was 0.00 GB on all three sides throughout, so here the
+**Peak dropped 57.0 → 19.1 GB, a 66 % reduction — that is the headline, backed by pinned bytes
+falling ~990x (336.97 → 0.340 GB).** Spill was 0.00 GB on every side throughout, so here the
 peak drop *is* the memory story (§6's "peak and pinned are different quantities" rule still
-holds in general: the 229x pin reduction does not translate 1:1 into the 64 % peak reduction,
-because peak also carries mode-independent working-set terms). **No wall-clock change either
-direction** — every delta (persist −1.1 %, streaming −1.1 % vs baseline; persist vs streaming
-+0.4 s) sits inside the ~5 % noise floor; do not read any of it as a speed win or loss.
+holds in general: the ~990x pin reduction does not translate 1:1 into the 66 % peak reduction,
+because peak also carries mode-independent working-set terms). **No wall-clock change in any
+direction** — every delta sits inside the ~5 % noise floor; do not read any of it as a speed
+win or loss.
+
+The last two rows are the `merge_ledger` fix (§3.1). It is the one place in this table where a
+pinned-byte change is visible in peak at roughly the right magnitude: pinned fell 1.135 GB and
+peak fell 1.34 GB (20.43 → 19.09). Treat that as *consistent*, not as a measurement — it is a
+single run against a ~5 % noise floor, and the two quantities are not the same thing.
+
+**`persist` is byte-identical across both passes — 336,970,337,552 B, to the byte.** That is
+the control for the `merge_ledger` change: the ledger's 1,135,311,408 B did not disappear in
+`persist` mode, it moved from a bare `.persist()` site to the `Materialiser`'s `stage` path,
+which in `persist` mode *is* `dask.persist`. The default path did not move.
 
 `persist(new)` matching the baseline call-for-call (33 = 33 `persist()` calls) and closely
 site-for-site is the **graph-level** proof that the default path did not move at scale —

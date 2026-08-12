@@ -194,20 +194,21 @@ class tracker:
 
         * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
           whenever the run fits (measured peak ~57 GB at n_time=3804, 0.25 deg global).
-        * 'streaming': stages the ID field, the filled/filtered fields, and the merge
-          loop's output accumulator to zarr under ``temp_dir`` instead of pinning them,
-          so memory scales with cluster size rather than series length (measured peak
-          20.4 GB on the same run, bytes pinned 337 -> 1.47 GB). Requires ``temp_dir``.
-          Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields, ~14 bytes per
-          cell-timestep uncompressed (~55 GB uncompressed at that same n_time=3804 x
-          720 x 1440 run; less on disk, since the ID fields are mostly zeros).
+        * 'streaming': stages the ID field, the filled/filtered fields, the merge loop's
+          output accumulator and the merge ledger to zarr under ``temp_dir`` instead of
+          pinning them, so memory scales with cluster size rather than series length
+          (measured peak 19.1 GB on the same run, bytes pinned 337 -> 0.34 GB). Requires
+          ``temp_dir``. Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields,
+          ~14 bytes per cell-timestep uncompressed (~55 GB uncompressed at that same
+          n_time=3804 x 720 x 1440 run; less on disk, since the ID fields are mostly
+          zeros). The merge ledger adds a sixth store but negligible disk: it is nearly
+          all ``-1`` fill and compresses to a few MB.
 
-          **Restrictions**: gridded grids only -- rejected for ``unstructured_grid=True``,
-          since the unstructured merge/split loop uses its own separate zarr writer that
-          is not wired through this mode. Also requires the input's time chunking to be
-          uniform (every chunk equal except a possibly-smaller last one, exactly what
-          ``.chunk({'time': k})`` always produces); a genuinely ragged chunking is
-          rejected at construction time rather than failing inside the zarr write.
+          **Restrictions**: requires the input's time chunking to be uniform (every chunk
+          equal except a possibly-smaller last one, exactly what ``.chunk({'time': k})``
+          always produces); a genuinely ragged chunking is rejected at construction time
+          rather than failing inside the zarr write. Both gridded and unstructured grids
+          are supported.
 
           **Staging-lifetime contract**: the returned dataset reads *lazily* from the
           staged zarr store, so the staging directory deliberately **outlives**
