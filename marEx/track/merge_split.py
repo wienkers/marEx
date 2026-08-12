@@ -390,8 +390,24 @@ def cluster_rename_objects_and_props(
         template=merge_ledger,
     )
 
-    # Format merge ledger
-    merge_ledger = merge_ledger.rename("merge_ledger").transpose(timedim, "ID", "sibling_ID").persist()
+    # Format merge ledger. This is a returned data_var of shape (time, ID, sibling_ID), so
+    # it grows quadratically with the series length (1.135 GB at nt=3804, 77 % of everything
+    # streaming still pinned). Anchoring it puts those bytes on disk under streaming; in
+    # persist mode `stage` is `dask.persist`, byte for byte what this line did before.
+    # Staging costs approximately nothing in disk terms. The ledger is overwhelmingly -1
+    # fill, and blosc crushes a constant chunk to a few hundred bytes: at the nt=3804 shape,
+    # 1.135 GB dense writes as ~5.5 MB of zarr (0.49 %) with that run's real merge count of
+    # 18712. The same is true of any events_ds a caller saves. (That figure is modelled, not
+    # a du of the staged store -- streaming cleans its staging dir on normal exit, so the
+    # A/B could not measure it directly. Sub-1 % is the robust part: a 3000-entry sprinkle
+    # gave 8.96 MB, so the exact value moves with merge density and neither is worth quoting
+    # to three digits.)
+    #
+    # So this removes the PIN, not the quadratic growth -- and the growth is a RAM-only
+    # concern, confined to persist mode. Do not reach for a sparse representation on
+    # disk-size grounds; that was measured and the premise does not hold.
+    merge_ledger = merge_ledger.rename("merge_ledger").transpose(timedim, "ID", "sibling_ID")
+    merge_ledger = _anchor_field(merge_ledger, "merge_ledger", materialiser)
 
     # Add start and end time indices for each ID
     valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data

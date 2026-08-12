@@ -625,6 +625,59 @@ class TestStageLabelReuse:
         mat.stage(self._array(2), "field")  # must not raise
 
 
+class TestMergeLedgerStaging:
+    """``merge_ledger`` must reach disk under streaming, and must not be all-fill.
+
+    It is a returned data_var of shape ``(time, ID, sibling_ID)`` that grows quadratically
+    with the series length -- 1.135 GB at ``nt=3804``, which was 77 % of everything
+    streaming still pinned. Its ``.persist()`` was bare, so it stayed in RAM in every mode.
+
+    The equivalence tests above DO cover its values (it is a data_var, so
+    ``assert_identical`` sees it, unlike the ``N_events_final`` attr) -- but only if the
+    fixture actually merges. A run with zero merges gives an all-``-1`` ledger and those
+    assertions pass for free. The vacuity check below is what makes them mean something.
+    """
+
+    @pytest.mark.slow
+    def test_streaming_stages_the_merge_ledger(self, extremes, tmp_path, dask_client):
+        tr = marEx.tracker(
+            extremes.extreme_events.chunk(CHUNK_SIZE),
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        events = tr.run()
+
+        staged = Path(events.attrs["marex_staging_dir"])
+        assert (staged / "merge_ledger.zarr").exists(), (
+            "streaming must stage merge_ledger to disk; a bare .persist() here keeps the "
+            "largest remaining streaming pin in RAM and it grows quadratically in time. "
+            f"staging dir holds: {sorted(p.name for p in staged.iterdir())}"
+        )
+
+        # NOT VACUOUS: the ledger must carry real merges, else every cross-mode
+        # assert_identical over it compares -1 against -1.
+        ledger = events.merge_ledger.compute()
+        assert int((ledger > 0).sum()) > 0, "fixture produced no merges: the ledger is all fill and proves nothing"
+
+    @pytest.mark.slow
+    def test_persist_does_not_stage_the_merge_ledger(self, extremes, tmp_path, dask_client):
+        """Control: the default path must not have started writing zarr stores."""
+        tr = marEx.tracker(
+            extremes.extreme_events.chunk(CHUNK_SIZE),
+            extremes.mask,
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        events = tr.run()
+
+        assert "marex_staging_dir" not in events.attrs
+        assert not list(tmp_path.glob("**/merge_ledger.zarr")), "persist mode must not stage anything"
+        ledger = events.merge_ledger.compute()
+        assert int((ledger > 0).sum()) > 0
+
+
 class TestUnstructuredCrossModeEquivalence:
     """streaming must be BIT-IDENTICAL to persist on the UNSTRUCTURED path too.
 
