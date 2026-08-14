@@ -23,6 +23,7 @@ method wrappers.
 
 import gc
 import os
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import dask.array as da
@@ -36,6 +37,7 @@ from scipy.sparse.csgraph import connected_components
 
 from ..exceptions import TrackingError
 from ..logging_config import get_logger
+from . import _merge_profile
 from . import objects as _objects
 from . import overlap as _overlap
 from .partitioning import (
@@ -1374,6 +1376,9 @@ def split_and_merge_objects_parallel(
         final_merging_objects = np.full((n_time, MAX_MERGES), -1, dtype=np.int32)
         final_merge_count = 0
 
+        # Env-var-gated instrumentation; a no-op singleton unless MAREX_MERGE_PROFILE is set.
+        prof = _merge_profile.make()
+
         # Process each timestep
         data_p1 = []
         for t in range(n_time):
@@ -1392,12 +1397,25 @@ def split_and_merge_objects_parallel(
             # Process each merging object at this timestep
             while merging_objects_list[t]:
                 child_id = merging_objects_list[t].pop(0)
+                _p_child0 = time.perf_counter()
 
                 # Get child mask and identify overlapping parents
                 child_mask = data_t == child_id
+                # Ascending cell indices of the child. Hoisted here from after the
+                # partitioning step, where it used to be recomputed; child_mask is not
+                # modified in between. Objects are tiny next to the mesh, so testing a
+                # candidate parent AT these indices costs O(child) where intersecting two
+                # whole-field boolean masks costs O(ncells).
+                child_cells = np.where(child_mask)[0].astype(np.int32)
 
                 # Find parent objects that overlap with this child
                 potential_parents = np.unique(data_m1[child_mask])
+                # Loop-invariant: the child's own area was recomputed once per candidate
+                # parent inside the scan below.
+                child_area = area[child_mask].sum()
+                _p_setup = time.perf_counter()
+                prof.add("child_setup", _p_setup - _p_child0)
+                prof.count("children", 1)
                 parent_iterator = 0
                 parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
                 parent_centroids = np.full((MAX_PARENTS, 2), -1.0e10, dtype=np.float32)
@@ -1407,7 +1425,9 @@ def split_and_merge_objects_parallel(
                 n_parents = 0
 
                 # Find all unique parent IDs with significant overlap
+                _p_n_cand = 0
                 for parent_id in potential_parents[potential_parents > 0]:
+                    _p_n_cand += 1
                     if n_parents >= MAX_PARENTS:  # pragma: no cover
                         raise TrackingError(
                             "Too many parent objects for tracking",
@@ -1425,12 +1445,17 @@ def split_and_merge_objects_parallel(
                         )
 
                     parent_mask = data_m1 == parent_id
-                    if np.any(parent_mask & child_mask):
+                    # Ascending, and exactly `np.where(parent_mask & child_mask)[0]` -- but
+                    # evaluated only at the child's own cells, so it replaces two whole-mesh
+                    # boolean intersections (the `any` test and the overlap gather) with two
+                    # O(child) lookups.
+                    overlap_cells = child_cells[parent_mask[child_cells]]
+                    if overlap_cells.size:
                         # Calculate overlap area and check if it's large enough
                         area_0 = area[parent_mask].sum()  # Parent area
-                        area_1 = area[child_mask].sum()  # Child area
+                        area_1 = child_area  # Child area
                         min_area = np.minimum(area_0, area_1)
-                        overlap_area = area[parent_mask & child_mask].sum()
+                        overlap_area = area[overlap_cells].sum()
 
                         # Skip if overlap is below threshold
                         if overlap_area / min_area < overlap_threshold:
@@ -1468,8 +1493,22 @@ def split_and_merge_objects_parallel(
                         parent_iterator += 1
                         n_parents += 1
 
+                _p_backward = time.perf_counter()
+                prof.add("backward_scan", _p_backward - _p_setup)
+                prof.count("parent_candidates", _p_n_cand)
+
                 # Need at least 2 parents for merging
                 if n_parents < 2:
+                    prof.count("children_no_merge", 1)
+                    prof.row(
+                        t=t,
+                        child=int(child_id),
+                        n_cand=_p_n_cand,
+                        n_parents=n_parents,
+                        merged=0,
+                        setup_s=_p_setup - _p_child0,
+                        backward_s=_p_backward - _p_setup,
+                    )
                     continue
 
                 # Create new IDs for each partition
@@ -1500,17 +1539,24 @@ def split_and_merge_objects_parallel(
                 has_merge[t] = True
 
                 # Partition the child object based on parent associations
+                _p_part0 = time.perf_counter()
                 if nn_partitioning:
                     # Estimate maximum search distance based on object size
                     max_area = parent_areas.max() / mean_cell_area
                     max_distance = int(np.sqrt(max_area) * 2.0)
 
-                    # Use optimised nearest-neighbor partitioning
+                    # Use optimised nearest-neighbor partitioning.
+                    #
+                    # No defensive copies here: the kernel makes its own working copy of
+                    # parent_frontiers (the only array it writes) and merely reads
+                    # child_mask and neighbours_int. Copying neighbours_int was by far the
+                    # worst of the three -- (3, ncells) int32 is 178 MB on the ICON mesh,
+                    # allocated and thrown away on EVERY merge event.
                     new_labels_uint = partition_nn_unstructured_optimised(
-                        child_mask.copy(),
-                        parent_masks_uint.copy(),
+                        child_mask,
+                        parent_masks_uint,
                         parent_centroids,
-                        neighbours_int.copy(),
+                        neighbours_int,
                         lat,
                         lon,
                         max_distance=max(max_distance, 20) * 2,
@@ -1525,13 +1571,25 @@ def split_and_merge_objects_parallel(
                     # Use centroid-based partitioning
                     new_labels = partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon)
 
+                _p_part1 = time.perf_counter()
+                prof.add("partition", _p_part1 - _p_part0)
+
                 # Update slice data for subsequent merging in process_chunk
                 data_t[child_mask] = new_labels
 
                 # Record which cells get which new IDs for later updates
-                spatial_indices_all = np.where(child_mask)[0].astype(np.int32)
+                spatial_indices_all = child_cells
+                _p_child_size = spatial_indices_all.size
                 child_mask = None  # Free memory
-                gc.collect()
+                _p_gc0 = time.perf_counter()
+                prof.add("relabel", _p_gc0 - _p_part1)
+                # No gc.collect() here. CPython frees these arrays by refcount the moment
+                # the last name is rebound; a full collection only breaks reference
+                # CYCLES, of which this loop creates none. It ran once per merge event and
+                # walks the WHOLE process heap each time, so its cost grows with the
+                # worker's live object count rather than with anything this loop does.
+                _p_gc1 = time.perf_counter()
+                prof.add("gc_collect", _p_gc1 - _p_gc0)
 
                 # Record update information for each new ID
                 for new_id in child_ids[1:]:
@@ -1542,23 +1600,55 @@ def split_and_merge_objects_parallel(
                     updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
 
                 next_new_id += n_parents - 1
+                _p_fwd0 = time.perf_counter()
+                prof.add("updates_bookkeeping", _p_fwd0 - _p_gc1)
 
                 # Find all child objects in the next timestep that overlap with our newly labeled regions
                 new_merging_list = []
+                _p_n_fwd_pairs = 0
                 for new_id in child_ids:
-                    parent_mask = data_t == new_id
-                    if np.any(parent_mask):
-                        area_0 = area[parent_mask].sum()
-                        potential_children = np.unique(data_p1[parent_mask])
+                    # Every cell holding new_id is a cell of the child just partitioned:
+                    # the new ids are freshly minted, and all cells that held child_id were
+                    # in child_mask by construction. So this is the same set `data_t ==
+                    # new_id` would find, ascending, without touching the whole field.
+                    parent_cells = spatial_indices_all[new_labels == new_id]
+                    if parent_cells.size:
+                        area_0 = area[parent_cells].sum()
+                        potential_children = np.unique(data_p1[parent_cells])
 
                         for potential_child in potential_children[potential_children > 0]:
+                            _p_n_fwd_pairs += 1
                             potential_child_mask = data_p1 == potential_child
                             area_1 = area[potential_child_mask].sum()
                             min_area = min(area_0, area_1)
-                            overlap_area = area[parent_mask & potential_child_mask].sum()
+                            # Ascending, and exactly the cells the whole-mesh
+                            # `parent_mask & potential_child_mask` would have selected.
+                            overlap_cells = parent_cells[potential_child_mask[parent_cells]]
+                            overlap_area = area[overlap_cells].sum()
 
                             if overlap_area / min_area > overlap_threshold:
                                 new_merging_list.append(potential_child)
+
+                _p_fwd1 = time.perf_counter()
+                prof.add("forward_rescan", _p_fwd1 - _p_fwd0)
+                prof.count("forward_pairs", _p_n_fwd_pairs)
+                prof.count("forward_newids", len(child_ids))
+                prof.count("merges", 1)
+                prof.row(
+                    t=t,
+                    child=int(child_id),
+                    n_cand=_p_n_cand,
+                    n_parents=n_parents,
+                    merged=1,
+                    child_cells=int(_p_child_size),
+                    n_fwd_pairs=_p_n_fwd_pairs,
+                    setup_s=_p_setup - _p_child0,
+                    backward_s=_p_backward - _p_setup,
+                    partition_s=_p_part1 - _p_part0,
+                    relabel_s=_p_gc0 - _p_part1,
+                    gc_s=_p_gc1 - _p_gc0,
+                    forward_s=_p_fwd1 - _p_fwd0,
+                )
 
                 # Add newly found merging objects to processing queue
                 if t < n_time - 1:
@@ -1589,6 +1679,8 @@ def split_and_merge_objects_parallel(
                             )
                         final_merging_objects[t][final_merge_count] = new_object_id
                         final_merge_count += 1
+
+        prof.dump(n_time=n_time, n_points=n_points, nn_partitioning=bool(nn_partitioning))
 
         return (
             merge_child_ids,
