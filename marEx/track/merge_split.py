@@ -1326,10 +1326,21 @@ def split_and_merge_objects_parallel(
         # merges in that chunk are silently dropped or crash. Target shape is (2, time, ncells).
         while chunk_data_m1_full.ndim > 3:
             chunk_data_m1_full = chunk_data_m1_full.squeeze(axis=-1)
-        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32).copy()
-        chunk_data = chunk_data_m1_full[1].astype(np.int32).copy()
+        # `.astype()` already returns a fresh, writable buffer that does not alias the task
+        # input (numpy's `copy` argument defaults to True, even when the dtype is unchanged),
+        # so the trailing `.copy()` these three lines used to carry was a second full
+        # duplicate of each array, purely transient: two single time slices and one whole
+        # chunk, ~358 MB per task on the ICON mesh at timechunks=4. The no-aliasing property
+        # the merge loop relies on (it mutates `data_t` in place) is a property of `astype`,
+        # not of the dropped copy.
+        #
+        # `chunk_data_m1_full` is the field shifted forward one step, so its first two TIME
+        # entries are (field[t-1], field[t]) for this chunk's first timestep -- which is why
+        # both come from the m1 argument and are single slices, not whole chunks.
+        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32)
+        chunk_data = chunk_data_m1_full[1].astype(np.int32)
         del chunk_data_m1_full  # Free memory immediately
-        chunk_data_p1 = chunk_data_p1_full.astype(np.int32).copy()
+        chunk_data_p1 = chunk_data_p1_full.astype(np.int32)
         # Remove any singleton dimensions except time and space
         while chunk_data_p1.ndim > 2:
             chunk_data_p1 = chunk_data_p1.squeeze(axis=-1)
@@ -2055,10 +2066,29 @@ def split_and_merge_objects_parallel(
         # fixture. They are small -- per-timestep ledgers, a few MB -- so pinning them in
         # every mode costs nothing.
         #
-        # `updates_array` is the exception worth moving: a whole (time, ncells) uint8 field,
-        # 2.382 GB of the 34.8 GB this path pinned at n_time=32. Staging it is safe for the
-        # same reason the persist above is needed -- `stage` WRITES it to disk immediately,
-        # so it is materialised before the store rewrite, not left lazy over it.
+        # `updates_array` is a whole (time, ncells) uint8 field -- 2.382 GB of the 34.8 GB
+        # this path pinned at n_time=32 -- so it is ANCHORED separately below, to disk under
+        # streaming. Staging it is safe for the same reason the persist is needed: `stage`
+        # WRITES it immediately, so it is materialised before the store rewrite, not left
+        # lazy over it.
+        #
+        # It must nonetheless be named in THIS persist call, even though the very next line
+        # anchors it again. All eight arrays are `getitem`s on ONE shared blockwise task --
+        # the `process_chunk` call. Materialising seven of them lets the scheduler release
+        # that shared task, so anchoring the eighth afterwards RE-RUNS `process_chunk` over
+        # every time chunk: the whole merge kernel, including the BFS partitioner that is
+        # 93 % of this stage's CPU, executed a second time per iteration. Measured, exactly
+        # 2x and not a scheduling race: the instrumented ICON runs logged 80 invocations at
+        # n_time=32 (5 iterations x 8 time chunks = 40) and 160 at n_time=64 (5 x 16 = 80).
+        # Naming it here computes the shared task once and hands `stage` a materialised
+        # array to write, which costs one transient whole-field pin (uint8, ~1 GB/worker
+        # spread over 16 workers at n_time=1096) and saves an entire second execution.
+        #
+        # Anchoring inside this call instead is NOT an alternative: `to_zarr(compute=False)`
+        # re-optimises its source graph and renames the shared keys, so a deferred write
+        # submitted alongside the seven does not share them and still costs 2x. Verified
+        # against a counting kernel: persist-seven-then-write 20 calls for 10 chunks,
+        # deferred-write-in-one-submission 20, persist-all-then-write 10.
         #
         # The label MUST carry the iteration index. This runs once per merge-loop iteration
         # with a different array each time, and staging writes <label>.zarr with mode="w",
@@ -2070,6 +2100,7 @@ def split_and_merge_objects_parallel(
             merge_areas,
             merge_counts,
             has_merge,
+            updates_array,
             updates_ids,
             final_merging_objects,
         ) = persist(
@@ -2078,6 +2109,7 @@ def split_and_merge_objects_parallel(
             merge_areas,
             merge_counts,
             has_merge,
+            updates_array,
             updates_ids,
             final_merging_objects,
         )
