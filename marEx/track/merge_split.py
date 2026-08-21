@@ -1263,8 +1263,27 @@ def split_and_merge_objects_parallel(
         (object_id_field, object_props, overlap_objects_list, merge_events)
     """
     # Constants for memory allocation
-    MAX_MERGES = 20  # Maximum number of merges per timestep
-    MAX_PARENTS = 10  # Maximum number of parents per merge
+    # Sized from measurement, not judgement: job 27105655 instrumented 5 x 24-timestep
+    # windows of the ICON R02B09 store (MAX_PARENTS=100/MAX_MERGES=200 so nothing capped)
+    # and saw, over 707 real merges, max n_parents = 10 (99th pct 7) and max merges/timestep
+    # = 8 (99th pct 6). Both constants are bounded together by the per-timestep update-id
+    # space -- `updates_array` is uint8 with 255 as its "no update" sentinel and
+    # `updates_ids` has exactly 255 slots -- giving
+    #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
+    # 16 x 15 = 240 fits. MAX_MERGES comes DOWN 20 -> 16 (still 2x the measured max of 8)
+    # to buy parent slots, because the parent tail is what actually failed: run 27098021
+    # died at global t~767 on a 10-parent child. The windowed histogram is a LOWER BOUND on
+    # that tail -- a 24-step window restarts the merge loop from a clean `data_m1`, so
+    # build-up across a 1096-step run is not reproduced -- which is why the margin over the
+    # observed 10 is deliberately wide rather than one or two slots.
+    # If a full run still exceeds these, the fix is NOT another bump: it is widening
+    # updates_array/updates_ids to uint16, or lowering R_fill.
+    # See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
+    MAX_MERGES = 16  # Maximum number of merges per timestep (measured max 8)
+    MAX_PARENTS = 16  # Maximum number of parents per merge (measured max 10)
+    # NOTE: this also sets MAX_CHILDREN, the width of `child_ids_iter`. Children-per-split
+    # was NOT measured; 10 -> 16 only widens that array, so it can add headroom but never
+    # remove any.
     MAX_CHILDREN = MAX_PARENTS
 
     def process_chunk(
@@ -1428,22 +1447,6 @@ def split_and_merge_objects_parallel(
 
                 # Find all unique parent IDs with significant overlap
                 for parent_id in potential_parents[potential_parents > 0]:
-                    if n_parents >= MAX_PARENTS:  # pragma: no cover
-                        raise TrackingError(
-                            "Too many parent objects for tracking",
-                            details=f"Child {child_id} at timestep {t} has {n_parents} parents (limit: {MAX_PARENTS})",
-                            suggestions=[
-                                "Increase overlap_threshold to reduce fragmentation",
-                                "Apply stronger area filtering",
-                            ],
-                            context={
-                                "child_id": child_id,
-                                "timestep": t,
-                                "n_parents": n_parents,
-                                "limit": MAX_PARENTS,
-                            },
-                        )
-
                     parent_mask = data_m1 == parent_id
                     # Ascending, and exactly `np.where(parent_mask & child_mask)[0]` -- but
                     # evaluated only at the child's own cells, so it replaces two whole-mesh
@@ -1460,6 +1463,35 @@ def split_and_merge_objects_parallel(
                         # Skip if overlap is below threshold
                         if overlap_area / min_area < overlap_threshold:
                             continue
+
+                        # Only now is this candidate an ACCEPTED parent, so only now can it
+                        # exhaust the fixed-width arrays. Checking at the top of the loop
+                        # instead -- as this did until 2026-08-20 -- raises whenever
+                        # MAX_PARENTS are accepted and ANY further candidate id remains in
+                        # `potential_parents`, even though every one of those may be about to
+                        # fail the overlap threshold above and the arrays hold indices
+                        # 0..MAX_PARENTS-1 exactly. On a basin-scale child `potential_parents`
+                        # is mostly such rejects, so that fired on merges the arrays could
+                        # hold. See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
+                        if n_parents >= MAX_PARENTS:  # pragma: no cover
+                            raise TrackingError(
+                                "Too many parent objects for tracking",
+                                details=(
+                                    f"Child {child_id} at timestep {t} has more than "
+                                    f"{MAX_PARENTS} parents (limit: {MAX_PARENTS})"
+                                ),
+                                suggestions=[
+                                    "Raise MAX_PARENTS, honouring MAX_MERGES * (MAX_PARENTS - 1) <= 255",
+                                    "Increase overlap_threshold (weak: wholly-absorbed parents score ~1.0)",
+                                    "Apply stronger area filtering",
+                                ],
+                                context={
+                                    "child_id": child_id,
+                                    "timestep": t,
+                                    "n_parents": n_parents,
+                                    "limit": MAX_PARENTS,
+                                },
+                            )
 
                         # Record parent information
                         parent_masks_uint[parent_mask] = parent_iterator
@@ -1570,9 +1602,36 @@ def split_and_merge_objects_parallel(
 
                 # Record update information for each new ID
                 for new_id in child_ids[1:]:
-                    update_idx = np.where(updates_ids[t] == -1)[0].astype(np.int32)[
-                        0
-                    ]  # Find next non-negative index in updates_ids
+                    free_slots = np.where(updates_ids[t] == -1)[0].astype(np.int32)
+                    if free_slots.size == 0:  # pragma: no cover
+                        # `updates_array` is uint8 with 255 as its "no update" sentinel, so
+                        # `updates_ids` has exactly 255 slots per timestep and every new id
+                        # minted at this timestep consumes one. Each merge mints
+                        # `n_parents - 1`, giving the joint invariant
+                        #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
+                        # which the two constants must be raised together under. Without
+                        # this branch the loop indexes an empty array and dies on a bare
+                        # IndexError hours into a run.
+                        raise TrackingError(
+                            "Exhausted the per-timestep update-id space",
+                            details=(
+                                f"Timestep {t} minted more than {updates_ids.shape[1]} new IDs; "
+                                f"MAX_MERGES={MAX_MERGES} x (MAX_PARENTS-1)={MAX_PARENTS - 1} "
+                                f"= {MAX_MERGES * (MAX_PARENTS - 1)}"
+                            ),
+                            suggestions=[
+                                "Lower MAX_MERGES or MAX_PARENTS so their product stays within the slot count",
+                                "Widen updates_array to uint16 and updates_ids to match (costs a whole extra "
+                                "(time, ncells) byte-field per iteration)",
+                            ],
+                            context={
+                                "timestep": t,
+                                "slots": int(updates_ids.shape[1]),
+                                "max_merges": MAX_MERGES,
+                                "max_parents": MAX_PARENTS,
+                            },
+                        )
+                    update_idx = free_slots[0]  # Next free index in updates_ids
                     updates_ids[t, update_idx] = new_id
                     updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
 

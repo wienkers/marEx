@@ -27,6 +27,7 @@ docs/tutorials/regional/
 docs/tutorials/unstructured/
 .claude/
 NEXT.md
+NEXT_PROMPT.md
 
 # Local working/review docs — kept out of public history
 # Glob rather than one line per file: every report so far was added individually and the
