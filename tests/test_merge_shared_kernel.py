@@ -36,10 +36,46 @@ from marEx.track import merge_split
 
 
 @pytest.fixture(scope="module")
-def unstructured_merging_data():
-    """The merging-specific unstructured fixture, the one that actually reaches the loop."""
+def unstructured_merging_data(dask_client_unstructured):
+    """The merging-specific unstructured fixture, the one that actually reaches the loop.
+
+    Deliberately NOT persisted, and deliberately dependent on the client fixture.
+
+    This test module previously flaked under ``-n 4`` with
+    ``FutureCancelledError: ... cancelled for reason: lost dependencies``, raised from the
+    FIRST compute of the shipped leg (``validate_inputs``' ``mask.any().compute()``), long
+    before the merge wiring this module is about. That error has exactly one source:
+    ``Scheduler._find_lost_dependencies`` fires when a submitted graph references a key that
+    is neither in the submitted graph nor in ``scheduler.tasks``. A dead worker does not
+    produce it -- the key stays in ``scheduler.tasks`` and dask recomputes. Futures whose
+    scheduler no longer knows their keys do.
+
+    ``.persist()`` is what put futures in this graph, and it bought nothing: the store is
+    309 KB, 100 timesteps x 405 cells. Dropping it removes the failure class outright --
+    a graph rooted in the zarr store is recomputable by any scheduler, so there is no key
+    that can go missing. That is the load-bearing half of this fix.
+
+    Which client ended up minting those futures is NOT established, and is deliberately not
+    claimed here. The fixture did not request the client, so being module-scoped like
+    ``dask_client_per_module`` it was set up first (equal scope, argument order decides) and
+    persisted against whatever ``_get_global_client()`` returned -- and that function skips
+    only clients whose status is already ``closed``. A neighbouring module's client is the
+    candidate, since ``-n 4`` selects xdist's ``--dist load``, which interleaves tests from
+    different modules on one worker.
+
+    That requires a client to have survived its own teardown, and it does: running this
+    module prints ``Warning: Error during Dask client cleanup`` from
+    ``dask_client_per_module``, because ``client.restart()`` raises
+    ``AssertionError: assert not self.tasks`` inside ``Scheduler.restart``. The teardown
+    calls ``restart()`` BEFORE ``close()`` inside one ``try``, so that exception -- swallowed
+    by design -- skips ``close()`` and leaves a client that never reaches ``closed``. What is
+    still not established is that this is what happened in the failing suite run
+    (job 27115003); the chain is observed link by link, not end to end. It does not need to
+    be: requesting the client fixture pins the ordering, and holding no futures at all makes
+    the question moot.
+    """
     path = Path(__file__).parent / "data" / "extremes_unstructured_merging.zarr"
-    return xr.open_zarr(str(path), chunks={}).persist()
+    return xr.open_zarr(str(path), chunks={})
 
 
 # Copied from `test_advanced_unstructured_tracking_with_merging`, which is the configuration
@@ -203,6 +239,30 @@ class TestMergeLoopSharesKernel:
         events, merges = tracker.run(return_merges=True)
         return events.compute(), merges.compute()
 
+    def test_input_fixture_carries_no_futures(self, unstructured_merging_data):
+        """Tripwire: re-adding ``.persist()`` to the fixture reintroduces the flake.
+
+        A persisted collection carries ``distributed.Future`` objects in its graph, and a
+        future is only meaningful to the scheduler that minted it. That is the whole
+        mechanism behind the ``lost dependencies`` cancellation documented on the fixture,
+        and it is invisible to every value-based assertion in this module -- the outputs are
+        identical right up until the client changes underneath them.
+
+        ``futures_of`` is the predicate, deliberately, rather than scanning graph values for
+        ``Future`` instances: where futures sit in a materialised graph is a dask
+        representation detail that has already moved once inside this package's supported
+        dask range, and a scan that stops matching would leave a tripwire that passes on
+        exactly what it exists to catch.
+        """
+        from distributed.client import futures_of
+
+        held = futures_of(unstructured_merging_data)
+        assert not held, (
+            f"the fixture holds {len(held)} future(s), so it is pinned to one client's scheduler "
+            f"and dies with it. Keep it rooted in the zarr store (no `.persist()`) -- see the "
+            f"fixture docstring."
+        )
+
     def test_kernel_runs_once_per_chunk_and_output_is_unchanged(
         self, unstructured_merging_data, tmp_path, dask_client_unstructured, monkeypatch
     ):
@@ -213,6 +273,14 @@ class TestMergeLoopSharesKernel:
             shipped_events, shipped_merges = self._run(unstructured_merging_data, tmp_path / "shipped")
         shipped_calls = counter.stat().st_size if counter.exists() else 0
 
+        # Control for the control: a patch that reached nothing would make the bound vacuous.
+        # Checked BEFORE the control leg runs, so a dead monkeypatch fails in one run's time
+        # rather than two.
+        assert shipped_calls > 0, (
+            "the counter saw no partitioner calls at all, so the monkeypatch is not reaching "
+            "the merge kernel and the ratio below proves nothing"
+        )
+
         counter.unlink(missing_ok=True)
         with monkeypatch.context() as patched:
             self._count_partition_calls(patched, counter)
@@ -220,11 +288,11 @@ class TestMergeLoopSharesKernel:
             control_events, control_merges = self._run(unstructured_merging_data, tmp_path / "control")
         control_calls = counter.stat().st_size if counter.exists() else 0
 
-        # Control for the control: a patch that reached nothing would make the bound vacuous.
-        assert shipped_calls > 0, (
-            "the counter saw no partitioner calls at all, so the monkeypatch is not reaching "
-            "the merge kernel and the ratio below proves nothing"
-        )
+        # Absolute counts, not just their ratio: the ratio is what is asserted, but a change
+        # in `shipped_calls` itself means the graph feeding the merge kernel moved, which is
+        # worth seeing even on a green run. Visible under `pytest -s`.
+        print(f"\npartitioner calls: shipped={shipped_calls} control={control_calls}")
+
         assert control_calls == 2 * shipped_calls, (
             f"expected the pre-fix wiring to run the merge kernel exactly twice "
             f"({2 * shipped_calls} calls against the shipped {shipped_calls}), saw {control_calls}. "
