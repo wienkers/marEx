@@ -18,7 +18,7 @@ repos:
         description: Check TOML files are valid
       - id: check-added-large-files
         description: Prevent adding large files to git
-        exclude: '^tests/data/.*(\.zarr/.*|\.nc)$'
+        exclude: '^tests/data/.*(\.zarr/.*|\.nc)$|^(media/|docs/_static/videos/).*\.mp4$'
       - id: check-case-conflict
         description: Check for files that would conflict on case-insensitive filesystems
       - id: check-merge-conflict
