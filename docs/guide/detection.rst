@@ -2,7 +2,7 @@
 Detection & Anomalies
 =====================
 
-See :doc:`../api/detect` for the full function reference.
+See :doc:`../api/anomaly` and :doc:`../api/extremes` for the full function reference.
 
 Overview
 ========
@@ -53,11 +53,11 @@ Advanced Preprocessing
        sst,
        threshold_percentile=90,
        method_anomaly='shifting_baseline',      # Use rolling climatology
-       method_extreme='hobday_extreme',         # Day-of-year specific thresholds
-       window_year_baseline=20,                 # 20-year rolling baseline
-       smooth_days_baseline=31,                 # 31-day smoothing
-       window_days_hobday=11,                   # 11-day window for thresholds
-       window_spatial_hobday=5,                 # 5-cell spatial clustering
+       method_extreme='seasonal_percentile',         # Day-of-year specific thresholds
+       window_years=20,                 # 20-year rolling baseline
+       smooth_days=31,                 # 31-day smoothing
+       window_days=11,                   # 11-day window for thresholds
+       window_spatial=5,                 # 5-cell spatial clustering
        dask_chunks={'time': 25}
    )
 
@@ -91,7 +91,7 @@ The preprocessing function returns an xarray Dataset with the following structur
        lat         (lat)
        lon         (lon)
        time        (time)
-       dayofyear   (dayofyear)    # Only for hobday_extreme method
+       dayofyear   (dayofyear)    # Only for seasonal_percentile method
    Data variables:
        dat_anomaly     (time, lat, lon)        float64     # Anomaly field
        mask            (lat, lon)              bool        # Land-sea mask
@@ -118,7 +118,7 @@ Use this decision tree to select the most appropriate anomaly calculation method
    │                                                                     │
    │ Need full time series? ──No──> SHIFTING BASELINE                    │
    │         │                       (most accurate, shortens data by    │
-   │        Yes                       window_year_baseline years)        │
+   │        Yes                       window_years years)        │
    │         │                                                           │
    │         ├─> Remove trends? ──No──> FIXED BASELINE                   │
    │         │         │                 (keeps trends in anomaly)       │
@@ -148,7 +148,7 @@ Anomaly Detection Methods
        method_anomaly='detrend_harmonic',
        threshold_percentile=95,
        # Additional parameters:
-       std_normalise=False,          # Optional STD normalisation
+       standardise=False,          # Optional STD normalisation
        detrend_orders=[1],           # Linear detrending (default)
        force_zero_mean=True          # Enforce zero mean
    )
@@ -169,7 +169,7 @@ Anomaly Detection Methods
        method_anomaly='fixed_baseline',
        threshold_percentile=95,
        # Additional parameters:
-       smooth_days_baseline=11       # Smoothing window for climatology
+       smooth_days=11       # Smoothing window for climatology
    )
 
    # Or where the climatology is calculated for a specific reference period (e.g., 1990-2020)
@@ -197,7 +197,7 @@ Anomaly Detection Methods
        threshold_percentile=95,
        # Additional parameters:
        detrend_orders=[1],           # Linear detrending (default)
-       smooth_days_baseline=11,      # Smoothing window for climatology
+       smooth_days=11,      # Smoothing window for climatology
        force_zero_mean=True,         # Enforce zero mean
        reference_period=(1990, 2020) # Optional: restrict climatology to a specific reference period
    )
@@ -217,8 +217,8 @@ Anomaly Detection Methods
        sst,
        method_anomaly='shifting_baseline',
        threshold_percentile=95,
-       window_year_baseline=15,      # 15-year rolling baseline
-       smooth_days_baseline=21       # 21-day smoothing window
+       window_years=15,      # 15-year rolling baseline
+       smooth_days=21       # 21-day smoothing window
    )
 
 **Characteristics:**
@@ -230,17 +230,17 @@ Anomaly Detection Methods
 Extreme Event Detection Methods
 -------------------------------
 
-**Global Extreme** (``method_extreme='global_extreme'``):
+**Global Extreme** (``method_extreme='global_percentile'``):
 
 .. code-block:: python
 
    # Single threshold across all time points
    extremes_ds = marEx.preprocess_data(
        sst,
-       method_extreme='global_extreme',
+       method_extreme='global_percentile',
        threshold_percentile=95,
        # Optional STD normalisation
-       std_normalise=True
+       standardise=True
    )
 
 **Characteristics:**
@@ -249,17 +249,17 @@ Extreme Event Detection Methods
   * Simple interpretation and fast computation
   * Best for: Exploratory analysis
 
-**Hobday Extreme** (``method_extreme='hobday_extreme'``):
+**Hobday Extreme** (``method_extreme='seasonal_percentile'``):
 
 .. code-block:: python
 
    # Day-of-year specific thresholds
    extremes_ds = marEx.preprocess_data(
        sst,
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=95,
-       window_days_hobday=11,        # 11-day window
-       window_spatial_hobday=None    # No spatial clustering (default)
+       window_days=11,        # 11-day window
+       window_spatial=None    # No spatial clustering (default)
    )
 
 **Characteristics:**
@@ -267,7 +267,7 @@ Extreme Event Detection Methods
   * Accounts for seasonal variations
   * Follows Hobday et al. (2016) methodology
 
-Spatial Window Enhancement (``window_spatial_hobday``)
+Spatial Window Enhancement (``window_spatial``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **New in v3.0+**: The Hobday extreme method supports optional spatial pooling window for more robust, spatially coherent thresholds.
@@ -276,14 +276,14 @@ Spatial Window Enhancement (``window_spatial_hobday``)
 
 For each grid cell ``(i, j)`` and each day-of-year ``d``:
 
-1. **Temporal Sampling**: Collect anomalies from all years within ±``window_days_hobday`` days around day ``d``
+1. **Temporal Sampling**: Collect anomalies from all years within ±``window_days`` days around day ``d``
 
    * Traditional: Samples from single cell ``(i, j)``
    * With spatial window: Samples from all cells in neighbourhood
 
-2. **Spatial Pooling** (if ``window_spatial_hobday`` specified):
+2. **Spatial Pooling** (if ``window_spatial`` specified):
 
-   * Define spatial window centered at ``(i, j)`` with radius ``r = (window_spatial_hobday - 1) / 2``
+   * Define spatial window centered at ``(i, j)`` with radius ``r = (window_spatial - 1) / 2``
    * Pool samples from cells ``(i-r:i+r+1, j-r:j+r+1)``
    * Edge handling: Smaller windows near boundaries
 
@@ -297,13 +297,13 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
 
    Configuration                         Sample Count
    ──────────────────────────────────   ─────────────
-   Traditional (no spatial window)       N_years × window_days_hobday
+   Traditional (no spatial window)       N_years × window_days
    Example: 30 years × 11 days          = 330 samples
 
-   With 5×5 spatial window               N_years × window_days_hobday × 25 cells
+   With 5×5 spatial window               N_years × window_days × 25 cells
    Example: 30 years × 11 days × 25     = 8,250 samples
 
-   With 9×9 spatial window               N_years × window_days_hobday × 81 cells
+   With 9×9 spatial window               N_years × window_days × 81 cells
    Example: 30 years × 11 days × 81     = 26,730 samples
 
 **Example: Enabling Spatial Window**:
@@ -313,26 +313,26 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
    # Very long time-series (50+ years): no spatial pooling needed
    extremes_highres = marEx.preprocess_data(
        sst_0.1deg,
-       method_extreme='hobday_extreme',
-       window_days_hobday=11,
-       window_spatial_hobday=None
+       method_extreme='seasonal_percentile',
+       window_days=11,
+       window_spatial=None
    )
 
    # Short time-series: use spatial pooling to increase robustness of threshold calculation
    extremes_coarse = marEx.preprocess_data(
        sst_2deg,
-       method_extreme='hobday_extreme',
-       window_days_hobday=11,
-       window_spatial_hobday=5         # Increase samples in anomaly distribution using a 5×5 window
+       method_extreme='seasonal_percentile',
+       window_days=11,
+       window_spatial=5         # Increase samples in anomaly distribution using a 5×5 window
    )
 
    # High threshold percentile (>95%): use spatial pooling to robustly sample distribution tails
    extremes_99th = marEx.preprocess_data(
        sst,
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=99,        # Extreme percentiles require more samples
-       window_days_hobday=11,
-       window_spatial_hobday=7         # Larger window to sample tails (7×7 = 49 cells)
+       window_days=11,
+       window_spatial=7         # Larger window to sample tails (7×7 = 49 cells)
    )
 
 
@@ -395,7 +395,7 @@ Core Parameters
 **method_anomaly** : {'detrend_harmonic', 'fixed_baseline', 'detrend_fixed_baseline', 'shifting_baseline'}, default='shifting_baseline'
   Method for anomaly computation
 
-**method_extreme** : {'global_extreme', 'hobday_extreme'}, default='hobday_extreme'
+**method_extreme** : {'global_percentile', 'seasonal_percentile'}, default='seasonal_percentile'
   Method for extreme identification
 
 **dask_chunks** : dict, default={'time': 25}
@@ -406,7 +406,7 @@ Anomaly Method Parameters
 
 **Harmonic Detrending Parameters:**
 
-**std_normalise** : bool, default=False
+**standardise** : bool, default=False
   Whether to normalise anomalies using 30-day rolling standard deviation
 
 **detrend_orders** : list of int, default=[1]
@@ -417,7 +417,7 @@ Anomaly Method Parameters
 
 **Fixed Baseline Parameters:**
 
-**smooth_days_baseline** : int, default=11
+**smooth_days** : int, default=11
   Number of days for smoothing the daily climatology
 
 **reference_period** : tuple of (int, int), optional
@@ -430,7 +430,7 @@ Anomaly Method Parameters
 **detrend_orders** : list of int, default=[1]
   Polynomial orders for detrending (e.g., [1, 2] for linear + quadratic)
 
-**smooth_days_baseline** : int, default=11
+**smooth_days** : int, default=11
   Number of days for smoothing the daily climatology after detrending
 
 **force_zero_mean** : bool, default=True
@@ -443,10 +443,10 @@ Anomaly Method Parameters
 
 **Shifting Baseline Parameters:**
 
-**window_year_baseline** : int, default=15
+**window_years** : int, default=15
   Number of years for rolling climatology baseline
 
-**smooth_days_baseline** : int, default=21
+**smooth_days** : int, default=21
   Number of days for smoothing the rolling climatology baseline
 
 Extreme Detection Parameters
@@ -454,10 +454,10 @@ Extreme Detection Parameters
 
 **Hobday Extreme Parameters:**
 
-**window_days_hobday** : int, default=11
+**window_days** : int, default=11
   Window size for day-of-year threshold calculation
 
-**window_spatial_hobday** : int, optional
+**window_spatial** : int, optional
   Spatial window size for clustering (None = no spatial clustering)
 
 **method_percentile** : {'exact', 'approximate'}, default='approximate'
@@ -502,20 +502,20 @@ Method Combinations
    extremes_ds = marEx.preprocess_data(
        sst,
        method_anomaly='shifting_baseline',
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=90,
-       window_year_baseline=20,
-       smooth_days_baseline=31,
-       window_days_hobday=11
+       window_years=20,
+       smooth_days=31,
+       window_days=11
    )
 
    # Fastest combination (less rigorous)
    extremes_ds = marEx.preprocess_data(
        sst,
        method_anomaly='detrend_harmonic',
-       method_extreme='global_extreme',
+       method_extreme='global_percentile',
        threshold_percentile=95,
-       std_normalise=False
+       standardise=False
    )
 
 Performance Optimisations
@@ -550,7 +550,7 @@ Multi-Variable Processing
            data,
            threshold_percentile=95,
            method_anomaly='shifting_baseline',
-           method_extreme='hobday_extreme'
+           method_extreme='seasonal_percentile'
        )
 
 Integration with Tracking
@@ -571,11 +571,11 @@ Complete Workflow
    extremes_ds = marEx.preprocess_data(
        sst,
        method_anomaly='shifting_baseline',
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=95,
-       window_year_baseline=15,
-       smooth_days_baseline=21,
-       window_days_hobday=11,
+       window_years=15,
+       smooth_days=21,
+       window_days=11,
        dask_chunks={'time': 25}
    )
 
@@ -591,7 +591,7 @@ Complete Workflow
 
    # Step 4: Visualise results
    config = marEx.PlotConfig(
-       title='Marine Heatwave Events',
+       title='Extreme Events',
        plot_IDs=True
    )
 
@@ -625,7 +625,7 @@ Threshold Validation
 
 .. code-block:: python
 
-   # For hobday_extreme method, examine thresholds
+   # For seasonal_percentile method, examine thresholds
    if 'thresholds' in extremes_ds:
        # Check seasonal threshold variation
        seasonal_range = (extremes_ds.thresholds.max(dim='dayofyear') -
@@ -668,8 +668,8 @@ Common Issues and Solutions
        sst,
        threshold_percentile=95,
        method_anomaly='detrend_harmonic',
-       method_extreme='global_extreme',
-       std_normalise=False
+       method_extreme='global_percentile',
+       standardise=False
    )
 
 **Threshold Calculation Issues**:
@@ -679,9 +679,9 @@ Common Issues and Solutions
    # Solution: Adjust window sizes and use spatial clustering
    extremes_ds = marEx.preprocess_data(
        sst,
-       method_extreme='hobday_extreme',
-       window_days_hobday=21,        # Larger window
-       window_spatial_hobday=5,      # Add spatial clustering
+       method_extreme='seasonal_percentile',
+       window_days=21,        # Larger window
+       window_spatial=5,      # Add spatial clustering
        precision=0.01                # Higher precision
    )
 
@@ -707,17 +707,17 @@ Method Performance Comparison
 
    # Relative performance for global 0.25° daily data:
 
-   # Fastest: detrend_harmonic + global_extreme
+   # Fastest: detrend_harmonic + global_percentile
    # - Processing time: ~0.5 wall-minutes per decade (2 CPU-hours)
    # - Memory usage: ~1 GB
    # - Accuracy: Good for first analysis
 
-   # Balanced: detrend_fixed_baseline + hobday_extreme
+   # Balanced: detrend_fixed_baseline + seasonal_percentile
    # - Processing time: ~5 wall-minutes per decade (21 CPU-hours)
    # - Memory usage: ~8 GB
    # - Accuracy: Better climatology
 
-   # Most rigorous: shifting_baseline + hobday_extreme
+   # Most rigorous: shifting_baseline + seasonal_percentile
    # - Processing time: ~8 wall-minutes per decade (34 CPU-hours)
    # - Memory usage: ~12 GB
    # - Accuracy: Best for research applications
@@ -739,9 +739,9 @@ Best Practices
 Method Selection Guidelines
 ---------------------------
 
-1. **Quick Exploratory Analysis**: Use ``detrend_harmonic`` + ``global_extreme``
-2. **Climate Change Research Studies**: Use ``shifting_baseline`` + ``hobday_extreme``
-3. **Limited Timeseries**: Use ``detrend_fixed_baseline`` + ``hobday_extreme``
+1. **Quick Exploratory Analysis**: Use ``detrend_harmonic`` + ``global_percentile``
+2. **Climate Change Research Studies**: Use ``shifting_baseline`` + ``seasonal_percentile``
+3. **Limited Timeseries**: Use ``detrend_fixed_baseline`` + ``seasonal_percentile``
 
 Chunking Guidelines
 -------------------
@@ -791,7 +791,7 @@ Threshold percentiles
 =====================
 
 * **90th percentile**: More events, captures moderate extremes
-* **95th percentile**: Standard for marine heatwaves, balanced approach
+* **95th percentile**: A common choice for temperature extremes, balanced approach
 * **99th percentile**: Only most extreme events, rare events focus
 
 Compound Events
@@ -827,17 +827,17 @@ Research Workflow
 Literature Compliance
 ---------------------
 
-For marine heatwave studies following Hobday et al. (2016):
+Following the Hobday et al. (2016) day-of-year definition:
 
 .. code-block:: python
 
    # Standard MHW definition
    mhw_config = {
        'method_anomaly': 'shifting_baseline',
-       'method_extreme': 'hobday_extreme',
+       'method_extreme': 'seasonal_percentile',
        'threshold_percentile': 90,
-       'window_days_hobday': 11,
-       'window_year_baseline': 30,
-       'smooth_days_baseline': 11,
-       'window_spatial_hobday': 1,  # Hobday et al. (2016) considers only single points
+       'window_days': 11,
+       'window_years': 30,
+       'smooth_days': 11,
+       'window_spatial': 1,  # Hobday et al. (2016) considers only single points
    }

@@ -30,18 +30,18 @@ class TestGriddedPreprocessing:
         # Standard dask chunks for output
         cls.dask_chunks = {"time": 25}
 
-    def test_shifting_baseline_hobday_extreme(self):
-        """Test preprocessing with shifting_baseline + hobday_extreme combination."""
-        window_year_baseline = 5
+    def test_shifting_baseline_seasonal_percentile(self):
+        """Test preprocessing with shifting_baseline + seasonal_percentile combination."""
+        window_years = 5
 
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=window_year_baseline,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=3,  # Reduced for test data
+            window_years=window_years,  # Reduced for test data
+            smooth_days=11,  # Reduced for test data
+            window_days=3,  # Reduced for test data
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -55,7 +55,7 @@ class TestGriddedPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
-        assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "seasonal_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
         # Verify data types
@@ -68,11 +68,11 @@ class TestGriddedPreprocessing:
         assert "lon" in extremes_ds.extreme_events.dims
         assert "dayofyear" in extremes_ds.thresholds.dims
 
-        # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
+        # Verify time dimension: shifting_baseline should reduce time by window_years
         input_time_size = self.sst_data.sizes["time"]
         output_time_size = extremes_ds.sizes["time"]
 
-        expected_time_reduction = window_year_baseline * 365  # Approximate daily reduction
+        expected_time_reduction = window_years * 365  # Approximate daily reduction
         assert (
             output_time_size < input_time_size
         ), f"Output time size ({output_time_size}) should be less than input ({input_time_size}) for shifting_baseline"
@@ -84,15 +84,15 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency}")
-        assert_percentile_frequency(extreme_frequency, 95, description="shifting_baseline + hobday_extreme")
+        print(f"Exact extreme_frequency for shifting_baseline + seasonal_percentile: {extreme_frequency}")
+        assert_percentile_frequency(extreme_frequency, 95, description="shifting_baseline + seasonal_percentile")
 
-    def test_detrend_harmonic_global_extreme(self):
-        """Test preprocessing with detrend_harmonic + global_extreme combination."""
+    def test_detrend_harmonic_global_percentile(self):
+        """Test preprocessing with detrend_harmonic + global_percentile combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
@@ -108,7 +108,7 @@ class TestGriddedPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "global_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
         # Verify data types
@@ -120,7 +120,7 @@ class TestGriddedPreprocessing:
         assert "lat" in extremes_ds.extreme_events.dims
         assert "lon" in extremes_ds.extreme_events.dims
 
-        # For global_extreme, thresholds should be 2D (lat, lon) not 3D with dayofyear
+        # For global_percentile, thresholds should be 2D (lat, lon) not 3D with dayofyear
         assert "dayofyear" not in extremes_ds.thresholds.dims
         assert "lat" in extremes_ds.thresholds.dims
         assert "lon" in extremes_ds.thresholds.dims
@@ -134,8 +134,8 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrend_harmonic + global_extreme: {extreme_frequency}")
-        assert_percentile_frequency(extreme_frequency, 95, description="detrend_harmonic + global_extreme")
+        print(f"Exact extreme_frequency for detrend_harmonic + global_percentile: {extreme_frequency}")
+        assert_percentile_frequency(extreme_frequency, 95, description="detrend_harmonic + global_percentile")
 
     def test_auxiliary_coords_survive_save_roundtrip(self, dask_client, tmp_path):
         """Auxiliary (non-index) coordinates must survive a distributed save round-trip.
@@ -156,7 +156,7 @@ class TestGriddedPreprocessing:
         extremes_ds = marEx.preprocess_data(
             sst_aux,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
@@ -186,11 +186,11 @@ class TestGriddedPreprocessing:
         shifting_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=5,
-            smooth_days_baseline=21,
-            window_days_hobday=11,
+            window_years=5,
+            smooth_days=21,
+            window_days=11,
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -198,7 +198,7 @@ class TestGriddedPreprocessing:
         detrended_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
@@ -208,7 +208,7 @@ class TestGriddedPreprocessing:
         fixed_detrended_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
             detrend_orders=[1],
             dimensions=self.dimensions,
@@ -218,7 +218,7 @@ class TestGriddedPreprocessing:
         fixed_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="fixed_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
             detrend_orders=[1],
             dimensions=self.dimensions,
@@ -242,14 +242,14 @@ class TestGriddedPreprocessing:
         spatial_dims = [ds.extreme_events.dims[-2:] for ds in datasets]
         assert all(dims == spatial_dims[0] for dims in spatial_dims)
 
-    def test_std_normalise_detrend_harmonic(self):
-        """Test preprocessing with std_normalise=True for detrend_harmonic method."""
+    def test_standardise_detrend_harmonic(self):
+        """Test preprocessing with standardise=True for detrend_harmonic method."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
-            std_normalise=True,
+            standardise=True,
             detrend_orders=[1, 2],
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
@@ -262,18 +262,18 @@ class TestGriddedPreprocessing:
         assert "thresholds" in extremes_ds.data_vars
         assert "mask" in extremes_ds.data_vars
 
-        # Check for additional variables when std_normalise=True
-        assert "dat_stn" in extremes_ds.data_vars, "dat_stn should be present when std_normalise=True"
-        assert "STD" in extremes_ds.data_vars, "STD should be present when std_normalise=True"
-        assert "extreme_events_stn" in extremes_ds.data_vars, "extreme_events_stn should be present when std_normalise=True"
-        assert "thresholds_stn" in extremes_ds.data_vars, "thresholds_stn should be present when std_normalise=True"
+        # Check for additional variables when standardise=True
+        assert "dat_stn" in extremes_ds.data_vars, "dat_stn should be present when standardise=True"
+        assert "STD" in extremes_ds.data_vars, "STD should be present when standardise=True"
+        assert "extreme_events_stn" in extremes_ds.data_vars, "extreme_events_stn should be present when standardise=True"
+        assert "thresholds_stn" in extremes_ds.data_vars, "thresholds_stn should be present when standardise=True"
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "global_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
         # Boolean flags are stored as int8 (0/1) so the dataset stays NetCDF-saveable.
-        assert bool(extremes_ds.attrs["std_normalise"]) is True
+        assert bool(extremes_ds.attrs["standardise"]) is True
 
         # Verify data types
         assert extremes_ds.extreme_events.dtype == bool
@@ -303,26 +303,26 @@ class TestGriddedPreprocessing:
         assert_percentile_frequency(
             extreme_frequency,
             95,
-            description="Regular extreme events (std_normalise=True)",
+            description="Regular extreme events (standardise=True)",
         )
         assert_percentile_frequency(
             extreme_frequency_stn,
             95,
-            description="Standardised extreme events (std_normalise=True)",
+            description="Standardised extreme events (standardise=True)",
         )
 
-    def test_shifting_baseline_hobday_extreme_exact_percentile(self):
-        """Test preprocessing with shifting_baseline + hobday_extreme combination and exact_percentile=True."""
-        window_year_baseline = 5
+    def test_shifting_baseline_seasonal_percentile_exact_percentile(self):
+        """Test preprocessing with shifting_baseline + seasonal_percentile combination and exact_percentile=True."""
+        window_years = 5
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
             method_percentile="exact",
-            window_year_baseline=window_year_baseline,  # Reduced for test data
-            smooth_days_baseline=5,  # Reduced for test data
-            window_days_hobday=3,  # Reduced for test data
+            window_years=window_years,  # Reduced for test data
+            smooth_days=5,  # Reduced for test data
+            window_days=3,  # Reduced for test data
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -336,7 +336,7 @@ class TestGriddedPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "shifting_baseline"
-        assert extremes_ds.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "seasonal_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
         assert extremes_ds.attrs["method_percentile"] == "exact"
 
@@ -350,10 +350,10 @@ class TestGriddedPreprocessing:
         assert "lon" in extremes_ds.extreme_events.dims
         assert "dayofyear" in extremes_ds.thresholds.dims
 
-        # Verify time dimension: shifting_baseline should reduce time by window_year_baseline
+        # Verify time dimension: shifting_baseline should reduce time by window_years
         input_time_size = self.sst_data.sizes["time"]
         output_time_size = extremes_ds.sizes["time"]
-        expected_time_reduction = window_year_baseline * 365  # Approximate daily reduction
+        expected_time_reduction = window_years * 365  # Approximate daily reduction
         assert (
             output_time_size < input_time_size
         ), f"Output time size ({output_time_size}) should be less than input ({input_time_size}) for shifting_baseline"
@@ -365,19 +365,19 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency (should be close to 5% for 95th percentile)
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for shifting_baseline + hobday_extreme (exact_percentile=True): {extreme_frequency}")
+        print(f"Exact extreme_frequency for shifting_baseline + seasonal_percentile (exact_percentile=True): {extreme_frequency}")
         assert_percentile_frequency(
             extreme_frequency,
             95,
-            description="shifting_baseline + hobday_extreme (exact_percentile=True)",
+            description="shifting_baseline + seasonal_percentile (exact_percentile=True)",
         )
 
-    def test_detrend_harmonic_global_extreme_exact_percentile(self):
-        """Test preprocessing with detrend_harmonic + global_extreme combination and exact_percentile=True."""
+    def test_detrend_harmonic_global_percentile_exact_percentile(self):
+        """Test preprocessing with detrend_harmonic + global_percentile combination and exact_percentile=True."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             method_percentile="exact",
             detrend_orders=[1, 2],
@@ -394,7 +394,7 @@ class TestGriddedPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "global_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
         assert extremes_ds.attrs["method_percentile"] == "exact"
 
@@ -407,7 +407,7 @@ class TestGriddedPreprocessing:
         assert "lat" in extremes_ds.extreme_events.dims
         assert "lon" in extremes_ds.extreme_events.dims
 
-        # For global_extreme, thresholds should be 2D (lat, lon) not 3D with dayofyear
+        # For global_percentile, thresholds should be 2D (lat, lon) not 3D with dayofyear
         assert "dayofyear" not in extremes_ds.thresholds.dims
         assert "lat" in extremes_ds.thresholds.dims
         assert "lon" in extremes_ds.thresholds.dims
@@ -421,13 +421,13 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        print(f"Exact extreme_frequency for detrend_harmonic + global_extreme (exact_percentile=True): {extreme_frequency}")
+        print(f"Exact extreme_frequency for detrend_harmonic + global_percentile (exact_percentile=True): {extreme_frequency}")
         # For exact_percentile=True, we expect very precise adherence to the percentile
         assert_percentile_frequency(
             extreme_frequency,
             95,
             tolerance_std=1.0,
-            description="detrend_harmonic + global_extreme (exact_percentile=True)",
+            description="detrend_harmonic + global_percentile (exact_percentile=True)",
         )
 
     def test_custom_dimension_names(self):
@@ -452,11 +452,11 @@ class TestGriddedPreprocessing:
         custom_dimensions = {"time": "t", "x": "x", "y": "y"}
         custom_coordinates = {"time": "T", "x": "longitude", "y": "latitude"}
 
-        # Test 1: detrend_harmonic + global_extreme
+        # Test 1: detrend_harmonic + global_percentile
         extremes_ds_detrended = marEx.preprocess_data(
             da_renamed,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],
             dimensions=custom_dimensions,
@@ -483,31 +483,31 @@ class TestGriddedPreprocessing:
 
         # Verify attributes for detrend_harmonic
         assert extremes_ds_detrended.attrs["method_anomaly"] == "detrend_harmonic"
-        assert extremes_ds_detrended.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds_detrended.attrs["method_extreme"] == "global_percentile"
 
-        # For global_extreme, thresholds should be 2D (y, x) not 3D with dayofyear
+        # For global_percentile, thresholds should be 2D (y, x) not 3D with dayofyear
         assert "dayofyear" not in extremes_ds_detrended.thresholds.dims
         assert "y" in extremes_ds_detrended.thresholds.dims
         assert "x" in extremes_ds_detrended.thresholds.dims
 
         # Verify reasonable extreme event frequency
         extreme_frequency_detrended = float(extremes_ds_detrended.extreme_events.mean())
-        print(f"extreme_frequency for detrend_harmonic + global_extreme: {extreme_frequency_detrended}")
+        print(f"extreme_frequency for detrend_harmonic + global_percentile: {extreme_frequency_detrended}")
         assert_percentile_frequency(
             extreme_frequency_detrended,
             95,
-            description="detrend_harmonic + global_extreme",
+            description="detrend_harmonic + global_percentile",
         )
 
-        # Test 2: shifting_baseline + hobday_extreme
+        # Test 2: shifting_baseline + seasonal_percentile
         extremes_ds_shifting = marEx.preprocess_data(
             da_renamed,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_year_baseline=5,  # Reduced for test data
-            smooth_days_baseline=11,  # Reduced for test data
-            window_days_hobday=3,  # Reduced for test data
+            window_years=5,  # Reduced for test data
+            smooth_days=11,  # Reduced for test data
+            window_days=3,  # Reduced for test data
             dimensions=custom_dimensions,
             coordinates=custom_coordinates,
             dask_chunks={"t": 25},
@@ -532,9 +532,9 @@ class TestGriddedPreprocessing:
 
         # Verify attributes for shifting_baseline
         assert extremes_ds_shifting.attrs["method_anomaly"] == "shifting_baseline"
-        assert extremes_ds_shifting.attrs["method_extreme"] == "hobday_extreme"
+        assert extremes_ds_shifting.attrs["method_extreme"] == "seasonal_percentile"
 
-        # For hobday_extreme, thresholds should have dayofyear dimension
+        # For seasonal_percentile, thresholds should have dayofyear dimension
         assert "dayofyear" in extremes_ds_shifting.thresholds.dims
         assert "y" in extremes_ds_shifting.thresholds.dims
         assert "x" in extremes_ds_shifting.thresholds.dims
@@ -546,11 +546,11 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency_shifting = float(extremes_ds_shifting.extreme_events.mean())
-        print(f"extreme_frequency for shifting_baseline + hobday_extreme: {extreme_frequency_shifting}")
+        print(f"extreme_frequency for shifting_baseline + seasonal_percentile: {extreme_frequency_shifting}")
         assert_percentile_frequency(
             extreme_frequency_shifting,
             95,
-            description="shifting_baseline + hobday_extreme",
+            description="shifting_baseline + seasonal_percentile",
         )
 
         # Test 3: Verify both methods produce consistent core structure
@@ -567,15 +567,15 @@ class TestGriddedPreprocessing:
         assert "latitude" in extremes_ds_shifting.coords
         assert "longitude" in extremes_ds_shifting.coords
 
-    def test_hobday_extreme_exact_percentile(self):
+    def test_seasonal_percentile_exact_percentile(self):
         """Test Hobday extreme method with exact percentile."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             method_percentile="exact",
             threshold_percentile=95,
-            window_days_hobday=11,
+            window_days=11,
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -602,12 +602,12 @@ class TestGriddedPreprocessing:
         # Verify attributes
         assert extremes_ds.attrs["method_percentile"] == "exact"
 
-    def test_fixed_baseline_global_extreme(self):
-        """Test preprocessing with fixed_baseline + global_extreme combination."""
+    def test_fixed_baseline_global_percentile(self):
+        """Test preprocessing with fixed_baseline + global_percentile combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="fixed_baseline",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
@@ -622,7 +622,7 @@ class TestGriddedPreprocessing:
 
         # Verify attributes
         assert extremes_ds.attrs["method_anomaly"] == "fixed_baseline"
-        assert extremes_ds.attrs["method_extreme"] == "global_extreme"
+        assert extremes_ds.attrs["method_extreme"] == "global_percentile"
         assert extremes_ds.attrs["threshold_percentile"] == 95
 
         # Verify data types
@@ -643,16 +643,16 @@ class TestGriddedPreprocessing:
 
         # Verify reasonable extreme event frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + global_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + global_percentile")
 
-    def test_fixed_baseline_hobday_extreme(self):
-        """Test preprocessing with fixed_baseline + hobday_extreme combination."""
+    def test_fixed_baseline_seasonal_percentile(self):
+        """Test preprocessing with fixed_baseline + seasonal_percentile combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="fixed_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=95,
-            window_days_hobday=11,
+            window_days=11,
             dimensions=self.dimensions,
             dask_chunks=self.dask_chunks,
         )
@@ -674,14 +674,14 @@ class TestGriddedPreprocessing:
 
         # Verify extreme frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + hobday_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_baseline + seasonal_percentile")
 
-    def test_detrend_fixed_baseline_global_extreme(self):
-        """Test preprocessing with fixed_detrend_harmonic + global_extreme combination."""
+    def test_detrend_fixed_baseline_global_percentile(self):
+        """Test preprocessing with fixed_detrend_harmonic + global_percentile combination."""
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_fixed_baseline",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             detrend_orders=[1, 2],  # Linear and quadratic trends
             force_zero_mean=True,
@@ -712,7 +712,7 @@ class TestGriddedPreprocessing:
 
         # Verify extreme frequency
         extreme_frequency = float(extremes_ds.extreme_events.mean())
-        assert_percentile_frequency(extreme_frequency, 95, description="fixed_detrend_harmonic + global_extreme")
+        assert_percentile_frequency(extreme_frequency, 95, description="fixed_detrend_harmonic + global_percentile")
 
     def test_detrend_fixed_baseline_different_orders(self):
         """Test detrend_fixed_baseline with different polynomial orders."""
@@ -782,14 +782,14 @@ class TestGriddedPreprocessing:
         """Test that new anomaly methods work with both extreme detection methods."""
         # Test all combinations
         combinations = [
-            ("fixed_baseline", "global_extreme"),
-            ("fixed_baseline", "hobday_extreme"),
-            ("detrend_fixed_baseline", "global_extreme"),
-            ("detrend_fixed_baseline", "hobday_extreme"),
-            ("shifting_baseline", "global_extreme"),
-            ("shifting_baseline", "hobday_extreme"),
-            ("detrend_harmonic", "global_extreme"),
-            ("detrend_harmonic", "hobday_extreme"),
+            ("fixed_baseline", "global_percentile"),
+            ("fixed_baseline", "seasonal_percentile"),
+            ("detrend_fixed_baseline", "global_percentile"),
+            ("detrend_fixed_baseline", "seasonal_percentile"),
+            ("shifting_baseline", "global_percentile"),
+            ("shifting_baseline", "seasonal_percentile"),
+            ("detrend_harmonic", "global_percentile"),
+            ("detrend_harmonic", "seasonal_percentile"),
         ]
 
         for method_anomaly, method_extreme in combinations:
@@ -799,7 +799,7 @@ class TestGriddedPreprocessing:
                 method_extreme=method_extreme,
                 threshold_percentile=95,
                 detrend_orders=[1] if "detrended" in method_anomaly else None,
-                window_days_hobday=11 if method_extreme == "hobday_extreme" else None,
+                window_days=11 if method_extreme == "seasonal_percentile" else None,
                 dimensions=self.dimensions,
                 dask_chunks=self.dask_chunks,
             )
@@ -838,11 +838,11 @@ class TestGriddedPreprocessing:
         dims = {"time": "time", "x": "lon", "y": "lat"}
 
         # Full-range climatology: mean mixes warm+cool years → anomalies centred on mixed mean
-        result_full = marEx.compute_normalised_anomaly(da, method_anomaly="fixed_baseline", dimensions=dims)
+        result_full = marEx.anomaly.compute_normalised_anomaly(da, method_anomaly="fixed_baseline", dimensions=dims)
 
         # Reference period restricted to cool years 2002-2003:
         # climatology is ~0, so warm years produce large positive anomalies
-        result_ref = marEx.compute_normalised_anomaly(
+        result_ref = marEx.anomaly.compute_normalised_anomaly(
             da, method_anomaly="fixed_baseline", reference_period=(2002, 2003), dimensions=dims
         )
 
@@ -873,7 +873,7 @@ class TestGriddedPreprocessing:
         result = marEx.preprocess_data(
             da,
             method_anomaly="fixed_baseline",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             reference_period=(2000, 2000),
             dimensions={"time": "time", "x": "lon", "y": "lat"},

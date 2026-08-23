@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-import marEx.detect.extremes.histogram as H
-from marEx.detect.extremes.base import identify_extremes
+import marEx.extremes.histogram as H
+from marEx.extremes.base import identify_extremes
 
 DIMENSIONS = {"time": "time", "x": "x"}
 PRECISION = 0.01
@@ -141,8 +141,8 @@ def test_2d_quantile_tiling_value_neutral_with_smoothing():
             return H._compute_histogram_quantile_2d(
                 da,
                 0.9,
-                window_days_hobday=3,
-                window_spatial_hobday=3,
+                window_days=3,
+                window_spatial=3,
                 dimensions=dims,
                 precision=PRECISION,
                 max_anomaly=MAX_ANOMALY,
@@ -179,7 +179,7 @@ def test_1d_quantile_real_chunker_multitile_matches_single():
 
 
 # ── §3.9 small unstructured grid + exact global must not crash ───────────────
-def test_global_extreme_exact_small_unstructured_no_zero_chunk():
+def test_global_percentile_exact_small_unstructured_no_zero_chunk():
     """§3.9: for a small unstructured grid (< ~4445 cells) the exact-path rechunk size must
     be clamped to >= 1 (was 0 -> invalid zero-size chunk)."""
     rng = np.random.default_rng(5)
@@ -193,7 +193,7 @@ def test_global_extreme_exact_small_unstructured_no_zero_chunk():
 
     extremes, thresholds = identify_extremes(
         anom,
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         method_percentile="exact",
         dimensions={"time": "time", "x": "cell"},
         coordinates={"time": "time", "x": "cell"},

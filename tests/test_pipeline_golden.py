@@ -7,9 +7,9 @@ can be verified to leave the scientific outputs bit-for-bit unchanged.
 
 Two configurations are captured, each exercising a distinct quantile path:
 
-* ``A`` -- ``detrend_harmonic`` anomaly + ``global_extreme`` (the 1D histogram
+* ``A`` -- ``detrend_harmonic`` anomaly + ``global_percentile`` (the 1D histogram
   quantile path, ``_compute_histogram_quantile_1d``).
-* ``B`` -- ``shifting_baseline`` anomaly + ``hobday_extreme`` (the 2D per-day-of-year
+* ``B`` -- ``shifting_baseline`` anomaly + ``seasonal_percentile`` (the 2D per-day-of-year
   histogram quantile path, ``_compute_histogram_quantile_2d``; the package default).
 
 Both use ``method_percentile='approximate'`` (the histogram approximation, the default).
@@ -45,15 +45,20 @@ DASK_CHUNKS = {"time": 25}
 N_GOLDEN_STEPS = 7 * 365
 
 CONFIGS = {
-    "A_harm_global": {"method_anomaly": "detrend_harmonic", "method_extreme": "global_extreme"},
-    "B_shift_hobday": {
+    "A_harm_global": {"method_anomaly": "detrend_harmonic", "method_extreme": "global_percentile"},
+    "B_shift_seasonal": {
         "method_anomaly": "shifting_baseline",
-        "method_extreme": "hobday_extreme",
-        "window_year_baseline": 5,
-        "smooth_days_baseline": 11,
-        "window_days_hobday": 3,
+        "method_extreme": "seasonal_percentile",
+        "window_years": 5,
+        "smooth_days": 11,
+        "window_days": 3,
     },
 }
+
+# The golden zarr stores keep their original names: the baselines are byte-for-byte
+# unchanged by the reorganisation, and regenerating them would destroy the evidence
+# that nothing moved.
+GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # Variables whose raw arrays must match the golden baseline exactly.
 GOLDEN_VARS = ["dat_anomaly", "mask", "extreme_events", "thresholds"]
@@ -80,7 +85,7 @@ class TestDetectGolden:
     @pytest.mark.parametrize("tag", list(CONFIGS))
     def test_detect_outputs_identical(self, tag, dask_client_gridded):
         """Every load-bearing detect output must match the golden baseline exactly."""
-        golden = xr.open_zarr(str(DATA_DIR / f"detect_golden_{tag}.zarr"))
+        golden = xr.open_zarr(str(DATA_DIR / f"detect_golden_{GOLDEN_STORE[tag]}.zarr"))
         result = self._run(tag)
 
         for var in GOLDEN_VARS:

@@ -125,12 +125,12 @@ Required Parameters
 
   **Physical Rationale**:
 
-  1. **Closing (Fill Holes)**: Marine heatwaves are generally coherent spatial phenomena. Small "holes"
+  1. **Closing (Fill Holes)**: Extreme events are generally coherent spatial phenomena. Small "holes"
      within a larger event are often artefacts of data gridding or minor fluctuations below the threshold.
      Closing (dilation → erosion) fills these internal gaps, making the event representation physically realistic.
 
   2. **Opening (Remove Noise)**: Very small, isolated pixels flagged as events are often statistical noise
-     or sensor errors rather than genuine marine heatwaves. Opening (erosion → dilation) removes these
+     or sensor errors rather than genuine events. Opening (erosion → dilation) removes these
      spurious objects, ensuring only spatially significant events are tracked.
 
   **Visual Process** (using ``R_fill=1`` as example)::
@@ -655,7 +655,7 @@ Visualisation Integration
 
    # Plot tracked events
    config = marEx.PlotConfig(
-       title='Tracked Marine Heatwave Events',
+       title='Tracked Extreme Events',
        plot_IDs=True,          # Special handling for event IDs
        cmap='tab20'            # Discrete colormap
    )
@@ -873,11 +873,11 @@ Complete Workflow Example
    extremes_ds = marEx.preprocess_data(
        sst,
        method_anomaly='shifting_baseline',
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=95,
-       window_year_baseline=15,
-       smooth_days_baseline=21,
-       window_days_hobday=11,
+       window_years=15,
+       smooth_days=21,
+       window_days=11,
        dask_chunks={'time': 25}
    )
 

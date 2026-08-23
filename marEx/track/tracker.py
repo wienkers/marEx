@@ -35,7 +35,7 @@ from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
-from ..detect.compute_mode import Materialiser, create_staging_dir
+from ..core.compute_mode import Materialiser, create_staging_dir
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from . import grid as _grid

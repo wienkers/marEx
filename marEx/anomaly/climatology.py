@@ -14,9 +14,9 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..validation import _infer_dims_coords
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -24,20 +24,20 @@ logger = get_logger(__name__)
 
 def rolling_climatology(
     da: xr.DataArray,
-    window_year_baseline: int = 15,
+    window_years: int = 15,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """
     Compute rolling climatology efficiently using flox cohorts.
-    Uses the previous `window_year_baseline` years of data and reassemble it to match the original data structure.
+    Uses the previous `window_years` years of data and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
 
     Parameters
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    window_year_baseline : int, default=15
+    window_years : int, default=15
         Number of years to include in each climatology window
     dimensions : dict, optional
         Mapping of dimensions to names in the data
@@ -60,7 +60,7 @@ def rolling_climatology(
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
     >>> # Compute 15-year rolling climatology
-    >>> climatology = marEx.rolling_climatology(sst, window_year_baseline=15)
+    >>> climatology = marEx.rolling_climatology(sst, window_years=15)
     >>> print(climatology.shape)
     (7305, 180, 360)  # Same as input
     >>>
@@ -72,7 +72,7 @@ def rolling_climatology(
 
     >>> # For datasets with only 10 years, use shorter window
     >>> short_climatology = marEx.rolling_climatology(
-    ...     sst, window_year_baseline=5
+    ...     sst, window_years=5
     ... )
     >>> # First 5 years will be NaN instead of 15
 
@@ -139,12 +139,12 @@ def rolling_climatology(
 
         # Find target years this time point contributes to
         # A time point from year Y contributes to target years where:
-        # target_year - window_year_baseline <= Y < target_year
-        # Which means: Y < target_year <= Y + window_year_baseline
-        candidate_targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_year_baseline)]
+        # target_year - window_years <= Y < target_year
+        # Which means: Y < target_year <= Y + window_years
+        candidate_targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_years)]
 
         # Only include target years that have sufficient history
-        valid_targets = candidate_targets[candidate_targets >= min_year + window_year_baseline]
+        valid_targets = candidate_targets[candidate_targets >= min_year + window_years]
 
         # Add entries for each valid target year
         n_targets = len(valid_targets)
@@ -199,13 +199,13 @@ def rolling_climatology(
 
 def smoothed_rolling_climatology(
     da: xr.DataArray,
-    window_year_baseline: int = 15,
-    smooth_days_baseline: int = 21,
+    window_years: int = 15,
+    smooth_days: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """
-    Compute a smoothed rolling climatology using the previous `window_year_baseline` years of data
+    Compute a smoothed rolling climatology using the previous `window_years` years of data
     and reassemble it to match the original data structure.
     Years without enough previous data will be filled with NaN.
 
@@ -213,9 +213,9 @@ def smoothed_rolling_climatology(
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    window_year_baseline : int, default=15
+    window_years : int, default=15
         Number of years to include in each climatology window
-    smooth_days_baseline : int, default=21
+    smooth_days : int, default=21
         Number of days for temporal smoothing window
     dimensions : dict, optional
         Mapping of dimensions to names in the data
@@ -240,8 +240,8 @@ def smoothed_rolling_climatology(
     >>> # Compute smoothed rolling climatology
     >>> smooth_clim = marEx.smoothed_rolling_climatology(
     ...     sst,
-    ...     window_year_baseline=15,
-    ...     smooth_days_baseline=21
+    ...     window_years=15,
+    ...     smooth_days=21
     ... )
     >>> print(smooth_clim.shape)
     (7305, 180, 360)
@@ -250,12 +250,12 @@ def smoothed_rolling_climatology(
 
     >>> # Short smoothing - more day-to-day variability
     >>> clim_short = marEx.smoothed_rolling_climatology(
-    ...     sst, smooth_days_baseline=7
+    ...     sst, smooth_days=7
     ... )
     >>>
     >>> # Long smoothing - smoother seasonal cycle
     >>> clim_long = marEx.smoothed_rolling_climatology(
-    ...     sst, smooth_days_baseline=61
+    ...     sst, smooth_days=61
     ... )
     >>>
     >>> # Compare variability
@@ -281,18 +281,18 @@ def smoothed_rolling_climatology(
     ...     icon_sst,
     ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
-    ...     window_year_baseline=10,
-    ...     smooth_days_baseline=31
+    ...     window_years=10,
+    ...     smooth_days=31
     ... )
 
     Effect of smoothing on seasonal cycle:
 
     >>> # Raw rolling climatology (no temporal smoothing)
-    >>> raw_clim = marEx.rolling_climatology(sst, window_year_baseline=15)
+    >>> raw_clim = marEx.rolling_climatology(sst, window_years=15)
     >>>
     >>> # Smoothed rolling climatology
     >>> smooth_clim = marEx.smoothed_rolling_climatology(
-    ...     sst, window_year_baseline=15, smooth_days_baseline=21
+    ...     sst, window_years=15, smooth_days=21
     ... )
     >>>
     >>> # Compare seasonal cycle smoothness
@@ -316,7 +316,7 @@ def smoothed_rolling_climatology(
 
     # Whether a given (length, chunking, window) combination can actually be reduced is a
     # property of the xarray -> dask.overlap -> bottleneck chain, and it is not a simple
-    # one. It has at least three regimes: chunks that divide smooth_days_baseline - 1 leave
+    # one. It has at least three regimes: chunks that divide smooth_days - 1 leave
     # a block one element short of the window; arrays shorter than the overlap depth are
     # rejected outright; and a window longer than the whole series is fine and yields NaN.
     # Modelling that here would hard-code one version's behaviour and go stale silently.
@@ -329,23 +329,19 @@ def smoothed_rolling_climatology(
     if time_chunks:
         probe = xr.DataArray(np.zeros(sum(time_chunks), dtype=np.float32), dims=[timedim]).chunk({timedim: time_chunks})
         try:
-            probe.rolling({timedim: smooth_days_baseline}, center=True).mean().compute()
+            probe.rolling({timedim: smooth_days}, center=True).mean().compute()
         except ValueError as exc:
             raise ConfigurationError(
-                f"Time chunking cannot support a {smooth_days_baseline}-day centred rolling mean",
-                details=(
-                    f"Reducing a {smooth_days_baseline}-day window over time chunks "
-                    f"{sorted(set(time_chunks))} failed with: {exc}"
-                ),
+                f"Time chunking cannot support a {smooth_days}-day centred rolling mean",
+                details=(f"Reducing a {smooth_days}-day window over time chunks " f"{sorted(set(time_chunks))} failed with: {exc}"),
                 suggestions=[
-                    f"Rechunk the time dimension to at least smooth_days_baseline: "
-                    f"da.chunk({{'{timedim}': {smooth_days_baseline}}})",
+                    f"Rechunk the time dimension to at least smooth_days: " f"da.chunk({{'{timedim}': {smooth_days}}})",
                     "Chunk the spatial dimension instead, to keep chunk sizes manageable",
-                    "Reduce smooth_days_baseline",
+                    "Reduce smooth_days",
                 ],
                 context={
                     "time_chunks": sorted(set(time_chunks)),
-                    "smooth_days_baseline": smooth_days_baseline,
+                    "smooth_days": smooth_days,
                     "upstream_error": str(exc),
                 },
             ) from exc
@@ -359,10 +355,8 @@ def smoothed_rolling_climatology(
     # was enough to exhaust the workers and take down a distributed run. Forcing xarray off
     # bottleneck also removes it, at 33x the cost. A spread at float32 precision is the
     # accepted trade -- see the tolerance in tests/test_climatology_chunking.py.
-    da_smoothed = (
-        da.rolling({timedim: smooth_days_baseline}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
-    )
+    da_smoothed = da.rolling({timedim: smooth_days}, center=True).mean().chunk(dict(zip(da.dims, da.chunks))).astype(np.float32)
 
-    clim = rolling_climatology(da_smoothed, window_year_baseline, dimensions, coordinates)
+    clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates)
 
     return clim

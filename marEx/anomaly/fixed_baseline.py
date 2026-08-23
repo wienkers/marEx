@@ -13,10 +13,10 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
-from ..validation import _infer_dims_coords
+from ..core.compute_mode import Materialiser
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 from .harmonic import _compute_anomaly_detrended
 
 # Get module logger
@@ -195,7 +195,7 @@ def _compute_anomaly_detrend_fixed_baseline(
     # Step 1: Remove polynomial trends (without harmonics) using _compute_anomaly_detrended
     detrended_result = _compute_anomaly_detrended(
         da=da,
-        std_normalise=False,
+        standardise=False,
         detrend_orders=detrend_orders,
         dimensions=dimensions,
         coordinates=coordinates,

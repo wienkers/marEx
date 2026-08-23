@@ -2,7 +2,7 @@
 Histogram-based quantile estimation kernels for extreme detection.
 
 Provides approximate quantile computation from precomputed histograms, used by
-the ``approximate`` percentile branches of both the global and Hobday extreme
+the ``approximate`` percentile branches of both the global and seasonal extreme
 methods. Contains a pure NumPy stride-tricks kernel plus 1-D and 2-D
 (day-of-year resolved) histogram-quantile drivers. This module is a leaf in the
 detect package dependency graph (it imports only package-level helpers and
@@ -20,8 +20,8 @@ from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
+from ..core.compute_mode import Materialiser
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -118,7 +118,7 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
     # `window` boundary sets, which shreds the tiling into width-1 slivers (measured: at
     # window=5 over two spatial dims, 2654 tasks and 1783 rechunk keys where the tiled
     # input had 6 chunks, output chunks (1,1,16,1,1,...)). That all-to-all rechunk is what
-    # OOM-killed the full-scale gridded hobday run. Putting every slice back on the input's
+    # OOM-killed the full-scale gridded seasonal run. Putting every slice back on the input's
     # own boundaries first keeps each add chunk-aligned: the shift becomes a local overlap
     # (each output chunk draws on at most two input chunks) and the tiling survives
     # -- 274 tasks / 104 rechunk keys for the same window=5 case, values bit-identical.
@@ -153,7 +153,7 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
 
 def _rolling_histogram_quantile(
     hist_chunk: NDArray[np.int32],
-    window_days_hobday: int,
+    window_days: int,
     q: float,
     bin_centers: NDArray[np.float64],
 ) -> NDArray[np.float32]:
@@ -165,7 +165,7 @@ def _rolling_histogram_quantile(
     ----------
     hist_chunk : numpy.ndarray
         Histogram data with shape (dayofyear, da_bin)
-    window_days_hobday : int
+    window_days : int
         Rolling window size for day-of-year smoothing
     q : float
         Quantile to compute (0-1)
@@ -181,11 +181,11 @@ def _rolling_histogram_quantile(
     eps = 1e-10
 
     # Pad histogram with wrap mode for day-of-year cycling
-    pad_size = window_days_hobday // 2
+    pad_size = window_days // 2
     hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
 
     # Apply rolling sum using stride tricks FTW
-    windowed_view = sliding_window_view(hist_pad, window_days_hobday, axis=0)
+    windowed_view = sliding_window_view(hist_pad, window_days, axis=0)
     hist_windowed = np.sum(windowed_view, axis=-1)
 
     # Apply gaussian smoothing along bin dimension
@@ -313,8 +313,8 @@ def _histogram_quantile_block(
 def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
-    window_days_hobday: int = 11,
-    window_spatial_hobday: Optional[int] = None,
+    window_days: int = 11,
+    window_spatial: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
@@ -331,9 +331,9 @@ def _compute_histogram_quantile_2d(
         Input data array
     q : float
         Quantile to compute (0-1)
-    window_days_hobday : int, default=11
+    window_days : int, default=11
         Rolling window size for day-of-year quantiles
-    window_spatial_hobday : int, default=None
+    window_spatial : int, default=None
         Spatial window size for day-of-year quantiles
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
@@ -375,7 +375,7 @@ def _compute_histogram_quantile_2d(
     # per tile to keep the per-task output near the element budget. On a gridded grid
     # this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
     # uses ~256 cells/chunk instead of 16, avoiding a task-graph explosion (the
-    # "hobday scheduler OOM on unstructured" failure).
+    # "seasonal scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
     spatial_dims_present = [dimensions[d] for d in ("y", "x") if d in dimensions]
 
@@ -392,10 +392,10 @@ def _compute_histogram_quantile_2d(
     ntime_2d = max(1, int(da.sizes[dimensions["time"]]))
     cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime_2d, 366 * max(1, n_bins)))
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
-    # The spatial smoothing below rolls a window of `window_spatial_hobday` over each
+    # The spatial smoothing below rolls a window of `window_spatial` over each
     # spatial dim, which requires every chunk to be at least that wide; never tile below it.
-    if window_spatial_hobday is not None and window_spatial_hobday > 1:
-        tile_side = max(tile_side, int(window_spatial_hobday))
+    if window_spatial is not None and window_spatial > 1:
+        tile_side = max(tile_side, int(window_spatial))
     chunk_dict = {dimensions["time"]: -1}
     for d in spatial_dims_present:
         chunk_dict[d] = min(int(da.sizes[d]), tile_side)
@@ -413,7 +413,7 @@ def _compute_histogram_quantile_2d(
             name="da_bin",
         )
         # Cast BEFORE the rechunk. np.digitize returns int64, and the rechunk below is the
-        # all-to-all shuffle of the hobday path, so casting afterwards moved 4x the bytes
+        # all-to-all shuffle of the seasonal path, so casting afterwards moved 4x the bytes
         # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
         # indices are small non-negative integers (review finding 3.5).
         .astype(np.uint16).chunk(chunk_dict)
@@ -434,41 +434,41 @@ def _compute_histogram_quantile_2d(
     hist_raw.name = None
 
     # Apply spatial-kernel smoothing to the histogram
-    if window_spatial_hobday is not None and window_spatial_hobday > 1:
-        pad_size = window_spatial_hobday // 2
+    if window_spatial is not None and window_spatial > 1:
+        pad_size = window_spatial // 2
         lon_dim, lat_dim = dimensions.get("x"), dimensions.get("y")
 
         # Integer-preserving window sums. xarray's .rolling().sum() goes through
         # bottleneck, which promotes these uint16 chunks to float64 and carries a halo
         # overlap -- ~0.4-0.8 GB transient per task over the (y, x, 366, ~502) histogram,
-        # the dominant memory spike of the default gridded hobday path (review finding
+        # the dominant memory spike of the default gridded seasonal path (review finding
         # 3.6). Summing explicit shifted views keeps the counts in an integer dtype and
         # is exactly equal to the rolling sum for odd windows: a zero-padded full window
         # equals a min_periods=1 partial window, and a wrap-padded one equals the periodic
         # case. Even windows keep the old path, whose centre alignment they depend on.
-        use_integer_window = window_spatial_hobday % 2 == 1
+        use_integer_window = window_spatial % 2 == 1
         hist_rolled = hist_raw.astype(np.uint32) if use_integer_window else hist_raw
 
         # Periodic padding in longitude, rolling mean in both dimensions, then trim
         if lon_dim in hist_raw.dims:
             if use_integer_window:
-                hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial_hobday, periodic=True)
+                hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=True)
             else:
                 hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
-                hist_rolled = hist_rolled.rolling({lon_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+                hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
                 hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
 
         # Standard rolling in latitude
         if lat_dim in hist_raw.dims:
             if use_integer_window:
-                hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial_hobday, periodic=False)
+                hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial, periodic=False)
             else:
-                hist_rolled = hist_rolled.rolling({lat_dim: window_spatial_hobday}, center=True, min_periods=1).sum()
+                hist_rolled = hist_rolled.rolling({lat_dim: window_spatial}, center=True, min_periods=1).sum()
 
         hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(hist_chunk, window_days_hobday, q, bin_centers_chunk)
+        return _rolling_histogram_quantile(hist_chunk, window_days, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time

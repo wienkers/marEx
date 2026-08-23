@@ -7,13 +7,28 @@ name = "marEx"
 authors = [
     {name = "Aaron Wienkers", email = "aaron@wienkers.com"},
 ]
-description = "Marine Extremes Detection and Tracking"
+description = "Scalable detection and tracking of extremes in weather and climate data"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+    "climate extremes",
+    "weather extremes",
+    "anomalies",
+    "climatology",
+    "detrending",
+    "heatwaves",
+    "drought",
+    "event tracking",
+    "xarray",
+    "dask",
+    "hpc",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Oceanography",
+    "Topic :: Scientific/Engineering :: Hydrology",
     "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -44,7 +59,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Minimal installation (basic oceanographic analysis)
+# Minimal installation (core anomaly, detection and tracking)
 minimal = []
 
 # Performance optimisation dependencies
@@ -124,8 +139,9 @@ test = [
 "Homepage" = "https://github.com/wienkers/marEx"
 "Bug Tracker" = "https://github.com/wienkers/marEx/issues"
 
-[tool.setuptools]
-packages = ["marEx"]
+[tool.setuptools.packages.find]
+include = ["marEx*"]
+namespaces = false
 
 [tool.setuptools_scm]
 version_scheme = "guess-next-dev"

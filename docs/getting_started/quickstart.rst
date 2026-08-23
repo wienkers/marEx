@@ -2,7 +2,7 @@
 Quickstart
 ==========
 
-This guide gets you detecting, tracking, and visualising marine heatwaves in a
+This guide gets you detecting, tracking, and visualising extreme events in a
 few minutes. For the full runnable versions, see the :doc:`../tutorials/index`.
 
 Pre-process SST data
@@ -23,11 +23,11 @@ Pre-process SST data
    extremes = marEx.preprocess_data(
       sst,
       method_anomaly='shifting_baseline',      # Anomalies from a rolling climatology using previous window_year years
-      method_extreme='hobday_extreme',         # Local day-of-year specific thresholds with windowing
+      method_extreme='seasonal_percentile',         # Local day-of-year specific thresholds with windowing
       threshold_percentile=95,                 # 95th percentile threshold for extremes
-      window_year_baseline=15,                 # Rolling climatology window
-      smooth_days_baseline=21,                 #    and smoothing window for determining the anomalies
-      window_days_hobday=11,                   # Window size of compiled samples collected for the extremes detection
+      window_years=15,                 # Rolling climatology window
+      smooth_days=21,                 #    and smoothing window for determining the anomalies
+      window_days=11,                   # Window size of compiled samples collected for the extremes detection
    )
 
    # Performance note: JAX acceleration automatically used if available
@@ -41,7 +41,7 @@ Pre-process SST data
 * ``thresholds`` (dayofyear, lat, lon): Extreme event thresholds used to determine extreme events
 * ``mask`` (lat, lon): Valid data mask
 
-Identify & track marine heatwaves
+Identify & Track Extreme Events
 =================================
 
 *cf.* the gridded :doc:`Tracking notebook <../tutorials/gridded/02_id_track_events>`.
@@ -106,7 +106,7 @@ Visualise results
        marEx.PlotConfig(plot_IDs=True), plot_dir="./plots", file_name="mhw_animation"
    )
 
-That's it! You've detected, tracked, and visualised marine heatwaves in your data.
+That's it! You've detected, tracked, and visualised extreme events in your data.
 
 Next steps
 ==========

@@ -1,41 +1,42 @@
 """
-MarEx: Marine Extremes Detection and Tracking
-==============================================
+marEx: scalable detection and tracking of extremes in weather and climate data.
 
-A Python package for efficient identification and tracking of marine extremes
-such as Marine Heatwaves (MHWs).
+Three independent stages, each usable on its own:
 
-Core Functionality
------------------
-- `detect`: Convert raw time series into standardised anomalies
-- `track`: Identify and track extreme events through time
+- :mod:`marEx.anomaly` -- climatology, detrending, and anomalies. A complete
+  product for anyone who wants a smoothed daily climatology on larger-than-memory
+  data and nothing else. No threshold parameter appears here.
+- :mod:`marEx.extremes` -- percentile thresholding and binary event
+  identification, on anomalies from anywhere.
+- :mod:`marEx.track` -- connected-component identification and tracking through
+  time, with merge/split handling.
+
+:func:`marEx.preprocess_data` chains the first two for convenience.
+
+Nothing in marEx is specific to a domain or a variable: the same pipeline applies
+to ocean, atmosphere, land surface, and biogeochemistry, on regular grids and
+unstructured meshes alike.
 
 Example
 -------
 >>> import xarray as xr
 >>> import marEx
->>> # Load SST data
->>> sst = xr.open_dataset('sst_data.nc').sst
->>> # Preprocess data to identify extreme events
->>> extreme_events_ds = marEx.preprocess_data(sst, threshold_percentile=95)
->>> # Track events through time
->>> events_ds = marEx.tracker(extreme_events_ds.extreme_events, extreme_events_ds.mask,
-...                         R_fill=8, area_filter_quartile=0.5).run()
+>>> t2m = xr.open_dataset("t2m.zarr", chunks={"time": 25}).t2m
+>>> # Anomalies only -- no detection
+>>> anomalies = marEx.anomaly.compute(t2m, method="shifting_baseline")
+>>> # Or the full chain, then track the events through time
+>>> ds = marEx.preprocess_data(t2m, threshold_percentile=95)
+>>> events_ds = marEx.tracker(ds.extreme_events, ds.mask,
+...                           R_fill=8, area_filter_quartile=0.5).run()
 """
+
+# Import the analysis packages. `anomaly` and `extremes` are peers and are exposed
+# as modules, not as loose functions, so that each reads as a self-contained stage.
+from . import anomaly, extremes
 
 # Import dependency management
 from ._dependencies import get_installation_profile, has_dependency, print_dependency_status
-
-# Import core functionality
-from .detect import (
-    ComputeMode,
-    clear_staging,
-    compute_normalised_anomaly,
-    identify_extremes,
-    preprocess_data,
-    rolling_climatology,
-    smoothed_rolling_climatology,
-)
+from .core import ComputeMode, clear_staging
 
 # Import exception hierarchy
 from .exceptions import (  # Main exception hierarchy; Convenience constructors
@@ -67,6 +68,7 @@ from .logging_config import (
     set_quiet_mode,
     set_verbose_mode,
 )
+from .pipeline import preprocess_data
 
 # Import plotting utilities
 from .plotX import PlotConfig, specify_grid
@@ -77,12 +79,11 @@ from .track import regional_tracker, tracker
 
 # Convenience variables
 __all__ = [
-    # Core data preprocessing
+    # Analysis stages
+    "anomaly",
+    "extremes",
+    # Full chain over the two stages above
     "preprocess_data",
-    "compute_normalised_anomaly",
-    "smoothed_rolling_climatology",
-    "rolling_climatology",
-    "identify_extremes",
     # Materialisation policy (compute_mode)
     "ComputeMode",
     "clear_staging",

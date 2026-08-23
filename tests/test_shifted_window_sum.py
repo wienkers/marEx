@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from marEx.detect.extremes.histogram import _shifted_window_sum
+from marEx.extremes.histogram import _shifted_window_sum
 
 ODD_WINDOWS = [3, 5, 7, 9]
 

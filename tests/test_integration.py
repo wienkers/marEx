@@ -43,7 +43,7 @@ class TestFullPipelineGridded:
         extremes_ds = marEx.preprocess_data(
             sst_subset,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=80,  # Lower threshold for more events
             detrend_orders=[1],  # Simple detrending only
             dimensions=self.dimensions,
@@ -98,19 +98,19 @@ class TestFullPipelineGridded:
     @pytest.mark.nocov
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_full_pipeline_shifting_hobday(self, dask_client_integration):
-        """Test complete pipeline with shifting_baseline + hobday_extreme methods."""
+    def test_full_pipeline_shifting_seasonal(self, dask_client_integration):
+        """Test complete pipeline with shifting_baseline + seasonal_percentile methods."""
         sst_subset = self.sst_data.isel(time=slice(0, 1500)).isel(lat=slice(0, 20), lon=slice(0, 40))  # ~4 years
         # Step 1: Preprocessing with more sophisticated methods
         extremes_ds = marEx.preprocess_data(
             sst_subset,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
+            method_extreme="seasonal_percentile",
             threshold_percentile=85,  # Lower threshold for test data
-            window_year_baseline=2,  # Reduced for test data duration
-            smooth_days_baseline=7,
-            window_days_hobday=21,  # Reduced hobday window
-            window_spatial_hobday=7,  # Small spatial window
+            window_years=2,  # Reduced for test data duration
+            smooth_days=7,
+            window_days=21,  # Reduced hobday window
+            window_spatial=7,  # Small spatial window
             dimensions=self.dimensions,
             dask_chunks={"time": 25},
         )
@@ -118,7 +118,7 @@ class TestFullPipelineGridded:
         # Verify shifting baseline reduces time series length
         original_time_length = len(sst_subset.time)
         new_time_length = len(extremes_ds.time)
-        expected_reduction = 2  # window_year_baseline
+        expected_reduction = 2  # window_years
 
         # Allow some flexibility in time reduction due to implementation details
         assert new_time_length < original_time_length, "Shifting baseline should reduce time series length"
@@ -188,7 +188,7 @@ class TestFullPipelineGridded:
             extremes_ds = marEx.preprocess_data(
                 self.sst_data,
                 method_anomaly="detrend_harmonic",
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 threshold_percentile=95,
                 dimensions=self.dimensions,
                 dask_chunks=chunks,
@@ -265,7 +265,7 @@ class TestFullPipelineUnstructured:
         extremes_ds = marEx.preprocess_data(
             self.sst_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=90,
             dimensions=self.dimensions,
             coordinates=self.coordinates,
@@ -322,10 +322,10 @@ class TestPipelineIntegration:
     def test_method_combinations_consistency(self, dask_client_integration):
         """Test that different method combinations produce reasonable and consistent results."""
         method_combinations = [
-            ("detrend_harmonic", "global_extreme"),
-            ("detrend_harmonic", "hobday_extreme"),
-            ("shifting_baseline", "global_extreme"),
-            # Note: shifting_baseline + hobday_extreme is tested separately due to complexity
+            ("detrend_harmonic", "global_percentile"),
+            ("detrend_harmonic", "seasonal_percentile"),
+            ("shifting_baseline", "global_percentile"),
+            # Note: shifting_baseline + seasonal_percentile is tested separately due to complexity
         ]
 
         results = {}
@@ -341,10 +341,10 @@ class TestPipelineIntegration:
             }
 
             if anomaly_method == "shifting_baseline":
-                params.update({"window_year_baseline": 3, "smooth_days_baseline": 11})
+                params.update({"window_years": 3, "smooth_days": 11})
 
-            if extreme_method == "hobday_extreme":
-                params["window_days_hobday"] = 5
+            if extreme_method == "seasonal_percentile":
+                params["window_days"] = 5
 
             # Run preprocessing on a subset for faster testing
             data_subset = self.gridded_data.isel(time=slice(0, 1000))  # Use ~3 years of data
@@ -423,7 +423,7 @@ class TestPipelineIntegration:
             extremes_ds = marEx.preprocess_data(
                 self.gridded_data,
                 method_anomaly="detrend_harmonic",
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 threshold_percentile=95,
                 dask_chunks={"time": 15},
             )
@@ -455,7 +455,7 @@ class TestPipelineIntegration:
         extremes_ds = marEx.preprocess_data(
             subset_data,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             threshold_percentile=95,
             dask_chunks={"time": 10},
         )

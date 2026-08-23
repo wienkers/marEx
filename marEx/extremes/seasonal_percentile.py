@@ -1,11 +1,17 @@
 """
-Hobday (day-of-year specific) extreme identification.
+Seasonal (day-of-year specific) extreme identification.
 
-Provides :func:`_identify_extremes_hobday`, which computes day-of-year resolved
+Provides :func:`_identify_extremes_seasonal`, which computes day-of-year resolved
 percentile thresholds (with a rolling day window) to identify extreme events.
-This backs the ``hobday_extreme`` extreme-detection method. The exact-percentile
+This backs the ``seasonal_percentile`` extreme-detection method. The exact-percentile
 branch uses a nested ``_doy_percentiles`` closure that must remain inside the
 parent function.
+
+The day-of-year percentile definition implemented here follows Hobday, A. J.,
+et al. (2016), "A hierarchical approach to defining marine heatwaves",
+*Progress in Oceanography* 141, 227-238. The definition itself is not specific to
+any variable or domain: it applies unchanged to air temperature, precipitation,
+soil moisture, or a biogeochemical tracer.
 """
 
 from typing import Dict, Literal, Optional, Tuple
@@ -13,31 +19,32 @@ from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import xarray as xr
 
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
+from ..core.compute_mode import Materialiser
+from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
 
 # Get module logger
 logger = get_logger(__name__)
 
 
-def _identify_extremes_hobday(
+def _identify_extremes_seasonal(
     da: xr.DataArray,
     threshold_percentile: float = 95,
-    window_days_hobday: int = 11,
-    window_spatial_hobday: Optional[int] = None,
+    window_days: int = 11,
+    window_spatial: Optional[int] = None,
     method_percentile: Literal["exact", "approximate"] = "approximate",
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    threshold_label: str = "thresholds",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
 
     For each spatial point and day-of-year, computes the p-th percentile of values within a
-    window_days_hobday day window across all years.
+    window_days day window across all years.
     This implements the standard methodology for marine heatwave detection threshold calculation.
 
     Parameters:
@@ -47,9 +54,9 @@ def _identify_extremes_hobday(
         Must be chunked with time dimension unbounded (time: -1)
     threshold_percentile : float, default=95
         Percentile to compute (0-100)
-    window_days_hobday : int, default=11
+    window_days : int, default=11
         Window in days
-    window_spatial_hobday : int, default=None
+    window_spatial : int, default=None
         Window size in cells
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
@@ -74,14 +81,14 @@ def _identify_extremes_hobday(
 
     # Check if there is sufficient samples
     N_years = np.unique(da[coordinates["time"]].dt.year).size
-    N_samples = N_years * window_days_hobday * (window_spatial_hobday if window_spatial_hobday is not None else 1) ** 2
+    N_samples = N_years * window_days * (window_spatial if window_spatial is not None else 1) ** 2
     N_above_threshold = N_samples * (1.0 - threshold_percentile / 100.0)
     if N_above_threshold < 50:
         # Make warning
         logger.warning(
             f"Not enough samples for accurate extreme detection: {N_above_threshold} < 50. "
             "Consider using a lower threshold_percentile, increasing your time-series size, "
-            "increasing the window_days_hobday, or using a larger window_spatial_hobday."
+            "increasing the window_days, or using a larger window_spatial."
             "If your time-series is very short, consider using method_percentile='exact'."
         )
 
@@ -104,7 +111,7 @@ def _identify_extremes_hobday(
         # a tile whose output exceeds the budget the tile was sized by.
         da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=366)
         dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
-        half_w = window_days_hobday // 2
+        half_w = window_days // 2
 
         # Pre-compute boolean masks (which time indices contribute to each DOY)
         doy_masks = []
@@ -140,8 +147,8 @@ def _identify_extremes_hobday(
         thresholds = _compute_histogram_quantile_2d(
             da,
             threshold_percentile / 100.0,
-            window_days_hobday=window_days_hobday,
-            window_spatial_hobday=window_spatial_hobday,
+            window_days=window_days,
+            window_spatial=window_spatial,
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
@@ -185,7 +192,7 @@ def _identify_extremes_hobday(
     # time. On an unstructured mesh `thresholds` is 366 x ncells x 4 B (21.8 GB at ICON
     # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
     # streaming mode stages it to disk rather than pinning it in RAM.
-    thresholds = materialiser.stage(thresholds, "thresholds")
+    thresholds = materialiser.stage(thresholds, threshold_label)
     extremes = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) >= thresholds
 
     # Drop unnecessary dayofyear coordinate

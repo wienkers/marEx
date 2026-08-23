@@ -14,7 +14,7 @@ import numpy as np
 import xarray as xr
 
 import marEx
-import marEx.detect.extremes.histogram as H
+import marEx.extremes.histogram as H
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -31,7 +31,7 @@ def test_histogram_quantile_tiling_invariant(dask_client_gridded, monkeypatch):
     """The 1D histogram quantile is identical under a single spatial chunk vs many small tiles."""
     sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(0, 4 * 365))
     sst = sst.chunk({"time": 30, "lat": -1, "lon": -1}).persist()
-    anom = marEx.compute_normalised_anomaly(
+    anom = marEx.anomaly.compute_normalised_anomaly(
         sst, method_anomaly="detrend_harmonic", dimensions={"time": "time", "x": "lon", "y": "lat"}
     ).dat_anomaly
     anom.name = "dat_anomaly"

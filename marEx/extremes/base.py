@@ -3,7 +3,7 @@ Extreme-identification dispatcher.
 
 Provides the public :func:`identify_extremes` entry point, which validates the
 extreme-detection parameters and delegates to one of the concrete methods
-(global constant-in-time threshold or Hobday day-of-year threshold) based on the
+(global constant-in-time threshold or day-of-year threshold) based on the
 ``method_extreme`` argument.
 """
 
@@ -11,12 +11,12 @@ from typing import Dict, Literal, Optional, Tuple
 
 import xarray as xr
 
-from ...exceptions import ConfigurationError
-from ...logging_config import configure_logging, get_logger
-from ..compute_mode import Materialiser
-from ..validation import _infer_dims_coords
-from .global_extreme import _identify_extremes_constant
-from .hobday import _identify_extremes_hobday
+from ..core.compute_mode import Materialiser
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import configure_logging, get_logger
+from .global_percentile import _identify_extremes_constant
+from .seasonal_percentile import _identify_extremes_seasonal
 
 # Get module logger
 logger = get_logger(__name__)
@@ -24,18 +24,19 @@ logger = get_logger(__name__)
 
 def identify_extremes(
     da: xr.DataArray,
-    method_extreme: Literal["global_extreme", "hobday_extreme"] = "hobday_extreme",
+    method_extreme: Literal["global_percentile", "seasonal_percentile"] = "seasonal_percentile",
     threshold_percentile: float = 95,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
-    window_days_hobday: int = 11,  # for hobday_extreme
-    window_spatial_hobday: Optional[int] = None,  # for hobday_extreme
+    window_days: int = 11,  # for seasonal_percentile
+    window_spatial: Optional[int] = None,  # for seasonal_percentile
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
+    threshold_label: str = "thresholds",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -44,18 +45,18 @@ def identify_extremes(
     ----------
     da : xarray.DataArray
         DataArray containing anomalies
-    method_extreme : str, default='hobday_extreme'
-        Method for threshold calculation ('global_extreme' or 'hobday_extreme')
+    method_extreme : str, default='seasonal_percentile'
+        Method for threshold calculation ('global_percentile' or 'seasonal_percentile')
     threshold_percentile : float, default=95
         Percentile threshold (e.g., 95 for 95th percentile)
     dimensions : dict, optional
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Mapping of coordinates to names in the data
-    window_days_hobday : int, default=11
-        Window for day-of-year threshold (hobday_extreme only)
-    window_spatial_hobday : int, default=None
-        Window for day-of-year threshold spatial clustering (hobday_extreme only)
+    window_days : int, default=11
+        Window for day-of-year threshold (seasonal_percentile only)
+    window_spatial : int, default=None
+        Window for day-of-year threshold spatial clustering (seasonal_percentile only)
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, default=0.01
@@ -82,7 +83,7 @@ def identify_extremes(
     >>> # Identify extreme events using global-in-time 95th percentile
     >>> extremes, thresholds = marEx.identify_extremes(
     ...     anomalies,
-    ...     method_extreme="global_extreme",
+    ...     method_extreme="global_percentile",
     ...     threshold_percentile=95
     ... )
     >>> print(f"Extreme events shape: {extremes.shape}")
@@ -97,19 +98,19 @@ def identify_extremes(
     Using day-of-year specific thresholds (cf. Hobday et al. 2016 method):
 
     >>> # More sophisticated threshold calculation
-    >>> extremes_hobday, thresholds_hobday = marEx.identify_extremes(
+    >>> extremes_seasonal, thresholds_seasonal = marEx.identify_extremes(
     ...     anomalies,
-    ...     method_extreme="hobday_extreme",
+    ...     method_extreme="seasonal_percentile",
     ...     threshold_percentile=95,
-    ...     window_days_hobday=11  # 11-day window around each day-of-year
-    ...     window_spatial_hobday=3  # 3x3 spatial window for clustering percentile calcuation
+    ...     window_days=11  # 11-day window around each day-of-year
+    ...     window_spatial=3  # 3x3 spatial window for clustering percentile calcuation
     ... )
-    >>> print(f"Hobday thresholds shape: {thresholds_hobday.shape}")
-    Hobday thresholds shape: (366, 180, 360)
+    >>> print(f"Seasonal thresholds shape: {thresholds_seasonal.shape}")
+    Seasonal thresholds shape: (366, 180, 360)
 
     >>> # Compare seasonal variation in thresholds
-    >>> summer_threshold = thresholds_hobday.sel(dayofyear=200).mean()
-    >>> winter_threshold = thresholds_hobday.sel(dayofyear=50).mean()
+    >>> summer_threshold = thresholds_seasonal.sel(dayofyear=200).mean()
+    >>> winter_threshold = thresholds_seasonal.sel(dayofyear=50).mean()
     >>> print(f"Summer vs Winter thresholds: {summer_threshold:.3f} vs {winter_threshold:.3f}")
 
     Comparison of exact vs approximate percentile methods:
@@ -156,18 +157,18 @@ def identify_extremes(
     ... )
     >>> print(f"Unstructured extremes shape: {extremes_unstructured.shape}")
 
-    Advanced Hobday method with custom temporal window:
+    Advanced seasonal method with custom temporal window:
 
     >>> # Longer temporal window for smoother thresholds
     >>> extremes_smooth, thresholds_smooth = marEx.identify_extremes(
     ...     anomalies,
-    ...     method_extreme="hobday_extreme",
-    ...     window_days_hobday=31,  # Longer smoothing window
+    ...     method_extreme="seasonal_percentile",
+    ...     window_days=31,  # Longer smoothing window
     ...     threshold_percentile=95
     ... )
     >>>
     >>> # Compare threshold smoothness
-    >>> std_11day = thresholds_hobday.std(dim='dayofyear').mean().compute()
+    >>> std_11day = thresholds_seasonal.std(dim='dayofyear').mean().compute()
     >>> std_31day = thresholds_smooth.std(dim='dayofyear').mean().compute()
     >>> print(f"Threshold variability: 11-day={std_11day:.3f}, 31-day={std_31day:.3f}")
     """
@@ -268,146 +269,147 @@ def identify_extremes(
             },
         )
 
-    # Validate window_spatial_hobday parameter
-    if window_spatial_hobday is not None:
-        # Check if window_spatial_hobday is specified for unstructured grid
+    # Validate window_spatial parameter
+    if window_spatial is not None:
+        # Check if window_spatial is specified for unstructured grid
         has_y_dim = "y" in dimensions and dimensions["y"] in da.dims
 
         if not has_y_dim:
-            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified for unstructured grid")
+            logger.error(f"window_spatial={window_spatial} specified for unstructured grid")
             raise ConfigurationError(
-                "window_spatial_hobday is not supported for unstructured grids",
+                "window_spatial is not supported for unstructured grids",
                 details=(
-                    "Spatial smoothing with window_spatial_hobday requires structured grids with both x and y dimensions. "
+                    "Spatial smoothing with window_spatial requires structured grids with both x and y dimensions. "
                     "Unstructured grids do not support spatial window operations due to computational and memory "
                     "limitations of the algorithms."
                 ),
                 suggestions=[
-                    "Remove the window_spatial_hobday parameter for unstructured grids",
+                    "Remove the window_spatial parameter for unstructured grids",
                     "Use structured grid data if spatial smoothing is required",
-                    "Set window_spatial_hobday=None to use default behavior",
+                    "Set window_spatial=None to use default behavior",
                 ],
                 context={
                     "grid_type": "unstructured",
-                    "window_spatial_hobday": window_spatial_hobday,
+                    "window_spatial": window_spatial,
                     "dimensions": dimensions,
                     "available_dims": list(da.dims),
                 },
             )
 
-        # Check if window_spatial_hobday is specified when hobday_extreme is not used
-        if method_extreme != "hobday_extreme":
-            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified with method_extreme='{method_extreme}'")
+        # Check if window_spatial is specified when seasonal_percentile is not used
+        if method_extreme != "seasonal_percentile":
+            logger.error(f"window_spatial={window_spatial} specified with method_extreme='{method_extreme}'")
             raise ConfigurationError(
-                "window_spatial_hobday can only be used with method_extreme='hobday_extreme'",
+                "window_spatial can only be used with method_extreme='seasonal_percentile'",
                 details=(
-                    "The window_spatial_hobday parameter is only implemented for the Hobday extreme method. "
+                    "The window_spatial parameter is only implemented for the seasonal_percentile method. "
                     "Other extreme methods do not support spatial smoothing due to computational and memory "
                     "limitations of the algorithms."
                 ),
                 suggestions=[
-                    "Remove the window_spatial_hobday parameter when using method_extreme='global_extreme'",
-                    "Use method_extreme='hobday_extreme' if spatial smoothing is required",
-                    "Set window_spatial_hobday=None to use default behavior",
+                    "Remove the window_spatial parameter when using method_extreme='global_percentile'",
+                    "Use method_extreme='seasonal_percentile' if spatial smoothing is required",
+                    "Set window_spatial=None to use default behavior",
                 ],
                 context={
                     "method_extreme": method_extreme,
-                    "window_spatial_hobday": window_spatial_hobday,
-                    "compatible_methods": ["hobday_extreme"],
+                    "window_spatial": window_spatial,
+                    "compatible_methods": ["seasonal_percentile"],
                 },
             )
 
-        # Check if window_spatial_hobday is specified when method_percentile is "exact"
+        # Check if window_spatial is specified when method_percentile is "exact"
         if method_percentile == "exact":
-            logger.error(f"window_spatial_hobday={window_spatial_hobday} specified with method_percentile='exact'")
+            logger.error(f"window_spatial={window_spatial} specified with method_percentile='exact'")
             raise ConfigurationError(
-                "window_spatial_hobday is not supported with method_percentile='exact'",
+                "window_spatial is not supported with method_percentile='exact'",
                 details=(
-                    "The window_spatial_hobday parameter is only implemented for the approximate percentile method. "
+                    "The window_spatial parameter is only implemented for the approximate percentile method. "
                     "Exact percentile computation does not support spatial smoothing due to computational and memory "
                     "limitations of the algorithms."
                 ),
                 suggestions=[
-                    "Remove the window_spatial_hobday parameter when using method_percentile='exact'",
+                    "Remove the window_spatial parameter when using method_percentile='exact'",
                     "Use method_percentile='approximate' if spatial smoothing is required",
-                    "Set window_spatial_hobday=None to use default behavior",
+                    "Set window_spatial=None to use default behavior",
                 ],
                 context={
                     "method_percentile": method_percentile,
-                    "window_spatial_hobday": window_spatial_hobday,
+                    "window_spatial": window_spatial,
                     "compatible_methods": ["approximate"],
                 },
             )
 
-    # Validate that window parameters are odd numbers (only for hobday_extreme method)
-    if method_extreme == "hobday_extreme" and window_days_hobday is not None and window_days_hobday % 2 == 0:
-        logger.error(f"window_days_hobday={window_days_hobday} is not an odd number")
+    # Validate that window parameters are odd numbers (only for seasonal_percentile method)
+    if method_extreme == "seasonal_percentile" and window_days is not None and window_days % 2 == 0:
+        logger.error(f"window_days={window_days} is not an odd number")
         raise ConfigurationError(
-            "window_days_hobday must be an odd number",
+            "window_days must be an odd number",
             details=(
                 f"Window parameters require odd numbers to ensure symmetric windows around a central point. "
-                f"window_days_hobday={window_days_hobday} is even, which would create asymmetric temporal windows."
+                f"window_days={window_days} is even, which would create asymmetric temporal windows."
             ),
             suggestions=[
-                f"Use window_days_hobday={window_days_hobday + 1} or {window_days_hobday - 1}",
+                f"Use window_days={window_days + 1} or {window_days - 1}",
                 "Choose an odd number",
             ],
             context={
-                "window_days_hobday": window_days_hobday,
+                "window_days": window_days,
                 "is_odd": False,
             },
         )
 
-    # Set default spatial window (only for the approximate hobday_extreme method). The
-    # exact percentile path ignores window_spatial_hobday entirely, and the validation
+    # Set default spatial window (only for the approximate seasonal_percentile method). The
+    # exact percentile path ignores window_spatial entirely, and the validation
     # above rejects it when user-supplied with method_percentile='exact', so it must not
     # be silently defaulted there (which only inflated N_samples and hid the warning).
     if (
-        method_extreme == "hobday_extreme"
+        method_extreme == "seasonal_percentile"
         and method_percentile != "exact"
-        and window_spatial_hobday is None
+        and window_spatial is None
         and "y" in dimensions
         and dimensions["y"] in da.dims
     ):
-        window_spatial_hobday = 5  # Default to 5x5 spatial window for structured grids
+        window_spatial = 5  # Default to 5x5 spatial window for structured grids
 
-    if method_extreme == "hobday_extreme" and window_spatial_hobday is not None and window_spatial_hobday % 2 == 0:
-        logger.error(f"window_spatial_hobday={window_spatial_hobday} is not an odd number")
+    if method_extreme == "seasonal_percentile" and window_spatial is not None and window_spatial % 2 == 0:
+        logger.error(f"window_spatial={window_spatial} is not an odd number")
         raise ConfigurationError(
-            "window_spatial_hobday must be an odd number",
+            "window_spatial must be an odd number",
             details=(
                 f"Window parameters require odd numbers to ensure symmetric windows around a central point. "
-                f"window_spatial_hobday={window_spatial_hobday} is even, which would create asymmetric spatial windows."
+                f"window_spatial={window_spatial} is even, which would create asymmetric spatial windows."
             ),
             suggestions=[
-                f"Use window_days_hobday={window_days_hobday + 1} or {window_days_hobday - 1}",
+                f"Use window_days={window_days + 1} or {window_days - 1}",
                 "Choose an odd number.",
             ],
             context={
-                "window_spatial_hobday": window_spatial_hobday,
+                "window_spatial": window_spatial,
                 "is_odd": False,
             },
         )
 
-    if method_extreme == "global_extreme":
+    if method_extreme == "global_percentile":
         logger.debug(f"Global extreme method - method_percentile={method_percentile}")
         return _identify_extremes_constant(
-            da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly, materialiser
+            da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly, materialiser, threshold_label
         )
-    elif method_extreme == "hobday_extreme":
-        logger.debug(f"Hobday extreme method - window_days={window_days_hobday}, method_percentile={method_percentile}")
+    elif method_extreme == "seasonal_percentile":
+        logger.debug(f"Seasonal percentile method - window_days={window_days}, method_percentile={method_percentile}")
 
-        return _identify_extremes_hobday(
+        return _identify_extremes_seasonal(
             da,
             threshold_percentile,
-            window_days_hobday,
-            window_spatial_hobday,
+            window_days,
+            window_spatial,
             method_percentile,
             dimensions,
             coordinates,
             precision,
             max_anomaly,
             materialiser,
+            threshold_label,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")
@@ -415,11 +417,11 @@ def identify_extremes(
             f"Unknown extreme method '{method_extreme}'",
             details="Invalid method_extreme parameter",
             suggestions=[
-                "Use 'global_extreme' for efficient constant percentile threshold",
-                "Use 'hobday_extreme' for day-of-year specific thresholds",
+                "Use 'global_percentile' for efficient constant percentile threshold",
+                "Use 'seasonal_percentile' for day-of-year specific thresholds",
             ],
             context={
                 "provided_method": method_extreme,
-                "valid_methods": ["global_extreme", "hobday_extreme"],
+                "valid_methods": ["global_percentile", "seasonal_percentile"],
             },
         )

@@ -16,14 +16,14 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.detect.compute_mode import clear_staging
+from marEx.core.compute_mode import clear_staging
 
 METHOD_COMBOS = [
-    ("detrend_harmonic", "global_extreme"),
-    ("detrend_harmonic", "hobday_extreme"),
-    ("shifting_baseline", "hobday_extreme"),
-    ("fixed_baseline", "global_extreme"),
-    ("detrend_fixed_baseline", "hobday_extreme"),
+    ("detrend_harmonic", "global_percentile"),
+    ("detrend_harmonic", "seasonal_percentile"),
+    ("shifting_baseline", "seasonal_percentile"),
+    ("fixed_baseline", "global_percentile"),
+    ("detrend_fixed_baseline", "seasonal_percentile"),
 ]
 
 COMPARED_VARS = ("dat_anomaly", "extreme_events", "thresholds", "mask")
@@ -40,9 +40,9 @@ def _kwargs(method_anomaly, method_extreme, dimensions, coordinates=None):
     if coordinates is not None:
         kw["coordinates"] = coordinates
     if method_anomaly == "shifting_baseline":
-        kw.update(window_year_baseline=5, smooth_days_baseline=11)
-    if method_extreme == "hobday_extreme":
-        kw.update(window_days_hobday=3)
+        kw.update(window_years=5, smooth_days=11)
+    if method_extreme == "seasonal_percentile":
+        kw.update(window_days=3)
     return kw
 
 
@@ -121,13 +121,13 @@ class TestUnstructuredEquivalence:
         cls.coordinates = {"time": "time", "x": "lon", "y": "lat"}
 
     def test_lazy_matches_persist(self):
-        kw = _kwargs("detrend_harmonic", "hobday_extreme", self.dimensions, self.coordinates)
+        kw = _kwargs("detrend_harmonic", "seasonal_percentile", self.dimensions, self.coordinates)
         ref = marEx.preprocess_data(self.sst, compute_mode="persist", **kw)
         lazy = marEx.preprocess_data(self.sst, compute_mode="lazy", **kw)
         _assert_identical(ref, lazy, "lazy/unstructured")
 
     def test_streaming_matches_persist(self, tmp_path):
-        kw = _kwargs("detrend_harmonic", "hobday_extreme", self.dimensions, self.coordinates)
+        kw = _kwargs("detrend_harmonic", "seasonal_percentile", self.dimensions, self.coordinates)
         ref = marEx.preprocess_data(self.sst, compute_mode="persist", **kw)
         streamed = marEx.preprocess_data(self.sst, compute_mode="streaming", scratch_dir=str(tmp_path), **kw)
         try:

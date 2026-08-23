@@ -16,7 +16,7 @@ import pytest
 import xarray as xr
 from dask.callbacks import Callback
 
-from marEx.detect.extremes.histogram import _compute_histogram_quantile_1d, _compute_histogram_quantile_2d
+from marEx.extremes.histogram import _compute_histogram_quantile_1d, _compute_histogram_quantile_2d
 
 
 class CountComputes(Callback):
@@ -76,7 +76,7 @@ class TestBoundsCheckRoundTrips:
         space-scaled (~30 GB on the ICON mesh) and no amount of time-chunking shrinks it,
         so it must not come back under any compute_mode.
         """
-        from marEx.detect.compute_mode import Materialiser
+        from marEx.core.compute_mode import Materialiser
 
         da = _anomaly_fixture()
         with CountComputes() as cb:
@@ -97,8 +97,8 @@ class TestBoundsCheckRoundTrips:
                 da,
                 q=0.95,
                 dimensions={"time": "time", "x": "lon", "y": "lat"},
-                window_days_hobday=3,
-                window_spatial_hobday=None,
+                window_days=3,
+                window_spatial=None,
             )
         assert cb.n <= 4, f"expected <= 4 scheduler round-trips, got {cb.n}"
 

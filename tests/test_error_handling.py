@@ -60,7 +60,7 @@ class TestNonDaskInputValidation:
         """Test that compute_normalised_anomaly raises error for non-Dask inputs."""
         # This will fail with TypeError when trying to access .chunks on non-Dask array
         with pytest.raises(TypeError, match=r"'NoneType' object is not subscriptable"):
-            marEx.compute_normalised_anomaly(
+            marEx.anomaly.compute_normalised_anomaly(
                 test_data_numpy,  # Non-Dask array
                 method_anomaly="detrend_harmonic",
                 dimensions=dimensions_gridded,
@@ -86,7 +86,7 @@ class TestMethodValidation:
         """Test runtime error handling for invalid method_anomaly values via compute_normalised_anomaly."""
         # Since Literal types prevent invalid values at call time, we test the underlying function
         with pytest.raises(ConfigurationError, match=r"Unknown anomaly method"):
-            marEx.compute_normalised_anomaly(
+            marEx.anomaly.compute_normalised_anomaly(
                 test_data_dask,
                 method_anomaly="invalid_method",  # Invalid method - will bypass Literal check
                 dimensions=dimensions_gridded,
@@ -96,7 +96,7 @@ class TestMethodValidation:
         """Test runtime error handling for invalid method_extreme values via identify_extremes."""
         # Test with the underlying function that has runtime validation
         with pytest.raises(ConfigurationError, match=r"Unknown extreme method"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 test_data_dask,
                 method_extreme="invalid_extreme",  # Invalid method
                 dimensions=dimensions_gridded,
@@ -104,31 +104,31 @@ class TestMethodValidation:
 
     def test_valid_method_combinations(self, test_data_dask, dimensions_gridded, dask_chunks):
         """Test that valid method combinations work correctly."""
-        # Test detrend_harmonic + global_extreme
+        # Test detrend_harmonic + global_percentile
         result1 = marEx.preprocess_data(
             test_data_dask,
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
+            method_extreme="global_percentile",
             dimensions=dimensions_gridded,
             dask_chunks=dask_chunks,
         )
         assert isinstance(result1, xr.Dataset)
         assert result1.attrs["method_anomaly"] == "detrend_harmonic"
-        assert result1.attrs["method_extreme"] == "global_extreme"
+        assert result1.attrs["method_extreme"] == "global_percentile"
 
-        # Test shifting_baseline + hobday_extreme (default combination)
+        # Test shifting_baseline + seasonal_percentile (default combination)
         result2 = marEx.preprocess_data(
             test_data_dask,
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
-            window_year_baseline=2,  # Reduced for test data
-            window_days_hobday=3,  # Reduced for test data
+            method_extreme="seasonal_percentile",
+            window_years=2,  # Reduced for test data
+            window_days=3,  # Reduced for test data
             dimensions=dimensions_gridded,
             dask_chunks=dask_chunks,
         )
         assert isinstance(result2, xr.Dataset)
         assert result2.attrs["method_anomaly"] == "shifting_baseline"
-        assert result2.attrs["method_extreme"] == "hobday_extreme"
+        assert result2.attrs["method_extreme"] == "seasonal_percentile"
 
 
 class TestInsufficientDataValidation:
@@ -143,14 +143,14 @@ class TestInsufficientDataValidation:
             marEx.preprocess_data(
                 small_data,
                 method_anomaly="shifting_baseline",
-                method_extreme="hobday_extreme",
-                window_year_baseline=15,  # Requires 15 years but only have 2
+                method_extreme="seasonal_percentile",
+                window_years=15,  # Requires 15 years but only have 2
                 dimensions=dimensions_gridded,
                 dask_chunks=dask_chunks,
             )
 
     def test_shifting_baseline_custom_window_insufficient_data(self, test_data_dask, dimensions_gridded, dask_chunks):
-        """Test error for insufficient data with custom window_year_baseline."""
+        """Test error for insufficient data with custom window_years."""
         # Create dataset with 3 years but require 5 years
         small_data = test_data_dask.isel(time=slice(0, 1095)).chunk(dask_chunks)  # ~3 years, chunked
 
@@ -158,8 +158,8 @@ class TestInsufficientDataValidation:
             marEx.preprocess_data(
                 small_data,
                 method_anomaly="shifting_baseline",
-                method_extreme="hobday_extreme",
-                window_year_baseline=5,  # Requires 5 years but only have 3
+                method_extreme="seasonal_percentile",
+                window_years=5,  # Requires 5 years but only have 3
                 dimensions=dimensions_gridded,
                 dask_chunks=dask_chunks,
             )
@@ -333,7 +333,7 @@ class TestCoordinateDimensionValidation:
         invalid_dimensions = {"time": "time", "x": "missing_x", "y": "missing_y"}
 
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
-            marEx.compute_normalised_anomaly(
+            marEx.anomaly.compute_normalised_anomaly(
                 test_data_dask,
                 method_anomaly="detrend_harmonic",
                 dimensions=invalid_dimensions,
@@ -345,7 +345,7 @@ class TestCoordinateDimensionValidation:
         invalid_coordinates = {"time": "time", "x": "missing_x", "y": "missing_y"}
 
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
-            marEx.compute_normalised_anomaly(
+            marEx.anomaly.compute_normalised_anomaly(
                 test_data_dask,
                 method_anomaly="detrend_harmonic",
                 dimensions=valid_dimensions,
@@ -357,9 +357,9 @@ class TestCoordinateDimensionValidation:
         invalid_dimensions = {"time": "time", "x": "missing_x", "y": "missing_y"}
 
         with pytest.raises(DataValidationError, match=r"Missing required dimensions"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 test_data_dask,
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 dimensions=invalid_dimensions,
             )
 
@@ -369,9 +369,9 @@ class TestCoordinateDimensionValidation:
         invalid_coordinates = {"time": "time", "x": "missing_x", "y": "missing_y"}
 
         with pytest.raises(DataValidationError, match=r"Missing required coordinates"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 test_data_dask,
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 dimensions=valid_dimensions,
                 coordinates=invalid_coordinates,
             )
@@ -548,7 +548,7 @@ class TestEdgeCasesAndBoundaryConditions:
             marEx.preprocess_data(
                 test_data_dask,
                 method_anomaly="shifting_baseline",
-                window_year_baseline=50,  # Larger than dataset (~40 years)
+                window_years=50,  # Larger than dataset (~40 years)
                 dimensions=dimensions_gridded,
                 dask_chunks=dask_chunks,
             )
@@ -574,7 +574,7 @@ class TestHelpfulErrorMessages:
             marEx.preprocess_data(
                 small_data,
                 method_anomaly="shifting_baseline",
-                window_year_baseline=15,
+                window_years=15,
                 dimensions=dimensions_gridded,
                 dask_chunks=dask_chunks,
             )
@@ -620,7 +620,7 @@ class TestIdentifyExtremesConfigurationErrors:
 
         # Create anomaly data for testing identify_extremes directly
         dimensions = {"time": "time", "x": "lon", "y": "lat"}
-        anomalies_ds = marEx.compute_normalised_anomaly(sst_da, dimensions=dimensions)
+        anomalies_ds = marEx.anomaly.compute_normalised_anomaly(sst_da, dimensions=dimensions)
         return anomalies_ds.dat_anomaly
 
     @pytest.fixture(scope="class")
@@ -631,7 +631,7 @@ class TestIdentifyExtremesConfigurationErrors:
     def test_invalid_method_percentile(self, anomaly_data):
         """Test ConfigurationError for invalid method_percentile."""
         with pytest.raises(ConfigurationError, match="Unknown method_percentile 'invalid_method'"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 anomaly_data,
                 method_percentile="invalid_method",
             )
@@ -639,7 +639,7 @@ class TestIdentifyExtremesConfigurationErrors:
     def test_precision_with_exact_percentile(self, anomaly_data):
         """Test ConfigurationError when precision is used with exact percentile method."""
         with pytest.raises(ConfigurationError, match="Parameter 'precision' cannot be used with method_percentile='exact'"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 anomaly_data,
                 method_percentile="exact",
                 precision=0.02,  # Non-default precision
@@ -648,7 +648,7 @@ class TestIdentifyExtremesConfigurationErrors:
     def test_max_anomaly_with_exact_percentile(self, anomaly_data):
         """Test ConfigurationError when max_anomaly is used with exact percentile method."""
         with pytest.raises(ConfigurationError, match="Parameter 'max_anomaly' cannot be used with method_percentile='exact'"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 anomaly_data,
                 method_percentile="exact",
                 max_anomaly=10.0,  # Non-default max_anomaly
@@ -659,54 +659,54 @@ class TestIdentifyExtremesConfigurationErrors:
         with pytest.raises(
             ConfigurationError, match="Percentile threshold 50% is not supported with method_percentile='approximate'"
         ):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 anomaly_data,
                 method_percentile="approximate",
                 threshold_percentile=50,  # Below 60% threshold
             )
 
-    def test_window_spatial_hobday_with_global_extreme(self, anomaly_data, dimensions_coords):
-        """Test ConfigurationError when window_spatial_hobday is used with global_extreme."""
-        with pytest.raises(ConfigurationError, match="window_spatial_hobday can only be used with method_extreme='hobday_extreme'"):
-            marEx.identify_extremes(
+    def test_window_spatial_with_global_percentile(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError when window_spatial is used with global_percentile."""
+        with pytest.raises(ConfigurationError, match="window_spatial can only be used with method_extreme='seasonal_percentile'"):
+            marEx.extremes.identify_extremes(
                 anomaly_data,
-                method_extreme="global_extreme",
-                window_spatial_hobday=3,  # This should trigger error with global_extreme
+                method_extreme="global_percentile",
+                window_spatial=3,  # This should trigger error with global_percentile
                 dimensions=dimensions_coords["dimensions"],
                 coordinates=dimensions_coords["coordinates"],
             )
 
-    def test_window_spatial_hobday_with_exact_percentile(self, anomaly_data, dimensions_coords):
-        """Test ConfigurationError when window_spatial_hobday is used with exact percentile."""
-        with pytest.raises(ConfigurationError, match="window_spatial_hobday is not supported with method_percentile='exact'"):
-            marEx.identify_extremes(
+    def test_window_spatial_with_exact_percentile(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError when window_spatial is used with exact percentile."""
+        with pytest.raises(ConfigurationError, match="window_spatial is not supported with method_percentile='exact'"):
+            marEx.extremes.identify_extremes(
                 anomaly_data,
-                method_extreme="hobday_extreme",
+                method_extreme="seasonal_percentile",
                 method_percentile="exact",
-                window_spatial_hobday=3,  # This should trigger error with exact percentile
+                window_spatial=3,  # This should trigger error with exact percentile
                 dimensions=dimensions_coords["dimensions"],
                 coordinates=dimensions_coords["coordinates"],
             )
 
-    def test_even_window_days_hobday(self, anomaly_data, dimensions_coords):
-        """Test ConfigurationError for even window_days_hobday."""
-        with pytest.raises(ConfigurationError, match="window_days_hobday must be an odd number"):
-            marEx.identify_extremes(
+    def test_even_window_days(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError for even window_days."""
+        with pytest.raises(ConfigurationError, match="window_days must be an odd number"):
+            marEx.extremes.identify_extremes(
                 anomaly_data,
-                method_extreme="hobday_extreme",
-                window_days_hobday=10,  # Even number
+                method_extreme="seasonal_percentile",
+                window_days=10,  # Even number
                 dimensions=dimensions_coords["dimensions"],
                 coordinates=dimensions_coords["coordinates"],
             )
 
-    def test_even_window_spatial_hobday(self, anomaly_data, dimensions_coords):
-        """Test ConfigurationError for even window_spatial_hobday."""
-        with pytest.raises(ConfigurationError, match="window_spatial_hobday must be an odd number"):
-            marEx.identify_extremes(
+    def test_even_window_spatial(self, anomaly_data, dimensions_coords):
+        """Test ConfigurationError for even window_spatial."""
+        with pytest.raises(ConfigurationError, match="window_spatial must be an odd number"):
+            marEx.extremes.identify_extremes(
                 anomaly_data,
-                method_extreme="hobday_extreme",
+                method_extreme="seasonal_percentile",
                 method_percentile="approximate",
-                window_spatial_hobday=4,  # Even number
+                window_spatial=4,  # Even number
                 dimensions=dimensions_coords["dimensions"],
                 coordinates=dimensions_coords["coordinates"],
             )
@@ -714,7 +714,7 @@ class TestIdentifyExtremesConfigurationErrors:
     def test_invalid_method_extreme(self, anomaly_data):
         """Test ConfigurationError for invalid method_extreme."""
         with pytest.raises(ConfigurationError, match="Unknown extreme method 'invalid_extreme'"):
-            marEx.identify_extremes(
+            marEx.extremes.identify_extremes(
                 anomaly_data,
                 method_extreme="invalid_extreme",
             )
@@ -1188,7 +1188,7 @@ class TestDetectDataValidationEdgeCases:
             )
 
     def test_partial_invalid_data_error(self, dimensions_gridded, dask_chunks):
-        """Test error when some ocean locations have NaN/infinite values across time."""
+        """Test error when some valid-region locations have NaN/infinite values across time."""
         import pandas as pd
 
         # Create data with mostly valid values
@@ -1209,7 +1209,7 @@ class TestDetectDataValidationEdgeCases:
             },
         ).chunk({"time": 25})
 
-        with pytest.raises(DataValidationError, match="contains.*invalid values.*ocean locations"):
+        with pytest.raises(DataValidationError, match="contains.*invalid values at.*locations"):
             marEx.preprocess_data(
                 partial_invalid_data,
                 dimensions=dimensions_gridded,
@@ -1242,7 +1242,7 @@ class TestQuantileThresholdWarnings:
         # Set one location to constant value (zero anomaly after detrending)
         data.values[:, 0, 0] = 15.0
 
-        # Process with global_extreme to trigger threshold validation
+        # Process with global_percentile to trigger threshold validation
         with warnings.catch_warnings(record=True) as _:
             warnings.simplefilter("always")
 
@@ -1251,7 +1251,7 @@ class TestQuantileThresholdWarnings:
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
                 method_anomaly="detrend_harmonic",
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 threshold_percentile=95,
             )
 
@@ -1287,15 +1287,15 @@ class TestQuantileThresholdWarnings:
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
                 method_anomaly="detrend_harmonic",
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 threshold_percentile=99,  # High percentile
             )
 
             # Verify processing completes
             assert result is not None
 
-    def test_high_quantile_threshold_warning_global_extreme(self, dimensions_gridded):
-        """Test warning when quantiles exceed max_anomaly bounds with global_extreme (lines 2445)."""
+    def test_high_quantile_threshold_warning_global_percentile(self, dimensions_gridded):
+        """Test warning when quantiles exceed max_anomaly bounds with global_percentile (lines 2445)."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1325,7 +1325,7 @@ class TestQuantileThresholdWarnings:
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
                 method_anomaly="detrend_harmonic",
-                method_extreme="global_extreme",
+                method_extreme="global_percentile",
                 method_percentile="approximate",
                 threshold_percentile=99,
                 max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
@@ -1334,8 +1334,8 @@ class TestQuantileThresholdWarnings:
             # Verify processing completes
             assert result is not None
 
-    def test_high_quantile_threshold_warning_hobday_extreme(self, dimensions_gridded):
-        """Test warning when quantiles exceed max_anomaly bounds with hobday_extreme (line 2576)."""
+    def test_high_quantile_threshold_warning_seasonal_percentile(self, dimensions_gridded):
+        """Test warning when quantiles exceed max_anomaly bounds with seasonal_percentile (line 2576)."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1365,9 +1365,9 @@ class TestQuantileThresholdWarnings:
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
                 method_anomaly="detrend_harmonic",
-                method_extreme="hobday_extreme",
+                method_extreme="seasonal_percentile",
                 method_percentile="approximate",
-                window_days_hobday=5,
+                window_days=5,
                 threshold_percentile=99,
                 max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
             )
@@ -1379,8 +1379,8 @@ class TestQuantileThresholdWarnings:
 class TestUnstructuredGridConfigurationErrors:
     """Test configuration errors specific to unstructured grids."""
 
-    def test_window_spatial_hobday_unstructured_error(self, dimensions_gridded, dask_chunks):
-        """Test error when window_spatial_hobday is used with unstructured grid."""
+    def test_window_spatial_unstructured_error(self, dimensions_gridded, dask_chunks):
+        """Test error when window_spatial is used with unstructured grid."""
         # Create 2D unstructured-like data
         test_data_path = Path(__file__).parent / "data" / "sst_gridded.zarr"
         ds = xr.open_zarr(str(test_data_path), chunks={"time": 25}).isel(lon=slice(0, 4), lat=slice(0, 3))
@@ -1391,17 +1391,17 @@ class TestUnstructuredGridConfigurationErrors:
         unstructured_dims = {"time": "time", "x": "ncells"}
         unstructured_coords = {"time": "time", "x": "ncells", "y": "ncells"}
 
-        # Try to use window_spatial_hobday with unstructured data - should raise ConfigurationError
-        with pytest.raises(ConfigurationError, match="window_spatial_hobday is not supported for unstructured grids"):
+        # Try to use window_spatial with unstructured data - should raise ConfigurationError
+        with pytest.raises(ConfigurationError, match="window_spatial is not supported for unstructured grids"):
             marEx.preprocess_data(
                 unstructured_data,
                 dimensions=unstructured_dims,
                 coordinates=unstructured_coords,
                 dask_chunks={"time": 25},
-                method_extreme="hobday_extreme",
+                method_extreme="seasonal_percentile",
                 method_percentile="approximate",
-                window_spatial_hobday=3,  # This should trigger error on unstructured grid
-                window_days_hobday=5,
+                window_spatial=3,  # This should trigger error on unstructured grid
+                window_days=5,
             )
 
 

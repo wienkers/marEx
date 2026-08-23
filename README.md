@@ -7,24 +7,26 @@
 [![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 [![DOI](https://zenodo.org/badge/945834123.svg)](https://doi.org/10.5281/zenodo.16922881)
 
-# Marine Extremes Detection and Tracking
+# Weather & Climate Extremes Detection and Tracking
 
-**Efficient & scalable marine extremes detection, identification, & tracking for exascale climate data.**
+**Efficient & scalable climatologies, anomalies, extreme detection, & event tracking for exascale climate data.**
 
-marEx is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
+marEx is a high-performance Python framework of three stages, each usable alone: smoothed climatologies and detrended anomalies, extreme identification against a percentile threshold, and tracking those events through time. It processes decades of daily-resolution global data on a single node or a thousand cores.
 
-📚 **[Full documentation on ReadTheDocs →](https://marex.readthedocs.io/)**
+Nothing in it is specific to one domain. The same pipeline runs on sea surface temperature, 2 m air temperature, precipitation, soil moisture, or a biogeochemical tracer, on regular grids and unstructured meshes alike. If all you want is a smoothed daily climatology on data far larger than memory, `marEx.anomaly` is a complete answer that never asks you for a threshold.
+
+**[Full documentation on ReadTheDocs](https://marex.readthedocs.io/)**
 
 ---
 
 ## Key Features
 
-- **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
-- **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models (FESOM, ICON-O, MPAS-Ocean)
-- **📈 Advanced Event Tracking**: Overlap-thresholded merge/split handling with genealogical record — avoids the spurious "mega-events" of naive 3D connected-component methods
-- **📊 Multiple Detection Methods**: Four anomaly methods and a generalised Hobday extreme definition with spatial pooling
-- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to supercomputer using up to 1024+ cores
-- **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
+- **Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
+- **Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured meshes (FESOM, ICON, MPAS)
+- **Standalone Anomaly Stage**: Climatologies, detrending, and anomalies as a first-class entry point, with no detection step and no threshold parameter
+- **Advanced Event Tracking**: Overlap-thresholded merge/split handling with genealogical record — avoids the spurious "mega-events" of naive 3D connected-component methods
+- **Multiple Detection Methods**: Four anomaly methods and a generalised day-of-year extreme definition with spatial pooling
+- **Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
 
 ---
 
@@ -72,7 +74,7 @@ events_ds = marEx.tracker(
 
 # 3. Visualise results
 fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(
-    marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96])
+    marEx.PlotConfig(var_units="Event Frequency", cmap="hot_r", cperc=[0, 96])
 )
 ```
 
@@ -80,8 +82,8 @@ marEx follows a three-stage pipeline:
 
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│  1. Detect      │  →   │  2. Track       │  →   │  3. Visualise   │
-│    Extremes     │      │    Events       │      │     & Analyse   │
+│  1. Anomalies   │  →   │  2. Track       │  →   │  3. Visualise   │
+│   & Extremes    │      │    Events       │      │     & Analyse   │
 └─────────────────┘      └─────────────────┘      └─────────────────┘
         ↓                        ↓                        ↓
 preprocess_data()           tracker()                  plotX()
@@ -90,13 +92,11 @@ Binary extreme map        Tracked objects          Maps, animations,
                             with unique IDs           & statistics
 ```
 
-➡️ **[Five-minute Quickstart](https://marex.readthedocs.io/en/latest/getting_started/quickstart.html)** · **[Core Concepts](https://marex.readthedocs.io/en/latest/guide/concepts.html)**
+**[Five-minute Quickstart](https://marex.readthedocs.io/en/latest/getting_started/quickstart.html)** · **[Core Concepts](https://marex.readthedocs.io/en/latest/guide/concepts.html)**
 
 ---
 
 ## Documentation
-
-The documentation is organised so you can find what you need quickly:
 
 | Section | What's there |
 | --- | --- |
@@ -124,7 +124,7 @@ The source notebooks live in the [`examples/`](https://github.com/wienkers/marEx
 **Detection** — see the **[Detection guide](https://marex.readthedocs.io/en/latest/guide/detection.html)**:
 
 - Four anomaly methods: *shifting baseline* (rolling climatology, research standard), *detrend fixed baseline* (detrending + fixed climatology), *fixed baseline* (trend-inclusive), and *harmonic detrending* (fast screening)
-- Two extreme definitions: the *Hobday* day-of-year method with a spatial-window extension (Hobday et al. 2016), and a fast *global* threshold
+- Two extreme definitions: a *seasonal* day-of-year method with a spatial-window extension (following Hobday et al. 2016), and a fast *global* threshold
 - Memory-efficient histogram-based approximate percentiles for terabyte-scale data
 
 **Tracking** — see the **[Tracking guide](https://marex.readthedocs.io/en/latest/guide/tracking.html)**:
@@ -161,8 +161,6 @@ When using marEx in publications, please cite:
 ---
 
 ## Funding
-
-This project has received funding through:
 
 * The [EERIE](https://eerie-project.eu) (European Eddy-Rich ESMs) Project
 * The European Union's Horizon Europe research and innovation programme under Grant Agreement No. 101081383

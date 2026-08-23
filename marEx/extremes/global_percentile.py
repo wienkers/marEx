@@ -3,7 +3,7 @@ Global (constant-in-time) extreme identification.
 
 Provides :func:`_identify_extremes_constant`, which applies a single
 time-invariant percentile threshold to identify extreme events. This backs the
-``global_extreme`` extreme-detection method.
+``global_percentile`` extreme-detection method.
 """
 
 from typing import Dict, Literal, Optional, Tuple
@@ -11,8 +11,8 @@ from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import xarray as xr
 
-from ...logging_config import get_logger
-from ..compute_mode import Materialiser
+from ..core.compute_mode import Materialiser
+from ..logging_config import get_logger
 from .histogram import _compute_histogram_quantile_1d
 
 # Get module logger
@@ -27,6 +27,7 @@ def _identify_extremes_constant(
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    threshold_label: str = "thresholds",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a constant (in time) percentile threshold.
@@ -83,8 +84,8 @@ def _identify_extremes_constant(
 
     # Create boolean mask for values exceeding threshold
     # Anchor the threshold before the comparison builds on it -- see the matching
-    # comment in the hobday path.
-    threshold = materialiser.stage(threshold, "thresholds")
+    # comment in the seasonal path.
+    threshold = materialiser.stage(threshold, threshold_label)
     extremes = da >= threshold
 
     # Clean up coordinates if needed

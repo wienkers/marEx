@@ -16,6 +16,8 @@ linked below):
 .. autosummary::
    :nosignatures:
 
+   anomaly.compute
+   extremes.identify
    preprocess_data
    tracker
    regional_tracker
@@ -28,7 +30,8 @@ Module reference
 .. toctree::
    :maxdepth: 2
 
-   detect
+   anomaly
+   extremes
    track
    plotx
    helper

@@ -1,10 +1,10 @@
 """
-Input validation helpers for the marEx detection pipeline.
+Input validation helpers shared across marEx.
 
-Provides dimension, coordinate, and data-value validators used throughout the
-preprocessing and extreme-identification routines. This module is a leaf in the
-detect package dependency graph: it imports only the package-level exception and
-logging utilities and never depends on sibling detect modules.
+Provides dimension, coordinate, and data-value validators used by the anomaly and
+extremes packages. This module is a leaf in the dependency graph: it imports only
+the package-level exception and logging utilities and never depends on a sibling
+analysis package.
 """
 
 from typing import Dict, Optional, Tuple
@@ -227,7 +227,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     if max_invalid > 0:
         # Error path: three more reductions over the same arrays, batched into one
         # round-trip rather than three sequential full re-scans.
-        total_invalid_in_ocean, total_ocean_locations, locations_affected = (
+        total_invalid_in_valid_region, total_valid_locations, locations_affected = (
             int(v)
             for v in dask.compute(
                 invalid_in_valid_locations.sum(),
@@ -238,7 +238,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
         total_time_steps = int(da.sizes[dimensions["time"]])
 
         raise create_data_validation_error(
-            f"Dataset contains {total_invalid_in_ocean} invalid values in {locations_affected} ocean locations",
+            f"Dataset contains {total_invalid_in_valid_region} invalid values at {locations_affected} locations",
             details=(
                 f"Found invalid data across time series. Worst location has {int(max_invalid)} "
                 f"invalid time steps out of {total_time_steps}."
@@ -248,14 +248,15 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
                 "Check data quality and loading procedures",
                 "Consider using data.fillna() or data.interpolate_na() methods",
                 "Verify coordinate/dimension alignment in your dataset",
-                "For ocean data, ensure land mask is properly applied before preprocessing",
+                "If your field carries a land/sea or missing-data mask, ensure it is "
+                "applied consistently across every time step",
             ],
             data_info={
-                "total_invalid_values_in_ocean": total_invalid_in_ocean,
+                "total_invalid_values": total_invalid_in_valid_region,
                 "locations_affected": locations_affected,
-                "total_ocean_locations": total_ocean_locations,
+                "total_valid_locations": total_valid_locations,
                 "max_invalid_at_one_location": int(max_invalid),
                 "total_time_steps": total_time_steps,
-                "percentage_affected": f"{100.0 * locations_affected / total_ocean_locations:.2f}%",
+                "percentage_affected": f"{100.0 * locations_affected / total_valid_locations:.2f}%",
             },
         )

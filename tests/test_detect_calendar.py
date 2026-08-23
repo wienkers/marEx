@@ -2,7 +2,7 @@
 Calendar and leap-year regression tests for the marEx detection pipeline.
 
 Covers the §2 findings of the code review:
-- §2.1  detrend_harmonic + std_normalise must not crash on a leap-free span.
+- §2.1  detrend_harmonic + standardise must not crash on a leap-free span.
 - §2.2  fixed_baseline must not NaN day-of-year 366 when the reference period has
         no leap year.
 - §2.8  the 1D-harmonic path must be reachable with a partial dimensions dict.
@@ -15,7 +15,7 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.detect.utils import add_decimal_year
+from marEx.core.time_axis import add_decimal_year
 
 
 # ── §2.14 cftime decimal year ────────────────────────────────────────────────
@@ -70,7 +70,7 @@ def test_add_decimal_year_datetime64_unchanged():
     assert abs((dy[1] - dy[0]) - 1.0 / 366) < 1e-9
 
 
-# ── §2.1 leap-free std_normalise ─────────────────────────────────────────────
+# ── §2.1 leap-free standardise ─────────────────────────────────────────────
 def _daily_series(start, end, seed=0):
     """A small dask-backed 1D daily time series over [start, end)."""
     time = pd.date_range(start, end, freq="D")
@@ -80,15 +80,15 @@ def _daily_series(start, end, seed=0):
     return da.chunk({"time": 90})
 
 
-def test_harmonic_std_normalise_leap_free_span():
-    """§2.1: std_normalise on a span with no 29 Feb must not raise an align error."""
+def test_harmonic_standardise_leap_free_span():
+    """§2.1: standardise on a span with no 29 Feb must not raise an align error."""
     # 2021-2023 contains no leap year.
     da = _daily_series("2021-01-01", "2024-01-01")
     result = marEx.preprocess_data(
         da,
         method_anomaly="detrend_harmonic",
-        method_extreme="global_extreme",
-        std_normalise=True,
+        method_extreme="global_percentile",
+        standardise=True,
         dimensions={"time": "time"},
         dask_chunks={"time": 90},
     )
@@ -104,7 +104,7 @@ def test_harmonic_1d_default_dimensions_reachable():
     result = marEx.preprocess_data(
         da,
         method_anomaly="detrend_harmonic",
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         dimensions={"time": "time"},
         dask_chunks={"time": 90},
     )
@@ -119,7 +119,7 @@ def test_fixed_baseline_day366_not_nan_with_nonleap_reference():
     result = marEx.preprocess_data(
         da,
         method_anomaly="fixed_baseline",
-        method_extreme="global_extreme",
+        method_extreme="global_percentile",
         reference_period=(2021, 2023),  # no leap year
         dimensions={"time": "time"},
         dask_chunks={"time": 90},

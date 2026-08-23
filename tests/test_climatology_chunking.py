@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from marEx.detect.anomaly.climatology import smoothed_rolling_climatology
+from marEx.anomaly.climatology import smoothed_rolling_climatology
 from marEx.exceptions import ConfigurationError
 
 SMOOTH_DAYS = 21
@@ -80,7 +80,7 @@ class TestTimeChunkValidation:
         # xarray -> dask.overlap -> bottleneck chain, verified against dask 2025.9.1 /
         # bottleneck 1.6.0. If an upgrade ever makes this configuration fail, that is
         # UPSTREAM BEHAVIOUR CHANGING, not a regression in marEx -- widen the guard in
-        # smoothed_rolling_climatology towards "chunk >= smooth_days_baseline" rather
+        # smoothed_rolling_climatology towards "chunk >= smooth_days" rather
         # than relaxing this test.
         da = _synthetic().chunk({"time": 4, "ncells": -1})
 

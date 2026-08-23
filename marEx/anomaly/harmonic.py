@@ -12,10 +12,10 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
-from ...exceptions import ConfigurationError
-from ...logging_config import get_logger
-from ..utils import add_decimal_year
-from ..validation import _infer_dims_coords
+from ..core.time_axis import add_decimal_year
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 def _compute_anomaly_detrended(
     da: xr.DataArray,
-    std_normalise: bool = False,
+    standardise: bool = False,
     detrend_orders: Optional[List[int]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
@@ -38,7 +38,7 @@ def _compute_anomaly_detrended(
     ----------
     da : xarray.DataArray
         Input data with time coordinate
-    std_normalise : bool, default=False
+    standardise : bool, default=False
         Whether to standardise anomalies by temporal variability
     detrend_orders : list, optional
         Polynomial orders for trend removal (default: [1] for linear)
@@ -222,7 +222,7 @@ def _compute_anomaly_detrended(
             coords_to_preserve[coord_name] = da.coords[coord_name]
 
     # Standardise anomalies by temporal variability if requested
-    if std_normalise:
+    if standardise:
 
         # Calculate day-of-year standard deviation using cohorts
         std_day = flox.xarray.xarray_reduce(

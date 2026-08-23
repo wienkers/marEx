@@ -234,7 +234,7 @@ tracker are designed to keep each Dask task's working set bounded so the pipelin
 runs at full resolution within reasonable per-worker memory.
 
 The histogram-based percentile kernels (the ``approximate`` method used by both
-``global_extreme`` and ``hobday_extreme``) are the most memory-intensive step. They
+``global_percentile`` and ``seasonal_percentile``) are the most memory-intensive step. They
 internally tile the spatial dimensions before building the per-cell histograms, so a
 single task never has to hold the entire ``(time × space)`` field at once -- regardless
 of how the input was chunked. As a result, no manual graph-breaking or checkpointing is
@@ -260,7 +260,7 @@ required, and the returned dataset can be written straight to Zarr or NetCDF.
    extremes = marEx.preprocess_data(
        sst,
        method_anomaly='shifting_baseline',
-       method_extreme='hobday_extreme',
+       method_extreme='seasonal_percentile',
        threshold_percentile=95,
        dask_chunks={'time': 25},
    )

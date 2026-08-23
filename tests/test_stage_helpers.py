@@ -1,17 +1,48 @@
 """
-Unit tests for individual functions in marEx.detect module.
+Unit tests for individual functions in marEx.anomaly, marEx.extremes and marEx.core.
 
-Tests core utility functions for marine extreme detection preprocessing.
-Focuses on testing individual function behaviour rather than full pipeline integration.
+Tests the utility functions underneath the two analysis stages, exercising each in
+isolation rather than through the full pipeline.
 """
+
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
 
-import marEx.detect as detect
+import marEx
 import marEx.exceptions
+from marEx.anomaly.api import _anomaly_steps
+from marEx.anomaly.base import compute_normalised_anomaly
+from marEx.core.time_axis import add_decimal_year
+from marEx.extremes.api import _extreme_steps
+from marEx.extremes.base import identify_extremes
+from marEx.extremes.histogram import _compute_histogram_quantile_1d, _compute_histogram_quantile_2d
+from marEx.extremes.seasonal_percentile import _identify_extremes_seasonal
+
+
+def _preprocessing_steps(
+    method_anomaly: str,
+    method_extreme: str,
+    standardise: bool,
+    detrend_orders: List[int],
+    window_years: int,
+    smooth_days: int,
+    window_days: int,
+    window_spatial: Optional[int],
+    reference_period: Optional[Tuple[int, int]] = None,
+) -> List[str]:
+    """
+    Compose both stages' step descriptions, as the chained pipeline does.
+
+    The two stages each own their own half of ``preprocessing_steps`` now, so this
+    reassembles them in execution order to test the combined result.
+    """
+    return _anomaly_steps(
+        method_anomaly, standardise, detrend_orders, window_years, smooth_days, reference_period
+    ) + _extreme_steps(method_extreme, window_days, window_spatial)
 
 
 class TestAddDecimalYear:
@@ -23,7 +54,7 @@ class TestAddDecimalYear:
         dates = pd.date_range("2020-01-01", "2020-12-31", freq="D")
         da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
-        result = detect.add_decimal_year(da, "time")
+        result = add_decimal_year(da, "time")
 
         # Check that decimal_year coordinate was added
         assert "decimal_year" in result.coords
@@ -49,7 +80,7 @@ class TestAddDecimalYear:
         dates = pd.date_range("2020-01-01", "2020-12-31", freq="D")
         da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
-        result = detect.add_decimal_year(da, "time")
+        result = add_decimal_year(da, "time")
         decimal_years = result.decimal_year.values
 
         # In leap year, Feb 29 should exist and be counted
@@ -65,7 +96,7 @@ class TestAddDecimalYear:
         dates = pd.date_range("2021-01-01", "2021-12-31", freq="D")
         da = xr.DataArray(np.random.randn(len(dates)), coords={"time": dates}, dims=["time"])
 
-        result = detect.add_decimal_year(da, "time")
+        result = add_decimal_year(da, "time")
         decimal_years = result.decimal_year.values
 
         # December 31st should be 364/365 through the year
@@ -80,7 +111,7 @@ class TestAddDecimalYear:
             dims=["custom_time"],
         )
 
-        result = detect.add_decimal_year(da, "custom_time")
+        result = add_decimal_year(da, "custom_time")
 
         assert "decimal_year" in result.coords
         assert len(result.decimal_year) == len(dates)
@@ -91,7 +122,7 @@ class TestAddDecimalYear:
         """Test decimal year calculation for single date."""
         da = xr.DataArray([1.0], coords={"time": [pd.Timestamp("2020-07-01")]}, dims=["time"])
 
-        result = detect.add_decimal_year(da, "time")
+        result = add_decimal_year(da, "time")
 
         # July 1st in leap year (182 days into year / 366 total)
         expected = 2020.0 + 182 / 366
@@ -115,7 +146,7 @@ class TestAddDecimalYear:
         )
 
         # Test with both dimension and coordinate specified
-        result = detect.add_decimal_year(da, dim="t", coord="T")
+        result = add_decimal_year(da, dim="t", coord="T")
 
         # Check that decimal_year coordinate was added
         assert "decimal_year" in result.coords
@@ -142,7 +173,7 @@ class TestAddDecimalYear:
         try:
             # This should now fail because dimension 't' doesn't have a coordinate named 't'
             # It should try to access da['t'] which doesn't exist as a coordinate
-            old_result = detect.add_decimal_year(da, dim="t")
+            old_result = add_decimal_year(da, dim="t")
             # If it doesn't fail, the decimal years should be wrong (e.g., 1970 epoch dates)
             old_decimal_years = old_result.decimal_year.values
             # The old bug would produce 1970 values instead of 1982 values
@@ -169,7 +200,7 @@ class TestComputeHistogramQuantile1D:
         )
 
         # Test 95th percentile
-        result = detect._compute_histogram_quantile_1d(da, 0.95, dim="x")
+        result = _compute_histogram_quantile_1d(da, 0.95, dim="x")
 
         # Compare with numpy percentile
         expected = np.percentile(data, 95)
@@ -190,7 +221,7 @@ class TestComputeHistogramQuantile1D:
         quantiles = [0.6, 0.9, 0.95, 0.99]
 
         for q in quantiles:
-            result = detect._compute_histogram_quantile_1d(da, q, dim="x")
+            result = _compute_histogram_quantile_1d(da, q, dim="x")
             expected = np.percentile(data, q * 100)
 
             histogram_value = result.values[0, 0]
@@ -221,7 +252,7 @@ class TestComputeHistogramQuantile1D:
         )
 
         # Test 95th percentile should be in the extreme range
-        result = detect._compute_histogram_quantile_1d(da, 0.95, dim="x")
+        result = _compute_histogram_quantile_1d(da, 0.95, dim="x")
         expected = np.percentile(data, 95.0)
         error = abs(result.values[0, 0] - expected)
 
@@ -247,7 +278,7 @@ class TestComputeHistogramQuantile1D:
         # Custom bin edges
         bin_edges = np.linspace(-3, 4, 100)
 
-        result = detect._compute_histogram_quantile_1d(da, 0.5, dim="x", bin_edges=bin_edges)
+        result = _compute_histogram_quantile_1d(da, 0.5, dim="x", bin_edges=bin_edges)
 
         # Median of uniform distribution should be near 0.5
         expected = np.percentile(data, 50)
@@ -263,7 +294,7 @@ class TestComputeHistogramQuantile1D:
             name="test_data",
         )
 
-        result = detect._compute_histogram_quantile_1d(da_const, 0.95, dim="x")
+        result = _compute_histogram_quantile_1d(da_const, 0.95, dim="x")
         assert np.isclose(result.values[0, 0], 2.5, atol=0.01)
 
         # Test with very small dataset
@@ -274,24 +305,24 @@ class TestComputeHistogramQuantile1D:
             name="test_data",
         )
 
-        result = detect._compute_histogram_quantile_1d(da_small, 0.5, dim="x")
+        result = _compute_histogram_quantile_1d(da_small, 0.5, dim="x")
         assert np.isclose(result.values[0, 0], 2.0, atol=0.01)
 
 
 class TestGetPreprocessingSteps:
-    """Test _get_preprocessing_steps function for metadata generation."""
+    """The composed preprocessing_steps metadata from both stages."""
 
     def test_detrend_harmonic_steps(self):
         """Test preprocessing steps for detrend harmonic method."""
-        steps = detect._get_preprocessing_steps(
+        steps = _preprocessing_steps(
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
-            std_normalise=False,
+            method_extreme="global_percentile",
+            standardise=False,
             detrend_orders=[1, 2],
-            window_year_baseline=15,
-            smooth_days_baseline=21,
-            window_days_hobday=11,
-            window_spatial_hobday=None,
+            window_years=15,
+            smooth_days=21,
+            window_days=11,
+            window_spatial=None,
         )
 
         expected_steps = [
@@ -301,17 +332,17 @@ class TestGetPreprocessingSteps:
 
         assert steps == expected_steps
 
-    def test_detrend_harmonic_with_std_normalise(self):
+    def test_detrend_harmonic_with_standardise(self):
         """Test preprocessing steps with standardisation."""
-        steps = detect._get_preprocessing_steps(
+        steps = _preprocessing_steps(
             method_anomaly="detrend_harmonic",
-            method_extreme="global_extreme",
-            std_normalise=True,
+            method_extreme="global_percentile",
+            standardise=True,
             detrend_orders=[1],
-            window_year_baseline=15,
-            smooth_days_baseline=21,
-            window_days_hobday=11,
-            window_spatial_hobday=None,
+            window_years=15,
+            smooth_days=21,
+            window_days=11,
+            window_spatial=None,
         )
 
         expected_steps = [
@@ -324,15 +355,15 @@ class TestGetPreprocessingSteps:
 
     def test_shifting_baseline_steps(self):
         """Test preprocessing steps for shifting baseline method."""
-        steps = detect._get_preprocessing_steps(
+        steps = _preprocessing_steps(
             method_anomaly="shifting_baseline",
-            method_extreme="hobday_extreme",
-            std_normalise=False,
+            method_extreme="seasonal_percentile",
+            standardise=False,
             detrend_orders=[1],
-            window_year_baseline=10,
-            smooth_days_baseline=15,
-            window_days_hobday=5,
-            window_spatial_hobday=None,
+            window_years=10,
+            smooth_days=15,
+            window_days=5,
+            window_spatial=None,
         )
 
         expected_steps = [
@@ -347,26 +378,26 @@ class TestGetPreprocessingSteps:
         """Test all valid method combinations."""
         # Test all four valid combinations
         combinations = [
-            ("detrend_harmonic", "global_extreme"),
-            ("detrend_harmonic", "hobday_extreme"),
-            ("shifting_baseline", "global_extreme"),
-            ("shifting_baseline", "hobday_extreme"),
-            ("detrend_fixed_baseline", "global_extreme"),
-            ("detrend_fixed_baseline", "hobday_extreme"),
-            ("fixed_baseline", "global_extreme"),
-            ("fixed_baseline", "hobday_extreme"),
+            ("detrend_harmonic", "global_percentile"),
+            ("detrend_harmonic", "seasonal_percentile"),
+            ("shifting_baseline", "global_percentile"),
+            ("shifting_baseline", "seasonal_percentile"),
+            ("detrend_fixed_baseline", "global_percentile"),
+            ("detrend_fixed_baseline", "seasonal_percentile"),
+            ("fixed_baseline", "global_percentile"),
+            ("fixed_baseline", "seasonal_percentile"),
         ]
 
         for method_anomaly, method_extreme in combinations:
-            steps = detect._get_preprocessing_steps(
+            steps = _preprocessing_steps(
                 method_anomaly=method_anomaly,
                 method_extreme=method_extreme,
-                std_normalise=False,
+                standardise=False,
                 detrend_orders=[1],
-                window_year_baseline=15,
-                smooth_days_baseline=21,
-                window_days_hobday=11,
-                window_spatial_hobday=None,
+                window_years=15,
+                smooth_days=21,
+                window_days=11,
+                window_spatial=None,
             )
 
             # Should always have at least 2 steps
@@ -380,38 +411,38 @@ class TestGetPreprocessingSteps:
             if "baseline" in method_anomaly:
                 assert "climatology" in steps_text
 
-            if method_extreme == "global_extreme":
+            if method_extreme == "global_percentile":
                 assert "Global percentile" in steps_text
             else:
                 assert "Day-of-year" in steps_text
 
     def test_get_preprocessing_steps_new_methods(self):
-        """Test _get_preprocessing_steps includes new method descriptions."""
+        """The composed step list includes the fixed-baseline method descriptions."""
         # Test fixed_baseline
-        steps_fixed = detect._get_preprocessing_steps(
+        steps_fixed = _preprocessing_steps(
             method_anomaly="fixed_baseline",
-            method_extreme="global_extreme",
-            std_normalise=False,
+            method_extreme="global_percentile",
+            standardise=False,
             detrend_orders=[1],
-            window_year_baseline=15,
-            smooth_days_baseline=21,
-            window_days_hobday=11,
-            window_spatial_hobday=None,
+            window_years=15,
+            smooth_days=21,
+            window_days=11,
+            window_spatial=None,
         )
 
         # Should contain description of fixed baseline
         assert any("Daily climatology computed from full time series" in step for step in steps_fixed)
 
         # Test detrend_fixed_baseline
-        steps_fixed_detrended = detect._get_preprocessing_steps(
+        steps_fixed_detrended = _preprocessing_steps(
             method_anomaly="detrend_fixed_baseline",
-            method_extreme="hobday_extreme",
-            std_normalise=False,
+            method_extreme="seasonal_percentile",
+            standardise=False,
             detrend_orders=[1, 2],
-            window_year_baseline=15,
-            smooth_days_baseline=21,
-            window_days_hobday=11,
-            window_spatial_hobday=None,
+            window_years=15,
+            smooth_days=21,
+            window_days=11,
+            window_spatial=None,
         )
 
         # Should contain descriptions for both detrending and climatology
@@ -436,7 +467,7 @@ class TestValidationFunctions:
         ).chunk({"time": 5})
 
         with pytest.raises(marEx.exceptions.ConfigurationError, match="Unknown anomaly method"):
-            detect.compute_normalised_anomaly(da, method_anomaly="invalid_method")
+            compute_normalised_anomaly(da, method_anomaly="invalid_method")
 
     def test_invalid_method_extreme(self):
         """Test error handling for invalid extreme method."""
@@ -451,7 +482,7 @@ class TestValidationFunctions:
         ).chunk({"time": 5})
 
         with pytest.raises(marEx.exceptions.ConfigurationError, match="Unknown extreme method"):
-            detect.identify_extremes(da, method_extreme="invalid_method")
+            identify_extremes(da, method_extreme="invalid_method")
 
     def test_non_dask_array_error(self):
         """Test error when non-Dask array is provided to preprocess_data."""
@@ -469,7 +500,7 @@ class TestValidationFunctions:
             marEx.exceptions.DataValidationError,
             match="Input DataArray must be Dask-backed",
         ):
-            detect.preprocess_data(da)
+            marEx.preprocess_data(da)
 
 
 class TestComputeHistogramQuantile2D:
@@ -504,8 +535,8 @@ class TestComputeHistogramQuantile2D:
         da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
 
         # Test 95th percentile calculation
-        result = detect._compute_histogram_quantile_2d(
-            da, q=0.95, window_days_hobday=21, window_spatial_hobday=5, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        result = _compute_histogram_quantile_2d(
+            da, q=0.95, window_days=21, window_spatial=5, dimensions={"time": "time", "x": "lon", "y": "lat"}
         ).compute()
 
         # Check output shape - should have dayofyear and spatial dimensions
@@ -522,7 +553,7 @@ class TestComputeHistogramQuantile2D:
         assert np.all(result.values <= 2.2)  # Allow for some extreme values due to windowing
 
     def test_histogram_quantile_2d_vs_exact_quantile(self):
-        """Test 2D histogram quantile vs exact quantile computation using _identify_extremes_hobday."""
+        """Test 2D histogram quantile vs exact quantile computation using _identify_extremes_seasonal."""
         # Create controlled test data
         np.random.seed(42)
         n_years = 5
@@ -559,20 +590,20 @@ class TestComputeHistogramQuantile2D:
         window_days = 41
 
         # Get 2D histogram-based quantile
-        hist_result = detect._compute_histogram_quantile_2d(
+        hist_result = _compute_histogram_quantile_2d(
             da,
             q=q,
-            window_days_hobday=window_days,
+            window_days=window_days,
             precision=precision,
             max_anomaly=max_anomaly,
             dimensions={"time": "time", "x": "lon", "y": "lat"},
         )
 
-        # Get exact quantile using _identify_extremes_hobday with method_percentile='exact'
-        _, exact_thresholds = detect._identify_extremes_hobday(
+        # Get exact quantile using _identify_extremes_seasonal with method_percentile='exact'
+        _, exact_thresholds = _identify_extremes_seasonal(
             da,
             threshold_percentile=q * 100,
-            window_days_hobday=window_days,
+            window_days=window_days,
             method_percentile="exact",
             dimensions={"time": "time", "x": "lon", "y": "lat"},
             coordinates={"time": "time", "x": "lon", "y": "lat"},
@@ -622,8 +653,8 @@ class TestComputeHistogramQuantile2D:
         # Custom bin edges with fine resolution
         custom_bins = np.linspace(-3, 5, 50)
 
-        result = detect._compute_histogram_quantile_2d(
-            da, q=0.5, window_days_hobday=5, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
+        result = _compute_histogram_quantile_2d(
+            da, q=0.5, window_days=5, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
         )
 
         # For uniform distribution, median should be reasonable
@@ -663,11 +694,11 @@ class TestComputeHistogramQuantile2D:
 
         results = {}
         for window_days in window_sizes:
-            result = detect._compute_histogram_quantile_2d(
+            result = _compute_histogram_quantile_2d(
                 da,
                 q=quantile,
-                window_days_hobday=window_days,
-                window_spatial_hobday=1,
+                window_days=window_days,
+                window_spatial=1,
                 dimensions={"time": "time", "x": "lon", "y": "lat"},
             ).compute()
             results[window_days] = result
@@ -709,10 +740,10 @@ class TestComputeHistogramQuantile2D:
         # Add dayofyear coordinate as expected by the function
         da = da.assign_coords(dayofyear=da.time.dt.dayofyear)
 
-        result = detect._compute_histogram_quantile_2d(
+        result = _compute_histogram_quantile_2d(
             da,
             q=0.95,
-            window_days_hobday=5,
+            window_days=5,
             dimensions={"time": "time", "x": "lon", "y": "lat"},
             bin_edges=np.linspace(-0.2, 1.2, 20),  # Custom bins for constant data
         )
