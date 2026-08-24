@@ -18,6 +18,7 @@ import xarray as xr
 
 from .anomaly.api import _anomaly_core
 from .core.compute_mode import Materialiser, create_staging_dir
+from .core.dimensions import resolve_dims
 from .core.finalise import finalise_dataset, split_large_chunks
 from .extremes.api import _effective_window_spatial, _extreme_steps, _extremes_core, _log_extreme_summary
 from .logging_config import configure_logging, get_logger
@@ -227,7 +228,15 @@ def preprocess_data(
                 ds.attrs.update({"window_spatial": effective_window_spatial})
         ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
-        ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir)
+        ds = finalise_dataset(
+            ds,
+            dimensions,
+            coordinates,
+            dask_chunks,
+            materialiser,
+            staging_dir,
+            extra_dims=resolve_dims(da, dimensions, coordinates).extra,
+        )
 
     _log_extreme_summary(ds, materialiser)
     return ds

@@ -286,7 +286,7 @@ def identify(
                 ds.attrs.update({"window_spatial": effective_window_spatial})
         ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
 
-        ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir)
+        ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir, extra_dims=dims.extra)
 
     # After finalisation, so that in persist mode the count reads the materialised
     # field rather than re-walking the graph that built it.

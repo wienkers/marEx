@@ -387,7 +387,15 @@ def compute(
             coordinates,
             materialiser,
         )
-        ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir)
+        ds = finalise_dataset(
+            ds,
+            dimensions,
+            coordinates,
+            dask_chunks,
+            materialiser,
+            staging_dir,
+            extra_dims=resolve_dims(da, dimensions, coordinates).extra,
+        )
 
     logger.info("Anomaly computation completed successfully")
     return ds

@@ -200,3 +200,52 @@ class TestRankGuards:
         plotter = level.plotX(dimensions=DIMENSIONS, coordinates=DIMENSIONS)
         fig, ax, im = plotter.single_plot(marEx.plotX.PlotConfig(title="level 0"))
         assert im is not None
+
+
+class TestFinaliseChunksTheFieldNotTheAttachments:
+    """``finalise`` makes the FIELD's spatial dims whole -- and nothing else's.
+
+    ``ds.dims`` on the output is the union over every variable, so deriving the
+    spatial dims from it would also pick up ``neighbours``' own ``nv`` axis on the
+    unstructured path. That axis is not a spatial dimension of the field and must
+    not be rechunked here. Neither golden covers it (both are gridded), so it is
+    pinned directly.
+    """
+
+    def test_neighbour_axis_is_not_treated_as_a_spatial_dim(self):
+        from marEx.core.dimensions import extra_dims, resolve_dims
+
+        sst = xr.open_zarr(str(DATA_DIR / "sst_unstructured.zarr"), chunks={}).to.isel(time=slice(0, 3 * 365))
+        ncells = sst.sizes["ncells"]
+        sst = sst.assign_coords(
+            lat=xr.DataArray(np.linspace(-90, 90, ncells), dims=["ncells"]),
+            lon=xr.DataArray(np.linspace(-180, 180, ncells), dims=["ncells"]),
+        ).chunk({"time": 30, "ncells": -1})
+        dims = {"time": "time", "x": "ncells"}
+        coords = {"time": "time", "x": "lon", "y": "lat"}
+        neighbours = xr.DataArray(
+            np.zeros((3, ncells), dtype=np.int32),
+            dims=("nv", "ncells"),
+            coords={"nv": np.arange(3)},
+        )
+        cell_areas = xr.DataArray(np.ones(ncells, dtype=np.float32), dims=("ncells",))
+
+        result = marEx.preprocess_data(
+            sst,
+            method_anomaly="fixed_baseline",
+            method_extreme="global_percentile",
+            threshold_percentile=95,
+            dimensions=dims,
+            coordinates=coords,
+            neighbours=neighbours,
+            cell_areas=cell_areas,
+            dask_chunks={"time": TIME_CHUNK},
+        )
+
+        # The field has no extra dims, so finalise must chunk exactly ncells and time.
+        assert resolve_dims(sst, dims, coords).extra == ()
+        # `nv` is visible on the output Dataset but is not the field's spatial dim.
+        assert "nv" in result.dims
+        assert "nv" in extra_dims(result, dims, exclude=("dayofyear",))
+        assert result.neighbours.chunksizes["nv"] == (3,)
+        assert result.dat_anomaly.chunksizes["ncells"] == (ncells,)

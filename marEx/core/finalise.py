@@ -10,14 +10,14 @@ alone, or the full chain, so it lives here rather than in any one of them.
 
 import logging
 from contextlib import contextmanager
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import dask
 import xarray as xr
 
 from ..logging_config import get_logger, log_dask_info, log_memory_usage, log_timing
 from .attrs import make_netcdf_safe_attrs
-from .dimensions import spatial_chunks
+from .dimensions import horizontal_dims
 
 # Get module logger
 logger = get_logger(__name__)
@@ -52,6 +52,7 @@ def finalise_dataset(
     dask_chunks: Dict[str, int],
     materialiser,
     staging_dir: Optional[object] = None,
+    extra_dims: Tuple[str, ...] = (),
 ) -> xr.Dataset:
     """
     Apply the common output tail to a finished dataset.
@@ -70,6 +71,16 @@ def finalise_dataset(
     staging_dir
         Staging directory to record on ``ds.attrs["marex_staging_dir"]`` so that
         :func:`marEx.clear_staging` can find it later.
+    extra_dims
+        The field's extra (non-time, non-horizontal) dimensions -- depth, level,
+        member -- resolved from the *input* by :func:`marEx.core.resolve_dims`.
+        They are made whole alongside the horizontal dims.
+
+        Passed in rather than derived from ``ds``, because ``ds.dims`` is the union
+        over every variable: on the unstructured path it also carries ``neighbours``'
+        own ``nv`` axis, which is not a spatial dimension of the field and must not
+        be rechunked here. Empty for a 2-D field, which is what makes this site
+        produce exactly the chunk dict it always did.
 
     Returns
     -------
@@ -88,8 +99,8 @@ def finalise_dataset(
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     # Every spatial dimension is made whole, extra dims (depth, level) included: the
     # tracker requires it, and a consumer of a 3D+time anomaly wants the same layout.
-    # CYCLE_DIMS are excluded here because they are handled just below.
-    chunk_dict = dict(spatial_chunks(ds, dimensions, -1, exclude=CYCLE_DIMS))
+    chunk_dict = {dim: -1 for dim in horizontal_dims(dimensions) if dim in ds.dims}
+    chunk_dict.update({dim: -1 for dim in extra_dims if dim in ds.dims})
     chunk_dict[dimensions["time"]] = time_chunks
     # A cycle-index dimension is only present when a seasonal threshold was computed,
     # so testing for it is equivalent to testing the extreme method -- and it keeps
