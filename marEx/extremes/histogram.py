@@ -100,6 +100,50 @@ def _chunk_spatial_for_histogram(
     return da.chunk(chunks)
 
 
+def _histogram_tile_chunks(
+    da: xr.DataArray,
+    dimensions: Dict[str, str],
+    n_bins: int,
+    window_spatial: Optional[int],
+) -> Dict[str, int]:
+    """Spatial tiling for the day-of-year resolved histogram, plus a whole time axis.
+
+    Sized from the histogram OUTPUT budget rather than a hardcoded 16 cells. Each
+    spatial cell yields a ``(366, n_bins)`` histogram, so the cells per tile are
+    capped to keep the per-task output near the element budget. On a gridded field
+    this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
+    uses ~256 cells/chunk instead of 16, avoiding the task-graph explosion behind
+    the "seasonal scheduler OOM on unstructured" failure.
+
+    Both sides of the reduction are budgeted, as ``_chunk_spatial_for_histogram``
+    does. The output side is ``366 x n_bins`` per cell; the INPUT side is ``ntime``
+    per cell, because time is held whole. Sizing on the output alone would leave the
+    slab a task reads growing with the length of the series. Taking the max makes the
+    per-task working set constant in the spatial extent and in the number of
+    timesteps. For any realistic series this is a no-op: ``366 * n_bins`` is ~183k at
+    the default binning, so ``ntime`` only binds beyond ~500 years of daily data.
+
+    **Every** spatial dimension is tiled, extra dims (depth, level) included, and the
+    side is the rank-th root of the cell budget -- so an extra dimension shrinks each
+    side rather than multiplying the task. The ``window_spatial`` floor applies to the
+    HORIZONTAL dims alone: the spatial window never rolls over an extra dimension, so
+    widening a depth chunk to the window width would buy nothing.
+    """
+    spatial_dims_present = list(spatial_dims(da, dimensions))
+    ntime = max(1, int(da.sizes[dimensions["time"]]))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, 366 * max(1, n_bins)))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
+
+    horizontal_present = set(horizontal_dims(dimensions))
+    chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    for dim in spatial_dims_present:
+        side = tile_side
+        if window_spatial is not None and window_spatial > 1 and dim in horizontal_present:
+            side = max(side, int(window_spatial))
+        chunk_dict[dim] = min(int(da.sizes[dim]), side)
+    return chunk_dict
+
+
 def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
     """Centred window sum along ``dim`` that preserves the input's integer dtype.
 
@@ -371,42 +415,9 @@ def _compute_histogram_quantile_2d(
         name="bin_centers",
     )
 
-    # Size the spatial tiles from the histogram OUTPUT budget rather than a hardcoded
-    # 16 cells. Each spatial cell yields a (366, n_bins) histogram, so cap the cells
-    # per tile to keep the per-task output near the element budget. On a gridded grid
-    # this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
-    # uses ~256 cells/chunk instead of 16, avoiding a task-graph explosion (the
-    # "seasonal scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
-    # Every spatial dim is tiled, extra dims (depth, level) included. The side is the
-    # rank-th root of the cell budget, so a depth axis shrinks each side rather than
-    # multiplying the task: the per-task working set is constant in the field's rank.
     spatial_dims_present = list(spatial_dims(da, dimensions))
-
-    # Budget against BOTH sides, as _chunk_spatial_for_histogram does. The output side is
-    # `366 x n_bins` elements per cell. The INPUT side is `ntime` per cell, because time is
-    # held whole below (chunk_dict sets it to -1) -- so sizing on the output alone leaves
-    # the slab this task reads growing linearly with the length of the series, i.e. with
-    # input size. Taking the max makes the per-task working set constant in both the
-    # spatial extent (already tiled) and the number of timesteps.
-    #
-    # For any realistic series this is a no-op: 366 * n_bins is ~183k at the default
-    # binning, so `ntime` only binds beyond ~500 years of daily data. It is a guarantee,
-    # not a retuning.
-    ntime_2d = max(1, int(da.sizes[dimensions["time"]]))
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime_2d, 366 * max(1, n_bins)))
-    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
-    # The spatial smoothing below rolls a window of `window_spatial` over each
-    # spatial dim, which requires every chunk to be at least that wide; never tile below it.
-    # ... but only along the HORIZONTAL dims. The spatial window never rolls over an
-    # extra dim such as depth, so widening a depth chunk to the window buys nothing.
-    horizontal_present = set(horizontal_dims(dimensions))
-    chunk_dict = {dimensions["time"]: -1}
-    for d in spatial_dims_present:
-        side = tile_side
-        if window_spatial is not None and window_spatial > 1 and d in horizontal_present:
-            side = max(side, int(window_spatial))
-        chunk_dict[d] = min(int(da.sizes[d]), side)
+    chunk_dict = _histogram_tile_chunks(da, dimensions, n_bins, window_spatial)
 
     da_bin = (
         xr.DataArray(

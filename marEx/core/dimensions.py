@@ -95,7 +95,7 @@ def tile_spatial_chunks(
     dims: Sequence[str],
     input_elements_per_cell: int,
     output_elements_per_cell: int = 1,
-    target_elements: int = TASK_ELEMENTS,
+    target_elements: Optional[int] = None,
     floor_dims: Iterable[str] = (),
     floor: int = 1,
 ) -> Dict[str, int]:
@@ -128,7 +128,8 @@ def tile_spatial_chunks(
     output_elements_per_cell
         Elements produced per spatial cell, e.g. ``n_years x cycle_length``.
     target_elements
-        Per-task element budget.
+        Per-task element budget. Defaults to :data:`TASK_ELEMENTS`, read at call
+        time so the module-level value stays the single knob.
     floor_dims, floor
         Dimensions that must not be tiled below ``floor`` -- the horizontal dims
         under a rolling spatial window, which needs every chunk at least as wide
@@ -144,19 +145,30 @@ def tile_spatial_chunks(
     if not present:
         return {}
 
+    if target_elements is None:
+        target_elements = TASK_ELEMENTS
+
     divisor = max(1, int(input_elements_per_cell), int(output_elements_per_cell))
     cells_per_tile = max(1, int(target_elements) // divisor)
-    side = max(1, int(round(cells_per_tile ** (1.0 / len(present)))))
 
+    # Spend the cell budget greedily, shortest dimension first. A flat
+    # `budget ** (1/rank)` side would waste most of the budget whenever one
+    # dimension is shorter than that side -- a depth axis of 3 against a side of 34
+    # leaves the tile 11x smaller than it may be, which is 11x the tasks for nothing.
+    # Taking the short dimensions whole first hands their unused share to the long
+    # ones, and reduces to exactly `budget ** (1/rank)` when all dims are long.
     current = obj.chunksizes
+    remaining_cells = cells_per_tile
     chunks: Dict[str, int] = {}
-    for dim in present:
-        limit = side
+    ordered = sorted(present, key=lambda d: int(obj.sizes[d]))
+    for position, dim in enumerate(ordered):
+        side = max(1, int(round(remaining_cells ** (1.0 / (len(ordered) - position)))))
         if dim in floor_dims:
-            limit = max(limit, int(floor))
+            side = max(side, int(floor))
         existing = current.get(dim)
         existing_max = max(existing) if existing else int(obj.sizes[dim])
-        chunks[dim] = max(1, min(int(limit), int(existing_max), int(obj.sizes[dim])))
+        chunks[dim] = max(1, min(side, int(existing_max), int(obj.sizes[dim])))
+        remaining_cells = max(1, remaining_cells // chunks[dim])
 
     logger.debug(
         f"Spatial tiling: {cells_per_tile} cells/task over {len(present)} dims "

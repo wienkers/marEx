@@ -21,6 +21,48 @@ from ..logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def validate_rank(
+    data_bin: xr.DataArray,
+    unstructured_grid: bool,
+    timedim: str,
+    xdim: str,
+    ydim: Optional[str],
+) -> None:
+    """Reject a field carrying a dimension beyond time and the horizontal ones.
+
+    Tracking operates on a single horizontal level: connected-component labelling,
+    the dilation matrix and the merge ledger are all defined on one 2-D field per
+    timestep. A field with an extra dimension -- depth, level, member -- is a stack
+    of independent tracking problems, not one.
+
+    Called early in ``tracker.__init__`` as well as from :func:`validate_inputs`,
+    so the rank error arrives before coordinate unification rather than after a
+    confusing failure about coordinate ranges.
+    """
+    expected = (timedim, xdim) if unstructured_grid else (timedim, ydim, xdim)
+    unexpected = [str(d) for d in data_bin.dims if d not in expected]
+    if not unexpected:
+        return
+
+    raise TrackingError(
+        f"Tracking does not support the extra dimension(s) {unexpected}",
+        details=(
+            f"Tracking operates on a single horizontal level. Expected dimensions "
+            f"{[d for d in expected if d is not None]}, got {list(data_bin.dims)}."
+        ),
+        suggestions=[
+            f"Select one level first, e.g. ds.isel({unexpected[0]}=0)",
+            "Loop over the extra dimension and track each level separately",
+            "Check the dimension mapping passed to the tracker",
+        ],
+        context={
+            "unexpected_dimensions": unexpected,
+            "actual_dims": [str(d) for d in data_bin.dims],
+            "expected_dims": [d for d in expected if d is not None],
+        },
+    )
+
+
 def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord: str, ycoord: str) -> None:
     """Raise a descriptive error if any required coordinate is absent from ``data_bin``.
 
@@ -74,32 +116,9 @@ def validate_inputs(
     if regional_mode and unstructured_grid:
         raise NotImplementedError("regional_mode is not yet implemented for unstructured grids")
 
-    # Rank guard, before the transpose below. Tracking is a single-horizontal-level
-    # operation: connected-component labelling, the dilation matrix and the merge
-    # ledger are all defined on one 2-D field per timestep. A field carrying an extra
-    # dimension (depth, level, member) is a stack of independent tracking problems,
-    # not one -- and the transpose below would otherwise reject it with a confusing
-    # "expected 3D array" message that names the wrong problem.
-    expected = (timedim, xdim) if unstructured_grid else (timedim, ydim, xdim)
-    unexpected = [str(d) for d in data_bin.dims if d not in expected]
-    if unexpected:
-        raise TrackingError(
-            f"Tracking does not support the extra dimension(s) {unexpected}",
-            details=(
-                f"Tracking operates on a single horizontal level. Expected dimensions "
-                f"{[d for d in expected if d is not None]}, got {list(data_bin.dims)}."
-            ),
-            suggestions=[
-                f"Select one level first, e.g. ds.isel({unexpected[0]}=0)",
-                "Loop over the extra dimension and track each level separately",
-                "Check the dimension mapping passed to the tracker",
-            ],
-            context={
-                "unexpected_dimensions": unexpected,
-                "actual_dims": [str(d) for d in data_bin.dims],
-                "expected_dims": [d for d in expected if d is not None],
-            },
-        )
+    # Rank guard, before the transpose below, which would otherwise reject an extra
+    # dimension with a confusing "expected 3D array" naming the wrong problem.
+    validate_rank(data_bin, unstructured_grid, timedim, xdim, ydim)
 
     # For unstructured grids, adjust dimensions
     if unstructured_grid:

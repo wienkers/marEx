@@ -515,6 +515,11 @@ class tracker:
             self.xcoord = coordinates.get("x", self.xdim)
             self.ycoord = coordinates.get("y", self.ydim)
 
+        # Reject an untrackable rank before anything reads the coordinates. A
+        # (time, depth, lat, lon) field would otherwise fail inside coordinate
+        # unification, which reports a coordinate range and names the wrong problem.
+        _validation.validate_rank(data_bin, unstructured_grid, self.timedim, self.xdim, self.ydim)
+
         # Validate coordinate presence before touching them, so a missing coordinate raises
         # the descriptive error rather than a bare KeyError from the indexing below (§4.4).
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)

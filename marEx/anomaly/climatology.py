@@ -14,12 +14,17 @@ import pandas as pd
 import xarray as xr
 from dask import persist
 
+from ..core.dimensions import spatial_dims, tile_spatial_chunks
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
 # Get module logger
 logger = get_logger(__name__)
+
+# Length of the day-of-year cycle the climatology is resolved on. Matches the
+# expected_groups below; Phase C replaces it with an inferred SeasonalCycle.
+_CYCLE_LENGTH = 366
 
 
 def rolling_climatology(
@@ -156,6 +161,36 @@ def rolling_climatology(
     time_indices = np.array(contributing_time_indices, dtype=np.int32)
     target_year_groups = np.array(contributing_target_years, dtype=np.int32)
     dayofyear_groups = np.array(contributing_dayofyears, dtype=np.int32)
+
+    # Bound the long-form expansion before building it.
+    #
+    # The `isel` below materialises roughly `window_years` times the input along time,
+    # and the flox reduction after it writes an `(n_years, cycle)` block per spatial
+    # cell, which `.chunk({"dayofyear": -1})` then forces whole. Neither side had a
+    # budget: on a field left spatially whole one task is the entire array (174 GB on
+    # the ICON mesh, where it thrashed rather than failing), and an extra dimension
+    # such as depth multiplies that directly.
+    #
+    # Tiling the spatial dims -- every one of them, so depth is tiled exactly like
+    # latitude -- bounds both sides. It is a pure rechunk of SPATIAL dims only: the
+    # reduction is independent per cell and each cell's reduced axis stays whole inside
+    # its tile, so flox's ordering along that axis is unchanged and the result is
+    # bit-identical (verified against both goldens and pinned by
+    # tests/test_climatology_tiling.py).
+    #
+    # The time chunking is deliberately untouched. Changing it WOULD move values: the
+    # smoothing in `smoothed_rolling_climatology` runs through bottleneck's move_mean,
+    # whose running sum restarts at every dask block boundary. `original_chunk_dict` was
+    # captured before this point, so the restore at the end of this function returns the
+    # caller's own layout regardless.
+    spatial_tile = tile_spatial_chunks(
+        da,
+        spatial_dims(da, dimensions),
+        input_elements_per_cell=len(time_indices),
+        output_elements_per_cell=len(unique_years) * _CYCLE_LENGTH,
+    )
+    if spatial_tile:
+        da = da.chunk(spatial_tile)
 
     # Create long-form dataset by selecting the contributing time points
     long_form_data = da.isel({timedim: time_indices})
