@@ -17,11 +17,12 @@ from typing import Dict, List, Literal, Optional, Union
 import xarray as xr
 
 from ..core.compute_mode import Materialiser, create_staging_dir
+from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
-from .base import identify_extremes
+from .base import identify_extremes, resolve_window_spatial
 
 # Get module logger
 logger = get_logger(__name__)
@@ -53,19 +54,17 @@ def _effective_window_spatial(
     window_spatial: Optional[int],
     dimensions: Dict[str, str],
     ds_or_da,
+    method_percentile: str = "approximate",
 ) -> Optional[int]:
     """
     Resolve the spatial window actually used.
 
     ``identify_extremes`` silently defaults a gridded seasonal run to a 5x5 window
     when the caller leaves it ``None``, so the recorded attributes and steps must
-    reflect that rather than the raw ``None``. Mirrors the default in
-    :mod:`marEx.extremes.base`.
+    reflect that rather than the raw ``None``. Delegates to
+    :func:`marEx.extremes.base.resolve_window_spatial`, which owns that rule.
     """
-    if method == "seasonal_percentile" and window_spatial is None:
-        if "y" in dimensions and dimensions["y"] in ds_or_da.dims:
-            return 5
-    return window_spatial
+    return resolve_window_spatial(ds_or_da, dimensions, method, method_percentile, window_spatial)
 
 
 def _extremes_core(
@@ -249,6 +248,11 @@ def identify(
     logger.info(f"Identifying extremes - method: {method}, percentile: {threshold_percentile}%")
 
     dimensions, coordinates = _infer_dims_coords(anomalies, dimensions, coordinates)
+
+    # Resolve the dimension contract (see marEx.anomaly.compute for the rationale).
+    dims = resolve_dims(anomalies, dimensions, coordinates)
+    if dims.extra:
+        logger.info(f"Extra (non-horizontal) dimensions detected and carried through: {list(dims.extra)}")
 
     staging_dir = create_staging_dir(scratch_dir) if compute_mode == "streaming" and scratch_dir else None
     materialiser = Materialiser(compute_mode, staging_dir)

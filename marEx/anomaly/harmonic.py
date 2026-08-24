@@ -12,6 +12,7 @@ import flox.xarray
 import numpy as np
 import xarray as xr
 
+from ..core.dimensions import spatial_dims
 from ..core.time_axis import add_decimal_year
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -140,7 +141,7 @@ def _compute_anomaly_detrended(
             dimensions["time"]: da[coordinates["time"]].values,
             "coeff": np.arange(1, n_coeffs + 1),
         },
-    ).chunk({dimensions["time"]: da.chunks[0]})
+    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
 
     pmodel_da = xr.DataArray(
         pmodel.T,
@@ -149,7 +150,7 @@ def _compute_anomaly_detrended(
             "coeff": np.arange(1, n_coeffs + 1),
             dimensions["time"]: da[coordinates["time"]].values,
         },
-    ).chunk({dimensions["time"]: da.chunks[0]})
+    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
 
     # Prepare dimensions for model coefficients based on data structure
     dims = ["coeff"]
@@ -168,12 +169,12 @@ def _compute_anomaly_detrended(
     # Fit model to data - use the actual dimensions of the result
     dot_result = pmodel_da.dot(da)
     # For dot product result, dimensions match input data's spatial dimensions
-    spatial_dims = [dim for dim in da.dims if dim != dimensions["time"]]
-    result_dims = ["coeff"] + spatial_dims
+    fit_dims = [dim for dim in da.dims if dim != dimensions["time"]]
+    result_dims = ["coeff"] + fit_dims
 
     # Build coordinates for the result
     result_coords = {"coeff": np.arange(1, n_coeffs + 1)}
-    for dim in spatial_dims:
+    for dim in fit_dims:
         if dim in da.coords:
             result_coords[dim] = da.coords[dim]
 
@@ -193,10 +194,11 @@ def _compute_anomaly_detrended(
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
-    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
-    if spatial_dims:
+    # Every spatial dim is made whole, extra dims (depth, level) included.
+    mask_dims = spatial_dims(da, dimensions)
+    if mask_dims:
         # Spatial data - create 2D/3D mask
-        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        chunk_dict_mask = {dim: -1 for dim in mask_dims}
         mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
         # Drop time-related coordinates to create spatial mask
         vars_to_drop = []

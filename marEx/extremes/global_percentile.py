@@ -12,6 +12,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import spatial_chunks, spatial_dims
 from ..logging_config import get_logger
 from .histogram import _compute_histogram_quantile_1d
 
@@ -54,7 +55,10 @@ def _identify_extremes_constant(
             n_cells = da[dimensions["x"]].size
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
-        chunk_dict = {dimensions[dim]: rechunk_size for dim in ["x", "y"] if dim in dimensions}
+        # Every spatial dim is tiled the same way, extra dims (depth, level) included:
+        # the exact quantile is a per-cell reduction over time, so how the spatial axes
+        # are split cannot change the result, only the task count.
+        chunk_dict = {dim: rechunk_size for dim in spatial_dims(da, dimensions)}
         chunk_dict[dimensions["time"]] = -1
         da_rechunk = da.chunk(chunk_dict)
 
@@ -79,8 +83,7 @@ def _identify_extremes_constant(
     # Rechunk only -- whether the threshold is materialised at all is the materialiser's
     # decision, not this function's. An unconditional persist here forced materialisation
     # on callers who only wanted to stream the result to zarr (review finding 3.15).
-    spatial_chunks = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
-    threshold = threshold.chunk(spatial_chunks)
+    threshold = threshold.chunk(spatial_chunks(threshold, dimensions))
 
     # Create boolean mask for values exceeding threshold
     # Anchor the threshold before the comparison builds on it -- see the matching

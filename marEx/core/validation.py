@@ -15,6 +15,7 @@ import xarray as xr
 
 from ..exceptions import create_data_validation_error
 from ..logging_config import get_logger
+from .dimensions import COORDINATE_KEYS
 
 # Get module logger
 logger = get_logger(__name__)
@@ -134,10 +135,16 @@ def _infer_dims_coords(
     if "time" not in dimensions:
         dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
 
-    # Handle coordinates parameter based on data structure
+    # Handle coordinates parameter based on data structure.
+    #
+    # Gridded iff BOTH x and y are named. Testing "x present, y absent" instead would be
+    # the same condition today but says the wrong thing: it reads as "malformed gridded
+    # config", when the layout it actually describes -- a single horizontal dimension --
+    # is the legitimate unstructured one, with or without extra dims such as depth.
+    is_gridded = "x" in dimensions and "y" in dimensions
     if coordinates is None:
-        if "x" in dimensions and "y" not in dimensions:
-            # Unstructured (2D) data (an x dimension but no y) - requires explicit
+        if "x" in dimensions and not is_gridded:
+            # Unstructured data (one horizontal dimension) - requires explicit
             # coordinate specification. Only reachable when 'x' is present, so the
             # message below can safely reference dimensions['x'].
             logger.error("Coordinates parameter required for unstructured data")
@@ -149,6 +156,8 @@ def _infer_dims_coords(
                     "Example: coordinates={'time': 'time', 'x': 'lon', 'y': 'lat'}",
                     f"Your x dimension '{dimensions['x']}' needs associated coordinate names",
                     "If data is gridded, ensure 'y' dimension is also specified",
+                    "Extra dimensions such as depth or level need no entry here - they are "
+                    "detected automatically and carried through as broadcast axes",
                 ],
                 data_info={
                     "data_structure": "unstructured (2D)",
@@ -157,10 +166,14 @@ def _infer_dims_coords(
                 },
             )
         else:
-            # Gridded (3D, has y) or 1D time series (no x and no y): copy dimensions
-            # to coordinates. This keeps the 1D-harmonic path reachable with defaults
-            # instead of raising a bare KeyError on dimensions['x'].
-            coordinates = dimensions.copy()
+            # Gridded (has both x and y) or 1D time series (no x and no y): copy the
+            # dimension names to coordinates. This keeps the 1D-harmonic path reachable
+            # with defaults instead of raising a bare KeyError on dimensions['x'].
+            #
+            # Only the coordinate-bearing keys are copied. An optional 'z' entry names a
+            # dimension, not a coordinate, and copying it would demand a coordinate the
+            # data need not carry.
+            coordinates = {key: value for key, value in dimensions.items() if key in COORDINATE_KEYS}
             logger.debug("Copying dimensions to coordinates (gridded or 1D time series)")
     else:
         # Coordinates provided but ensure time coordinate is included if missing

@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import horizontal_dims, spatial_dims
 from ..logging_config import get_logger
 
 # Get module logger
@@ -377,7 +378,10 @@ def _compute_histogram_quantile_2d(
     # uses ~256 cells/chunk instead of 16, avoiding a task-graph explosion (the
     # "seasonal scheduler OOM on unstructured" failure).
     n_bins = len(bin_centers_array)
-    spatial_dims_present = [dimensions[d] for d in ("y", "x") if d in dimensions]
+    # Every spatial dim is tiled, extra dims (depth, level) included. The side is the
+    # rank-th root of the cell budget, so a depth axis shrinks each side rather than
+    # multiplying the task: the per-task working set is constant in the field's rank.
+    spatial_dims_present = list(spatial_dims(da, dimensions))
 
     # Budget against BOTH sides, as _chunk_spatial_for_histogram does. The output side is
     # `366 x n_bins` elements per cell. The INPUT side is `ntime` per cell, because time is
@@ -394,11 +398,15 @@ def _compute_histogram_quantile_2d(
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
     # The spatial smoothing below rolls a window of `window_spatial` over each
     # spatial dim, which requires every chunk to be at least that wide; never tile below it.
-    if window_spatial is not None and window_spatial > 1:
-        tile_side = max(tile_side, int(window_spatial))
+    # ... but only along the HORIZONTAL dims. The spatial window never rolls over an
+    # extra dim such as depth, so widening a depth chunk to the window buys nothing.
+    horizontal_present = set(horizontal_dims(dimensions))
     chunk_dict = {dimensions["time"]: -1}
     for d in spatial_dims_present:
-        chunk_dict[d] = min(int(da.sizes[d]), tile_side)
+        side = tile_side
+        if window_spatial is not None and window_spatial > 1 and d in horizontal_present:
+            side = max(side, int(window_spatial))
+        chunk_dict[d] = min(int(da.sizes[d]), side)
 
     da_bin = (
         xr.DataArray(
@@ -472,9 +480,9 @@ def _compute_histogram_quantile_2d(
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time
-    hist_chunk_dict = {dimensions["x"]: chunk_dict.get(dimensions["x"], 16), "dayofyear": -1, "da_bin": -1}
-    if "y" in dimensions:
-        hist_chunk_dict[dimensions["y"]] = chunk_dict.get(dimensions["y"], 16)
+    hist_chunk_dict = {"dayofyear": -1, "da_bin": -1}
+    for d in spatial_dims_present:
+        hist_chunk_dict[d] = chunk_dict.get(d, 16)
 
     hist_raw = hist_raw.chunk(hist_chunk_dict)
 

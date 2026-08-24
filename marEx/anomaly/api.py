@@ -21,6 +21,7 @@ import xarray as xr
 from dask.base import is_dask_collection
 
 from ..core.compute_mode import Materialiser, create_staging_dir
+from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
 from ..core.validation import _infer_dims_coords, _validate_data_values
 from ..exceptions import ConfigurationError, create_data_validation_error
@@ -142,6 +143,14 @@ def _anomaly_core(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
+    # Resolve the dimension contract: which axes are horizontal, and which are extra
+    # (depth, level, member) and carried through as broadcast axes. Validates an
+    # explicit dimensions["z"] against what the data actually has, so a typo is
+    # reported here rather than ignored.
+    dims = resolve_dims(da, dimensions, coordinates)
+    if dims.extra:
+        logger.info(f"Extra (non-horizontal) dimensions detected and carried through: {list(dims.extra)}")
 
     # Check if input data is dask-backed
     if not is_dask_collection(da.data):

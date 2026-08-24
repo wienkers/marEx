@@ -10,12 +10,20 @@ keeps the dependency graph acyclic.
 
 from .attrs import make_netcdf_safe_attrs
 from .compute_mode import ComputeMode, Materialiser, clear_staging, create_staging_dir
+from .dimensions import DimSpec, extra_dims, horizontal_dims, resolve_dims, spatial_chunks, spatial_dims, tile_spatial_chunks
 from .time_axis import add_decimal_year
 from .validation import _infer_dims_coords, _validate_coordinates_exist, _validate_data_values, _validate_dimensions_exist
 
 __all__ = [
     "ComputeMode",
     "Materialiser",
+    "DimSpec",
+    "resolve_dims",
+    "horizontal_dims",
+    "extra_dims",
+    "spatial_dims",
+    "spatial_chunks",
+    "tile_spatial_chunks",
     "clear_staging",
     "create_staging_dir",
     "add_decimal_year",

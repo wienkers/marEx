@@ -12,6 +12,7 @@ from typing import Dict, Literal, Optional, Tuple
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import horizontal_dims
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import configure_logging, get_logger
@@ -20,6 +21,43 @@ from .seasonal_percentile import _identify_extremes_seasonal
 
 # Get module logger
 logger = get_logger(__name__)
+
+
+def supports_spatial_window(da: xr.DataArray, dimensions: Dict[str, str]) -> bool:
+    """Whether a spatial rolling window is meaningful for this field.
+
+    The window rolls over the HORIZONTAL dimensions only -- never over an extra
+    dimension such as depth, which must not be smoothed across. So it needs two
+    horizontal dims present, i.e. a structured grid.
+    """
+    return len([d for d in horizontal_dims(dimensions) if d in da.dims]) >= 2
+
+
+def resolve_window_spatial(
+    da: xr.DataArray,
+    dimensions: Dict[str, str],
+    method_extreme: str,
+    method_percentile: str,
+    window_spatial: Optional[int],
+) -> Optional[int]:
+    """Resolve the spatial window actually used, applying the gridded default.
+
+    Sole definition of that default. :mod:`marEx.extremes.api` calls it to record
+    the resolved value in the output attributes rather than restating the rule.
+
+    The default applies only to the approximate seasonal path: the exact
+    percentile path ignores ``window_spatial`` entirely, and validation rejects it
+    when a caller supplies it there, so defaulting it would only inflate
+    ``N_samples`` and hide the warning.
+    """
+    if (
+        method_extreme == "seasonal_percentile"
+        and method_percentile != "exact"
+        and window_spatial is None
+        and supports_spatial_window(da, dimensions)
+    ):
+        return 5  # Default to 5x5 spatial window for structured grids
+    return window_spatial
 
 
 def identify_extremes(
@@ -271,15 +309,15 @@ def identify_extremes(
 
     # Validate window_spatial parameter
     if window_spatial is not None:
-        # Check if window_spatial is specified for unstructured grid
-        has_y_dim = "y" in dimensions and dimensions["y"] in da.dims
-
-        if not has_y_dim:
+        # A spatial window needs two horizontal dims. Extra dims (depth, level) do
+        # not count: the window never rolls over them.
+        if not supports_spatial_window(da, dimensions):
             logger.error(f"window_spatial={window_spatial} specified for unstructured grid")
             raise ConfigurationError(
                 "window_spatial is not supported for unstructured grids",
                 details=(
                     "Spatial smoothing with window_spatial requires structured grids with both x and y dimensions. "
+                    "It applies to the horizontal dimensions only, never to extra dimensions such as depth. "
                     "Unstructured grids do not support spatial window operations due to computational and memory "
                     "limitations of the algorithms."
                 ),
@@ -359,18 +397,8 @@ def identify_extremes(
             },
         )
 
-    # Set default spatial window (only for the approximate seasonal_percentile method). The
-    # exact percentile path ignores window_spatial entirely, and the validation
-    # above rejects it when user-supplied with method_percentile='exact', so it must not
-    # be silently defaulted there (which only inflated N_samples and hid the warning).
-    if (
-        method_extreme == "seasonal_percentile"
-        and method_percentile != "exact"
-        and window_spatial is None
-        and "y" in dimensions
-        and dimensions["y"] in da.dims
-    ):
-        window_spatial = 5  # Default to 5x5 spatial window for structured grids
+    # Set default spatial window (only for the approximate seasonal_percentile method).
+    window_spatial = resolve_window_spatial(da, dimensions, method_extreme, method_percentile, window_spatial)
 
     if method_extreme == "seasonal_percentile" and window_spatial is not None and window_spatial % 2 == 0:
         logger.error(f"window_spatial={window_spatial} is not an odd number")

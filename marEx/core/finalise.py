@@ -17,6 +17,7 @@ import xarray as xr
 
 from ..logging_config import get_logger, log_dask_info, log_memory_usage, log_timing
 from .attrs import make_netcdf_safe_attrs
+from .dimensions import spatial_chunks
 
 # Get module logger
 logger = get_logger(__name__)
@@ -85,7 +86,10 @@ def finalise_dataset(
     # so a partial dask_chunks dict does not silently get 10-step chunks.
     time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
-    chunk_dict = {dimensions[dim]: -1 for dim in ["x", "y"] if dim in dimensions}
+    # Every spatial dimension is made whole, extra dims (depth, level) included: the
+    # tracker requires it, and a consumer of a 3D+time anomaly wants the same layout.
+    # CYCLE_DIMS are excluded here because they are handled just below.
+    chunk_dict = dict(spatial_chunks(ds, dimensions, -1, exclude=CYCLE_DIMS))
     chunk_dict[dimensions["time"]] = time_chunks
     # A cycle-index dimension is only present when a seasonal threshold was computed,
     # so testing for it is equivalent to testing the extreme method -- and it keeps

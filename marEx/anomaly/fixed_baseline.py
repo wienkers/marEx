@@ -14,6 +14,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import spatial_dims
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
@@ -125,13 +126,15 @@ def _compute_anomaly_fixed_baseline(
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
-    spatial_dims = [dim for dim in ["x", "y"] if dim in dimensions]
-    if spatial_dims:
+    mask_dims = spatial_dims(da, dimensions)
+    if mask_dims:
         # Spatial data - create 2D/3D mask.
         # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
         # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
         # under global_extreme). Drop both.
-        chunk_dict_mask = {dimensions[dim]: -1 for dim in spatial_dims}
+        # Extra (non-horizontal) spatial dims such as depth are made whole alongside
+        # the horizontal ones, so the mask keeps the field's full spatial shape.
+        chunk_dict_mask = {dim: -1 for dim in mask_dims}
         coords_to_drop = [coordinates["time"]]
         if "dayofyear" in da.coords:
             coords_to_drop.append("dayofyear")

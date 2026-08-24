@@ -20,6 +20,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import spatial_dims
 from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
 
@@ -157,15 +158,13 @@ def _identify_extremes_seasonal(
 
     # Extract spatial chunk sizes from input data for alignment
     # Use most common chunk size to handle irregular chunks robustly
+    # Every spatial dim of the input, extra dims (depth, level) included -- the
+    # thresholds carry them as broadcast axes and must be aligned on all of them.
     spatial_chunks = {}
-    for dim_key in ["x", "y"]:
-        if dim_key in dimensions:
-            dim_name = dimensions[dim_key]
-            if dim_name in da.dims:
-                dim_index = da.dims.index(dim_name)
-                chunks_tuple = da.chunks[dim_index]
-                # Get the most common chunk size (handles irregular chunks better)
-                spatial_chunks[dim_name] = max(set(chunks_tuple), key=chunks_tuple.count)
+    for dim_name in spatial_dims(da, dimensions):
+        chunks_tuple = da.chunksizes[dim_name]
+        # Get the most common chunk size (handles irregular chunks better)
+        spatial_chunks[dim_name] = max(set(chunks_tuple), key=chunks_tuple.count)
 
     # Drop time coordinate/dimension to avoid conflicts when comparing with data grouped by dayofyear
     coords_to_drop = []
@@ -201,8 +200,8 @@ def _identify_extremes_seasonal(
 
     # Rechunk to fix irregular time chunks created by groupby operation
     # Zarr requires uniform chunks, so we rechunk to match input data's time chunks
-    time_dim_index = da.dims.index(dimensions["time"])
-    time_chunk_size = max(set(da.chunks[time_dim_index]), key=da.chunks[time_dim_index].count)
+    time_chunks = da.chunksizes[dimensions["time"]]
+    time_chunk_size = max(set(time_chunks), key=time_chunks.count)
     rechunk_dict = {dimensions["time"]: time_chunk_size}
     rechunk_dict.update(spatial_chunks)
     logger.debug(f"Rechunking extremes to fix irregular chunks from groupby: {rechunk_dict}")

@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 import xarray as xr
 from dask.base import is_dask_collection
 
-from ..exceptions import ConfigurationError, create_data_validation_error
+from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -73,6 +73,33 @@ def validate_inputs(
     """
     if regional_mode and unstructured_grid:
         raise NotImplementedError("regional_mode is not yet implemented for unstructured grids")
+
+    # Rank guard, before the transpose below. Tracking is a single-horizontal-level
+    # operation: connected-component labelling, the dilation matrix and the merge
+    # ledger are all defined on one 2-D field per timestep. A field carrying an extra
+    # dimension (depth, level, member) is a stack of independent tracking problems,
+    # not one -- and the transpose below would otherwise reject it with a confusing
+    # "expected 3D array" message that names the wrong problem.
+    expected = (timedim, xdim) if unstructured_grid else (timedim, ydim, xdim)
+    unexpected = [str(d) for d in data_bin.dims if d not in expected]
+    if unexpected:
+        raise TrackingError(
+            f"Tracking does not support the extra dimension(s) {unexpected}",
+            details=(
+                f"Tracking operates on a single horizontal level. Expected dimensions "
+                f"{[d for d in expected if d is not None]}, got {list(data_bin.dims)}."
+            ),
+            suggestions=[
+                f"Select one level first, e.g. ds.isel({unexpected[0]}=0)",
+                "Loop over the extra dimension and track each level separately",
+                "Check the dimension mapping passed to the tracker",
+            ],
+            context={
+                "unexpected_dimensions": unexpected,
+                "actual_dims": [str(d) for d in data_bin.dims],
+                "expected_dims": [d for d in expected if d is not None],
+            },
+        )
 
     # For unstructured grids, adjust dimensions
     if unstructured_grid:
