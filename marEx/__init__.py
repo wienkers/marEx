@@ -36,7 +36,7 @@ from . import anomaly, extremes
 
 # Import dependency management
 from ._dependencies import get_installation_profile, has_dependency, print_dependency_status
-from .core import ComputeMode, clear_staging
+from .core import ComputeMode, SeasonalCycle, clear_staging, infer_cycle
 
 # Import exception hierarchy
 from .exceptions import (  # Main exception hierarchy; Convenience constructors
@@ -87,6 +87,8 @@ __all__ = [
     # Materialisation policy (compute_mode)
     "ComputeMode",
     "clear_staging",
+    "SeasonalCycle",
+    "infer_cycle",
     # Tracking
     "tracker",
     "regional_tracker",

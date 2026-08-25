@@ -141,7 +141,7 @@ def test_2d_quantile_tiling_value_neutral_with_smoothing():
             return H._compute_histogram_quantile_2d(
                 da,
                 0.9,
-                window_days=3,
+                window_steps=3,
                 window_spatial=3,
                 dimensions=dims,
                 precision=PRECISION,
@@ -340,3 +340,26 @@ def test_2d_tile_budget_is_constant_in_series_length():
         c = cells(ntime)
         assert ntime * c <= H._HISTOGRAM_TASK_ELEMENTS, f"read slab over budget at ntime={ntime}"
         assert out_per_cell * c <= H._HISTOGRAM_TASK_ELEMENTS, f"histogram over budget at ntime={ntime}"
+
+
+def test_single_step_window_does_not_duplicate_the_cycle():
+    """A one-step window must be a no-op smoothing, not a wrap-pad of the whole array.
+
+    ``pad_size = window_steps // 2`` is 0 there, and ``hist[-0:]`` is ``hist[0:]`` -- the
+    WHOLE array, not an empty one -- so the naive concatenate returns ``2 x n_slots``
+    rows and the downstream fancy-indexing raises. Unreachable on daily data (the
+    smallest legal ``window_days`` is 1 day and any larger odd window pads by at least
+    1), but it is the normal case on a monthly axis, where any ``window_days`` under
+    ~45 clamps to a single month.
+    """
+    rng = np.random.default_rng(7)
+    hist = rng.integers(0, 50, size=(12, 40)).astype(np.int32)
+    centers = np.linspace(-1.0, 5.0, 40)
+
+    out = H._rolling_histogram_quantile(hist, 1, 0.9, centers)
+    assert out.shape == (12,), "a one-step window changed the number of cycle slots"
+
+    # With no smoothing, each slot's threshold depends on that slot's counts alone.
+    for slot in range(12):
+        one_row = H._rolling_histogram_quantile(hist[slot : slot + 1], 1, 0.9, centers)
+        np.testing.assert_array_equal(out[slot : slot + 1], one_row)

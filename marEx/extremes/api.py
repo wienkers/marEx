@@ -19,6 +19,7 @@ import xarray as xr
 from ..core.compute_mode import Materialiser, create_staging_dir
 from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
+from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
@@ -80,6 +81,7 @@ def _extremes_core(
     coordinates: Dict[str, str],
     materialiser: Materialiser,
     threshold_label: str = "thresholds",
+    cycle: Optional[SeasonalCycle] = None,
 ):
     """
     Identify extremes, up to but not including output finalisation.
@@ -121,6 +123,7 @@ def _extremes_core(
             max_anomaly,
             materialiser=materialiser,
             threshold_label=threshold_label,
+            cycle=cycle,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -163,6 +166,7 @@ def identify(
     scratch_dir: Optional[str] = None,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -207,6 +211,11 @@ def identify(
         Staging directory, required by ``compute_mode='streaming'``.
     dimensions, coordinates
         Name mappings. Inferred when omitted.
+    cycle
+        Within-year axis the thresholds are resolved on, as a
+        :class:`~marEx.SeasonalCycle`. Inferred from the median spacing of the
+        time coordinate when omitted: ``dayofyear`` for daily data, ``month``
+        for monthly, ``hourofyear`` for sub-daily.
     verbose, quiet
         Logging verbosity overrides.
 
@@ -254,6 +263,12 @@ def identify(
     if dims.extra:
         logger.info(f"Extra (non-horizontal) dimensions detected and carried through: {list(dims.extra)}")
 
+    # NOT resolved here. `identify_extremes` resolves it inside the seasonal branch and
+    # `_identify_extremes_seasonal` resolves it again for its own use; both are cheap and
+    # deterministic from the same coordinate. Resolving eagerly would run `infer_cycle`
+    # -- which raises on a mixed-cadence axis -- on the `global_percentile` path, which
+    # needs no within-year cycle and must keep working there.
+
     staging_dir = create_staging_dir(scratch_dir) if compute_mode == "streaming" and scratch_dir else None
     materialiser = Materialiser(compute_mode, staging_dir)
 
@@ -270,6 +285,7 @@ def identify(
             dimensions,
             coordinates,
             materialiser,
+            cycle=cycle,
         )
         ds = ds.copy()
         ds["extreme_events"] = extremes

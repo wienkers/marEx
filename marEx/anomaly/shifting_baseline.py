@@ -12,6 +12,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.dimensions import spatial_dims
+from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords
 from ..logging_config import get_logger
 from .climatology import smoothed_rolling_climatology
@@ -26,6 +27,7 @@ def _compute_anomaly_shifting_baseline(
     smooth_days: int = 21,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -39,7 +41,7 @@ def _compute_anomaly_shifting_baseline(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(da, window_years, smooth_days, dimensions, coordinates)
+    climatology_smoothed = smoothed_rolling_climatology(da, window_years, smooth_days, dimensions, coordinates, cycle)
 
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed

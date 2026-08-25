@@ -20,6 +20,7 @@ from .anomaly.api import _anomaly_core
 from .core.compute_mode import Materialiser, create_staging_dir
 from .core.dimensions import resolve_dims
 from .core.finalise import finalise_dataset, split_large_chunks
+from .core.time_axis import SeasonalCycle
 from .extremes.api import _effective_window_spatial, _extreme_steps, _extremes_core, _log_extreme_summary
 from .logging_config import configure_logging, get_logger
 
@@ -51,6 +52,7 @@ def preprocess_data(
     validate: bool = True,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
     neighbours: Optional[xr.DataArray] = None,
     cell_areas: Optional[xr.DataArray] = None,
     verbose: Optional[bool] = None,
@@ -100,6 +102,12 @@ def preprocess_data(
         Check that all unmasked values are finite before computing.
     dimensions, coordinates
         Name mappings. Inferred when omitted.
+    cycle
+        Within-year axis both stages are resolved on, as a
+        :class:`~marEx.SeasonalCycle`. Inferred from the median spacing of the
+        time coordinate when omitted: ``dayofyear`` for daily data, ``month``
+        for monthly, ``hourofyear`` for sub-daily. Pass one explicitly to
+        override the inference on an irregular time axis.
     neighbours, cell_areas
         Optional unstructured-mesh connectivity and cell areas, attached to the
         output for the tracker. They do not constrain the input chunking.
@@ -142,7 +150,11 @@ def preprocess_data(
     with split_large_chunks():
         # Stage 1: anomalies. This anchors dat_anomaly internally, which is what makes
         # the larger-than-memory modes work.
-        ds, dimensions, coordinates, detrend_orders = _anomaly_core(
+        # The anomaly stage passes the caller's cycle override straight back, so the
+        # extremes stage below sees the same one. Neither stage resolves it eagerly:
+        # each method resolves at the point it actually groups, so a run that needs no
+        # within-year cycle never invokes `infer_cycle`.
+        ds, dimensions, coordinates, detrend_orders, cycle = _anomaly_core(
             da,
             method_anomaly,
             window_years,
@@ -155,6 +167,7 @@ def preprocess_data(
             dimensions,
             coordinates,
             materialiser,
+            cycle,
         )
 
         # Stage 2: extremes on the raw anomaly.
@@ -170,6 +183,7 @@ def preprocess_data(
             dimensions,
             coordinates,
             materialiser,
+            cycle=cycle,
         )
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
@@ -197,6 +211,7 @@ def preprocess_data(
                 coordinates,
                 materialiser,
                 threshold_label="thresholds_stn",
+                cycle=cycle,
             )
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn

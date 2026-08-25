@@ -21,6 +21,7 @@ import xarray as xr
 
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import spatial_dims
+from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
 
@@ -40,6 +41,7 @@ def _identify_extremes_seasonal(
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
+    cycle: Optional[SeasonalCycle] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -97,9 +99,18 @@ def _identify_extremes_seasonal(
     # No persist and no rechunk here: the rechunk restated the array's own chunks (a no-op)
     # and the persist duplicated the pipeline-level anomaly persist, pinning a second
     # full-size copy -- ~38 GB at 0.25 deg / 25 yr (review finding 3.14).
-    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear.compute())
+    cycle = resolve_cycle(da, coordinates["time"], cycle)
+    cycle_dim = cycle.index_name
+    # `window_days` is a physical duration; convert it to whole timesteps. It must be
+    # odd so the window is symmetric about its centre step -- both the exact path's
+    # `half_w` offsets and the histogram path's wrap-padded sliding window depend on
+    # that. On daily data the conversion is the identity (11 days -> 11 steps), which
+    # is what keeps every existing seasonal threshold bit-identical.
+    window_steps = cycle.window_steps(window_days)
 
-    # Group by day-of-year and compute percentile
+    da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]]).compute()})
+
+    # Group by cycle index and compute percentile
     if method_percentile == "exact":
         # Use apply_ufunc to compute DOY percentiles per spatial chunk in pure numpy.
         # Tile the spatial dims alongside time:-1. Rechunking only time leaves a
@@ -107,25 +118,27 @@ def _identify_extremes_seasonal(
         # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
         # for exactly this reason. Per-cell percentiles are independent of the tiling, so
         # this changes task granularity only (review finding 3.10).
-        # Each cell yields 366 day-of-year percentiles, so budget the tile against that as
-        # well as against the time slab: a series shorter than 366 days would otherwise get
-        # a tile whose output exceeds the budget the tile was sized by.
-        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=366)
-        dayofyear_vals = da_ufunc[coordinates["time"]].dt.dayofyear.values
-        half_w = window_days // 2
+        # Each cell yields one percentile per cycle slot (366 on daily data), so budget
+        # the tile against that as well as against the time slab: a series shorter than
+        # the cycle would otherwise get a tile whose output exceeds its own budget.
+        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=cycle.length)
+        cycle_vals = cycle.index_of(da_ufunc[coordinates["time"]]).values
+        half_w = window_steps // 2
 
-        # Pre-compute boolean masks (which time indices contribute to each DOY)
+        # Pre-compute boolean masks (which time indices contribute to each cycle slot)
         doy_masks = []
-        for doy in range(1, 367):
-            mask = np.zeros(len(dayofyear_vals), dtype=bool)
+        for slot in range(1, cycle.length + 1):
+            mask = np.zeros(len(cycle_vals), dtype=bool)
             for offset in range(-half_w, half_w + 1):
-                target = ((doy - 1 + offset) % 366) + 1
-                mask |= dayofyear_vals == target
+                target = ((slot - 1 + offset) % cycle.length) + 1
+                mask |= cycle_vals == target
             doy_masks.append(mask)
 
+        n_slots = cycle.length
+
         def _doy_percentiles(data, doy_masks, percentile):
-            """Compute per-DOY percentiles. data: (*spatial, time) -> (*spatial, 366)."""
-            result = np.full(data.shape[:-1] + (366,), np.nan, dtype=np.float32)
+            """Per-slot percentiles. data: (*spatial, time) -> (*spatial, cycle.length)."""
+            result = np.full(data.shape[:-1] + (n_slots,), np.nan, dtype=np.float32)
             for i, mask in enumerate(doy_masks):
                 if mask.any():
                     result[..., i] = np.nanpercentile(data[..., mask], percentile, axis=-1)
@@ -135,25 +148,26 @@ def _identify_extremes_seasonal(
             _doy_percentiles,
             da_ufunc,
             input_core_dims=[[dimensions["time"]]],
-            output_core_dims=[["dayofyear"]],
+            output_core_dims=[[cycle_dim]],
             dask="parallelized",
             kwargs={"doy_masks": doy_masks, "percentile": threshold_percentile},
             output_dtypes=[np.float32],
-            dask_gufunc_kwargs={"output_sizes": {"dayofyear": 366}},
+            dask_gufunc_kwargs={"output_sizes": {cycle_dim: cycle.length}},
         )
 
-        # Assign dayofyear coordinate values and move dayofyear to first dimension
-        thresholds = thresholds.assign_coords(dayofyear=np.arange(1, 367)).transpose("dayofyear", ...)
+        # Assign cycle coordinate values and move the cycle dim to first position
+        thresholds = thresholds.assign_coords({cycle_dim: np.arange(1, cycle.length + 1)}).transpose(cycle_dim, ...)
     else:  # Optimised histogram approximation method
         thresholds = _compute_histogram_quantile_2d(
             da,
             threshold_percentile / 100.0,
-            window_days=window_days,
+            window_steps=window_steps,
             window_spatial=window_spatial,
             dimensions=dimensions,
             precision=precision,
             max_anomaly=max_anomaly,
             materialiser=materialiser,
+            cycle=cycle,
         )
 
     # Extract spatial chunk sizes from input data for alignment
@@ -166,7 +180,7 @@ def _identify_extremes_seasonal(
         # Get the most common chunk size (handles irregular chunks better)
         spatial_chunks[dim_name] = max(set(chunks_tuple), key=chunks_tuple.count)
 
-    # Drop time coordinate/dimension to avoid conflicts when comparing with data grouped by dayofyear
+    # Drop time coordinate/dimension to avoid conflicts when comparing with data grouped by cycle slot
     coords_to_drop = []
     if coordinates["time"] in thresholds.coords:
         coords_to_drop.append(coordinates["time"])
@@ -183,8 +197,8 @@ def _identify_extremes_seasonal(
     thresholds = thresholds.chunk(spatial_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
-    # Assign dayofyear coordinate and use UniqueGrouper for chunked arrays
-    da = da.assign_coords(dayofyear=da[coordinates["time"]].dt.dayofyear)
+    # Assign the cycle-index coordinate and use UniqueGrouper for chunked arrays
+    da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]])})
     # Anchor the thresholds BEFORE the comparison is built on top of them. `extremes` is
     # a lazy expression over `thresholds`; anchoring after this line would leave it
     # pointing at the original graph and the whole threshold reduction would run a second
@@ -192,11 +206,11 @@ def _identify_extremes_seasonal(
     # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
     # streaming mode stages it to disk rather than pinning it in RAM.
     thresholds = materialiser.stage(thresholds, threshold_label)
-    extremes = da.groupby(dayofyear=xr.groupers.UniqueGrouper(labels=np.arange(1, 367))) >= thresholds
+    extremes = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))}) >= thresholds
 
-    # Drop unnecessary dayofyear coordinate
-    if "dayofyear" in extremes.coords:
-        extremes = extremes.drop_vars("dayofyear")
+    # Drop the now-unnecessary cycle-index coordinate
+    if cycle_dim in extremes.coords:
+        extremes = extremes.drop_vars(cycle_dim)
 
     # Rechunk to fix irregular time chunks created by groupby operation
     # Zarr requires uniform chunks, so we rechunk to match input data's time chunks

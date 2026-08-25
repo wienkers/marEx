@@ -13,6 +13,7 @@ import xarray as xr
 from dask.base import is_dask_collection
 
 from ..core.compute_mode import Materialiser
+from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger
@@ -40,6 +41,7 @@ def compute_normalised_anomaly(
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.Dataset:
     """
     Generate normalised anomalies using specified methodology.
@@ -237,20 +239,20 @@ def compute_normalised_anomaly(
         logger.debug(
             f"Detrended baseline parameters: standardise={standardise}, orders={detrend_orders}, zero_mean={force_zero_mean}"
         )
-        return _compute_anomaly_detrended(da, standardise, detrend_orders, dimensions, coordinates, force_zero_mean)
+        return _compute_anomaly_detrended(da, standardise, detrend_orders, dimensions, coordinates, force_zero_mean, cycle=cycle)
     elif method_anomaly == "shifting_baseline":
         logger.debug(f"Shifting baseline parameters: window_years={window_years}, smooth_days={smooth_days}")
-        return _compute_anomaly_shifting_baseline(da, window_years, smooth_days, dimensions, coordinates)
+        return _compute_anomaly_shifting_baseline(da, window_years, smooth_days, dimensions, coordinates, cycle)
     elif method_anomaly == "fixed_baseline":
         logger.debug(f"Fixed baseline parameters: reference_period={reference_period}")
-        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser)
+        return _compute_anomaly_fixed_baseline(da, dimensions, coordinates, reference_period, materialiser, cycle)
     elif method_anomaly == "detrend_fixed_baseline":
         logger.debug(
             f"Fixed detrended baseline parameters: orders={detrend_orders}, "
             f"zero_mean={force_zero_mean}, reference_period={reference_period}"
         )
         return _compute_anomaly_detrend_fixed_baseline(
-            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser
+            da, detrend_orders, dimensions, coordinates, force_zero_mean, reference_period, materialiser, cycle
         )
     else:
         logger.error(f"Unknown anomaly method: {method_anomaly}")

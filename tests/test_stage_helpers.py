@@ -536,7 +536,7 @@ class TestComputeHistogramQuantile2D:
 
         # Test 95th percentile calculation
         result = _compute_histogram_quantile_2d(
-            da, q=0.95, window_days=21, window_spatial=5, dimensions={"time": "time", "x": "lon", "y": "lat"}
+            da, q=0.95, window_steps=21, window_spatial=5, dimensions={"time": "time", "x": "lon", "y": "lat"}
         ).compute()
 
         # Check output shape - should have dayofyear and spatial dimensions
@@ -593,7 +593,7 @@ class TestComputeHistogramQuantile2D:
         hist_result = _compute_histogram_quantile_2d(
             da,
             q=q,
-            window_days=window_days,
+            window_steps=window_days,
             precision=precision,
             max_anomaly=max_anomaly,
             dimensions={"time": "time", "x": "lon", "y": "lat"},
@@ -654,7 +654,7 @@ class TestComputeHistogramQuantile2D:
         custom_bins = np.linspace(-3, 5, 50)
 
         result = _compute_histogram_quantile_2d(
-            da, q=0.5, window_days=5, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
+            da, q=0.5, window_steps=5, bin_edges=custom_bins, dimensions={"time": "time", "x": "lon", "y": "lat"}
         )
 
         # For uniform distribution, median should be reasonable
@@ -697,7 +697,7 @@ class TestComputeHistogramQuantile2D:
             result = _compute_histogram_quantile_2d(
                 da,
                 q=quantile,
-                window_days=window_days,
+                window_steps=window_days,
                 window_spatial=1,
                 dimensions={"time": "time", "x": "lon", "y": "lat"},
             ).compute()
@@ -743,7 +743,7 @@ class TestComputeHistogramQuantile2D:
         result = _compute_histogram_quantile_2d(
             da,
             q=0.95,
-            window_days=5,
+            window_steps=5,
             dimensions={"time": "time", "x": "lon", "y": "lat"},
             bin_edges=np.linspace(-0.2, 1.2, 20),  # Custom bins for constant data
         )

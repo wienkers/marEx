@@ -8,8 +8,10 @@ Percentile thresholding and binary extreme-event identification. Takes anomalies
 -- from :mod:`marEx.anomaly` or from anywhere else -- and returns a boolean event
 field plus the thresholds that defined it.
 
-For method-selection guidance and worked examples, see
-:doc:`../guide/detection`.
+``seasonal_percentile`` resolves its thresholds on a within-year cycle inferred from
+the time coordinate (``dayofyear``, ``month`` or ``hourofyear``), overridable via
+``cycle=``; ``global_percentile`` uses no cycle at all. For method-selection guidance,
+worked examples, and the time-resolution table, see :doc:`../guide/detection`.
 
 .. autosummary::
    :nosignatures:

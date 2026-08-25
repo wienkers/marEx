@@ -11,7 +11,10 @@ for anyone who wants a climatology and anomalies and nothing further.
 Works on any field with a time dimension -- ocean, atmosphere, land surface, or
 biogeochemistry -- on regular grids and unstructured meshes alike.
 
-For method-selection guidance and worked examples, see :doc:`../guide/detection`.
+All entry points accept a ``cycle=`` override for the within-year axis the climatology
+is resolved on; it is otherwise inferred from the time coordinate's cadence. See
+:doc:`../guide/detection` for method-selection guidance, worked examples, and the
+time-resolution table.
 
 .. autosummary::
    :nosignatures:

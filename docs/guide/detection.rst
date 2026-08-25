@@ -447,15 +447,19 @@ Anomaly Method Parameters
   Number of years for rolling climatology baseline
 
 **smooth_days** : int, default=21
-  Number of days for smoothing the rolling climatology baseline
+  Number of **days** for smoothing the rolling climatology baseline. Converted to
+  timesteps for non-daily data; on a monthly axis it clamps to a single step and the
+  smoothing becomes a no-op, which is logged.
 
 Extreme Detection Parameters
 ----------------------------
 
-**Hobday Extreme Parameters:**
+**Seasonal Percentile Parameters:**
 
 **window_days** : int, default=11
-  Window size for day-of-year threshold calculation
+  Window size, **in days**, for the seasonal threshold calculation. Converted to
+  timesteps for non-daily data — see `Time Resolution`_ above. Must be odd on a daily
+  axis (the window is symmetric about its centre step).
 
 **window_spatial** : int, optional
   Spatial window size for clustering (None = no spatial clustering)
@@ -468,6 +472,110 @@ Extreme Detection Parameters
 
 **max_anomaly** : float, default=5.0
   Maximum anomaly value for approximate percentile calculation
+
+Time Resolution
+---------------
+
+marEx infers the **within-year cycle** its climatologies and seasonal thresholds are
+resolved on from the median spacing of your time coordinate. Daily data is the common
+case and behaves exactly as it always has; monthly and sub-daily series are supported
+on the same code paths.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 22 18 38
+
+   * - Median spacing
+     - Cycle dimension
+     - Slots
+     - Notes
+   * - ≥ 28 days
+     - ``month``
+     - 12
+     - Monthly means, model output on a monthly axis
+   * - ≥ 1 day
+     - ``dayofyear``
+     - 366
+     - The default; unchanged from earlier releases
+   * - < 1 day
+     - ``hourofyear``
+     - ``366 × steps_per_day``
+     - Hourly, 6-hourly, sub-daily reanalysis
+
+The cycle only matters for ``method_extreme='seasonal_percentile'`` and for the
+climatology-based anomaly methods. ``global_percentile`` has no within-year cycle at
+all and works on any time axis.
+
+**Durations are physical, not step counts.** ``window_days`` and ``smooth_days`` are
+always expressed in *days*, whatever the cadence, and are converted to timesteps
+internally:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 50
+
+   * - Cadence
+     - ``window_days=11`` becomes
+     - Effect
+   * - Daily
+     - 11 steps
+     - Unchanged
+   * - 6-hourly
+     - 45 steps
+     - The same 11 days of data
+   * - Monthly
+     - 1 step (clamped)
+     - **Warns**: this month only
+
+That last row is worth reading twice. An 11-day window cannot be represented on a
+monthly axis, so marEx uses the closest thing it can — a single month — and emits a
+warning naming both the requested and the realised duration. A user who asked for an
+11-day window and silently received "this month only" has been given a different
+method than the one they requested.
+
+.. note::
+
+   ``method_anomaly='detrend_harmonic'`` **rejects sub-daily input.** Its basis
+   removes annual and semi-annual cycles only, so on an hourly axis the entire diurnal
+   cycle would survive into the anomaly — a silently wrong result rather than a slow
+   one. Use ``shifting_baseline``, ``fixed_baseline``, or ``detrend_fixed_baseline``
+   instead: their climatologies are resolved on the sub-daily cycle and remove the
+   diurnal cycle as a matter of course.
+
+**Overriding the inference.** An irregular time axis — one whose spacings have no
+single characteristic cadence, such as a daily series concatenated onto a monthly one
+— raises a :class:`~marEx.ConfigurationError` rather than guessing. Pass an explicit
+cycle to override:
+
+.. code-block:: python
+
+   import marEx
+
+   ds = marEx.preprocess_data(
+       data,
+       method_anomaly='fixed_baseline',
+       method_extreme='seasonal_percentile',
+       cycle=marEx.SeasonalCycle('month', 12, 30.44),
+   )
+
+``cycle=`` is accepted by :func:`marEx.preprocess_data`,
+:func:`marEx.anomaly.compute` and :func:`marEx.extremes.identify`; the chainer passes
+it to both stages so they are always resolved on the same axis. To see what marEx
+would infer without running anything:
+
+.. code-block:: python
+
+   >>> marEx.infer_cycle(data.time)
+   SeasonalCycle(index_name='hourofyear', length=1464, step_days=0.25)
+
+.. warning::
+
+   Sub-daily runs are **supported but expensive**. The threshold histogram is
+   ``cycle_length × n_bins`` per spatial cell, so 6-hourly data makes it four times
+   the daily size and hourly data twenty-four times. The internal spatial tiling
+   shrinks each task in proportion, which keeps the working set bounded but multiplies
+   the task count. For long sub-daily series, prefer ``global_percentile``, or coarsen
+   to daily first.
 
 Grid Configuration
 ------------------

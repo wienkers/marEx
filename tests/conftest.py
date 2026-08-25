@@ -419,3 +419,34 @@ def dask_client_integration(dask_client_per_module):
 def dask_client_gridded(dask_client_per_module):
     """Dedicated Dask client for gridded tests."""
     return dask_client_per_module
+
+
+class _MarExWarningCapture(logging.Handler):
+    """Collect WARNING records straight off the ``marEx`` logger.
+
+    ``caplog`` cannot see them: :func:`marEx.logging_config.configure_logging` sets
+    ``propagate = False`` on the package root logger, so nothing reaches pytest's
+    handler on the true root.
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def __enter__(self):
+        self.messages.clear()
+        logging.getLogger("marEx").addHandler(self)
+        return self
+
+    def __exit__(self, *exc):
+        logging.getLogger("marEx").removeHandler(self)
+        return False
+
+
+@pytest.fixture
+def marex_warnings():
+    """Context manager yielding the marEx WARNING records emitted inside its block."""
+    return _MarExWarningCapture()

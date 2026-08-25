@@ -13,6 +13,7 @@ import xarray as xr
 
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import horizontal_dims
+from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import configure_logging, get_logger
@@ -75,6 +76,7 @@ def identify_extremes(
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
+    cycle: Optional[SeasonalCycle] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -378,8 +380,22 @@ def identify_extremes(
                 },
             )
 
-    # Validate that window parameters are odd numbers (only for seasonal_percentile method)
-    if method_extreme == "seasonal_percentile" and window_days is not None and window_days % 2 == 0:
+    # Validate that window parameters are odd numbers (only for seasonal_percentile method).
+    #
+    # Oddness is a property of the window in TIMESTEPS, not in days -- the window must be
+    # symmetric about a centre step. On a daily axis the two coincide, which is why this
+    # has always been expressed in days. On any other cadence they do not: an 11-day
+    # window on 6-hourly data is 44 steps, and demanding an odd number of *days* there
+    # would reject a perfectly well-posed request. `SeasonalCycle.window_steps` forces
+    # the step count odd on those axes, so the check is only needed, and only meaningful,
+    # for daily data.
+    #
+    # Resolved ONLY for the seasonal method. `infer_cycle` raises on a mixed-cadence
+    # axis, and `global_percentile` has no within-year cycle at all -- resolving
+    # unconditionally would make it fail on axes where it has always worked, naming a
+    # problem it does not have. Same shape as the Phase B `validate_rank` finding.
+    resolved_cycle = resolve_cycle(da, coordinates["time"], cycle) if method_extreme == "seasonal_percentile" else cycle
+    if method_extreme == "seasonal_percentile" and resolved_cycle.is_daily and window_days is not None and window_days % 2 == 0:
         logger.error(f"window_days={window_days} is not an odd number")
         raise ConfigurationError(
             "window_days must be an odd number",
@@ -438,6 +454,7 @@ def identify_extremes(
             max_anomaly,
             materialiser,
             threshold_label,
+            resolved_cycle,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")

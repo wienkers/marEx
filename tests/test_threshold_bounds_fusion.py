@@ -97,7 +97,7 @@ class TestBoundsCheckRoundTrips:
                 da,
                 q=0.95,
                 dimensions={"time": "time", "x": "lon", "y": "lat"},
-                window_days=3,
+                window_steps=3,
                 window_spatial=None,
             )
         assert cb.n <= 4, f"expected <= 4 scheduler round-trips, got {cb.n}"

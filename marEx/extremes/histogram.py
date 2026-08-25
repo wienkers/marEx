@@ -22,6 +22,7 @@ from xhistogram.xarray import histogram
 
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import horizontal_dims, spatial_dims
+from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
 from ..logging_config import get_logger
 
 # Get module logger
@@ -105,23 +106,27 @@ def _histogram_tile_chunks(
     dimensions: Dict[str, str],
     n_bins: int,
     window_spatial: Optional[int],
+    cycle_length: int = 366,
 ) -> Dict[str, int]:
     """Spatial tiling for the day-of-year resolved histogram, plus a whole time axis.
 
     Sized from the histogram OUTPUT budget rather than a hardcoded 16 cells. Each
-    spatial cell yields a ``(366, n_bins)`` histogram, so the cells per tile are
+    spatial cell yields a ``(cycle_length, n_bins)`` histogram -- 366 slots on daily
+    data, 12 monthly, ``366 * steps_per_day`` sub-daily -- so the cells per tile are
     capped to keep the per-task output near the element budget. On a gridded field
     this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
     uses ~256 cells/chunk instead of 16, avoiding the task-graph explosion behind
     the "seasonal scheduler OOM on unstructured" failure.
 
     Both sides of the reduction are budgeted, as ``_chunk_spatial_for_histogram``
-    does. The output side is ``366 x n_bins`` per cell; the INPUT side is ``ntime``
+    does. The output side is ``cycle_length x n_bins`` per cell; the INPUT side is ``ntime``
     per cell, because time is held whole. Sizing on the output alone would leave the
     slab a task reads growing with the length of the series. Taking the max makes the
     per-task working set constant in the spatial extent and in the number of
     timesteps. For any realistic series this is a no-op: ``366 * n_bins`` is ~183k at
-    the default binning, so ``ntime`` only binds beyond ~500 years of daily data.
+    the default daily binning, so ``ntime`` only binds beyond ~500 years of daily data.
+    A sub-daily cycle multiplies the output side by ``steps_per_day``, which shrinks the
+    tile in proportion -- expensive, but bounded, which is the point.
 
     **Every** spatial dimension is tiled, extra dims (depth, level) included, and the
     side is the rank-th root of the cell budget -- so an extra dimension shrinks each
@@ -131,7 +136,7 @@ def _histogram_tile_chunks(
     """
     spatial_dims_present = list(spatial_dims(da, dimensions))
     ntime = max(1, int(da.sizes[dimensions["time"]]))
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, 366 * max(1, n_bins)))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, cycle_length * max(1, n_bins)))
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
 
     horizontal_present = set(horizontal_dims(dimensions))
@@ -198,7 +203,7 @@ def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool)
 
 def _rolling_histogram_quantile(
     hist_chunk: NDArray[np.int32],
-    window_days: int,
+    window_steps: int,
     q: float,
     bin_centers: NDArray[np.float64],
 ) -> NDArray[np.float32]:
@@ -209,9 +214,9 @@ def _rolling_histogram_quantile(
     Parameters
     ----------
     hist_chunk : numpy.ndarray
-        Histogram data with shape (dayofyear, da_bin)
-    window_days : int
-        Rolling window size for day-of-year smoothing
+        Histogram data with shape (cycle index, da_bin)
+    window_steps : int
+        Rolling window size, in cycle steps (11 for an 11-day window on daily data)
     q : float
         Quantile to compute (0-1)
     bin_centers : numpy.ndarray
@@ -220,17 +225,28 @@ def _rolling_histogram_quantile(
     Returns
     -------
     numpy.ndarray
-        Quantile thresholds with shape (dayofyear,)
+        Quantile thresholds with shape (cycle index,)
     """
     n_doy, n_bins = hist_chunk.shape
     eps = 1e-10
 
-    # Pad histogram with wrap mode for day-of-year cycling
-    pad_size = window_days // 2
-    hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
+    # Pad histogram with wrap mode for cycling across the year boundary.
+    #
+    # The `pad_size == 0` branch is load-bearing, not defensive. `hist_chunk[-0:]` is
+    # `hist_chunk[0:]` -- the WHOLE array, not an empty one -- so the naive concatenate
+    # would triple-count the first copy and return 2 x n_slots rows, which then fails to
+    # broadcast against `doy_indices`. A one-step window is unreachable on daily data
+    # (`window_days` is validated odd and >= 1, so `pad_size >= 1` whenever the window
+    # exceeds one day), but it is the NORMAL case on a monthly axis, where any
+    # `window_days` under ~45 clamps to a single month.
+    pad_size = window_steps // 2
+    if pad_size > 0:
+        hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
+    else:
+        hist_pad = hist_chunk
 
     # Apply rolling sum using stride tricks FTW
-    windowed_view = sliding_window_view(hist_pad, window_days, axis=0)
+    windowed_view = sliding_window_view(hist_pad, window_steps, axis=0)
     hist_windowed = np.sum(windowed_view, axis=-1)
 
     # Apply gaussian smoothing along bin dimension
@@ -251,7 +267,7 @@ def _rolling_histogram_quantile(
 
     # Vectorised search for the bins containing the quantile position.
     # ``searchsorted(row, v, side="right")`` on a non-decreasing row is exactly the count
-    # of entries <= v, so the whole 366-iteration Python loop of searchsorted calls (run
+    # of entries <= v, so the whole per-slot Python loop of searchsorted calls (run
     # once per cell inside an apply_ufunc(vectorize=True)) collapses to one comparison
     # against the broadcast quantile positions (review finding 3.13).
     idx_upper = (cumsum <= quantile_position[:, None]).sum(axis=1).astype(np.int32)
@@ -358,13 +374,14 @@ def _histogram_quantile_block(
 def _compute_histogram_quantile_2d(
     da: xr.DataArray,
     q: float,
-    window_days: int = 11,
+    window_steps: int = 11,
     window_spatial: Optional[int] = None,
     bin_edges: Optional[NDArray[np.float64]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -376,10 +393,10 @@ def _compute_histogram_quantile_2d(
         Input data array
     q : float
         Quantile to compute (0-1)
-    window_days : int, default=11
-        Rolling window size for day-of-year quantiles
+    window_steps : int, default=11
+        Rolling window size along the cycle axis, in timesteps
     window_spatial : int, default=None
-        Spatial window size for day-of-year quantiles
+        Spatial window size for the per-cycle-slot quantiles
     bin_edges : numpy.ndarray, optional
         Custom bin edges for histogram computation
     dimensions : dict, optional
@@ -388,6 +405,9 @@ def _compute_histogram_quantile_2d(
         Precision for positive anomaly bins
     max_anomaly : float, default=5.0
         Maximum anomaly value for binnin
+    cycle : SeasonalCycle, optional
+        Within-year axis the histogram is resolved on. Defaults to the daily cycle,
+        which is what the caller's ``dayofyear`` coordinate implies.
 
     Returns
     -------
@@ -398,6 +418,9 @@ def _compute_histogram_quantile_2d(
     # caller, doctest and test working unchanged.
     if materialiser is None:
         materialiser = Materialiser("persist")
+    if cycle is None:
+        cycle = DAILY_CYCLE
+    cycle_dim = cycle.index_name
 
     if bin_edges is None:
         # Create optimised asymmetric bins
@@ -417,7 +440,7 @@ def _compute_histogram_quantile_2d(
 
     n_bins = len(bin_centers_array)
     spatial_dims_present = list(spatial_dims(da, dimensions))
-    chunk_dict = _histogram_tile_chunks(da, dimensions, n_bins, window_spatial)
+    chunk_dict = _histogram_tile_chunks(da, dimensions, n_bins, window_spatial, cycle.length)
 
     da_bin = (
         xr.DataArray(
@@ -441,11 +464,11 @@ def _compute_histogram_quantile_2d(
     # Construct 2D histogram using flox (in doy & anomaly)
     hist_raw = flox.xarray.xarray_reduce(
         da_bin,
-        da_bin.dayofyear,
+        da_bin[cycle_dim],
         da_bin,
         dim=[dimensions["time"]],
         func="count",
-        expected_groups=(np.arange(1, 367, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
+        expected_groups=(np.arange(1, cycle.length + 1, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
         isbin=(False, False),
         dtype=np.uint16,
         fill_value=0,
@@ -487,11 +510,11 @@ def _compute_histogram_quantile_2d(
         hist_raw = hist_rolled
 
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
-        return _rolling_histogram_quantile(hist_chunk, window_days, q, bin_centers_chunk)
+        return _rolling_histogram_quantile(hist_chunk, window_steps, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
     # Create chunk dict for hist_raw that preserves spatial chunks but drops time
-    hist_chunk_dict = {"dayofyear": -1, "da_bin": -1}
+    hist_chunk_dict = {cycle_dim: -1, "da_bin": -1}
     for d in spatial_dims_present:
         hist_chunk_dict[d] = chunk_dict.get(d, 16)
 
@@ -502,16 +525,16 @@ def _compute_histogram_quantile_2d(
         _compute_quantile_with_params,
         hist_raw,
         bin_centers,
-        input_core_dims=[["dayofyear", "da_bin"], ["da_bin"]],
-        output_core_dims=[["dayofyear"]],
+        input_core_dims=[[cycle_dim, "da_bin"], ["da_bin"]],
+        output_core_dims=[[cycle_dim]],
         dask="parallelized",
         vectorize=True,
         output_dtypes=[np.float32],
-        dask_gufunc_kwargs={"output_sizes": {"dayofyear": 366}},
+        dask_gufunc_kwargs={"output_sizes": {cycle_dim: cycle.length}},
         keep_attrs=True,
     )
 
-    # Drop time coordinate to avoid conflicts when comparing with data grouped by dayofyear
+    # Drop time coordinate to avoid conflicts when comparing with data grouped by cycle slot
     if dimensions["time"] in threshold.coords:
         threshold = threshold.drop_vars(dimensions["time"])
 

@@ -23,6 +23,7 @@ from dask.base import is_dask_collection
 from ..core.compute_mode import Materialiser, create_staging_dir
 from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
+from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords, _validate_data_values
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
@@ -114,13 +115,16 @@ def _anomaly_core(
     dimensions: Optional[Dict[str, str]],
     coordinates: Optional[Dict[str, str]],
     materialiser: Materialiser,
+    cycle: Optional[SeasonalCycle] = None,
 ):
     """
     Compute anomalies, up to but not including output finalisation.
 
     Shared by :func:`compute` and by :func:`marEx.preprocess_data`, which needs
     the intermediate dataset before the extremes stage runs. Returns the dataset,
-    the resolved dimension/coordinate mappings, and the resolved detrend orders.
+    the resolved dimension/coordinate mappings, the resolved detrend orders, and the
+    caller's seasonal cycle (possibly ``None``) -- the chainer forwards that last one to
+    the extremes stage so an explicit override reaches both halves.
     """
     if detrend_orders is None:
         detrend_orders = [1]
@@ -143,6 +147,13 @@ def _anomaly_core(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
+    # The cycle is deliberately NOT resolved here, only threaded. Each anomaly method
+    # resolves it at the point it groups (`fixed_baseline`, `climatology`, and
+    # `harmonic` only when `standardise=True`), so a method that never groups -- and a
+    # `global_percentile` run downstream -- never invokes `infer_cycle`, which raises on
+    # a mixed-cadence axis. Both stages still land on the same axis: inference is
+    # deterministic from the same time coordinate.
 
     # Resolve the dimension contract: which axes are horizontal, and which are extra
     # (depth, level, member) and carried through as broadcast axes. Validates an
@@ -215,6 +226,7 @@ def _anomaly_core(
             force_zero_mean,
             reference_period,
             materialiser=materialiser,
+            cycle=cycle,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
 
@@ -262,7 +274,7 @@ def _anomaly_core(
         _anomaly_attrs(method, standardise, detrend_orders, force_zero_mean, window_years, smooth_days, reference_period)
     )
 
-    return ds, dimensions, coordinates, detrend_orders
+    return ds, dimensions, coordinates, detrend_orders, cycle
 
 
 def compute(
@@ -281,6 +293,7 @@ def compute(
     validate: bool = True,
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
@@ -346,6 +359,12 @@ def compute(
     dimensions, coordinates
         Name mappings, e.g. ``{"time": "time", "y": "lat", "x": "lon"}``.
         Inferred when omitted.
+    cycle
+        Within-year axis the climatology is resolved on, as a
+        :class:`~marEx.SeasonalCycle`. Inferred from the median spacing of the
+        time coordinate when omitted: ``dayofyear`` for daily data, ``month``
+        for monthly, ``hourofyear`` for sub-daily. Pass one explicitly to
+        override the inference on an irregular time axis.
     verbose, quiet
         Logging verbosity overrides.
 
@@ -373,7 +392,7 @@ def compute(
     materialiser = Materialiser(compute_mode, staging_dir)
 
     with split_large_chunks():
-        ds, dimensions, coordinates, _ = _anomaly_core(
+        ds, dimensions, coordinates, _, _ = _anomaly_core(
             da,
             method,
             window_years,
@@ -386,6 +405,7 @@ def compute(
             dimensions,
             coordinates,
             materialiser,
+            cycle,
         )
         ds = finalise_dataset(
             ds,
