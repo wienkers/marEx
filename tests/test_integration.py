@@ -351,7 +351,16 @@ class TestPipelineIntegration:
             try:
                 extremes_ds = marEx.preprocess_data(data_subset, **params)
             except (marEx.exceptions.ConfigurationError, ZeroDivisionError) as e:
-                if "Quantile computation failed" in str(e) or "division" in str(e).lower():
+                # "the anomaly series is empty": shifting_baseline with window_years=3
+                # trims the first 3 years off this 2.74-year subset and leaves time=0.
+                # That combination has never actually been exercised here -- before the
+                # bin geometry was derived from the data it died one step later, as a
+                # bare ZeroDivisionError caught by the "division" clause below.
+                if (
+                    "Quantile computation failed" in str(e)
+                    or "the anomaly series is empty" in str(e)
+                    or "division" in str(e).lower()
+                ):
                     print(f"Skipping {anomaly_method} + {extreme_method}: {type(e).__name__}: {e}")
                     continue
                 else:

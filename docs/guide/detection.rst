@@ -249,7 +249,7 @@ Extreme Event Detection Methods
   * Simple interpretation and fast computation
   * Best for: Exploratory analysis
 
-**Hobday Extreme** (``method_extreme='seasonal_percentile'``):
+**Seasonal Percentile** (``method_extreme='seasonal_percentile'``):
 
 .. code-block:: python
 
@@ -290,7 +290,8 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
 3. **Percentile Calculation**:
 
    * Use histogram approximation (``method_percentile='approximate'``)
-   * Precision controlled by ``precision`` parameter (default 0.01°C)
+   * Bins are symmetric about zero, so both tails are resolved at the same precision
+   * Bin width controlled by ``precision``; derived from the data when not supplied
    * Calculate threshold at ``threshold_percentile`` (e.g., 95th)
 
 **Sample Size Comparison**::
@@ -390,7 +391,13 @@ Core Parameters
 ---------------
 
 **threshold_percentile** : float, default=95
-  Percentile threshold for extreme event identification (e.g., 95 for 95th percentile)
+  Percentile threshold for extreme event identification (e.g., 95 for 95th percentile).
+  Combined with ``tail``, this is the percentile of the *distribution*, not of the tail:
+  the coldest 5 % is ``threshold_percentile=5, tail='lower'``.
+
+**tail** : {'upper', 'lower'}, default='upper'
+  Which side of the distribution counts as extreme. ``'upper'`` flags
+  ``anomaly >= threshold``; ``'lower'`` flags ``anomaly <= threshold``.
 
 **method_anomaly** : {'detrend_harmonic', 'fixed_baseline', 'detrend_fixed_baseline', 'shifting_baseline'}, default='shifting_baseline'
   Method for anomaly computation
@@ -467,11 +474,84 @@ Extreme Detection Parameters
 **method_percentile** : {'exact', 'approximate'}, default='approximate'
   Method for percentile calculation
 
-**precision** : float, default=0.01
-  Precision for histogram bins in approximate percentile calculation
+**precision** : float, optional
+  Histogram bin width for the approximate percentile calculation. Derived from
+  ``max_anomaly`` and ``n_bins`` when omitted.
 
-**max_anomaly** : float, default=5.0
-  Maximum anomaly value for approximate percentile calculation
+**max_anomaly** : float, optional
+  Half-width of the binned range, in the units of your data. Derived from the data
+  itself when omitted.
+
+**n_bins** : int, default=1000
+  Number of histogram bins spanning ``[-max_anomaly, +max_anomaly]``. Used to derive
+  whichever of ``precision`` and ``max_anomaly`` was not supplied.
+
+Which Tail
+----------
+
+By default marEx looks for extremes **above** a high percentile: marine heatwaves,
+atmospheric heatwaves, extreme rainfall. ``tail='lower'`` flips the comparison for
+low-side extremes -- cold spells, drought, hypoxia.
+
+.. code-block:: python
+
+   # The coldest 5 % of days, day-of-year resolved
+   cold = marEx.preprocess_data(
+       sst,
+       threshold_percentile=5,
+       tail="lower",
+   )
+
+``threshold_percentile`` always names the percentile of the distribution, never of the
+tail, so ``5`` with ``tail='lower'`` and ``95`` with ``tail='upper'`` are the two ends
+of the same distribution. The threshold field means the same thing in both cases; only
+the comparison changes, and the tail chosen is recorded in ``ds.attrs['tail']``.
+
+Two consequences worth knowing:
+
+* The histogram bins are **symmetric about zero**. Before this they were
+  ``[-inf, -precision, 0, precision, ...]`` -- one bin for every negative value -- which
+  made a low percentile unresolvable and is why percentiles below 60 used to be
+  rejected outright. That restriction is gone.
+* The guard rail that keeps a constant-zero anomaly (sea ice, a permanently masked
+  cell) from being flagged as extreme is applied on **both** sides. A flat-zero cell is
+  never a cold extreme either.
+
+``tail='both'`` is not supported: it would need a second threshold array and an extra
+output dimension. Run the two tails separately if you need both.
+
+Bin Geometry and Non-SST Variables
+----------------------------------
+
+``precision=0.01`` and ``max_anomaly=5.0`` are calibrated for **SST anomalies in
+kelvin**. On precipitation in mm/day, with anomalies of tens, that range clips almost
+everything into the end bins; on pressure in Pa it is off by three orders of magnitude.
+
+So when neither is supplied, marEx derives the range from your data -- one fused
+min/max pass, then ``max(|min|, |max|)`` -- and sets ``precision = 2 * max_anomaly /
+n_bins``. Both resolved values are logged at INFO and recorded in the output attributes.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - You supply
+     - What marEx uses
+   * - nothing
+     - ``max_anomaly`` from the data; ``precision = 2 * max_anomaly / n_bins``
+   * - ``precision`` only
+     - ``max_anomaly = precision * n_bins / 2`` (so ``precision=0.01`` still spans ±5.0)
+   * - ``max_anomaly`` only
+     - ``precision = 2 * max_anomaly / n_bins``
+   * - both
+     - exactly what you gave; ``n_bins`` is ignored
+
+.. note::
+
+   The derivation is skipped entirely for ``method_percentile='exact'``, which builds
+   no histogram. It costs one pass over the anomaly, which is cheap in the default
+   ``persist`` mode (the anomaly is already staged) but walks the whole anomaly graph
+   under ``compute_mode='lazy'``. Pin ``max_anomaly`` there if that matters.
 
 Time Resolution
 ---------------

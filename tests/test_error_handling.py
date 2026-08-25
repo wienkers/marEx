@@ -658,16 +658,21 @@ class TestIdentifyExtremesConfigurationErrors:
                 max_anomaly=10.0,  # Non-default max_anomaly
             )
 
-    def test_low_percentile_with_approximate_method(self, anomaly_data):
-        """Test ConfigurationError for low percentile with approximate method."""
-        with pytest.raises(
-            ConfigurationError, match="Percentile threshold 50% is not supported with method_percentile='approximate'"
-        ):
-            marEx.extremes.identify_extremes(
-                anomaly_data,
-                method_percentile="approximate",
-                threshold_percentile=50,  # Below 60% threshold
-            )
+    def test_low_percentile_with_approximate_method_is_now_accepted(self, anomaly_data):
+        """A low percentile used to raise; symmetric bins made the rejection obsolete.
+
+        Under the old asymmetric bins every negative value shared a single bin, so a
+        percentile landing in it was undefined by construction and was rejected below
+        60%. Phase D's bins are symmetric about zero, so a low percentile is resolved
+        at exactly the same precision as a high one. See tests/test_low_tail.py for
+        the accuracy gate; this only pins that the guard is gone.
+        """
+        extremes, thresholds = marEx.extremes.identify_extremes(
+            anomaly_data,
+            method_percentile="approximate",
+            threshold_percentile=50,
+        )
+        assert extremes.dtype == bool
 
     def test_window_spatial_with_global_percentile(self, anomaly_data, dimensions_coords):
         """Test ConfigurationError when window_spatial is used with global_percentile."""

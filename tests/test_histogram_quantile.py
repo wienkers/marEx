@@ -226,14 +226,25 @@ def _anomaly_fixture_1d(n_time=400, n_y=6, n_x=7, seed=0):
 _REFERENCE_NPY = Path(__file__).parent / "data" / "histogram_quantile_1d_reference.npy"
 
 
-def test_1d_quantile_matches_captured_reference():
-    """Bit-identity oracle for the 1D quantile path.
+def _legacy_bin_edges(precision, max_anomaly, dtype=np.float64):
+    """The pre-Phase-D asymmetric edges: one bin for every negative value."""
+    if dtype == np.float32:
+        return np.concatenate(
+            [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
+        )
+    return np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+
+
+def test_1d_quantile_matches_captured_reference_under_the_legacy_bins(monkeypatch):
+    """Bit-identity oracle for the 1D quantile ARITHMETIC. No tolerance.
 
     The reference was captured from the two-phase (persist-the-CDF) implementation before
-    that path was restructured. Any change to the quantile arithmetic -- notably a cumsum
-    that drops from float64 to float32 -- moves these values, and this test is the gate
-    that catches it. Phase-2 rules apply: no tolerance.
+    that path was restructured, and with the pre-Phase-D asymmetric bins. Forcing those
+    bins back in isolates the arithmetic from the binning: any change to the quantile
+    computation -- notably a cumsum that drops from float64 to float32 -- moves these
+    values, and this is the gate that catches it.
     """
+    monkeypatch.setattr(H, "_symmetric_bin_edges", _legacy_bin_edges)
     got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
     expected = np.load(_REFERENCE_NPY)
     assert got.dtype == expected.dtype, f"dtype moved {expected.dtype} -> {got.dtype}"
@@ -243,6 +254,20 @@ def test_1d_quantile_matches_captured_reference():
         np.nan_to_num(got, nan=sentinel),
         np.nan_to_num(expected, nan=sentinel),
     )
+
+
+def test_1d_quantile_symmetric_bins_move_the_reference_only_by_round_off():
+    """Phase D's symmetric bins accumulate the CDF over twice as many bins.
+
+    That reorders a float64 cumulative sum, so the same quantiles come back with
+    last-bit differences and nothing more: MEASURED at 28 of 42 cells, max 1.33e-15,
+    against a method whose own bin precision is 0.01. The bound here is the entire
+    observable effect of the bin change on this path -- if it grows, something other
+    than summation order moved.
+    """
+    got = H._compute_histogram_quantile_1d(_anomaly_fixture_1d(), q=0.95, dim="time").compute().values
+    expected = np.load(_REFERENCE_NPY)
+    np.testing.assert_allclose(got, expected, atol=2e-14, rtol=0, equal_nan=True)
 
 
 def test_spatial_tile_budget_bounds_the_output_not_just_the_input():

@@ -9,6 +9,8 @@ extreme-detection parameters and delegates to one of the concrete methods
 
 from typing import Dict, Literal, Optional, Tuple
 
+import dask
+import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
@@ -61,6 +63,105 @@ def resolve_window_spatial(
     return window_spatial
 
 
+# Bin geometry used when neither `precision` nor `max_anomaly` is supplied and the data
+# gives no usable scale (all-NaN, or constant). These are the historical SST-calibrated
+# defaults, in kelvin.
+_FALLBACK_PRECISION = 0.01
+_FALLBACK_MAX_ANOMALY = 5.0
+
+
+def resolve_bin_spec(
+    da: xr.DataArray,
+    precision: Optional[float],
+    max_anomaly: Optional[float],
+    n_bins: int,
+) -> Tuple[float, float]:
+    """Resolve the histogram bin width and range, deriving whatever was not supplied.
+
+    ``precision=0.01, max_anomaly=5.0`` are calibrated for SST anomalies in kelvin.
+    On precipitation (mm/day, anomalies of tens) that range clips nearly everything
+    into the end bins; on pressure it is off by three orders of magnitude. So the
+    range is derived from the data when the caller does not state it.
+
+    ``n_bins`` is the invariant whenever exactly one of the two is given, which is
+    what makes the old defaults a fixed point: ``precision=0.01`` alone still spans
+    ``+/-5.0``, because ``0.01 * 1000 / 2 == 5.0``.
+
+    With NEITHER supplied, the range comes from the data: one fused
+    ``dask.compute(min, max)``, then ``max(|min|, |max|)``. **That is a full pass over
+    the anomaly.** In ``persist`` mode the anomaly is already staged at the seam, so
+    it is cheap; in ``lazy`` mode it walks the whole anomaly graph, exactly like the
+    NaN-mask pass the 2-D path already makes. It is skipped entirely for
+    ``method_percentile='exact'``, which never builds a histogram.
+    """
+    # An empty series reaches the reduction below as a zero-size array, where
+    # `nanmin` raises "zero-size array to reduction operation fmin which has no
+    # identity" -- and on the explicit-bins path it survives to a bare
+    # ZeroDivisionError deeper in the histogram. Both are unintelligible, and the
+    # cause is nearly always a baseline window longer than the series it is given
+    # (`shifting_baseline` trims the first `window_years` years, so
+    # `window_years=3` on 2.7 years of data leaves nothing). Checked before the
+    # early return, so both bin paths report it the same way.
+    if da.size == 0:
+        empty_dims = [str(d) for d, n in zip(da.dims, da.shape) if n == 0]
+        raise ConfigurationError(
+            f"Cannot identify extremes: the anomaly series is empty ({', '.join(f'{d}=0' for d in empty_dims)})",
+            details=(
+                "The histogram bin geometry is derived from the data range, which needs at least one sample. "
+                "An empty anomaly usually means the baseline window consumed the whole series: "
+                "`shifting_baseline` removes the first `window_years` years before computing anomalies."
+            ),
+            suggestions=[
+                "Reduce `window_years` so it is shorter than the input time series",
+                "Lengthen the input time series",
+                "Use `method_anomaly='detrend_harmonic'` or `'fixed_baseline'`, which do not trim the series",
+            ],
+            context={"shape": tuple(da.shape), "dims": tuple(str(d) for d in da.dims)},
+        )
+
+    if precision is not None and max_anomaly is not None:
+        return float(precision), float(max_anomaly)
+
+    if n_bins < 2:
+        raise ConfigurationError(
+            f"n_bins must be at least 2, got {n_bins}",
+            details="n_bins sets the number of histogram bins spanning [-max_anomaly, +max_anomaly]",
+            suggestions=["Use the default n_bins=1000", "Increase n_bins for a finer threshold estimate"],
+            context={"n_bins": n_bins},
+        )
+    # The bin index is stored as uint16 (`extremes/histogram.py`'s flox expected_groups),
+    # so a count above 65535 would wrap silently rather than fail.
+    if n_bins > 65535:
+        raise ConfigurationError(
+            f"n_bins must not exceed 65535, got {n_bins}",
+            details=(
+                "Histogram bin indices are stored as uint16; a larger count wraps silently " "and assigns samples to the wrong bins"
+            ),
+            suggestions=["Use a smaller n_bins", "Widen `precision` instead of adding bins"],
+            context={"n_bins": n_bins, "max_supported": 65535},
+        )
+
+    if max_anomaly is None and precision is None:
+        lo, hi = dask.compute(da.min(), da.max())
+        scale = max(abs(float(lo)), abs(float(hi)))
+        if not np.isfinite(scale) or scale <= 0:
+            logger.warning(
+                f"Could not derive a histogram range from the data (max|anomaly|={scale}); "
+                f"falling back to precision={_FALLBACK_PRECISION}, max_anomaly={_FALLBACK_MAX_ANOMALY}. "
+                "Pass max_anomaly explicitly if this field is not an SST-like anomaly in kelvin."
+            )
+            return _FALLBACK_PRECISION, _FALLBACK_MAX_ANOMALY
+        max_anomaly = scale
+        precision = 2.0 * max_anomaly / n_bins
+    elif max_anomaly is None:
+        max_anomaly = precision * n_bins / 2.0
+    else:
+        precision = 2.0 * max_anomaly / n_bins
+
+    logger.info(f"Histogram bins derived from the data: precision={precision:.6g}, max_anomaly={max_anomaly:.6g}")
+    return float(precision), float(max_anomaly)
+
+
 def identify_extremes(
     da: xr.DataArray,
     method_extreme: Literal["global_percentile", "seasonal_percentile"] = "seasonal_percentile",
@@ -70,13 +171,15 @@ def identify_extremes(
     window_days: int = 11,  # for seasonal_percentile
     window_spatial: Optional[int] = None,  # for seasonal_percentile
     method_percentile: Literal["exact", "approximate"] = "approximate",
-    precision: float = 0.01,
-    max_anomaly: float = 5.0,
+    precision: Optional[float] = None,
+    max_anomaly: Optional[float] = None,
+    n_bins: int = 1000,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -99,10 +202,20 @@ def identify_extremes(
         Window for day-of-year threshold spatial clustering (seasonal_percentile only)
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
-    precision : float, default=0.01
-        Precision for histogram bins in approximate method
-    max_anomaly : float, default=5.0
-        Maximum anomaly value for histogram binning
+    precision : float, optional
+        Histogram bin width for the approximate method. Derived from
+        ``max_anomaly`` and ``n_bins`` when omitted.
+    max_anomaly : float, optional
+        Half-width of the binned range. Derived from the data when omitted (and
+        from ``precision`` and ``n_bins`` when only ``precision`` is given).
+    n_bins : int, default=1000
+        Number of histogram bins spanning ``[-max_anomaly, +max_anomaly]``. Used to
+        derive whichever of the two above was not supplied.
+    tail : {'upper', 'lower'}, default='upper'
+        Which side of the distribution counts as extreme. ``'upper'`` flags
+        ``data >= threshold``, ``'lower'`` flags ``data <= threshold``. The
+        threshold is the ``threshold_percentile``-th percentile in both cases, so
+        the coldest 5 % is ``threshold_percentile=5, tail='lower'``.
 
     Returns
     -------
@@ -243,13 +356,26 @@ def identify_extremes(
             },
         )
 
+    # Validate tail parameter
+    valid_tails = ["upper", "lower"]
+    if tail not in valid_tails:
+        logger.error(f"Unknown tail: {tail}")
+        raise ConfigurationError(
+            f"Unknown tail '{tail}'",
+            details="Invalid tail parameter",
+            suggestions=[
+                "Use 'upper' for extremes above the threshold (the default)",
+                "Use 'lower' for extremes below the threshold, e.g. cold spells or drought",
+            ],
+            context={"provided_tail": tail, "valid_tails": valid_tails},
+        )
+
     # Validate parameter compatibility for exact percentile method
     if method_percentile == "exact":
-        default_precision = 0.01
-        default_max_anomaly = 5.0
-
-        # Check if precision parameter was explicitly set to a non-default value
-        if precision != default_precision:
+        # Detected by the SENTINEL, not by comparison against a literal default: the
+        # defaults are now derived, so `precision != 0.01` would fire on every exact
+        # run the moment auto-derivation set a value.
+        if precision is not None:
             logger.error(f"Invalid parameter: precision={precision} with method_percentile='exact'")
             raise ConfigurationError(
                 "Parameter 'precision' cannot be used with method_percentile='exact'",
@@ -264,12 +390,10 @@ def identify_extremes(
                 context={
                     "method_percentile": method_percentile,
                     "provided_precision": precision,
-                    "default_precision": default_precision,
                 },
             )
 
-        # Check if max_anomaly parameter was explicitly set to a non-default value
-        if max_anomaly != default_max_anomaly:
+        if max_anomaly is not None:
             logger.error(f"Invalid parameter: max_anomaly={max_anomaly} with method_percentile='exact'")
             raise ConfigurationError(
                 "Parameter 'max_anomaly' cannot be used with method_percentile='exact'",
@@ -284,30 +408,17 @@ def identify_extremes(
                 context={
                     "method_percentile": method_percentile,
                     "provided_max_anomaly": max_anomaly,
-                    "default_max_anomaly": default_max_anomaly,
                 },
             )
 
-    # Validate percentile parameter when using approximate method
-    if threshold_percentile < 60 and method_percentile == "approximate":
-        logger.error(f"Invalid percentile threshold: {threshold_percentile}% with method_percentile='approximate'")
-        raise ConfigurationError(
-            f"Percentile threshold {threshold_percentile}% is not supported with method_percentile='approximate'",
-            details=(
-                "Low percentile thresholds (<60%) produce undefined and unsupported behaviour "
-                "when using approximate histogram methods"
-            ),
-            suggestions=[
-                "Use method_percentile='exact' for percentiles below 60%",
-                "Use a higher percentile threshold (≥60%) with method_percentile='approximate'",
-                "Consider if such low percentiles are appropriate for extreme event identification",
-            ],
-            context={
-                "threshold_percentile": threshold_percentile,
-                "method_percentile": method_percentile,
-                "min_supported_percentile": 60,
-            },
-        )
+    # NOTE: the approximate method used to reject `threshold_percentile < 60`. That was
+    # correct under the old asymmetric bins, where every negative value shared a single
+    # bin and any percentile falling into it was undefined by construction. The bins are
+    # now symmetric about zero (`extremes/histogram.py::_symmetric_bin_edges`), so a low
+    # percentile is resolved at exactly the same precision as a high one and the
+    # rejection is obsolete. The genuine remaining failure mode -- a threshold landing in
+    # a clipped end bin -- is reported by the out-of-range UserWarning, which now fires
+    # symmetrically at both ends.
 
     # Validate window_spatial parameter
     if window_spatial is not None:
@@ -434,10 +545,24 @@ def identify_extremes(
             },
         )
 
+    # Resolve the bin geometry once, here, and hand concrete numbers down. Skipped for
+    # the exact path, which builds no histogram -- deriving there would cost a full pass
+    # over the anomaly for nothing, and would defeat the sentinel check above.
+    if method_percentile != "exact":
+        precision, max_anomaly = resolve_bin_spec(da, precision, max_anomaly, n_bins)
+
     if method_extreme == "global_percentile":
         logger.debug(f"Global extreme method - method_percentile={method_percentile}")
         return _identify_extremes_constant(
-            da, threshold_percentile, method_percentile, dimensions, precision, max_anomaly, materialiser, threshold_label
+            da,
+            threshold_percentile,
+            method_percentile,
+            dimensions,
+            precision,
+            max_anomaly,
+            materialiser,
+            threshold_label,
+            tail=tail,
         )
     elif method_extreme == "seasonal_percentile":
         logger.debug(f"Seasonal percentile method - window_days={window_days}, method_percentile={method_percentile}")
@@ -455,6 +580,7 @@ def identify_extremes(
             materialiser,
             threshold_label,
             resolved_cycle,
+            tail=tail,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")

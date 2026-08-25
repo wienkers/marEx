@@ -42,6 +42,7 @@ def _identify_extremes_seasonal(
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -67,6 +68,10 @@ def _identify_extremes_seasonal(
         Precision for histogram bins in approximate method
     max_anomaly : float, default=5.0
         Maximum anomaly value for histogram binning
+    tail : {'upper', 'lower'}, default='upper'
+        Which side of the distribution counts as extreme. The threshold is the
+        ``threshold_percentile``-th percentile either way; only the comparison
+        flips, so ``threshold_percentile=5, tail='lower'`` gives the coldest 5 %.
 
     Returns:
     --------
@@ -85,7 +90,12 @@ def _identify_extremes_seasonal(
     # Check if there is sufficient samples
     N_years = np.unique(da[coordinates["time"]].dt.year).size
     N_samples = N_years * window_days * (window_spatial if window_spatial is not None else 1) ** 2
-    N_above_threshold = N_samples * (1.0 - threshold_percentile / 100.0)
+    # Samples landing beyond the threshold -- the count the estimate actually rests
+    # on. In the lower tail that is the percentile itself, not its complement; using
+    # the complement there would keep the warning silent in exactly the sparse case
+    # it exists for (`threshold_percentile=5` has 5 % of samples below it, not 95 %).
+    tail_fraction = (1.0 - threshold_percentile / 100.0) if tail == "upper" else (threshold_percentile / 100.0)
+    N_above_threshold = N_samples * tail_fraction
     if N_above_threshold < 50:
         # Make warning
         logger.warning(
@@ -168,6 +178,7 @@ def _identify_extremes_seasonal(
             max_anomaly=max_anomaly,
             materialiser=materialiser,
             cycle=cycle,
+            tail=tail,
         )
 
     # Extract spatial chunk sizes from input data for alignment
@@ -206,7 +217,8 @@ def _identify_extremes_seasonal(
     # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
     # streaming mode stages it to disk rather than pinning it in RAM.
     thresholds = materialiser.stage(thresholds, threshold_label)
-    extremes = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))}) >= thresholds
+    grouped = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))})
+    extremes = (grouped >= thresholds) if tail == "upper" else (grouped <= thresholds)
 
     # Drop the now-unnecessary cycle-index coordinate
     if cycle_dim in extremes.coords:

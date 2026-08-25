@@ -12,6 +12,16 @@ tolerance. It is the only test that can distinguish a genuine broadcast from a
 silent reduction over the extra axis, and it is why it compares values rather than
 shapes.
 
+There is exactly one input that is legitimately not slice-invariant, and the gate
+concedes it explicitly rather than loosening its tolerance: the **histogram bin
+geometry**. ``resolve_bin_spec`` derives ``max_anomaly`` as ``max(|min|, |max|)``
+over the whole series, and a 3-D field is one series, so the range is pooled over
+depth -- the same way a 2-D run already pools over lat/lon, which is why a regional
+subset and a global run do not share bins either. The per-level leg is therefore
+given the 3-D run's own resolved geometry, and everything else stays exact. Do not
+"fix" this by pinning constants: that would stop the 3-D path exercising
+``resolve_bin_spec`` at all.
+
 The fixture carries one entirely-NaN level, standing in for a bathymetry mask: it
 must yield an all-False mask and NaN thresholds rather than an exception. That
 level is excluded from the per-level leg, because a 2-D run on an all-NaN field
@@ -68,7 +78,7 @@ def sst_3d():
     return da.chunk({"time": TIME_CHUNK, "depth": -1, "lat": -1, "lon": -1})
 
 
-def _run(da, method_anomaly, method_extreme):
+def _run(da, method_anomaly, method_extreme, **bin_spec):
     return marEx.preprocess_data(
         da,
         method_anomaly=method_anomaly,
@@ -78,6 +88,7 @@ def _run(da, method_anomaly, method_extreme):
         threshold_percentile=95,
         dimensions=DIMENSIONS,
         dask_chunks={"time": TIME_CHUNK},
+        **bin_spec,
     )
 
 
@@ -90,9 +101,27 @@ class TestSliceEquivalence:
     def test_each_level_matches_its_own_2d_run(self, sst_3d, method_anomaly, method_extreme):
         result_3d = _run(sst_3d, method_anomaly, method_extreme).compute()
 
+        # The 3-D leg runs with the production default: bin geometry derived from the
+        # data. That geometry is the one input which is legitimately NOT slice-invariant
+        # -- `resolve_bin_spec` pools `max(|min|, |max|)` over the whole series, and a
+        # 3-D field is one series, so it pools over depth. The fixture's levels scale the
+        # anomaly by 1.0 / 0.8 / 1.3, so the pooled range is level 2's; measured, levels 0
+        # and 1 then disagree with their own 2-D runs on ~0.03 % of `extreme_events` while
+        # level 2 stays bit-identical. That is the bin spec differing, not the depth axis
+        # being reduced over: pinning the geometry makes all three exact.
+        #
+        # So hand the 3-D run's OWN resolved geometry to each 2-D leg. The gate keeps
+        # asking its real question -- is the extra dimension a clean broadcast? -- and
+        # still exercises `resolve_bin_spec` on the 3-D path, which pinning constants
+        # here would not.
+        bin_spec = {
+            "precision": result_3d.attrs["precision"],
+            "max_anomaly": result_3d.attrs["max_anomaly"],
+        }
+
         for level in REAL_LEVELS:
             slice_2d = sst_3d.isel(depth=level, drop=True).chunk({"time": TIME_CHUNK, "lat": -1, "lon": -1})
-            result_2d = _run(slice_2d, method_anomaly, method_extreme).compute()
+            result_2d = _run(slice_2d, method_anomaly, method_extreme, **bin_spec).compute()
             got = result_3d.isel(depth=level, drop=True)
 
             assert list(result_2d.time.values) == list(got.time.values), f"level {level}: time axis differs"

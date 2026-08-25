@@ -10,7 +10,7 @@ logging).
 """
 
 import warnings
-from typing import Dict, Optional
+from typing import Callable, Dict, Literal, Optional
 
 import dask
 import flox.xarray
@@ -33,6 +33,149 @@ logger = get_logger(__name__)
 # float32) regardless of field resolution or input chunking, which is what allows the
 # histogram-quantile path to run at full resolution without exhausting worker memory.
 _HISTOGRAM_TASK_ELEMENTS = 50_000_000
+
+
+def _symmetric_bin_edges(precision: float, max_anomaly: float, dtype: type = np.float64) -> NDArray[np.floating]:
+    """Finite histogram bins, symmetric about zero, resolving BOTH tails.
+
+    The legacy binning was ``[-inf, -precision, 0, precision, ..., max_anomaly]``:
+    a single bin holding every negative value, which makes a low-tail percentile
+    unresolvable by construction. These edges keep the positive half unchanged and
+    mirror it, so an upper-tail threshold moves only where the old scheme's one
+    negative bin actually mattered.
+
+    Two construction details are load-bearing:
+
+    * **The positive half is built from the legacy ``arange`` expression**, not from
+      ``precision * arange(-n, n + 1)``. ``arange`` evaluates ``start + i * step``,
+      and ``-precision + i * precision`` is not the same float as
+      ``precision * (i - 1)``: measured, the two differ by up to 8.9e-16 in float64
+      and 4.8e-7 in float32. A float32 edge shifted by 5e-7 moves a float32
+      threshold by a ULP, which flips ``>=`` at cells sitting exactly on it. Keeping
+      the old edges bit-for-bit is what lets the symmetric-bin change be attributed
+      to the bins alone.
+    * **No trailing ``+inf``.** Both drivers derive their end clip as the midpoint of
+      the outermost bin, so an infinite edge would make that clip a no-op, let
+      out-of-range samples land in an infinitely wide bin, and give the outermost
+      bin an infinite centre. The correct symmetrisation drops the LEADING ``-inf``
+      and keeps finite edges at both ends.
+    """
+    legacy = np.arange(-precision, max_anomaly + precision, precision, dtype=dtype)
+    positive = legacy[1:]  # 0, precision, ..., max_anomaly
+    negative = -positive[:0:-1]  # -max_anomaly, ..., -precision
+    return np.concatenate([negative, positive]).astype(dtype)
+
+
+def _zero_bin_edges(bin_edges: NDArray[np.floating]) -> tuple:
+    """Return the guard rails: the outer edges of the bins flanking zero.
+
+    A cell whose anomaly is constant at zero must never be "extreme", in either
+    tail, so a threshold is clamped away from zero by one bin. Expressed as an
+    edge lookup rather than as ``+/- precision`` so that it is **exactly** the value
+    the legacy code used: ``bin_edges[3]`` on the old asymmetric edges is the upper
+    edge of the bin containing zero, which is what ``searchsorted`` returns here,
+    and on symmetric edges it is the same ``arange`` element. That equality is what
+    makes the clamped cells keep their clamped VALUES across the bin change, not
+    just their identity as a set.
+    """
+    k = int(np.searchsorted(bin_edges, 0.0, side="right"))
+    upper = bin_edges[min(k, len(bin_edges) - 1)]
+    lower = bin_edges[max(k - 2, 0)]
+    return float(upper), float(lower)
+
+
+def _end_clips(bin_edges: NDArray[np.floating]) -> tuple:
+    """Midpoints of the outermost bins, used to clip out-of-range samples inwards.
+
+    Values beyond the outermost edge are otherwise dropped by the histogram, which
+    renormalises the CDF over a truncated total and biases the threshold inwards.
+    The bottom clip is ``-inf`` (a no-op) on the legacy edges, so it costs nothing
+    there and is only real once the bottom of the range is finite.
+    """
+    bottom = (bin_edges[0] + bin_edges[1]) / 2
+    top = (bin_edges[-2] + bin_edges[-1]) / 2
+    return bottom, top
+
+
+def _apply_threshold_bounds(
+    threshold: xr.DataArray,
+    bin_edges: NDArray[np.floating],
+    max_anomaly: float,
+    tail: Literal["upper", "lower"],
+    guard_notnull: bool,
+    clamp: Optional[Callable[[xr.DataArray], xr.DataArray]] = None,
+) -> xr.DataArray:
+    """Warn on out-of-range thresholds and clamp them off the zero guard rail.
+
+    Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
+    the top bin (the range check) nor fall below ``+one bin`` (the guard); for
+    ``tail='lower'`` both are mirrored. The two checks keep their original wording
+    per direction, so the upper-tail messages -- the ones existing tests match on --
+    are unchanged.
+
+    One fused ``dask.compute`` for all four reductions, as before: they share their
+    upstream, so computing them together costs a single pass instead of one
+    traversal per predicate over a graph that re-executes the whole anomaly
+    whenever it is not pinned.
+
+    ``guard_notnull`` reproduces a pre-existing difference between the two drivers:
+    the 1-D path ANDs its predicates with ``notnull()`` and the 2-D path does not.
+    ``clamp`` lets the 1-D path pin the clamped result, which only it does.
+    """
+    if tail == "upper":
+        range_bound, guard = float(bin_edges[-2]), _zero_bin_edges(bin_edges)[0]
+    else:
+        range_bound, guard = float(bin_edges[1]), _zero_bin_edges(bin_edges)[1]
+
+    # `out_of_range` is "past the end of the binned range"; `on_guard` is "inside the
+    # bin pair flanking zero". Which comparison is which flips with the tail.
+    if tail == "upper":
+        out_of_range = threshold > range_bound
+        on_guard = threshold < guard
+    else:
+        out_of_range = threshold < range_bound
+        on_guard = threshold > guard
+    if guard_notnull:
+        out_of_range = out_of_range & threshold.notnull()
+        on_guard = on_guard & threshold.notnull()
+
+    any_range, any_guard, thr_max, thr_min = dask.compute(out_of_range.any(), on_guard.any(), threshold.max(), threshold.min())
+
+    if bool(any_range):
+        if tail == "upper":
+            message = (
+                f"Quantile values exceed expected range: max={float(thr_max):.4f} > {range_bound:.4f}. "
+                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
+                "or using a lower percentile threshold."
+            )
+        else:
+            message = (
+                f"Quantile values below expected range: min={float(thr_min):.4f} < {range_bound:.4f}. "
+                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
+                "or using a higher percentile threshold."
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
+
+    if bool(any_guard):
+        if tail == "upper":
+            message = (
+                f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {guard:.4f}. "
+                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
+                "Double check the computed threshold values are correct."
+            )
+        else:
+            message = (
+                f"Quantile values above expected range in some locations: max={float(thr_max):.4f} > {guard:.4f}. "
+                "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
+                "Double check the computed threshold values are correct."
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
+        # Clamp onto the guard rail so a constant-zero anomaly is never "extreme".
+        threshold = threshold.where(~on_guard, guard)
+        if clamp is not None:
+            threshold = clamp(threshold)
+
+    return threshold
 
 
 def _chunk_spatial_for_histogram(
@@ -382,10 +525,11 @@ def _compute_histogram_quantile_2d(
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
-    Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
 
     Parameters
     ----------
@@ -408,6 +552,9 @@ def _compute_histogram_quantile_2d(
     cycle : SeasonalCycle, optional
         Within-year axis the histogram is resolved on. Defaults to the daily cycle,
         which is what the caller's ``dayofyear`` coordinate implies.
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. Only the sign of the guard rail and of the
+        range check depend on it -- the quantile itself is ``q`` either way.
 
     Returns
     -------
@@ -423,13 +570,17 @@ def _compute_histogram_quantile_2d(
     cycle_dim = cycle.index_name
 
     if bin_edges is None:
-        # Create optimised asymmetric bins
-        bin_edges = np.concatenate(
-            [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
-        )
+        # Bins symmetric about zero, in float32 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float32)
 
     bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
-    bin_centers_array[0] = 0.0
+    if not np.isfinite(bin_centers_array[0]):
+        # Legacy asymmetric edges open at -inf, so the first "centre" is -inf and
+        # would poison the interpolation below. Symmetric edges are finite at both
+        # ends and their first centre (-max_anomaly + precision/2) is already the
+        # right answer, so nothing is substituted there.
+        bin_centers_array[0] = 0.0
+    bottom_clip, top_clip = _end_clips(bin_edges)
 
     bin_centers = xr.DataArray(
         bin_centers_array.astype(np.float32),
@@ -444,12 +595,13 @@ def _compute_histogram_quantile_2d(
 
     da_bin = (
         xr.DataArray(
-            # Clip finite data into the last bin (its centre) before digitizing so
-            # out-of-range-high values are counted in the top bin rather than silently
+            # Clip finite data into the outermost bins (at their centres) before
+            # digitizing so out-of-range values are counted there rather than silently
             # dropped by the flox expected_groups (which biased every approximate
-            # threshold low). Clipping the data (not the index) preserves NaN, which
-            # still digitizes out of range and is correctly dropped.
-            np.digitize(np.clip(da.data, None, bin_centers_array[-1]), bin_edges) - 1,
+            # threshold inwards). Clipping the data (not the index) preserves NaN, which
+            # still digitizes out of range and is correctly dropped. The bottom clip is
+            # -inf, hence skipped, on the legacy asymmetric edges.
+            np.digitize(np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip), bin_edges) - 1,
             dims=da.dims,
             coords=da.coords,
             name="da_bin",
@@ -544,42 +696,12 @@ def _compute_histogram_quantile_2d(
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
     threshold = materialiser.pin_one(threshold.where(~nan_mask))
 
-    # Validate threshold values against bounds
-    upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
-
-    # One scheduler round-trip for the whole bounds check. Each predicate used to be its
-    # own ``if ...any():`` -- DataArray.__bool__ computes -- plus a ``.max()``/``.min()``
-    # inside the warning body, so up to four traversals of a graph that re-executes the
-    # entire upstream anomaly whenever it is not pinned. The four reductions share their
-    # upstream, so computing them together costs a single pass. ``too_low`` stays lazy as
-    # an array: only its ``.any()`` becomes a scalar, because the clamp below still needs
-    # the elementwise mask.
-    #
-    # The predicates here deliberately lack the ``& notnull()`` guard the 1D path carries.
-    # NaN comparisons are False either way; adding it would alter the clamp mask.
-    too_high = threshold > upper_bound
-    too_low = threshold < lower_bound
-    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
-
-    if bool(any_high):
-        warnings.warn(
-            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
-            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
-            UserWarning,
-            stacklevel=2,
-        )
-
-    if bool(any_low):
-        warnings.warn(
-            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-            "Double check the computed threshold values are correct.",
-            UserWarning,
-            stacklevel=2,
-        )
-        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = threshold.where(~too_low, lower_bound)
+    # Validate threshold values against the sign-aware bounds. One scheduler round-trip
+    # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.
+    # The predicates there deliberately lack the ``& notnull()`` guard the 1D path
+    # carries: NaN comparisons are False either way, but adding it would alter the
+    # clamp mask.
+    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=False)
 
     return threshold
 
@@ -592,10 +714,11 @@ def _compute_histogram_quantile_1d(
     precision: float = 0.01,
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
+    tail: Literal["upper", "lower"] = "upper",
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
-    Uses fine-grained bins for positive anomalies and a single bin for negative values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
     Improved robust interpolation handles empty bins in the tails.
 
     Parameters
@@ -612,6 +735,9 @@ def _compute_histogram_quantile_1d(
         Precision for positive anomaly bins
     max_anomaly : float, default=5.0
         Maximum anomaly value for binning
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. Only the sign of the guard rail and of the
+        range check depend on it -- the quantile itself is ``q`` either way.
 
     Returns
     -------
@@ -624,8 +750,8 @@ def _compute_histogram_quantile_1d(
         materialiser = Materialiser("persist")
 
     if bin_edges is None:
-        # Create optimised asymmetric bins
-        bin_edges = np.concatenate([[-np.inf], np.arange(-precision, max_anomaly + precision, precision)])
+        # Bins symmetric about zero, in float64 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float64)
 
     # Tile the non-reduced (spatial) dimensions so each histogram task processes a
     # bounded working set, independent of how the caller chunked the input. Without
@@ -640,14 +766,17 @@ def _compute_histogram_quantile_1d(
     # histogram is larger than the budget it was sized by.
     da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1)
 
-    # Clip finite data into the last bin (its centre) so out-of-range-high values are
-    # counted in the top bin instead of being dropped by xhistogram, which renormalised
-    # the CDF over a truncated total and biased the threshold low. NaN is preserved by
-    # clip and is still dropped by the histogram, so the mask below is unaffected.
-    top_clip = float((bin_edges[-2] + bin_edges[-1]) / 2)
+    # Clip finite data into the outermost bins (at their centres) so out-of-range values
+    # are counted there instead of being dropped by xhistogram, which renormalised the
+    # CDF over a truncated total and biased the threshold inwards. NaN is preserved by
+    # clip and is still dropped by the histogram, so the mask below is unaffected. The
+    # bottom clip is -inf on the legacy asymmetric edges, where it is skipped entirely so
+    # the graph is unchanged there.
+    bottom_clip, top_clip = (float(v) for v in _end_clips(bin_edges))
 
     # Compute histogram
-    hist = histogram(da.clip(max=top_clip), bins=[bin_edges], dim=[dim])
+    da_clipped = da.clip(min=bottom_clip, max=top_clip) if np.isfinite(bottom_clip) else da.clip(max=top_clip)
+    hist = histogram(da_clipped, bins=[bin_edges], dim=[dim])
 
     # Interpolate the quantile inside a single apply_ufunc over the bin dimension rather
     # than materialising the CDF and indexing it with a concrete idx_upper. The CDF is
@@ -670,34 +799,8 @@ def _compute_histogram_quantile_1d(
         threshold = threshold.drop_vars(f"{da.name}_bin")
     threshold = materialiser.pin_one(threshold)
 
-    # Validate threshold against bounds
-    upper_bound = bin_edges[-2]
-    lower_bound = bin_edges[3]  # We want this to be positive so that constant=0 anomalies will not be "extreme"
-
-    # One scheduler round-trip for the whole bounds check -- see the matching comment in
-    # the 2D path. The four reductions share their upstream, so computing them together
-    # costs a single pass instead of one traversal per predicate.
-    too_high = (threshold > upper_bound) & threshold.notnull()
-    too_low = (threshold < lower_bound) & threshold.notnull()
-    any_high, any_low, thr_max, thr_min = dask.compute(too_high.any(), too_low.any(), threshold.max(), threshold.min())
-
-    if bool(any_high):
-        warnings.warn(
-            f"Quantile values exceed expected range: max={float(thr_max):.4f} > {upper_bound:.4f}. "
-            f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) or using a lower percentile threshold.",
-            UserWarning,
-            stacklevel=2,
-        )
-
-    if bool(any_low):
-        warnings.warn(
-            f"Quantile values below expected range in some locations: min={float(thr_min):.4f} < {lower_bound:.4f}. "
-            "This is likely due to a constant anomaly in certain (e.g. due to sea ice). "
-            "Double check the computed threshold values are correct.",
-            UserWarning,
-            stacklevel=2,
-        )
-        # Set too low values to lower bound -- This is to ensure that constant=0 anomalies will not be "extreme"
-        threshold = materialiser.pin_one(threshold.where(~too_low, lower_bound))
+    # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
+    # with the 2D path.
+    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one)
 
     return threshold

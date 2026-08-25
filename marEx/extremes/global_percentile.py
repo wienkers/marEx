@@ -29,10 +29,18 @@ def _identify_extremes_constant(
     max_anomaly: float = 5.0,
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
+    tail: Literal["upper", "lower"] = "upper",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
-    Identify extreme events exceeding a constant (in time) percentile threshold.
+    Identify extreme events beyond a constant (in time) percentile threshold.
     i.e. There is 1 threshold for each spatial point, computed across all time.
+
+    ``tail`` selects which side of the distribution counts as extreme. The
+    threshold is the ``threshold_percentile``-th percentile either way -- the tail
+    changes only the comparison, so ``threshold_percentile=5, tail='lower'`` gives
+    the coldest 5 %. The lower tail is NOT implemented by negating the data: that
+    would add a full-size lazy op and make the returned thresholds mean something
+    other than what the caller asked for.
 
     Returns both the extreme events boolean mask and the thresholds used.
     """
@@ -73,6 +81,7 @@ def _identify_extremes_constant(
             precision=precision,
             max_anomaly=max_anomaly,
             materialiser=materialiser,
+            tail=tail,
         )
 
     # Clean up coordinates if needed
@@ -89,7 +98,7 @@ def _identify_extremes_constant(
     # Anchor the threshold before the comparison builds on it -- see the matching
     # comment in the seasonal path.
     threshold = materialiser.stage(threshold, threshold_label)
-    extremes = da >= threshold
+    extremes = (da >= threshold) if tail == "upper" else (da <= threshold)
 
     # Clean up coordinates if needed
     if "quantile" in extremes.coords:

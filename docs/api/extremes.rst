@@ -10,8 +10,16 @@ field plus the thresholds that defined it.
 
 ``seasonal_percentile`` resolves its thresholds on a within-year cycle inferred from
 the time coordinate (``dayofyear``, ``month`` or ``hourofyear``), overridable via
-``cycle=``; ``global_percentile`` uses no cycle at all. For method-selection guidance,
-worked examples, and the time-resolution table, see :doc:`../guide/detection`.
+``cycle=``; ``global_percentile`` uses no cycle at all.
+
+``tail='lower'`` flags the low side of the distribution (cold spells, drought) instead
+of the high side, and the histogram bins are symmetric about zero so both tails resolve
+at the same precision. The bin range itself (``max_anomaly``) is derived from the data
+when not supplied, which is what lets the defaults work on a variable that is not an
+SST anomaly in kelvin.
+
+For method-selection guidance, worked examples, and the tail, bin-geometry and
+time-resolution tables, see :doc:`../guide/detection`.
 
 .. autosummary::
    :nosignatures:

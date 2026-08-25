@@ -35,6 +35,7 @@ def preprocess_data(
     ] = "shifting_baseline",
     method_extreme: Literal["global_percentile", "seasonal_percentile"] = "seasonal_percentile",
     threshold_percentile: float = 95,
+    tail: Literal["upper", "lower"] = "upper",
     window_years: int = 15,
     smooth_days: int = 21,
     window_days: int = 11,
@@ -44,8 +45,9 @@ def preprocess_data(
     force_zero_mean: bool = True,
     reference_period: Optional[Tuple[int, int]] = None,
     method_percentile: Literal["exact", "approximate"] = "approximate",
-    precision: float = 0.01,
-    max_anomaly: float = 5.0,
+    precision: Optional[float] = None,
+    max_anomaly: Optional[float] = None,
+    n_bins: int = 1000,
     dask_chunks: Optional[Dict[str, int]] = None,
     compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
     scratch_dir: Optional[str] = None,
@@ -79,6 +81,12 @@ def preprocess_data(
         ``'global_percentile'``.
     threshold_percentile
         Percentile defining an extreme.
+    tail
+        Which side of the distribution counts as extreme. ``'upper'`` (default)
+        flags ``data >= threshold``; ``'lower'`` flags ``data <= threshold``, for
+        cold spells, drought, or any low-side extreme. The threshold is the
+        ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
+        is ``threshold_percentile=5, tail='lower'``.
     window_years, smooth_days
         Rolling-climatology parameters (``shifting_baseline`` only).
     window_days, window_spatial
@@ -92,8 +100,17 @@ def preprocess_data(
     reference_period
         ``(start_year, end_year)`` for the climatology (fixed-baseline methods
         only).
-    method_percentile, precision, max_anomaly
-        Percentile-estimation controls.
+    method_percentile
+        ``'approximate'`` (default) uses a histogram-based quantile; ``'exact'``
+        computes a true quantile per cell.
+    precision, max_anomaly, n_bins
+        Histogram bin geometry for ``method_percentile='approximate'``.
+        ``max_anomaly`` is the half-width of the binned range and ``precision`` the
+        bin width; ``n_bins`` (default 1000) derives whichever of the two is left
+        unset. With both unset the range is taken from the data, which is what makes
+        the defaults work on a variable that is not an SST anomaly in kelvin --
+        precipitation in mm/day, or pressure in Pa. Supplying ``precision=0.01``
+        alone reproduces the historical ``+/-5.0`` range exactly.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
     compute_mode, scratch_dir
@@ -171,7 +188,7 @@ def preprocess_data(
         )
 
         # Stage 2: extremes on the raw anomaly.
-        extremes, thresholds = _extremes_core(
+        extremes, thresholds, (used_precision, used_max_anomaly) = _extremes_core(
             ds.dat_anomaly,
             method_extreme,
             threshold_percentile,
@@ -180,10 +197,12 @@ def preprocess_data(
             method_percentile,
             precision,
             max_anomaly,
+            n_bins,
             dimensions,
             coordinates,
             materialiser,
             cycle=cycle,
+            tail=tail,
         )
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
@@ -198,7 +217,11 @@ def preprocess_data(
             # Same anchor as dat_anomaly: it is consumed as many times, so leaving it
             # lazy re-runs the harmonic fit per consumer.
             ds["dat_stn"] = materialiser.stage(ds.dat_stn, "dat_stn")
-            extremes_stn, thresholds_stn = _extremes_core(
+            # Resolved independently of the raw anomaly: `dat_stn` is in units of
+            # sigma, so a range derived from kelvin anomalies would not fit it. The
+            # attributes record the raw series' geometry, which is the one that
+            # produced `thresholds`.
+            extremes_stn, thresholds_stn, _ = _extremes_core(
                 ds.dat_stn,
                 method_extreme,
                 threshold_percentile,
@@ -207,11 +230,13 @@ def preprocess_data(
                 method_percentile,
                 precision,
                 max_anomaly,
+                n_bins,
                 dimensions,
                 coordinates,
                 materialiser,
                 threshold_label="thresholds_stn",
                 cycle=cycle,
+                tail=tail,
             )
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
@@ -233,7 +258,7 @@ def preprocess_data(
         # Merge the extremes stage's metadata onto the anomaly stage's. Each stage
         # appends its own steps, so the chained list reads in execution order.
         effective_window_spatial = _effective_window_spatial(method_extreme, window_spatial, dimensions, ds)
-        ds.attrs.update({"method_extreme": method_extreme, "threshold_percentile": threshold_percentile})
+        ds.attrs.update({"method_extreme": method_extreme, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
             method_extreme, window_days, effective_window_spatial
         )
@@ -241,7 +266,8 @@ def preprocess_data(
             ds.attrs.update({"window_days": window_days})
             if effective_window_spatial is not None:
                 ds.attrs.update({"window_spatial": effective_window_spatial})
-        ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
+        # The RESOLVED geometry, not what the caller passed -- see marEx.extremes.identify.
+        ds.attrs.update({"method_percentile": method_percentile, "precision": used_precision, "max_anomaly": used_max_anomaly})
 
         ds = finalise_dataset(
             ds,

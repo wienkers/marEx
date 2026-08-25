@@ -23,7 +23,7 @@ from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
-from .base import identify_extremes, resolve_window_spatial
+from .base import identify_extremes, resolve_bin_spec, resolve_window_spatial
 
 # Get module logger
 logger = get_logger(__name__)
@@ -75,13 +75,15 @@ def _extremes_core(
     window_days: int,
     window_spatial: Optional[int],
     method_percentile: str,
-    precision: float,
-    max_anomaly: float,
+    precision: Optional[float],
+    max_anomaly: Optional[float],
+    n_bins: int,
     dimensions: Dict[str, str],
     coordinates: Dict[str, str],
     materialiser: Materialiser,
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
+    tail: str = "upper",
 ):
     """
     Identify extremes, up to but not including output finalisation.
@@ -92,6 +94,12 @@ def _extremes_core(
     rather than a constant because a caller may run this stage twice on two
     different series (raw and standardised anomalies), and ``Materialiser``
     labels are single-owner: reusing one would raise.
+
+    Returns ``(extremes, thresholds, bin_spec)``. The bin geometry comes back
+    because it may have been DERIVED from the data, and the caller records what was
+    actually used in the output attributes. It is resolved per series, not once per
+    run: a standardised series is in units of sigma and has no reason to share a
+    range with the raw anomaly.
     """
     if method not in METHODS:
         raise ConfigurationError(
@@ -99,6 +107,14 @@ def _extremes_core(
             details=f"Supported methods are: {', '.join(METHODS)}",
             suggestions=[f"Use method='{METHODS[0]}' (the default)"],
         )
+
+    # Resolve the bin geometry ONCE, here, before anything is built on it. With both
+    # `precision` and `max_anomaly` unset this costs a fused min/max pass over the
+    # anomaly, so it must not happen twice -- `identify_extremes` re-resolves, but by
+    # then both are concrete and the call is a no-op. Skipped for the exact path, which
+    # builds no histogram.
+    bin_spec = (None, None) if method_percentile == "exact" else resolve_bin_spec(anomalies, precision, max_anomaly, n_bins)
+    precision, max_anomaly = bin_spec
 
     with log_timing(
         logger,
@@ -121,16 +137,19 @@ def _extremes_core(
             method_percentile,
             precision,
             max_anomaly,
+            n_bins=n_bins,
             materialiser=materialiser,
             threshold_label=threshold_label,
             cycle=cycle,
+            tail=tail,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
     # `thresholds` was already anchored inside the method module (before the comparison
     # that builds `extremes` was constructed on top of it), so this pin only covers
     # `extremes` itself in persist mode.
-    return materialiser.pin(extremes, thresholds)
+    extremes, thresholds = materialiser.pin(extremes, thresholds)
+    return extremes, thresholds, bin_spec
 
 
 def _log_extreme_summary(ds: xr.Dataset, materialiser: Materialiser) -> None:
@@ -156,11 +175,13 @@ def identify(
     method: Literal["seasonal_percentile", "global_percentile"] = "seasonal_percentile",
     *,
     threshold_percentile: float = 95,
+    tail: Literal["upper", "lower"] = "upper",
     window_days: int = 11,
     window_spatial: Optional[int] = None,
     method_percentile: Literal["exact", "approximate"] = "approximate",
-    precision: float = 0.01,
-    max_anomaly: float = 5.0,
+    precision: Optional[float] = None,
+    max_anomaly: Optional[float] = None,
+    n_bins: int = 1000,
     dask_chunks: Optional[Dict[str, int]] = None,
     compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
     scratch_dir: Optional[str] = None,
@@ -188,6 +209,12 @@ def identify(
         * ``'global_percentile'`` -- one constant-in-time threshold per cell.
     threshold_percentile
         Percentile defining an extreme, e.g. ``95``.
+    tail
+        Which side of the distribution counts as extreme. ``'upper'`` (default)
+        flags ``data >= threshold``; ``'lower'`` flags ``data <= threshold``, for
+        cold spells, drought, or any low-side extreme. The threshold is the
+        ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
+        is ``threshold_percentile=5, tail='lower'``.
     window_days
         Width of the rolling day-of-year window
         (``seasonal_percentile`` only).
@@ -199,10 +226,14 @@ def identify(
         ``'approximate'`` (default) uses a histogram-based quantile, which is
         what allows the reduction to stream. ``'exact'`` computes a true
         quantile and needs the full series resident per cell.
-    precision, max_anomaly
-        Histogram bin width and range for ``method_percentile='approximate'``.
-        The defaults suit anomalies of order a few kelvin; a variable on a very
-        different scale needs them set explicitly.
+    precision, max_anomaly, n_bins
+        Histogram bin geometry for ``method_percentile='approximate'``.
+        ``max_anomaly`` is the half-width of the binned range and ``precision`` the
+        bin width; ``n_bins`` (default 1000) derives whichever of the two is left
+        unset. With both unset the range is taken from the data, which is what makes
+        the defaults work on a variable that is not an SST anomaly in kelvin --
+        precipitation in mm/day, or pressure in Pa. Supplying ``precision=0.01``
+        alone reproduces the historical ``+/-5.0`` range exactly.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
     compute_mode
@@ -273,7 +304,7 @@ def identify(
     materialiser = Materialiser(compute_mode, staging_dir)
 
     with split_large_chunks():
-        extremes, thresholds = _extremes_core(
+        extremes, thresholds, (used_precision, used_max_anomaly) = _extremes_core(
             anomalies,
             method,
             threshold_percentile,
@@ -282,17 +313,19 @@ def identify(
             method_percentile,
             precision,
             max_anomaly,
+            n_bins,
             dimensions,
             coordinates,
             materialiser,
             cycle=cycle,
+            tail=tail,
         )
         ds = ds.copy()
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
 
         effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds)
-        ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile})
+        ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
             method, window_days, effective_window_spatial
         )
@@ -300,7 +333,9 @@ def identify(
             ds.attrs.update({"window_days": window_days})
             if effective_window_spatial is not None:
                 ds.attrs.update({"window_spatial": effective_window_spatial})
-        ds.attrs.update({"method_percentile": method_percentile, "precision": precision, "max_anomaly": max_anomaly})
+        # The RESOLVED geometry, not what the caller passed: with both left unset these
+        # were derived from the data, and the output has to say which bins produced it.
+        ds.attrs.update({"method_percentile": method_percentile, "precision": used_precision, "max_anomaly": used_max_anomaly})
 
         ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir, extra_dims=dims.extra)
 
