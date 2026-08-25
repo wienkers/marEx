@@ -21,6 +21,7 @@ other levels.
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import xarray as xr
@@ -200,6 +201,11 @@ class TestRankGuards:
         plotter = level.plotX(dimensions=DIMENSIONS, coordinates=DIMENSIONS)
         fig, ax, im = plotter.single_plot(marEx.plotX.PlotConfig(title="level 0"))
         assert im is not None
+        # Close it. This file sorts first, so a figure left open here stays the
+        # current figure for the whole session, and the mocked-pyplot tests in
+        # test_plotx.py then get a real Figure back from plt.colorbar's gcf()
+        # instead of their MagicMock.
+        plt.close(fig)
 
 
 class TestFinaliseChunksTheFieldNotTheAttachments:

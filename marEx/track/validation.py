@@ -40,6 +40,15 @@ def validate_rank(
     confusing failure about coordinate ranges.
     """
     expected = (timedim, xdim) if unstructured_grid else (timedim, ydim, xdim)
+
+    # A dimension the mapping names but the data does not carry is a *mapping* error,
+    # not an extra-dimension one. Every dim of the field then looks "unexpected", so
+    # reporting them as extra levels names the wrong problem -- exactly the failure
+    # this guard exists to avoid, in the other direction. Defer to the dimension
+    # validation downstream, which reports the bad mapping precisely.
+    if any(d is not None and d not in data_bin.dims for d in expected):
+        return
+
     unexpected = [str(d) for d in data_bin.dims if d not in expected]
     if not unexpected:
         return

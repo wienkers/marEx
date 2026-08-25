@@ -58,8 +58,9 @@ class TestNonDaskInputValidation:
 
     def test_compute_normalised_anomaly_non_dask_input(self, test_data_numpy, dimensions_gridded):
         """Test that compute_normalised_anomaly raises error for non-Dask inputs."""
-        # This will fail with TypeError when trying to access .chunks on non-Dask array
-        with pytest.raises(TypeError, match=r"'NoneType' object is not subscriptable"):
+        # The entry point rejects a numpy-backed array by name, rather than letting it
+        # fail deep inside a method-specific chunking call with an incidental TypeError.
+        with pytest.raises(DataValidationError, match=r"must be Dask-backed"):
             marEx.anomaly.compute_normalised_anomaly(
                 test_data_numpy,  # Non-Dask array
                 method_anomaly="detrend_harmonic",
@@ -170,10 +171,13 @@ class TestParameterValidation:
 
     def test_missing_dimensions_time(self, test_data_dask, dask_chunks):
         """Test error when dimensions parameter is missing required keys."""
-        # Test with missing x dimension - time gets default value, but missing x causes KeyError
+        # 'time' gets a default; a missing 'x' on a field that HAS a horizontal dimension
+        # must be rejected. Without the check it is not an error at all -- 'lon' is picked
+        # up as an extra (depth-like) dim and carried through, and the run completes with
+        # the horizontal axis silently demoted.
         incomplete_dimensions = {"y": "lat"}  # Missing 'time' and 'x'
 
-        with pytest.raises(KeyError, match=r"'x'"):
+        with pytest.raises(DataValidationError, match=r"missing the required 'x' entry"):
             marEx.preprocess_data(
                 test_data_dask,
                 dimensions=incomplete_dimensions,  # Missing required dimensions

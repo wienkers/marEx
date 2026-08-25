@@ -135,6 +135,32 @@ def _infer_dims_coords(
     if "time" not in dimensions:
         dimensions = {"time": "time", **dimensions}  # Permit partial default dimensions --> "time"
 
+    # A partial ``dimensions`` mapping must still name the horizontal axis, unless the
+    # field is a bare 1-D time series and has none to name. Without this check a mapping
+    # that omits 'x' -- a typo, or {"y": "lat"} -- is not an error at all: every unnamed
+    # dimension is picked up as an *extra* dim by ``core.dimensions.extra_dims`` and
+    # carried through as a broadcast axis, so the run completes with the horizontal axis
+    # silently demoted to a depth-like one. Checked before the coordinates branch below,
+    # which already assumes dimensions['x'] when it is present.
+    non_time_dims = [str(d) for d in da.dims if str(d) != dimensions["time"]]
+    if "x" not in dimensions and non_time_dims:
+        logger.error("Dimensions mapping does not name the horizontal 'x' dimension")
+        raise create_data_validation_error(
+            "Dimensions mapping is missing the required 'x' entry",
+            details=(
+                "'x' names the horizontal dimension (the cell dimension of an unstructured "
+                f"mesh, or the longitude axis of a grid). The data carries {non_time_dims} "
+                "beyond time, so one of them must be named as 'x'; the rest are detected "
+                "automatically and carried through as extra broadcast axes."
+            ),
+            suggestions=[
+                f"Add an 'x' entry, e.g. dimensions={{'time': '{dimensions['time']}', 'x': '{non_time_dims[-1]}'}}",
+                "For gridded data name both, e.g. dimensions={'time': 'time', 'x': 'lon', 'y': 'lat'}",
+                "Omit the dimensions parameter entirely to use the defaults",
+            ],
+            data_info={"dimensions": dimensions, "unnamed_dimensions": non_time_dims},
+        )
+
     # Handle coordinates parameter based on data structure.
     #
     # Gridded iff BOTH x and y are named. Testing "x present, y absent" instead would be

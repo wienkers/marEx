@@ -10,10 +10,11 @@ shifting baseline, fixed baseline, or detrended fixed baseline) based on the
 from typing import Dict, List, Literal, Optional, Tuple
 
 import xarray as xr
+from dask.base import is_dask_collection
 
 from ..core.compute_mode import Materialiser
 from ..core.validation import _infer_dims_coords
-from ..exceptions import ConfigurationError
+from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger
 from .fixed_baseline import _compute_anomaly_detrend_fixed_baseline, _compute_anomaly_fixed_baseline
 from .harmonic import _compute_anomaly_detrended
@@ -204,6 +205,22 @@ def compute_normalised_anomaly(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+
+    # Same guard as the ``anomaly.compute`` stage entry point. This function is a public
+    # entry point in its own right, and without the check a numpy-backed array fails deep
+    # inside a method-specific chunking call with an incidental KeyError/TypeError that
+    # names neither the input nor the fix.
+    if not is_dask_collection(da.data):
+        logger.error("Input DataArray is not Dask-backed - anomaly computation requires chunked data")
+        raise create_data_validation_error(
+            "Input DataArray must be Dask-backed",
+            details="Anomaly computation requires chunked data for efficient computation",
+            suggestions=[
+                "Convert to Dask array: da = da.chunk({'time': 30})",
+                "Load with chunking: xr.open_dataset('file.nc', chunks={'time': 30})",
+            ],
+            data_info={"data_type": type(da.data).__name__, "shape": da.shape},
+        )
 
     # Validate reference_period is only used with compatible methods
     if reference_period is not None and method_anomaly not in ("fixed_baseline", "detrend_fixed_baseline"):
