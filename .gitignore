@@ -12,7 +12,7 @@ build/
 .env
 
 # Local-only files (never commit)
-/CLAUDE.md
+CLAUDE.md
 backup/
 docs/superpowers/
 container/
@@ -29,6 +29,9 @@ docs/tutorials/unstructured/
 NEXT.md
 NEXT_PROMPT.md
 DONE.md
+DECISIONS.md
+QUESTIONS.md
+LEDGER.md
 
 # Local working/review docs — kept out of public history
 # Glob rather than one line per file: every report so far was added individually and the
