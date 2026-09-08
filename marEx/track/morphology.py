@@ -258,6 +258,12 @@ def fill_time_gaps(
     if T_fill == 0:
         return data_bin
 
+    # dask_image's overlap step calls ensure_minimum_chunksize: any time chunk shorter than
+    # the kernel depth is refilled from its neighbour, which SHIFTS an interior boundary and
+    # never shifts it back. Remember the input's layout so it can be restored below.
+    time_axis = data_bin.dims.index(timedim)
+    input_time_chunks = data_bin.chunks[time_axis] if data_bin.chunks is not None else None
+
     # Create temporal structuring element
     kernel_size = T_fill + 1  # This will then fill a maximum hole size of T_fill
     time_kernel = np.ones(kernel_size, dtype=bool)
@@ -284,13 +290,22 @@ def fill_time_gaps(
     )
 
     # Remove padding
+    data_bin_filled = data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)})
+
+    # Realign to the boundaries we were handed. Without this the tail chunk that the overlap
+    # step rebalanced stays rebalanced: a (..., 25, 1) record comes back as (..., 24, 2) and a
+    # (..., 3, 1) one as (..., 4). Both are illegal for zarr, which permits a short FINAL chunk
+    # and nothing else, so ObjectIDRegionWriter._initialise dies mid-merge under
+    # compute_mode="streaming" -- observed at n_time=951, time chunk 25, T_fill=4 (job
+    # 27272708). The realignment touches only the tail chunks, so it is not an all-to-all.
+    if input_time_chunks is not None and data_bin_filled.chunks is not None:
+        if data_bin_filled.chunks[time_axis] != input_time_chunks:
+            data_bin_filled = data_bin_filled.chunk({timedim: input_time_chunks})
+
     # _hold, not _anchor: the only consumer is the fill_holes call immediately below,
     # and the caller stages the RESULT (tracker.py:879). Staging here too would write
     # the whole field to zarr twice.
-    data_bin_filled = _hold(
-        data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)}),
-        materialiser,
-    )
+    data_bin_filled = _hold(data_bin_filled, materialiser)
 
     # Fill newly-created spatial holes
     data_bin_filled = fill_holes(
