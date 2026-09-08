@@ -231,7 +231,19 @@ class NannyWatcher(logging.Handler):
 
 
 class SpillSampler(threading.Thread):
-    """Sample bytes spilled to disk. Zero spill plus a low peak is the strong result."""
+    """Sample bytes resident in the workers' spill directories.
+
+    `max_disk` is the largest CONCURRENT total seen across a 5 s sampling grid, not the
+    cumulative bytes ever written: `SpillBuffer.spilled_total` falls again when a key is
+    dropped (measured -- deleting one of four spilled 1 MB keys took the total from
+    4000912 to 3000684 B).  A short spike between two samples is missed, so the figure is a
+    LOWER BOUND on the true peak.
+
+    `unmeasured` is the load-bearing field.  A probe that cannot read the number must never
+    report 0, because 0 is also a legitimate answer; see D-038 and D-041.
+    """
+
+    UNREADABLE = -1  # a spill buffer is present but its total could not be read
 
     def __init__(self, client, interval: float = 5.0) -> None:
         """Sample every `interval` seconds once start()ed; call stop() to end the thread."""
@@ -239,32 +251,51 @@ class SpillSampler(threading.Thread):
         self.client = client
         self.interval = interval
         self.max_disk = 0
-        self._stop = threading.Event()
+        self.unmeasured = False
+        # NOT `_stop`: that name shadows threading.Thread._stop(), which Thread.join()
+        # calls internally, so join() would raise "'Event' object is not callable".
+        self._stopped = threading.Event()
 
     @staticmethod
     def _probe(dask_worker):
-        disk = getattr(getattr(dask_worker, "data", None), "disk", None)
-        if disk is None:
-            return 0
+        """Bytes currently on disk for this worker, or UNREADABLE if a spill buffer hides them.
+
+        `worker.data` is a `SpillBuffer` when spilling is on, and its `spilled_total` is a
+        `SpilledSize(memory, disk)` namedtuple whose `disk` field is the compressed size
+        actually written.  With `--no-spill` it is a plain `dict` with no spill layer at all,
+        and 0 is then the true answer rather than a failure to measure.
+
+        Do NOT reach for `worker.data.disk.weight_by_key`: on distributed 2025.9.1
+        `worker.data.disk` is a `zict.cache.Cache` and has no such attribute, so that
+        expression raises AttributeError and a broad `except` turns it into a silent 0.  That
+        is the defect that made every leg of the campaign report `spill 0.00 GB` (D-041).
+        """
+        data = getattr(dask_worker, "data", None)
+        total = getattr(data, "spilled_total", None)
+        if total is None:
+            # No spill buffer at all (`--no-spill`, or a plain dict): nothing can be on disk.
+            return 0 if not hasattr(data, "slow") else SpillSampler.UNREADABLE
         try:
-            # `weight_by_key` holds SpilledSize NamedTuples, not ints. A bare sum() raises
-            # TypeError, and with a broad `except` that made this probe return 0 whether or
-            # not anything had spilled -- so every leg of the campaign reported "spill 0.00 GB"
-            # regardless. Sum the `disk` field explicitly.
-            return int(sum(v.disk for v in disk.weight_by_key.values()))
+            return int(getattr(total, "disk", total))
         except Exception:
-            return 0
+            return SpillSampler.UNREADABLE
 
     def run(self) -> None:  # noqa: D102
-        while not self._stop.wait(self.interval):
+        while not self._stopped.wait(self.interval):
             try:
                 per_worker = self.client.run(self._probe)
-                self.max_disk = max(self.max_disk, sum(int(v) for v in per_worker.values() if isinstance(v, (int, float))))
             except Exception:
                 continue
+            values = [v for v in per_worker.values() if isinstance(v, (int, float))]
+            if len(values) != len(per_worker) or any(v < 0 for v in values):
+                # Never sum a sentinel into a total: three workers at -1 and one at +3 would
+                # cancel to 0, which is exactly the failure this class exists to prevent.
+                self.unmeasured = True
+                continue
+            self.max_disk = max(self.max_disk, sum(int(v) for v in values))
 
     def stop(self) -> None:  # noqa: D102
-        self._stop.set()
+        self._stopped.set()
 
 
 class PersistAccountant:
@@ -485,7 +516,8 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         elapsed_s=elapsed,
         peak_cluster_bytes=peak,
         mean_cluster_bytes=mean,
-        spill_max_disk_bytes=spill.max_disk,
+        spill_max_disk_bytes=None if spill.unmeasured else spill.max_disk,
+        spill_unmeasured=spill.unmeasured,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
@@ -495,7 +527,8 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
 
     print(
         f"[{args.label}] {outcome}  wall {elapsed:.1f} s  peak {peak / GB:.1f} GB  "
-        f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  spill {spill.max_disk / GB:.2f} GB  "
+        f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  "
+        f"spill {'UNMEASURED' if spill.unmeasured else f'{spill.max_disk / GB:.2f} GB'}  "
         f"nanny-memory-events {len(watcher.events)}",
         flush=True,
     )
