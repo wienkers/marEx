@@ -286,6 +286,16 @@ class SpillSampler(threading.Thread):
     compared against the per-worker managed fraction; recording both here makes that comparison
     possible without a second round trip.  Its `unmeasured` flag is independent: managed bytes
     failing to read never suppresses a disk measurement, and vice versa.
+
+    `max_process_worker` is the THIRD quantity, and it is a different threshold, not a finer
+    reading of the second.  `WorkerMemoryManager.memory_monitor` (distributed 2025.9.1,
+    worker_memory.py:213) calls `worker.monitor.get_process_memory()` -- process RSS -- and
+    compares `memory / self.memory_limit` against `memory.spill` (0.7) and `memory.pause` (0.8),
+    while `memory.target` (0.6) compares the MANAGED bytes above.  A leg can therefore sit at
+    44 % of target and still cross spill on unmanaged memory, so "the target path was never
+    approached" does not imply "the leg never approached spilling".  This polled series is a
+    5 s LOWER BOUND and exists as a cross-check; the primary per-worker RSS instrument is
+    `harvest_process_history`, which reads dask's own 500 ms history at the end of the run.
     """
 
     UNREADABLE = -1  # a value is present in principle but could not be read
@@ -306,18 +316,23 @@ class SpillSampler(threading.Thread):
         self.max_managed_total = 0
         self.managed_unmeasured = False
         self.managed_samples_ok = 0
+        self.max_process_worker = 0
+        self.max_process_total = 0
+        self.process_unmeasured = False
+        self.process_samples_ok = 0
         # NOT `_stop`: that name shadows threading.Thread._stop(), which Thread.join()
         # calls internally, so join() would raise "'Event' object is not callable".
         self._stopped = threading.Event()
 
     @staticmethod
     def _probe(dask_worker):
-        """`{"disk": ..., "managed": ...}` for this worker; either field may be UNREADABLE.
+        """`{"disk", "managed", "process"}` for this worker; any field may be UNREADABLE.
 
         `disk` is the bytes currently in the spill directory, `managed` the bytes zict is
         holding in memory -- the quantity `distributed.worker.memory.target` thresholds on,
-        per worker.  Each carries its own UNREADABLE sentinel so that one being unreadable
-        never contaminates the other.
+        per worker -- and `process` this worker's RSS, the quantity
+        `distributed.worker.memory.spill` and `.pause` threshold on.  Each carries its own
+        UNREADABLE sentinel so that one being unreadable never contaminates the others.
 
         `worker.data` is a `SpillBuffer` when spilling is on, and its `spilled_total` is a
         `SpilledSize(memory, disk)` namedtuple whose `disk` field is the compressed size
@@ -330,10 +345,20 @@ class SpillSampler(threading.Thread):
         is the defect that made every leg of the campaign report `spill 0.00 GB` (D-041).
         """
         unreadable = SpillSampler.UNREADABLE
+
+        # RSS is read FIRST and unconditionally. It comes from the SystemMonitor, not from the
+        # data store, so a worker handing us no store must still be able to report its process
+        # memory: coupling them made an unreadable `data` silently unmeasure a quantity that was
+        # perfectly readable (falsifier, 2026-09-08, finding 6).
+        try:
+            process = int(dask_worker.monitor.get_process_memory())
+        except Exception:
+            process = unreadable
+
         data = getattr(dask_worker, "data", None)
         if data is None:
             # Not "nothing spilled" -- we were handed no store to look at.
-            return {"disk": unreadable, "managed": unreadable}
+            return {"disk": unreadable, "managed": unreadable, "process": process}
 
         total = getattr(data, "spilled_total", None)
         if total is None:
@@ -355,18 +380,19 @@ class SpillSampler(threading.Thread):
         except Exception:
             managed = unreadable
 
-        return {"disk": disk, "managed": managed}
+        return {"disk": disk, "managed": managed, "process": process}
 
     def _latch_all(self) -> None:
         """Mark BOTH quantities unmeasured.
 
         For a failure of the round trip itself -- it raised, nobody answered, the sample was
-        narrower or wider than the cluster, the replies were not readings -- neither quantity
-        was sampled. Latching only `unmeasured` here would leave the managed series claiming a
+        narrower or wider than the cluster, the replies were not readings -- no quantity was
+        sampled. Latching only `unmeasured` here would leave the other series claiming a
         coverage the disk series had just rejected on identical evidence.
         """
         self.unmeasured = True
         self.managed_unmeasured = True
+        self.process_unmeasured = True
 
     def run(self) -> None:  # noqa: D102
         while not self._stopped.wait(self.interval):
@@ -412,8 +438,161 @@ class SpillSampler(threading.Thread):
                 self.max_managed_worker = max(self.max_managed_worker, max(managed))
                 self.max_managed_total = max(self.max_managed_total, sum(managed))
 
+            # Independent again, for the same reason: RSS is thresholded by `memory.spill`,
+            # managed bytes by `memory.target`, and a failure to read one says nothing about
+            # the other.  A build that reported one when it had only measured the other is the
+            # category error D-042 was amended for.
+            process = [v.get("process") for v in values]
+            if not all(_is_count(p) for p in process):
+                self.process_unmeasured = True
+            else:
+                self.process_samples_ok += 1
+                self.max_process_worker = max(self.max_process_worker, max(process))
+                self.max_process_total = max(self.max_process_total, sum(process))
+
     def stop(self) -> None:  # noqa: D102
         self._stopped.set()
+
+
+def _prochist_dead() -> dict:
+    """Return the process-history fields as they read when nothing was measured.
+
+    One definition, used by `harvest_process_history` on every failure path AND by its caller
+    when the harvest itself is abandoned, so that "we did not measure" cannot be written two
+    ways -- one of which some later `_measured` clause forgets to reject.
+    """
+    return {
+        "prochist_unmeasured": True,
+        "prochist_samples_ok": 0,
+        "prochist_workers_sampled": None,
+        "prochist_max_worker_bytes": None,
+        "prochist_max_worker_fraction": None,
+        "prochist_per_worker_max_bytes": None,
+        "prochist_worker_limit_bytes": None,
+        "prochist_spill_fraction": None,
+        "prochist_target_fraction": None,
+        "prochist_pause_fraction": None,
+        "prochist_covers_whole_run": None,
+        "prochist_median_dt_s": None,
+        "prochist_span_s": None,
+        "prochist_span_s_source": None,
+    }
+
+
+def _worker_process_history(dask_worker):
+    """Return this worker's own RSS history, plus the thresholds that history is compared against.
+
+    `SystemMonitor.update` records `get_process_memory()` into `quantities["memory"]` on a
+    PeriodicCallback driven by `distributed.admin.system-monitor.interval` (500 ms by default),
+    keeping `...system-monitor.log-length` samples (7200, so 3600 s at that cadence).  Reading
+    it once at the end of a run therefore yields the per-worker RSS series at dask's NATIVE
+    resolution over the whole run -- the instrument `memory.spill` itself effectively uses --
+    where a 5 s poller can only offer a lower bound between its samples.
+
+    That holds only while `count <= maxlen`.  Past that the deque has wrapped and the series
+    covers the tail of the run alone, so `count` and `maxlen` are both returned and the caller
+    decides; inferring "whole run" from a full deque would be exactly the silent-undercount
+    failure D-041 and D-042 are about.
+
+    Returns `{"error": ...}` rather than a partial dict if either read fails: a missing series
+    must never reach a summary as a zero.
+    """
+    out = {}
+    try:
+        monitor = dask_worker.monitor
+        out["memory"] = [int(v) for v in monitor.quantities["memory"]]
+        out["time"] = [float(v) for v in monitor.quantities["time"]]
+        out["count"] = int(monitor.count)
+        out["maxlen"] = None if monitor.maxlen is None else int(monitor.maxlen)
+    except Exception as exc:
+        return {"error": f"monitor unreadable: {type(exc).__name__}"}
+    try:
+        manager = dask_worker.memory_manager
+        out["limit"] = int(manager.memory_limit)
+        out["spill_fraction"] = manager.memory_spill_fraction
+        out["target_fraction"] = manager.memory_target_fraction
+        out["pause_fraction"] = manager.memory_pause_fraction
+    except Exception as exc:
+        return {"error": f"memory_manager unreadable: {type(exc).__name__}"}
+    return out
+
+
+def harvest_process_history(client, n_workers: int, outdir=None, label: str = "leg"):
+    """Collect every worker's RSS history and reduce it to summary fields.
+
+    `n_workers` is the REQUESTED count, for the same reason `SpillSampler` takes it: a reply
+    from a strict subset of the cluster under-counts a maximum exactly like an unreadable
+    field does, and a width learned from the reply can never fail its own check.
+
+    Every failure path -- the round trip raising, a narrow or wide reply, a worker returning
+    an error, an empty series -- yields `prochist_unmeasured True` and `None` byte counts.
+    There is deliberately no partial answer: three workers' maxima with the fourth missing
+    would print as a per-worker maximum while being a maximum over three quarters of a cluster.
+
+    Returns `(fields, series)`; `series` maps worker address to `(times, rss_bytes)` and is
+    written to `<label>_procseries.npz` when `outdir` is given.
+    """
+    import numpy as np
+
+    dead = _prochist_dead()
+    try:
+        replies = client.run(_worker_process_history)
+    except Exception:
+        return dict(dead), {}
+    if not replies or len(replies) != int(n_workers):
+        return dict(dead, prochist_workers_sampled=len(replies) if replies else 0), {}
+    if not all(isinstance(v, dict) and "error" not in v and v.get("memory") for v in replies.values()):
+        return dict(dead, prochist_workers_sampled=len(replies)), {}
+    per_worker_max = [max(v["memory"]) for v in replies.values()]
+    limits = [v["limit"] for v in replies.values()]
+    if not all(isinstance(m, int) and m >= 0 for m in per_worker_max) or not all(v > 0 for v in limits):
+        return dict(dead, prochist_workers_sampled=len(replies)), {}
+
+    # The fraction is per worker against ITS OWN limit, then maximised -- not the maximum RSS
+    # over one worker's limit.  With equal limits the two agree; with unequal ones only the
+    # former is the quantity `memory_monitor` computes.
+    fractions = [m / lim for m, lim in zip(per_worker_max, limits)]
+    dts = []
+    for v in replies.values():
+        times = v["time"]
+        dts.extend(t2 - t1 for t1, t2 in zip(times, times[1:]))
+    dts.sort()
+
+    fields = {
+        "prochist_unmeasured": False,
+        "prochist_samples_ok": min(len(v["memory"]) for v in replies.values()),
+        "prochist_workers_sampled": len(replies),
+        "prochist_max_worker_bytes": max(per_worker_max),
+        "prochist_max_worker_fraction": max(fractions),
+        "prochist_per_worker_max_bytes": sorted(per_worker_max),
+        "prochist_worker_limit_bytes": sorted({int(v) for v in limits}),
+        "prochist_spill_fraction": sorted({v["spill_fraction"] for v in replies.values()}, key=str),
+        "prochist_target_fraction": sorted({v["target_fraction"] for v in replies.values()}, key=str),
+        "prochist_pause_fraction": sorted({v["pause_fraction"] for v in replies.values()}, key=str),
+        # False means the deque wrapped: the maximum is then over the retained tail only, and
+        # is a lower bound on the run's maximum rather than the run's maximum.
+        "prochist_covers_whole_run": all(v["maxlen"] is None or v["count"] <= v["maxlen"] for v in replies.values()),
+        "prochist_median_dt_s": (dts[len(dts) // 2] if dts else None),
+        # `covers_whole_run` is `count <= maxlen`, and a worker RESTART resets `count`, so it
+        # reads True over a post-restart TAIL. The span does not: it is the wall time the
+        # narrowest worker's series actually covers, and a consumer compares it against
+        # `elapsed_s` (falsifier, 2026-09-08, finding 13).
+        "prochist_span_s": min(max(v["time"]) - min(v["time"]) for v in replies.values()),
+        # Names where the span came from, and it is READ by report.py's licence rather than
+        # left in a sibling key nothing consumes. A value derived after the fact from a
+        # persisted artefact is defensible; a figure that cannot be told apart from one the
+        # run itself wrote is not, because the distinction stops travelling with the row.
+        "prochist_span_s_source": "run",
+    }
+    series = {addr: (np.asarray(v["time"], dtype=float), np.asarray(v["memory"], dtype=float)) for addr, v in replies.items()}
+    if outdir is not None:
+        flat = {}
+        for i, (addr, (t, m)) in enumerate(sorted(series.items())):
+            flat[f"w{i}_time"] = t
+            flat[f"w{i}_rss"] = m
+            flat[f"w{i}_addr"] = np.asarray([addr])
+        np.savez(Path(outdir) / f"{label}_procseries.npz", **flat)
+    return fields, series
 
 
 class PersistAccountant:
@@ -627,6 +806,17 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
     except Exception:
         peak = mean = float("nan")
 
+    # Bounded: a worker that died mid-run can leave `client.run` waiting forever, and an
+    # instrument must never be able to cost the leg its wall clock.  A timeout is a failure to
+    # measure, which is what `prochist_unmeasured` says.
+    try:
+        with deadline(60):
+            prochist, _ = harvest_process_history(client, args.workers, outdir=outdir, label=args.label)
+    except (Exception, DeadlineExceeded):
+        # Deliberately NOT BaseException: a KeyboardInterrupt or SystemExit landing inside this
+        # 60 s window would otherwise be swallowed and the leg written out as "finished".
+        prochist = _prochist_dead()
+
     summary.update(
         status="finished",
         outcome=outcome,
@@ -642,6 +832,11 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         managed_max_total_bytes=None if (spill.managed_unmeasured or spill.managed_samples_ok == 0) else spill.max_managed_total,
         managed_unmeasured=bool(spill.managed_unmeasured or spill.managed_samples_ok == 0),
         managed_samples_ok=spill.managed_samples_ok,
+        process_max_worker_bytes=None if (spill.process_unmeasured or spill.process_samples_ok == 0) else spill.max_process_worker,
+        process_max_total_bytes=None if (spill.process_unmeasured or spill.process_samples_ok == 0) else spill.max_process_total,
+        process_unmeasured=bool(spill.process_unmeasured or spill.process_samples_ok == 0),
+        process_samples_ok=spill.process_samples_ok,
+        **prochist,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
@@ -651,6 +846,19 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
 
     managed_dead = spill.managed_unmeasured or spill.managed_samples_ok == 0
     managed_text = "UNMEASURED" if managed_dead else f"{spill.max_managed_worker / GB:.2f} GB"
+    process_dead = spill.process_unmeasured or spill.process_samples_ok == 0
+    polled_text = "UNMEASURED" if process_dead else f"{spill.max_process_worker / GB:.2f} GB"
+    if prochist["prochist_unmeasured"]:
+        proc_text = "UNMEASURED"
+    else:
+        proc_text = (
+            f"{prochist['prochist_max_worker_bytes'] / GB:.2f} GB "
+            f"({100 * prochist['prochist_max_worker_fraction']:.1f}% of limit, "
+            f"spill at {prochist['prochist_spill_fraction']}, "
+            f"whole-run={prochist['prochist_covers_whole_run']}, "
+            f"span {prochist['prochist_span_s']:.0f} s vs wall {elapsed:.0f} s, "
+            f"n={prochist['prochist_samples_ok']} @ {prochist['prochist_median_dt_s']:.2f} s)"
+        )
     print(
         f"[{args.label}] {outcome}  wall {elapsed:.1f} s  peak {peak / GB:.1f} GB  "
         f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  "
@@ -658,6 +866,9 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         f" (n={spill.samples_ok}/{spill.workers_expected}w)  "
         f"managed/worker {managed_text}"
         f" (n={spill.managed_samples_ok})  "
+        f"rss/worker {proc_text}  "
+        f"rss/worker-polled {polled_text}"
+        f" (n={spill.process_samples_ok})  "
         f"nanny-memory-events {len(watcher.events)}",
         flush=True,
     )
