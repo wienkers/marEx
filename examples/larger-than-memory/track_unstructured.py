@@ -2,11 +2,14 @@
 """Larger-than-memory squeeze: `marEx.tracker` on an unstructured (ICON) mesh.
 
 14,886,338 cells, so one whole int32 ID field is 59.5 MB *per timestep*: 65.3 GB over the
-1096-day record.  ``persist`` holds several of those simultaneously and cannot run this at
-any single-node budget; the streaming path completed the same record with a measured peak
-of 116.8 GB.  This is the leg where the feasibility claim is least ambiguous, and also the
-one where no bit-identity reference can exist at full length, because the persist side
-produces no field to compare against.
+1096-day record.  ``persist`` holds several of those simultaneously.  Given room it copes --
+it completed the full record in 4297 s at a 192 GB budget and in 7489 s at 72 GB -- but
+squeezed to 4 x 8 GB = 32 GB it did not finish within 5 h on either of two replicates,
+while ``streaming`` finished in 3 h 50 min.  That is the claim this leg supports, and it is
+a five-hour statement rather than a proof of infeasibility: the persist runs were stopped by
+this script's own deadline, not by an out-of-memory kill.  No same-budget bit-identity
+reference exists at full length either, because the persist side produced no field to
+compare against; the reductions are checked against the 72 GB and 192 GB runs instead.
 
 ``ncells`` stays whole on purpose -- the tracker is global in space.  Time is the lever,
 and the iterative merge algorithm prefers larger time chunks.

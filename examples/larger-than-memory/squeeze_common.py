@@ -112,9 +112,10 @@ def build_cluster(args) -> tuple:
     # mean RAM, and the outcome would be binary.  Measured, it does the opposite.  A worker
     # that crosses `pause` can no longer spill its way back down, so it pauses permanently and
     # the cluster deadlocks; and peak memory RISES, because everything that would have spilled
-    # stays resident.  On the unstructured tracker the same configuration that completes in
-    # 54 min at 116.8 GB peak with spilling on was killed at 169.5 GB peak with it off.  Both
-    # modes then fail, and a leg where neither mode completes proves nothing about either.
+    # stays resident.  On the unstructured tracker at 192 GB, the same configuration that
+    # completes in 70 min at 118.7 GB peak with spilling on (f4_stream 27255851) was killed at
+    # 169.5 GB peak with it off.  Both modes then fail, and a leg where neither mode completes
+    # proves nothing about either.
     spill_config = (
         {}
         if args.spill
@@ -246,7 +247,11 @@ class SpillSampler(threading.Thread):
         if disk is None:
             return 0
         try:
-            return int(sum(disk.weight_by_key.values()))
+            # `weight_by_key` holds SpilledSize NamedTuples, not ints. A bare sum() raises
+            # TypeError, and with a broad `except` that made this probe return 0 whether or
+            # not anything had spilled -- so every leg of the campaign reported "spill 0.00 GB"
+            # regardless. Sum the `disk` field explicitly.
+            return int(sum(v.disk for v in disk.weight_by_key.values()))
         except Exception:
             return 0
 
