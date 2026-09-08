@@ -739,6 +739,71 @@ def classify_failure(exc: BaseException, watcher: NannyWatcher) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# How many times did the graph actually run?
+# --------------------------------------------------------------------------------------
+# `lazy` mode's whole cost model is "the anomaly graph is re-executed once per consumer".
+# Nothing in this harness could count that: bytes pinned prove laziness, wall clock is a
+# proxy that mixes in scheduling and I/O, and neither is the number the claim states.
+#
+# `Scheduler.task_prefixes[prefix].state_counts` is that number.  It is CUMULATIVE and it
+# outlives the tasks: a prefix keeps counting after its tasks are released and forgotten,
+# so the `memory` entry is "how many tasks under this prefix ever completed", summed over
+# every `.compute()` in the leg.  Running the same graph three times triples it (verified:
+# 16 -> 48 for a `sum` prefix across three computes on a two-worker LocalCluster).
+#
+# Read the RATIO between modes on a prefix that all three modes share -- the ones that read
+# the input store -- not the absolute total: `streaming` adds zarr write/read prefixes that
+# `persist` does not have, so the totals are not comparable across modes and the per-prefix
+# counts are.
+def _scheduler_task_prefix_counts(dask_scheduler):
+    """Cumulative completed-task count per prefix, read on the scheduler."""
+    out = {}
+    for name, prefix in dask_scheduler.task_prefixes.items():
+        counts = dict(getattr(prefix, "state_counts", {}) or {})
+        out[str(name)] = {str(k): int(v) for k, v in counts.items()}
+    return out
+
+
+def harvest_task_prefix_counts(client) -> dict:
+    """Harvest the per-prefix cumulative completion counts, or say it was not measured.
+
+    Returns the `taskcount_*` block for the summary.  A build without the instrument, a
+    scheduler that does not answer, and a scheduler that answers with nothing all read
+    UNMEASURED -- an empty answer is not a zero, exactly as with the spill sampler.
+    """
+    dead = {
+        "taskcount_by_prefix": None,
+        "taskcount_total_completed": None,
+        "taskcount_n_prefixes": 0,
+        "taskcount_unmeasured": True,
+        "taskcount_error": None,
+    }
+    try:
+        by_prefix = client.run_on_scheduler(_scheduler_task_prefix_counts)
+    except Exception as exc:  # noqa: BLE001 - a failure to measure is a reportable outcome
+        dead["taskcount_error"] = f"{type(exc).__name__}: {exc}"[:400]
+        return dead
+    if not isinstance(by_prefix, dict) or not by_prefix:
+        dead["taskcount_error"] = f"scheduler returned {type(by_prefix).__name__} of length 0"
+        return dead
+    completed = {k: int(v.get("memory", 0)) for k, v in by_prefix.items()}
+    if not any(completed.values()):
+        # Every prefix at zero means the counter never incremented; that is the broken-probe
+        # shape (D-038), not a run in which no task completed.
+        dead["taskcount_by_prefix"] = completed
+        dead["taskcount_n_prefixes"] = len(completed)
+        dead["taskcount_error"] = "every prefix reports 0 completions"
+        return dead
+    return {
+        "taskcount_by_prefix": completed,
+        "taskcount_total_completed": int(sum(completed.values())),
+        "taskcount_n_prefixes": len(completed),
+        "taskcount_unmeasured": False,
+        "taskcount_error": None,
+    }
+
+
+# --------------------------------------------------------------------------------------
 # The leg runner
 # --------------------------------------------------------------------------------------
 def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
@@ -817,6 +882,19 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         # 60 s window would otherwise be swallowed and the leg written out as "finished".
         prochist = _prochist_dead()
 
+    # Same bound, same reasoning: an instrument must never cost the leg its wall clock.
+    try:
+        with deadline(60):
+            taskcounts = harvest_task_prefix_counts(client)
+    except (Exception, DeadlineExceeded):
+        taskcounts = {
+            "taskcount_by_prefix": None,
+            "taskcount_total_completed": None,
+            "taskcount_n_prefixes": 0,
+            "taskcount_unmeasured": True,
+            "taskcount_error": "harvest exceeded its 60 s bound",
+        }
+
     summary.update(
         status="finished",
         outcome=outcome,
@@ -837,6 +915,7 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         process_unmeasured=bool(spill.process_unmeasured or spill.process_samples_ok == 0),
         process_samples_ok=spill.process_samples_ok,
         **prochist,
+        **taskcounts,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
@@ -859,6 +938,10 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
             f"span {prochist['prochist_span_s']:.0f} s vs wall {elapsed:.0f} s, "
             f"n={prochist['prochist_samples_ok']} @ {prochist['prochist_median_dt_s']:.2f} s)"
         )
+    if taskcounts["taskcount_unmeasured"]:
+        taskcount_text = f"UNMEASURED ({taskcounts['taskcount_error']})"
+    else:
+        taskcount_text = f"{taskcounts['taskcount_total_completed']} over {taskcounts['taskcount_n_prefixes']} prefixes"
     print(
         f"[{args.label}] {outcome}  wall {elapsed:.1f} s  peak {peak / GB:.1f} GB  "
         f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  "
@@ -869,6 +952,7 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         f"rss/worker {proc_text}  "
         f"rss/worker-polled {polled_text}"
         f" (n={spill.process_samples_ok})  "
+        f"tasks-completed {taskcount_text}  "
         f"nanny-memory-events {len(watcher.events)}",
         flush=True,
     )

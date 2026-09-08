@@ -104,6 +104,45 @@ def prochist_measured(row) -> bool:
     return elapsed - slack <= span <= elapsed + slack
 
 
+def input_reads(row, prefix: str = "open_dataset-sst"):
+    """Completions of ONE named input-reading prefix, or why the figure may not be read.
+
+    `taskcount_by_prefix` counts completed tasks per scheduler task prefix, cumulatively over
+    the whole leg. Three separate things can make that number uninterpretable, and each is
+    named rather than folded into a bare count:
+
+    * a leg that did not COMPLETE. Falsifier gate 5, finding 9: a leg that raised
+      `ConfigurationError` after 2.2 s, having computed nothing of the science, still reported
+      `taskcount_unmeasured` False with 50 completions over 8 prefixes -- those are the setup
+      graph. "The harvest answered" is not "the graph ran".
+    * a leg with `nanny_memory_events > 0`. A restarted worker's lost tasks are re-run, and
+      this counter counts that re-execution with the same increment as a mode's recompute.
+    * summing across prefixes. `streaming` re-reads its own staged zarrs, which also carry
+      `open_dataset*` prefixes (`compute_mode.py` stages `dat_anomaly`, `thresholds`,
+      `dat_stn`), so an `open_dataset*` SUM is not comparable across modes. One named prefix,
+      passed in, or nothing.
+
+    A leg predating the instrument has no `taskcount_unmeasured` key at all; ABSENT reads
+    UNMEASURED, never 0, for the same reason the spill column does (D-038).
+
+    NOTE the figure this returns is NOT yet licensed as "how many times the anomaly graph ran".
+    Falsifier gate 5, finding 10 falsified that reading of `open_dataset-sst`: dask fuses the
+    prefix away in a plain `.sum()` graph and it survives only where a rechunk blocks fusion,
+    so its count is not one-per-graph-execution. The column reports what was counted; it does
+    not claim what the count means.
+    """
+    if row.get("taskcount_unmeasured") is not False:
+        return "UNMEASURED"
+    if row.get("outcome") != "completed":
+        return f"VOID ({row.get('outcome')})"
+    if row.get("nanny_memory_events"):
+        return f"VOID ({row.get('nanny_memory_events')} nanny restarts)"
+    by_prefix = row.get("taskcount_by_prefix") or {}
+    if prefix not in by_prefix:
+        return "no such prefix"
+    return str(by_prefix[prefix])
+
+
 def main() -> None:
     """Collate the outdir's summary JSONs into the feasibility and equivalence tables."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -119,8 +158,8 @@ def main() -> None:
 
     header = (
         "| leg | mode | n_time | input | input chunk | cluster RAM | outcome | peak | pinned "
-        "| spill | managed/worker | rss/worker | nanny | wall |\n"
-        "|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"
+        "| spill | managed/worker | rss/worker | open_dataset-sst | nanny | wall |\n"
+        "|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     print(header)
     for r in rows:
@@ -165,6 +204,7 @@ def main() -> None:
             f"{fmt(r.get('input_bytes'))} | {fmt(r.get('input_chunk_bytes'), 3)} | "
             f"{fmt(r.get('cluster_memory_limit_bytes'))} | {outcome} | "
             f"{fmt(r.get('peak_cluster_bytes'))} | {fmt(pinned, 3)} | {spill} | {managed} | {proc} | "
+            f"{input_reads(r)} | "
             f"{r.get('nanny_memory_events', '-')} | {f'{wall:.0f} s' if wall else '-'} |"
         )
 
