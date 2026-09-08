@@ -52,12 +52,15 @@ def main() -> None:
         else:
             outcome = "-"
         pinned = (r.get("persist") or {}).get("total_bytes")
+        # A null spill is not a missing spill: legs run before 2026-09-08, and any leg whose
+        # sampler never sampled, cannot distinguish "nothing spilled" from "never measured".
+        spill = "UNMEASURED" if r.get("spill_unmeasured") else fmt(r.get("spill_max_disk_bytes"), 2)
         wall = r.get("elapsed_s")
         print(
             f"| {r.get('label')} | {r.get('compute_mode')} | {r.get('n_time', '-')} | "
             f"{fmt(r.get('input_bytes'))} | {fmt(r.get('input_chunk_bytes'), 3)} | "
             f"{fmt(r.get('cluster_memory_limit_bytes'))} | {outcome} | "
-            f"{fmt(r.get('peak_cluster_bytes'))} | {fmt(pinned, 3)} | {fmt(r.get('spill_max_disk_bytes'), 2)} | "
+            f"{fmt(r.get('peak_cluster_bytes'))} | {fmt(pinned, 3)} | {spill} | "
             f"{r.get('nanny_memory_events', '-')} | {f'{wall:.0f} s' if wall else '-'} |"
         )
 

@@ -239,8 +239,10 @@ class SpillSampler(threading.Thread):
     4000912 to 3000684 B).  A short spike between two samples is missed, so the figure is a
     LOWER BOUND on the true peak.
 
-    `unmeasured` is the load-bearing field.  A probe that cannot read the number must never
-    report 0, because 0 is also a legitimate answer; see D-038 and D-041.
+    `unmeasured` and `samples_ok` are the load-bearing fields.  A probe that cannot read the
+    number must never report 0, because 0 is also a legitimate answer; see D-038 and D-041.
+    `samples_ok` is what distinguishes "sampled every 5 s and never saw a byte on disk" from
+    "never managed to sample at all" -- without it those two are the same `max_disk = 0`.
     """
 
     UNREADABLE = -1  # a spill buffer is present but its total could not be read
@@ -252,6 +254,7 @@ class SpillSampler(threading.Thread):
         self.interval = interval
         self.max_disk = 0
         self.unmeasured = False
+        self.samples_ok = 0
         # NOT `_stop`: that name shadows threading.Thread._stop(), which Thread.join()
         # calls internally, so join() would raise "'Event' object is not callable".
         self._stopped = threading.Event()
@@ -271,10 +274,14 @@ class SpillSampler(threading.Thread):
         is the defect that made every leg of the campaign report `spill 0.00 GB` (D-041).
         """
         data = getattr(dask_worker, "data", None)
+        if data is None:
+            # Not "nothing spilled" -- we were handed no store to look at.
+            return SpillSampler.UNREADABLE
         total = getattr(data, "spilled_total", None)
         if total is None:
-            # No spill buffer at all (`--no-spill`, or a plain dict): nothing can be on disk.
-            return 0 if not hasattr(data, "slow") else SpillSampler.UNREADABLE
+            # A plain dict (`--no-spill`) has no spill layer, so 0 is the true answer. Anything
+            # that DOES have a spill layer but no readable total is a failure, not a zero.
+            return 0 if isinstance(data, dict) and not hasattr(data, "slow") else SpillSampler.UNREADABLE
         try:
             return int(getattr(total, "disk", total))
         except Exception:
@@ -285,6 +292,12 @@ class SpillSampler(threading.Thread):
             try:
                 per_worker = self.client.run(self._probe)
             except Exception:
+                # A sampler that never sampled must not look like a sampler that saw zero.
+                self.unmeasured = True
+                continue
+            if not per_worker:
+                # No workers answered at all: sum(()) is 0 and would read as a real zero.
+                self.unmeasured = True
                 continue
             values = [v for v in per_worker.values() if isinstance(v, (int, float))]
             if len(values) != len(per_worker) or any(v < 0 for v in values):
@@ -292,6 +305,7 @@ class SpillSampler(threading.Thread):
                 # cancel to 0, which is exactly the failure this class exists to prevent.
                 self.unmeasured = True
                 continue
+            self.samples_ok += 1
             self.max_disk = max(self.max_disk, sum(int(v) for v in values))
 
     def stop(self) -> None:  # noqa: D102
@@ -516,8 +530,9 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         elapsed_s=elapsed,
         peak_cluster_bytes=peak,
         mean_cluster_bytes=mean,
-        spill_max_disk_bytes=None if spill.unmeasured else spill.max_disk,
-        spill_unmeasured=spill.unmeasured,
+        spill_max_disk_bytes=None if (spill.unmeasured or spill.samples_ok == 0) else spill.max_disk,
+        spill_unmeasured=bool(spill.unmeasured or spill.samples_ok == 0),
+        spill_samples_ok=spill.samples_ok,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
@@ -528,7 +543,8 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
     print(
         f"[{args.label}] {outcome}  wall {elapsed:.1f} s  peak {peak / GB:.1f} GB  "
         f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  "
-        f"spill {'UNMEASURED' if spill.unmeasured else f'{spill.max_disk / GB:.2f} GB'}  "
+        f"spill {'UNMEASURED' if (spill.unmeasured or spill.samples_ok == 0) else f'{spill.max_disk / GB:.2f} GB'}"
+        f" (n={spill.samples_ok})  "
         f"nanny-memory-events {len(watcher.events)}",
         flush=True,
     )
