@@ -151,6 +151,14 @@ def build_cluster(args) -> tuple:
     slurm_mem = int(slurm_mem_mb) * 2**20 if slurm_mem_mb else None
 
     meta = {
+        # `n_workers_requested` is what was asked for and what `wait_for_workers` gated on;
+        # `n_workers` is what `client.run` answered from. The ABORT above makes them equal on
+        # any run that gets this far, so a consumer comparing the two is NOT cross-checking a
+        # live cluster -- that check happens here, once, and again on every sample in
+        # `SpillSampler.run`. Recording both is for the RETROSPECTIVE case: summaries written
+        # before 2026-09-08 carry neither key, and must read UNMEASURED rather than inherit a
+        # coverage guarantee that did not exist when they were produced.
+        "n_workers_requested": args.workers,
         "n_workers": len(limits),
         "threads_per_worker": args.threads,
         "worker_memory_limits_bytes": distinct,
@@ -165,6 +173,14 @@ def build_cluster(args) -> tuple:
         flush=True,
     )
 
+    if len(limits) != args.workers:
+        client.close()
+        cluster.close()
+        sys.exit(
+            f"ABORT: requested {args.workers} workers but client.run() answered from {len(limits)}. "
+            "Every width derived downstream -- `n_workers`, and with it the spill sampler's "
+            "coverage check -- would inherit the undercount instead of catching it."
+        )
     if len(distinct) != 1 or distinct[0] != parse_memory(args.mem_per_worker):
         client.close()
         cluster.close()
@@ -230,6 +246,15 @@ class NannyWatcher(logging.Handler):
             logging.getLogger(name).removeHandler(self)
 
 
+def _is_count(value) -> bool:
+    """Report whether `value` is a non-negative integer byte count, excluding bool.
+
+    `isinstance(True, int)` is True, so a bool would otherwise pass as a byte count and
+    `True` would sum as 1. The negative test rejects `SpillSampler.UNREADABLE`.
+    """
+    return type(value) is int and value >= 0
+
+
 class SpillSampler(threading.Thread):
     """Sample bytes resident in the workers' spill directories.
 
@@ -243,28 +268,56 @@ class SpillSampler(threading.Thread):
     number must never report 0, because 0 is also a legitimate answer; see D-038 and D-041.
     `samples_ok` is what distinguishes "sampled every 5 s and never saw a byte on disk" from
     "never managed to sample at all" -- without it those two are the same `max_disk = 0`.
-    A sample that reached only part of the cluster under-counts just as badly, so the worker
-    count is pinned at the first good sample and any narrower sample latches `unmeasured`.
+
+    A sample that reached only part of the cluster under-counts just as badly, so the expected
+    width is taken from `n_workers` as REQUESTED at the command line and any sample of a
+    different width latches `unmeasured`.  Note what `workers_expected` therefore is: the width
+    every counted sample was REQUIRED to have, not a width observed and recorded.  It is
+    reported as `spill_workers_sampled` because the latch makes the two equivalent for the
+    samples that count -- a sample of any other width is not counted at all -- but no artefact
+    holds an independently observed per-sample width.  It must not be learned from the cluster: a client
+    that persistently answers from 1 of 4 workers would teach the sampler to expect 1 and then
+    satisfy it on every sample, which is the defect this paragraph replaces.  For the same
+    reason it must not be taken from `build_cluster`'s `n_workers`, which is itself
+    `len(client.run(...))` and would inherit the same undercount one call earlier.
+
+    `max_managed_worker` is the per-worker series `memory.target` actually thresholds on.
+    `peak_cluster_bytes` is MemorySampler's cluster-SUMMED PROCESS series, so it cannot be
+    compared against the per-worker managed fraction; recording both here makes that comparison
+    possible without a second round trip.  Its `unmeasured` flag is independent: managed bytes
+    failing to read never suppresses a disk measurement, and vice versa.
     """
 
-    UNREADABLE = -1  # a spill buffer is present but its total could not be read
+    UNREADABLE = -1  # a value is present in principle but could not be read
 
-    def __init__(self, client, interval: float = 5.0) -> None:
-        """Sample every `interval` seconds once start()ed; call stop() to end the thread."""
+    def __init__(self, client, n_workers: int, interval: float = 5.0) -> None:
+        """Sample every `interval` seconds once start()ed; call stop() to end the thread.
+
+        `n_workers` is the REQUESTED worker count, not one derived from the cluster.
+        """
         super().__init__(daemon=True)
         self.client = client
         self.interval = interval
         self.max_disk = 0
         self.unmeasured = False
         self.samples_ok = 0
-        self.workers_expected = None
+        self.workers_expected = int(n_workers)
+        self.max_managed_worker = 0
+        self.max_managed_total = 0
+        self.managed_unmeasured = False
+        self.managed_samples_ok = 0
         # NOT `_stop`: that name shadows threading.Thread._stop(), which Thread.join()
         # calls internally, so join() would raise "'Event' object is not callable".
         self._stopped = threading.Event()
 
     @staticmethod
     def _probe(dask_worker):
-        """Bytes currently on disk for this worker, or UNREADABLE if a spill buffer hides them.
+        """`{"disk": ..., "managed": ...}` for this worker; either field may be UNREADABLE.
+
+        `disk` is the bytes currently in the spill directory, `managed` the bytes zict is
+        holding in memory -- the quantity `distributed.worker.memory.target` thresholds on,
+        per worker.  Each carries its own UNREADABLE sentinel so that one being unreadable
+        never contaminates the other.
 
         `worker.data` is a `SpillBuffer` when spilling is on, and its `spilled_total` is a
         `SpilledSize(memory, disk)` namedtuple whose `disk` field is the compressed size
@@ -276,19 +329,44 @@ class SpillSampler(threading.Thread):
         expression raises AttributeError and a broad `except` turns it into a silent 0.  That
         is the defect that made every leg of the campaign report `spill 0.00 GB` (D-041).
         """
+        unreadable = SpillSampler.UNREADABLE
         data = getattr(dask_worker, "data", None)
         if data is None:
             # Not "nothing spilled" -- we were handed no store to look at.
-            return SpillSampler.UNREADABLE
+            return {"disk": unreadable, "managed": unreadable}
+
         total = getattr(data, "spilled_total", None)
         if total is None:
             # A plain dict (`--no-spill`) has no spill layer, so 0 is the true answer. Anything
             # that DOES have a spill layer but no readable total is a failure, not a zero.
-            return 0 if isinstance(data, dict) and not hasattr(data, "slow") else SpillSampler.UNREADABLE
+            disk = 0 if isinstance(data, dict) and not hasattr(data, "slow") else unreadable
+        else:
+            try:
+                disk = int(getattr(total, "disk", total))
+            except Exception:
+                disk = unreadable
+
+        # `data.fast` is the in-memory zict.lru.LRU whose `total_weight` is this worker's
+        # managed bytes (verified on distributed 2025.9.1: 4 x 10 MB arrays over two workers
+        # reported 20000000 and 40000000).  A plain dict has no `.fast`, and guessing a number
+        # for it would be exactly the failure D-041 is about, so it reads UNREADABLE.
         try:
-            return int(getattr(total, "disk", total))
+            managed = int(data.fast.total_weight)
         except Exception:
-            return SpillSampler.UNREADABLE
+            managed = unreadable
+
+        return {"disk": disk, "managed": managed}
+
+    def _latch_all(self) -> None:
+        """Mark BOTH quantities unmeasured.
+
+        For a failure of the round trip itself -- it raised, nobody answered, the sample was
+        narrower or wider than the cluster, the replies were not readings -- neither quantity
+        was sampled. Latching only `unmeasured` here would leave the managed series claiming a
+        coverage the disk series had just rejected on identical evidence.
+        """
+        self.unmeasured = True
+        self.managed_unmeasured = True
 
     def run(self) -> None:  # noqa: D102
         while not self._stopped.wait(self.interval):
@@ -296,27 +374,43 @@ class SpillSampler(threading.Thread):
                 per_worker = self.client.run(self._probe)
             except Exception:
                 # A sampler that never sampled must not look like a sampler that saw zero.
-                self.unmeasured = True
+                self._latch_all()
                 continue
             if not per_worker:
                 # No workers answered at all: sum(()) is 0 and would read as a real zero.
-                self.unmeasured = True
+                self._latch_all()
                 continue
             # A sample that reached only some of the workers under-counts the total exactly
-            # like a sentinel does. Pin the width at the first good sample and require it.
-            if self.workers_expected is None:
-                self.workers_expected = len(per_worker)
-            elif len(per_worker) != self.workers_expected:
-                self.unmeasured = True
+            # like a sentinel does, and the expected width is fixed at construction from the
+            # REQUESTED worker count, so a narrow sample cannot satisfy a narrowed expectation.
+            if len(per_worker) != self.workers_expected:
+                self._latch_all()
                 continue
-            values = [v for v in per_worker.values() if isinstance(v, (int, float))]
-            if len(values) != len(per_worker) or any(v < 0 for v in values):
+            values = list(per_worker.values())
+            if not all(isinstance(v, dict) for v in values):
+                # An older `_probe` returning a bare int, or an exception marshalled back as a
+                # value. Either way this is not a reading.
+                self._latch_all()
+                continue
+
+            disk = [v.get("disk") for v in values]
+            if not all(_is_count(d) for d in disk):
                 # Never sum a sentinel into a total: three workers at -1 and one at +3 would
                 # cancel to 0, which is exactly the failure this class exists to prevent.
                 self.unmeasured = True
-                continue
-            self.samples_ok += 1
-            self.max_disk = max(self.max_disk, sum(int(v) for v in values))
+            else:
+                self.samples_ok += 1
+                self.max_disk = max(self.max_disk, sum(disk))
+
+            # Independent of the disk verdict above, and deliberately so: an unreadable
+            # managed figure must not suppress a disk measurement, nor the reverse.
+            managed = [v.get("managed") for v in values]
+            if not all(_is_count(m) for m in managed):
+                self.managed_unmeasured = True
+            else:
+                self.managed_samples_ok += 1
+                self.max_managed_worker = max(self.max_managed_worker, max(managed))
+                self.max_managed_total = max(self.max_managed_total, sum(managed))
 
     def stop(self) -> None:  # noqa: D102
         self._stopped.set()
@@ -505,7 +599,7 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
 
     watcher = NannyWatcher().install()
     accountant = PersistAccountant(marex_root, repo_root).install()
-    spill = SpillSampler(client)
+    spill = SpillSampler(client, n_workers=args.workers)
     spill.start()
     sampler = MemorySampler()
 
@@ -544,6 +638,10 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         spill_unmeasured=bool(spill.unmeasured or spill.samples_ok == 0),
         spill_samples_ok=spill.samples_ok,
         spill_workers_sampled=spill.workers_expected,
+        managed_max_worker_bytes=None if (spill.managed_unmeasured or spill.managed_samples_ok == 0) else spill.max_managed_worker,
+        managed_max_total_bytes=None if (spill.managed_unmeasured or spill.managed_samples_ok == 0) else spill.max_managed_total,
+        managed_unmeasured=bool(spill.managed_unmeasured or spill.managed_samples_ok == 0),
+        managed_samples_ok=spill.managed_samples_ok,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
@@ -551,11 +649,15 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
     )
     summary_path.write_text(json.dumps(summary, indent=2, default=str))
 
+    managed_dead = spill.managed_unmeasured or spill.managed_samples_ok == 0
+    managed_text = "UNMEASURED" if managed_dead else f"{spill.max_managed_worker / GB:.2f} GB"
     print(
         f"[{args.label}] {outcome}  wall {elapsed:.1f} s  peak {peak / GB:.1f} GB  "
         f"pinned {accountant.report()['total_bytes'] / GB:.3f} GB  "
         f"spill {'UNMEASURED' if (spill.unmeasured or spill.samples_ok == 0) else f'{spill.max_disk / GB:.2f} GB'}"
-        f" (n={spill.samples_ok})  "
+        f" (n={spill.samples_ok}/{spill.workers_expected}w)  "
+        f"managed/worker {managed_text}"
+        f" (n={spill.managed_samples_ok})  "
         f"nanny-memory-events {len(watcher.events)}",
         flush=True,
     )

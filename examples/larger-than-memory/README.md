@@ -56,17 +56,33 @@ Every one of these exists because its absence has already produced a wrong answe
   the number means: `spilled_total` is what is on disk *at that instant*, so the reported
   figure is the peak concurrent total on a 5 s sampling grid, a lower bound on the true peak,
   and never a cumulative "bytes ever spilled".
-  Re-measured once the probe worked, the headline gridded-track leg (nt=3804, 4 x 4 GB) reports
-  **0 bytes spilled across 324 successful samples**, with the metric flagged as measured: at a
-  5 s interval over a 1626 s run that is essentially every interval, so the sampler demonstrably
-  ran rather than silently failing. No sample ever caught bytes in the spill directory.
-  Note what that does and does not test: at 4 x 4 GB with dask's default 0.6 target the spill
-  threshold is around 9.6 GB aggregate, and the leg peaked at 6.65 GB, so it never came close to
-  spilling. The zero confirms that the metric now reports honestly on a leg that should not
-  spill; it does not demonstrate that the probe would catch a spill at this budget. That is weaker than "not one byte was written" -- a spill shorter than the
-  sampling interval is invisible -- but it is the first spill figure this campaign has produced
-  that is a measurement at all. It is one leg at one budget: every other leg predates the fix and
-  its spill figure remains *unmeasured*, not zero.
+  A count of successful samples is not enough on its own, either. The first version of that
+  count let a client answering from **1 of 4 workers** satisfy it, because the expected width
+  was learned from the first sample rather than required to match the cluster -- so a quarter
+  of the cluster read as the whole of it. The width is now taken from the *requested* worker
+  count, and a figure is printed only when `workers_sampled == n_workers == n_workers_requested`.
+  Deriving it from the cluster is not sufficient: `n_workers` is itself `len(client.run(...))`
+  and would inherit the same undercount one call earlier.
+  Re-measured on that basis, the headline gridded-track leg (nt=3804, 4 x 4 GB) reports
+  **0 bytes spilled across 333 successful samples, every one of them covering all 4 workers**.
+  At a 5 s interval over a 1676 s run that is essentially every interval, so the sampler
+  demonstrably ran, demonstrably reached the whole cluster, and never caught a byte in the spill
+  directory.
+  Note what that does and does not test. Dask has two paths to disk and this leg measured one
+  of them. `memory.target` (0.6) thresholds **per-worker managed** bytes: the leg peaked at
+  1.05 GB against 2.4 GB per worker, 44 % of the threshold, so that path was never close.
+  `memory.spill` (0.7) thresholds per-worker **process** memory, 2.8 GB per worker here, and
+  no per-worker process series was recorded -- only the cluster-summed one, whose peak over
+  four workers averages 1.73 GB, 62 % of that threshold, with the true per-worker maximum
+  necessarily higher. So "the target path was never approached" is measured; "nothing could
+  have spilled" is not. (And do not compare the 6.9 GB `peak` column against a per-worker
+  fraction: that is `MemorySampler`'s cluster-summed *process* series, a different quantity on
+  a different denominator, and comparing the two is a mistake this README previously made.)
+  The zero confirms that the metric reports honestly on a leg that should not spill; it does not
+  demonstrate that the probe would catch a spill at this budget. It is also weaker than "not one
+  byte was written" -- a spill shorter than the sampling interval is invisible. It is one leg at
+  one budget: every other leg predates the fix and its spill figure remains *unmeasured*, not
+  zero, including the earlier replicates of this very leg.
 - **A breadcrumb summary is written before the work starts**, so a leg killed by the wall
   clock still leaves a record of what it attempted.
 - **Squeeze by worker count and record length, never by absurd per-worker RAM.** Per-worker
@@ -115,12 +131,12 @@ squeeze from an *arithmetic invariant* instead (the whole int32 field, `n_time x
 | ---: | ---: | ---: | ---: |
 | 951 | 3.9 GB | 6.2 GB | 355 s |
 | 1902 | 7.9 GB | 6.9 GB | 849 s |
-| 3804 | **15.8 GB** | **6.65 - 7.29 GB** (four replicates) | 1600 - 1660 s |
+| 3804 | **15.8 GB** | **6.65 - 7.29 GB** (five replicates) | 1600 - 1676 s |
 
 The field being tracked grows **4x** across that span; peak grows by **at most ~17 %**, and on
-the closest pair of runs by ~7 %. Do not read a precise percentage off this table. Four
-replicates of the nt=3804 leg spread 6.65 / 6.75 / 7.11 / 7.29 GB, a 0.64 GB spread at a single
-length, which is the same size as the growth being measured. The defensible statement is the
+the closest pair of runs by ~7 %. Do not read a precise percentage off this table. Five
+replicates of the nt=3804 leg spread 6.65 / 6.75 / 6.91 / 7.11 / 7.29 GB, a 0.64 GB spread at a
+single length, which is the same size as the growth being measured. The defensible statement is the
 qualitative one: **peak is near-flat in series length, growing by a small fraction of the 4x the
 data grows.** Anything sharper than that is reading noise.
 
