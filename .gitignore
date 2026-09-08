@@ -11,7 +11,7 @@ build/
 # Environment variables
 .env
 
-# Local-only files (never commit)
+# Local-only files
 CLAUDE.md
 backup/
 docs/superpowers/
@@ -27,15 +27,10 @@ docs/tutorials/regional/
 docs/tutorials/unstructured/
 .claude/
 NEXT.md
-NEXT_PROMPT.md
 DONE.md
 DECISIONS.md
 QUESTIONS.md
 LEDGER.md
 
-# Local working/review docs — kept out of public history
-# Glob rather than one line per file: every report so far was added individually and the
-# next one was missed each time. No REPORT_*.md has ever been tracked.
+# Local working/review docs
 REPORT_*.md
-marEx_Fable_Review.md
-SAVING_HACKS_CHANGES_FIXED.md
