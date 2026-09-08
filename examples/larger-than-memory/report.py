@@ -52,9 +52,18 @@ def main() -> None:
         else:
             outcome = "-"
         pinned = (r.get("persist") or {}).get("total_bytes")
-        # A null spill is not a missing spill: legs run before 2026-09-08, and any leg whose
-        # sampler never sampled, cannot distinguish "nothing spilled" from "never measured".
-        spill = "UNMEASURED" if r.get("spill_unmeasured") else fmt(r.get("spill_max_disk_bytes"), 2)
+        # A leg predating the 2026-09-08 probe fix has no `spill_unmeasured` key at all, and its
+        # recorded 0 is an artefact of a probe that returned 0 on failure -- so ABSENT must read
+        # UNMEASURED, not "0.00 GB". Only an explicit False, written by a sampler that counted
+        # its successful samples, licenses printing a number.
+        # `spill_samples_ok` is the licence: a build without it could not tell a sampler that
+        # saw nothing from one that never ran, so its 0 is not a measurement either.
+        spill_n = r.get("spill_samples_ok")
+        spill = (
+            fmt(r.get("spill_max_disk_bytes"), 2)
+            if r.get("spill_unmeasured") is False and isinstance(spill_n, int) and spill_n > 0
+            else "UNMEASURED"
+        )
         wall = r.get("elapsed_s")
         print(
             f"| {r.get('label')} | {r.get('compute_mode')} | {r.get('n_time', '-')} | "

@@ -59,7 +59,11 @@ Every one of these exists because its absence has already produced a wrong answe
   Re-measured once the probe worked, the headline gridded-track leg (nt=3804, 4 x 4 GB) reports
   **0 bytes spilled across 324 successful samples**, with the metric flagged as measured: at a
   5 s interval over a 1626 s run that is essentially every interval, so the sampler demonstrably
-  ran rather than silently failing. No sample ever caught bytes in the spill directory. That is weaker than "not one byte was written" -- a spill shorter than the
+  ran rather than silently failing. No sample ever caught bytes in the spill directory.
+  Note what that does and does not test: at 4 x 4 GB with dask's default 0.6 target the spill
+  threshold is around 9.6 GB aggregate, and the leg peaked at 6.65 GB, so it never came close to
+  spilling. The zero confirms that the metric now reports honestly on a leg that should not
+  spill; it does not demonstrate that the probe would catch a spill at this budget. That is weaker than "not one byte was written" -- a spill shorter than the
   sampling interval is invisible -- but it is the first spill figure this campaign has produced
   that is a measurement at all. It is one leg at one budget: every other leg predates the fix and
   its spill figure remains *unmeasured*, not zero.
@@ -107,27 +111,23 @@ squeeze from an *arithmetic invariant* instead (the whole int32 field, `n_time x
 
 **And the property that actually matters -- peak near-flat in series length, same 16 GB budget:**
 
-| n_time | whole int32 field | peak | wall | code |
-| ---: | ---: | ---: | ---: | --- |
-| 951 | 3.9 GB | 6.2 GB | 355 s | post-fix |
-| 1902 | 7.9 GB | 6.9 GB | 849 s | pre-fix |
-| 3804 | **15.8 GB** | **7.1 GB** | 1658 s | pre-fix |
-| 3804 | **15.8 GB** | **6.8 GB** | 1600 s | post-fix |
-| 3804 | **15.8 GB** | **6.7 GB** | 1626 s | post-fix |
+| n_time | whole int32 field | peak | wall |
+| ---: | ---: | ---: | ---: |
+| 951 | 3.9 GB | 6.2 GB | 355 s |
+| 1902 | 7.9 GB | 6.9 GB | 849 s |
+| 3804 | **15.8 GB** | **6.65 - 7.29 GB** (four replicates) | 1600 - 1660 s |
 
-Peak grows **7-9 %** while the field it is tracking grows **4x**: that, not the absolute number,
-is the larger-than-memory property. Read that figure off the **post-fix** rows only (6.2 GB at
-nt=951 against 6.7 and 6.8 GB at nt=3804), which are the like-for-like ones. Comparing across the
-`fill_time_gaps` realignment fix instead gives 6.2 -> 7.1 GB, or 14 %, and that number mixes two
-different versions of the tracker -- it is quoted here only so the discrepancy is not a surprise.
+The field being tracked grows **4x** across that span; peak grows by **at most ~17 %**, and on
+the closest pair of runs by ~7 %. Do not read a precise percentage off this table. Four
+replicates of the nt=3804 leg spread 6.65 / 6.75 / 7.11 / 7.29 GB, a 0.64 GB spread at a single
+length, which is the same size as the growth being measured. The defensible statement is the
+qualitative one: **peak is near-flat in series length, growing by a small fraction of the 4x the
+data grows.** Anything sharper than that is reading noise.
 
-Wall clock is *not* cleanly linear over the same span -- 2.39x then 1.95x per doubling on the
-pre-fix points -- and every row is n=1, taken on three different nodes, over a record whose
-event count also grows (1130, 2142, 4388 events), so wall may be tracking work rather than
-length. Read the peak column; treat the wall column as an order of magnitude.
-
-Four replicates of the nt=3804 configuration exist and they spread 6.65 / 6.75 / 7.11 / 7.29 GB,
-so treat differences below roughly half a gigabyte here as noise rather than signal.
+Wall clock is *not* cleanly linear either -- 2.39x then 1.95x per doubling -- and every row is
+n=1 or a small handful, taken on several different nodes, over a record whose event count also
+grows (1130, 2142, 4388 events), so wall may be tracking work rather than length. Read the peak
+column qualitatively; treat the wall column as an order of magnitude.
 
 **Unstructured tracker, nt=1096, cluster 4 x 8 GB = 32 GB:** `persist` did not complete
 within 5 h on either of two replicates, while `streaming` completed in 3 h 50 min with matching
@@ -190,7 +190,7 @@ above rest on.
 ./slurm/submit.sh variants       # tracker settings
 ./slurm/submit.sh f1_stream      # or any single leg by name
 
-python report.py /work/bk1377/b382615/marex_fable/measurements/lm
+python report.py <measurements-dir>    # whatever --outdir the legs were given
 ```
 
 Pre-flight first, always. It is the cheapest insurance against burning a headline leg on a

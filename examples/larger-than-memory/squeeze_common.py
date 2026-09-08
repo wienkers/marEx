@@ -243,6 +243,8 @@ class SpillSampler(threading.Thread):
     number must never report 0, because 0 is also a legitimate answer; see D-038 and D-041.
     `samples_ok` is what distinguishes "sampled every 5 s and never saw a byte on disk" from
     "never managed to sample at all" -- without it those two are the same `max_disk = 0`.
+    A sample that reached only part of the cluster under-counts just as badly, so the worker
+    count is pinned at the first good sample and any narrower sample latches `unmeasured`.
     """
 
     UNREADABLE = -1  # a spill buffer is present but its total could not be read
@@ -255,6 +257,7 @@ class SpillSampler(threading.Thread):
         self.max_disk = 0
         self.unmeasured = False
         self.samples_ok = 0
+        self.workers_expected = None
         # NOT `_stop`: that name shadows threading.Thread._stop(), which Thread.join()
         # calls internally, so join() would raise "'Event' object is not callable".
         self._stopped = threading.Event()
@@ -297,6 +300,13 @@ class SpillSampler(threading.Thread):
                 continue
             if not per_worker:
                 # No workers answered at all: sum(()) is 0 and would read as a real zero.
+                self.unmeasured = True
+                continue
+            # A sample that reached only some of the workers under-counts the total exactly
+            # like a sentinel does. Pin the width at the first good sample and require it.
+            if self.workers_expected is None:
+                self.workers_expected = len(per_worker)
+            elif len(per_worker) != self.workers_expected:
                 self.unmeasured = True
                 continue
             values = [v for v in per_worker.values() if isinstance(v, (int, float))]
@@ -533,6 +543,7 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         spill_max_disk_bytes=None if (spill.unmeasured or spill.samples_ok == 0) else spill.max_disk,
         spill_unmeasured=bool(spill.unmeasured or spill.samples_ok == 0),
         spill_samples_ok=spill.samples_ok,
+        spill_workers_sampled=spill.workers_expected,
         nanny_memory_events=len(watcher.events),
         nanny_memory_event_sample=watcher.events[:10],
         persist=accountant.report(),
