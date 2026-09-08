@@ -47,6 +47,22 @@ Every one of these exists because its absence has already produced a wrong answe
   would have spilled stays resident (169.5 GB with spilling off versus 118.7 GB with it on, on
   the same run); and it kills both modes, so nothing can be compared. `--no-spill` remains as
   an explicitly labelled control.
+- **The spill metric reports UNMEASURED rather than zero when it cannot read the number.**
+  Until 2026-09-08 the sampler read an attribute that does not exist on `distributed` 2025.9.1
+  and a bare `except` turned the resulting error into `0`, so every leg printed
+  `spill 0.00 GB` whether or not anything had spilled -- a fabricated zero that was very nearly
+  cited as evidence that streaming never touched disk. It now reads
+  `worker.data.spilled_total.disk` and latches an `unmeasured` flag on any failure. Note what
+  the number means: `spilled_total` is what is on disk *at that instant*, so the reported
+  figure is the peak concurrent total on a 5 s sampling grid, a lower bound on the true peak,
+  and never a cumulative "bytes ever spilled".
+  Re-measured once the probe worked, the headline gridded-track leg (nt=3804, 4 x 4 GB) reports
+  **0 bytes spilled across 324 successful samples**, with the metric flagged as measured: at a
+  5 s interval over a 1626 s run that is essentially every interval, so the sampler demonstrably
+  ran rather than silently failing. No sample ever caught bytes in the spill directory. That is weaker than "not one byte was written" -- a spill shorter than the
+  sampling interval is invisible -- but it is the first spill figure this campaign has produced
+  that is a measurement at all. It is one leg at one budget: every other leg predates the fix and
+  its spill figure remains *unmeasured*, not zero.
 - **A breadcrumb summary is written before the work starts**, so a leg killed by the wall
   clock still leaves a record of what it attempted.
 - **Squeeze by worker count and record length, never by absurd per-worker RAM.** Per-worker
@@ -87,26 +103,54 @@ squeeze from an *arithmetic invariant* instead (the whole int32 field, `n_time x
 | --- | --- | --- | --- | ---: |
 | `g2_persist` | persist | **OOM-KILLED** | SLURM `OUT_OF_MEMORY`, `Detected 1 oom_kill event`, MaxRSS 23.83 GB | - |
 | `g2_persist_r2` | persist | **OOM-KILLED** | same, MaxRSS 24.10 GB | - |
-| `g2_stream` | streaming | **completed** | output identical to 32 GB and 192 GB runs | 7.3 GB |
+| `g2_stream` | streaming | **completed** | five reductions match the 32 GB and 192 GB runs (`id_field_sum` 826033161263, 4388 events, 18712 merges) | 7.3 GB |
 
 **And the property that actually matters -- peak near-flat in series length, same 16 GB budget:**
 
-| n_time | whole int32 field | peak | wall |
-| ---: | ---: | ---: | ---: |
-| 1902 | 7.9 GB | 6.9 GB | 849 s |
-| 3804 | **15.8 GB** | **7.1 GB** | 1658 s |
+| n_time | whole int32 field | peak | wall | code |
+| ---: | ---: | ---: | ---: | --- |
+| 951 | 3.9 GB | 6.2 GB | 355 s | post-fix |
+| 1902 | 7.9 GB | 6.9 GB | 849 s | pre-fix |
+| 3804 | **15.8 GB** | **7.1 GB** | 1658 s | pre-fix |
+| 3804 | **15.8 GB** | **6.8 GB** | 1600 s | post-fix |
+| 3804 | **15.8 GB** | **6.7 GB** | 1626 s | post-fix |
 
-**Unstructured tracker, nt=1096, cluster 32 GB:** persist failed to complete in 5 h twice
-(under memory pressure); streaming completed in 3.84 h with identical output. A weaker result
-than the gridded OOM kill, and labelled `timeout_with_memory_pressure` for that reason.
+Peak grows **7-9 %** while the field it is tracking grows **4x**: that, not the absolute number,
+is the larger-than-memory property. Read that figure off the **post-fix** rows only (6.2 GB at
+nt=951 against 6.7 and 6.8 GB at nt=3804), which are the like-for-like ones. Comparing across the
+`fill_time_gaps` realignment fix instead gives 6.2 -> 7.1 GB, or 14 %, and that number mixes two
+different versions of the tracker -- it is quoted here only so the discrepancy is not a surprise.
+
+Wall clock is *not* cleanly linear over the same span -- 2.39x then 1.95x per doubling on the
+pre-fix points -- and every row is n=1, taken on three different nodes, over a record whose
+event count also grows (1130, 2142, 4388 events), so wall may be tracking work rather than
+length. Read the peak column; treat the wall column as an order of magnitude.
+
+Four replicates of the nt=3804 configuration exist and they spread 6.65 / 6.75 / 7.11 / 7.29 GB,
+so treat differences below roughly half a gigabyte here as noise rather than signal.
+
+**Unstructured tracker, nt=1096, cluster 4 x 8 GB = 32 GB:** `persist` did not complete
+within 5 h on either of two replicates, while `streaming` completed in 3 h 50 min with matching
+output reductions.
+
+That is a *wall-clock* statement, and deliberately not more. Both persist replicates were
+stopped by this harness's own deadline with roughly an hour of the SLURM wall still unused:
+there was no kernel OOM, no SLURM `OUT_OF_MEMORY` and no `KilledWorker`, so "persist cannot
+fit here" is **not** something this leg shows. Whether persist would finish given eight hours
+is untested. The gridded leg above, where the kernel actually killed persist twice, is what
+the headline claim rests on; the unstructured path is supporting evidence.
+
+Nor is there a same-budget equivalence reference: `run_and_fingerprint` calls `clear_staging`,
+so the ID field is deleted and no array comparison exists at any budget. What is checked is
+five order-invariant reductions (4359 events, 9404 merges, `id_field_sum` 5589043195416,
+`n_nonzero_cells` 3341563658, `max_id` 4359), and they match the 72 GB and 192 GB runs -- not
+a persist run at 32 GB, which produced no output at all.
 
 **`detect` does not squeeze, on either grid.** Peak is ~127 GB on a 9.1 GB input in *both*
 modes while streaming pins 0.00 GB, so the ceiling is a mode-independent transient and
-`compute_mode` cannot move it. See the report and roadmap.
+`compute_mode` cannot move it.
 
-Full results: `docs/superpowers/reports/REPORT_larger_than_memory_squeeze.md`.
-Why it is not yet fully larger-than-memory, and what to fix:
-`docs/superpowers/specs/2026-08-26-true-larger-than-memory-roadmap.md`.
+Every leg's raw numbers live in its `<label>_summary.json`; `report.py` collates them.
 
 ### Equivalence legs (short, comfortable, only where a reference is missing)
 
@@ -116,7 +160,11 @@ Why it is not yet fully larger-than-memory, and what to fix:
 | E2 | unstructured detect | 3 yr | 8 × 16 GB | persist vs streaming vs lazy |
 | E3 | gridded detect | 3650 | 8 × 8 GB | persist vs streaming vs lazy |
 
-Gridded-track equivalence is already established bit-identically at nt=3804 and is not repeated.
+Gridded-track equivalence at nt=3804 is carried by the five order-invariant reductions matching
+across the 16 / 32 / 192 GB runs, so it is not repeated here. That is reduction equality, not an
+array comparison: the streaming staging directory is cleared at the end of each leg, so no
+full-field reference survives at squeeze scale. The array-level check lives in the test suite,
+at fixture scale and zero tolerance.
 
 ### Tracker setting variants
 
@@ -126,9 +174,18 @@ Carried on the cheapest leg of the right grid type rather than given their own s
 
 ## Running
 
+Not every leg below is a live experiment. **F1 (gridded detect) was dropped**: measured, that
+path is compute-bound rather than memory-bound -- both modes hit a 12000 s deadline at nt=2200
+on 48 GB, and the specified leg is 6.7x that data -- so squeezing it demonstrates nothing about
+`compute_mode`. F3 consumes F1's output store and is therefore blocked by construction, as are
+the `v_merge_off` and `v_fill` variants; F2 is independent of F1 (it reads the EERIE catalogue
+directly) and is simply unrun.
+**F4 and the `g2_*` gridded-track legs are the validated ones**, and they are what the results
+above rest on.
+
 ```bash
 ./slurm/submit.sh preflight      # small probes: does each configuration run at all?
-./slurm/submit.sh feasibility    # F1-F4, persist twice each
+./slurm/submit.sh feasibility    # F1-F4 (see the note above: only F4 is live), persist twice each
 ./slurm/submit.sh equivalence    # E1-E3
 ./slurm/submit.sh variants       # tracker settings
 ./slurm/submit.sh f1_stream      # or any single leg by name
@@ -141,7 +198,8 @@ failure that has nothing to do with `compute_mode`.
 
 Each leg writes `<label>_summary.json` (dimensions, chunking, cluster budget, the *asserted*
 effective per-worker limit, outcome, failure classification, peak and mean cluster memory,
-bytes pinned per marEx source line, spill, nanny events, wall clock, output fingerprints) plus
+bytes pinned per marEx source line, spill (`spill_max_disk_bytes`, `null` when
+`spill_unmeasured`), nanny events, wall clock, output fingerprints) plus
 a `<label>_memseries.npy` memory trace. `report.py` collates them into the results table.
 
 ## Adapting to another system
