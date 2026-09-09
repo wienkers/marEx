@@ -780,6 +780,10 @@ def harvest_task_prefix_counts(client) -> dict:
     }
     try:
         by_prefix = client.run_on_scheduler(_scheduler_task_prefix_counts)
+    except DeadlineExceeded:
+        # The leg's own alarm has already fired; swallowing it here would let the leg run on
+        # to the SLURM wall and produce no summary at all.
+        raise
     except Exception as exc:  # noqa: BLE001 - a failure to measure is a reportable outcome
         dead["taskcount_error"] = f"{type(exc).__name__}: {exc}"[:400]
         return dead
@@ -801,6 +805,259 @@ def harvest_task_prefix_counts(client) -> dict:
         "taskcount_unmeasured": False,
         "taskcount_error": None,
     }
+
+
+# --------------------------------------------------------------------------------------
+# The boundary snapshot: how much of the count belongs to the LIBRARY, not to the harness
+# --------------------------------------------------------------------------------------
+# `harvest_task_prefix_counts` read at the end of a leg answers the wrong question.  A leg
+# is one `preprocess_data` call followed by however many consumers the harness happens to
+# run, and `detect_gridded.py:fingerprint` runs three of them.  A whole-leg lazy/persist
+# ratio is therefore dominated by the consumer count: measured at the desk on four graph
+# shapes it ranged 19.7-38.2 and tracked the time chunk, where the ratio INSIDE one
+# `preprocess_data` call sat in a 2.02-2.22 band (D-046).  The cell under test
+# (`CHUNKING_NOTES.md:222`, and `marEx/anomaly/api.py:262-263`, "two to three times") is a
+# statement about the library's own fan-out, so it must be read at the library's boundary.
+#
+# Two things make the boundary well defined on a distributed cluster where they were free
+# on the local threaded scheduler:
+#
+# * **Quiescence.**  `dask.persist` on a distributed cluster returns futures immediately,
+#   so `preprocess_data` in `persist` mode can return while its tasks are still running.
+#   Snapshotting straight away would undercount persist and bias the ratio UPWARDS, i.e.
+#   towards confirming the cell.  `settle_cluster` waits for the scheduler's non-terminal
+#   task census to empty, which restores the threaded scheduler's synchronous semantics
+#   rather than distorting them.  It adds no work to the graph; it only moves where the
+#   boundary is read.
+# * **The guards travel with the number.**  The snapshot is written to its own file the
+#   moment it is taken, so a leg later killed by its deadline still yields it -- which is
+#   exactly the case in which a worker restart is most likely.  A restarted worker's re-run
+#   tasks increment the SAME counter as a mode's recompute and are indistinguishable in it
+#   (D-047), so the file carries `boundary_nanny_memory_events`, and a snapshot with that
+#   above zero is VOID, whatever the count says.
+_ACTIVE_INSTRUMENTS: Dict[str, Any] = {"watcher": None, "accountant": None, "boundary": None}
+
+# TaskGroup.states is a live per-state census, O(number of groups) rather than O(number of
+# tasks); iterating `Scheduler.tasks` would walk millions of TaskStates on every poll.
+_TERMINAL_TASK_STATES = ("memory", "erred", "released", "forgotten")
+
+
+def _scheduler_pending_census(dask_scheduler):
+    """Count tasks in every non-terminal state, summed over task groups."""
+    out: dict = {}
+    for group in dask_scheduler.task_groups.values():
+        for state, n in dict(getattr(group, "states", {}) or {}).items():
+            if state in _TERMINAL_TASK_STATES or not n:
+                continue
+            out[str(state)] = out.get(str(state), 0) + int(n)
+    return out
+
+
+# Why `futures_in` reports beside its return value: a bare `except ... return []` cannot
+# distinguish "the walk failed" from "nothing was persisted", and a leg reading
+# `settle_futures_waited=0` is then uninterpretable (falsifier gate 7 RISKS).
+_LAST_FUTURES_IN: dict = {"collections": None, "error": None}
+
+
+def futures_in(obj) -> list:
+    """Every distributed Future backing `obj`, which may be a Dataset, DataArray or collection.
+
+    An unpersisted (lazy) collection has none, which is the correct answer and not an error.
+    """
+    import xarray as xr
+    from dask.base import is_dask_collection
+    from distributed.client import futures_of
+
+    collections: list = []
+
+    # These tests are `isinstance` and NOT `hasattr`, and that is load-bearing.  MEASURED
+    # 2026-09-08 (falsifier gate 7 finding 4, reproduced at :884 of the duck-typed version):
+    # the DataArray branch recurses into `item.data`, which for a datetime64 time coord is a
+    # plain numpy array -- and `hasattr(np_datetime64_array, "data")` RAISES
+    # `ValueError: cannot include dtype 'M' in a buffer`, because `ndarray.data` is the buffer
+    # and datetime64 cannot be exposed through the buffer protocol.  The raise escaped `walk`
+    # entirely, so `futures_in` returned NOTHING for a Dataset whose data_vars were persisted,
+    # and every persist replicate of job 27325013 read `futures=0` -- the exact-wait half of
+    # D-049 silently inert on the real marEx return, leaving quiescence to the poll census
+    # alone.  An xarray DataArray backed by dask IS itself a dask collection, so the DataArray
+    # test must still come BEFORE the `is_dask_collection` test: otherwise `futures_of` is
+    # handed the DataArray rather than the dask array inside it.
+    def walk(item):
+        if item is None:
+            return
+        if isinstance(item, xr.Dataset):
+            for v in list(item.data_vars.values()) + list(item.coords.values()):
+                walk(v)
+            return
+        if isinstance(item, (xr.DataArray, xr.Variable)):
+            walk(item.variable._data if isinstance(item, xr.DataArray) else item._data)
+            return
+        if isinstance(item, (list, tuple, set)):
+            for sub in item:
+                walk(sub)
+            return
+        if is_dask_collection(item):
+            collections.append(item)
+
+    walk(obj)
+    _LAST_FUTURES_IN["collections"] = len(collections)
+    _LAST_FUTURES_IN["error"] = None
+    if not collections:
+        _LAST_FUTURES_IN["error"] = "walk found no dask collection"
+        return []
+    try:
+        return list(futures_of(collections))
+    except Exception as exc:  # noqa: BLE001 - an unwalkable collection is reported as zero futures
+        # A bare `return []` here cannot be told apart from "nothing was persisted", and both
+        # print `futures=0`. Falsifier gate 7 finding 6: every persist replicate of
+        # 27325013 read `futures=0` on marEx's persist-mode return and the cause could not be
+        # discriminated from the log. Record it.
+        _LAST_FUTURES_IN["error"] = f"{type(exc).__name__}: {exc}"[:400]
+        return []
+
+
+def settle_cluster(client, timeout_s: float = 900.0, poll_s: float = 5.0, consecutive_empty: int = 3, collections=None) -> dict:
+    """Establish that no work is in flight, so that a count read here is a boundary count.
+
+    Two mechanisms, because one is not enough:
+
+    * **Wait on the futures.**  If `collections` is given and holds persisted work, the wait
+      is EXACT: `distributed.wait` returns when those futures are done, with no polling and
+      no race.  A lazy collection contributes no futures and the wait is a no-op, which is
+      the right answer rather than a missing one.
+    * **Then poll the scheduler's census, and require it empty `consecutive_empty` times in
+      a row.**  This is the backstop for work that `preprocess_data` persisted internally and
+      did not return (`marEx/anomaly/climatology.py:131` persists `years, doys` with no mode
+      guard, and those futures never reach the caller).  A SINGLE empty census does not mean
+      quiescent: `Scheduler.update_graph` awaits `offload(...)` before any task state exists,
+      so a `run_on_scheduler` round trip issued just after `.persist()` returns can be
+      serviced while the graph is not yet ingested and reads `{}`.  MEASURED: on a 4001-task
+      graph the first census landed 0.043 s after `dask.persist` returned, read `{}`, and a
+      one-poll settle counted 0 tasks against a true total of 4001.  That undercount falls on
+      `persist` only, which is the mode this instrument compares `lazy` AGAINST, so it biases
+      the ratio upwards -- towards confirming the claim under test.
+    """
+    started = time.perf_counter()
+    deadline_at = started + float(timeout_s)
+    waited_futures, futures_error = 0, None
+    if collections is not None:
+        try:
+            from distributed import wait as _wait
+
+            futures = futures_in(collections)
+            waited_futures = len(futures)
+            if futures:
+                _wait(futures, timeout=max(1.0, deadline_at - time.perf_counter()))
+        except DeadlineExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failure to wait is reported, never hidden
+            futures_error = f"{type(exc).__name__}: {exc}"[:400]
+
+    polls, empties, pending, error = 0, 0, None, None
+    while True:
+        polls += 1
+        try:
+            pending = client.run_on_scheduler(_scheduler_pending_census)
+        except DeadlineExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failure to observe is a reportable outcome
+            error = f"{type(exc).__name__}: {exc}"[:400]
+            break
+        empties = empties + 1 if not pending else 0
+        if empties >= consecutive_empty:
+            break
+        if time.perf_counter() >= deadline_at:
+            break
+        time.sleep(poll_s)
+    return {
+        "settle_quiescent": bool(error is None and empties >= consecutive_empty),
+        "settle_pending": pending,
+        "settle_polls": polls,
+        "settle_consecutive_empty": empties,
+        "settle_required_empty": int(consecutive_empty),
+        "settle_poll_s": float(poll_s),
+        "settle_futures_waited": waited_futures,
+        "settle_futures_error": futures_error or _LAST_FUTURES_IN["error"],
+        "settle_futures_collections": _LAST_FUTURES_IN["collections"],
+        "settle_wait_s": time.perf_counter() - started,
+        "settle_error": error,
+    }
+
+
+def snapshot_boundary(client, args, collections=None, phase: str = "preprocess_data", settle_timeout_s: float = 900.0) -> dict:
+    """Read the cumulative task counts at a phase boundary and write them out immediately.
+
+    Call this from a leg's ``work(client)``, directly after the marEx call whose internal
+    fan-out is being counted.  The returned dict is folded into the leg summary under
+    ``boundary_*``; the same content is written to ``<outdir>/<label>_boundary_<phase>.json``
+    so that a leg killed by its deadline still leaves the number behind.
+    """
+    # A failure to MEASURE is a void reading, never a dead leg: by this point
+    # `preprocess_data` has already returned, so an instrument that raised here would throw
+    # away a completed call's work. `DeadlineExceeded` is the one exception -- that is the
+    # leg's own alarm, and swallowing it would let the leg run on to the SLURM wall and
+    # produce no summary at all.
+    try:
+        settled = settle_cluster(client, timeout_s=settle_timeout_s, collections=collections)
+        counts = harvest_task_prefix_counts(client)
+    except DeadlineExceeded:
+        raise
+    except BaseException as exc:  # noqa: BLE001, B036 - see above
+        settled = {
+            "settle_quiescent": False,
+            "settle_pending": None,
+            "settle_polls": 0,
+            "settle_consecutive_empty": 0,
+            "settle_required_empty": 0,
+            "settle_poll_s": 0.0,
+            "settle_futures_waited": 0,
+            "settle_futures_error": None,
+            "settle_futures_collections": None,
+            "settle_wait_s": 0.0,
+            "settle_error": f"{type(exc).__name__}: {exc}"[:400],
+        }
+        counts = {
+            "taskcount_by_prefix": None,
+            "taskcount_total_completed": None,
+            "taskcount_n_prefixes": 0,
+            "taskcount_unmeasured": True,
+            "taskcount_error": f"snapshot raised: {type(exc).__name__}"[:400],
+        }
+    watcher = _ACTIVE_INSTRUMENTS.get("watcher")
+    accountant = _ACTIVE_INSTRUMENTS.get("accountant")
+    block = {
+        "boundary_phase": phase,
+        "boundary_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "boundary_taskcount_by_prefix": counts["taskcount_by_prefix"],
+        "boundary_taskcount_total_completed": counts["taskcount_total_completed"],
+        "boundary_taskcount_n_prefixes": counts["taskcount_n_prefixes"],
+        "boundary_taskcount_unmeasured": counts["taskcount_unmeasured"],
+        "boundary_taskcount_error": counts["taskcount_error"],
+        "boundary_nanny_memory_events": None if watcher is None else len(watcher.events),
+        "boundary_pinned_bytes": None if accountant is None else accountant.report()["total_bytes"],
+        **{f"boundary_{k}": v for k, v in settled.items()},
+    }
+    # Stashed as well as returned: `work()` hands its dict back through `execute()`'s
+    # `extra`, and `extra` is never assigned when `work()` raises -- which is precisely the
+    # deadline case this file exists for.  `execute()` folds the stash in either way.
+    _ACTIVE_INSTRUMENTS["boundary"] = block
+    try:
+        path = Path(args.outdir) / f"{args.label}_boundary_{phase}.json"
+        path.write_text(json.dumps({"label": args.label, "compute_mode": args.mode, **block}, indent=2, default=str))
+    except Exception as exc:  # noqa: BLE001 - the leg must not die because a side file could not be written
+        block["boundary_write_error"] = f"{type(exc).__name__}: {exc}"[:400]
+    total = block["boundary_taskcount_total_completed"]
+    print(
+        f"[{args.label}] BOUNDARY {phase}: "
+        f"tasks-completed {'UNMEASURED' if total is None else total} "
+        f"over {block['boundary_taskcount_n_prefixes']} prefixes  "
+        f"pinned {block['boundary_pinned_bytes']} B  "
+        f"nanny-memory-events {block['boundary_nanny_memory_events']}  "
+        f"quiescent {block['boundary_settle_quiescent']} "
+        f"(waited {block['boundary_settle_wait_s']:.1f} s, pending {block['boundary_settle_pending']})",
+        flush=True,
+    )
+    return block
 
 
 # --------------------------------------------------------------------------------------
@@ -843,6 +1100,12 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
 
     watcher = NannyWatcher().install()
     accountant = PersistAccountant(marex_root, repo_root).install()
+    # Published so that `snapshot_boundary`, called from inside `work()`, can carry the same
+    # guards the leg summary carries: a count without its nanny-event reading is not
+    # interpretable (D-047).
+    _ACTIVE_INSTRUMENTS["watcher"] = watcher
+    _ACTIVE_INSTRUMENTS["accountant"] = accountant
+    _ACTIVE_INSTRUMENTS["boundary"] = None
     spill = SpillSampler(client, n_workers=args.workers)
     spill.start()
     sampler = MemorySampler()
@@ -921,6 +1184,21 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
         persist=accountant.report(),
         **extra,
     )
+    # A leg killed by its deadline never assigns `extra`, so the boundary block would be lost
+    # from the summary exactly when the standalone file matters most.  Fold in the stash.
+    stashed = _ACTIVE_INSTRUMENTS.get("boundary")
+    if stashed and "boundary_taskcount_total_completed" not in summary:
+        summary.update(stashed)
+    _ACTIVE_INSTRUMENTS["watcher"] = None
+    _ACTIVE_INSTRUMENTS["accountant"] = None
+    _ACTIVE_INSTRUMENTS["boundary"] = None
+
+    # The consumers' share, derived rather than measured separately: everything the leg ran
+    # after the boundary snapshot.  Both readings come from the same cumulative counter, so
+    # the subtraction is exact when both are measured and is simply absent when either is not.
+    boundary_total = summary.get("boundary_taskcount_total_completed")
+    if boundary_total is not None and not summary.get("taskcount_unmeasured", True):
+        summary["consumer_taskcount_completed"] = int(summary["taskcount_total_completed"]) - int(boundary_total)
     summary_path.write_text(json.dumps(summary, indent=2, default=str))
 
     managed_dead = spill.managed_unmeasured or spill.managed_samples_ok == 0

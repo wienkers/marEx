@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-from squeeze_common import GB, add_common_args, execute
+from squeeze_common import GB, add_common_args, execute, snapshot_boundary
 
 import marEx
 
@@ -102,7 +102,12 @@ def main() -> None:
             scratch_dir=str(Path(args.scratch) / "staging" / args.label),
             validate=args.validate,
         )
+        # Read the task counts HERE, at the library's boundary, not at the leg's: the three
+        # `.compute()` calls in `fingerprint` below would otherwise dominate the number and
+        # a lazy/persist ratio would be measuring this harness rather than marEx (D-046).
+        boundary = snapshot_boundary(client, args, collections=ds, phase="preprocess_data")
         result = fingerprint(ds)
+        result.update(boundary)
         if args.write_output:
             ds.to_zarr(args.write_output, mode="w")
             result["written_to"] = args.write_output
