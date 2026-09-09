@@ -28,7 +28,7 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.core.time_axis import _median_step_days, cadence_index_name
+from marEx.core.time_axis import _median_step_days, cadence_index_name, is_subdaily_axis
 from marEx.exceptions import ConfigurationError
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -572,17 +572,118 @@ class TestCadenceIndexName:
         assert cadence_index_name(da, "time") == "dayofyear"
 
     def test_a_nat_in_the_coordinate_does_not_read_as_sub_daily(self):
-        """`_median_step_days` returns a large NEGATIVE number on a NaT-bearing axis.
+        """A NaT is DROPPED from the spacings, so the cadence is read off the real steps.
 
-        Ungated, that is `< 1.0` and a plain daily run gets worded "Hour-of-year". The
-        guard is local to `cadence_index_name`: `is_subdaily_axis` shares the helper and
-        still answers True here, which flips a `detrend_harmonic` rejection rather than a
-        string, so it needs its own reasoning and is deliberately left alone.
+        `np.diff` on a NaT-bearing datetime64 axis yields NaT spacings, and NaT's int64
+        sentinel survives `.astype(np.float64)` as -2**63; divided by 86400 that is
+        -1.0675e14, a plainly negative "median spacing" that reads as sub-daily. Masking
+        the NaT spacings out before the cast is what makes the remaining steps speak.
         """
         time = pd.DatetimeIndex(["2000-01-01", "NaT", "2000-01-03", "2000-01-04"])
         da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
-        assert _median_step_days(da.time) < 0  # the input the guard exists for
+        assert _median_step_days(da.time) == 1.0
+        assert is_subdaily_axis(da, "time") is False
         assert cadence_index_name(da, "time") == "dayofyear"
+
+    def test_a_nat_bearing_sub_daily_axis_still_reads_sub_daily(self):
+        """Dropping NaT spacings must not push every axis to "daily".
+
+        The counterpart to the test above, and the one that would catch an over-correction
+        that simply returned 1.0 whenever a NaT appeared.
+        """
+        time = pd.DatetimeIndex(["2000-01-01T00", "NaT", "2000-01-01T12", "2000-01-01T18"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        assert _median_step_days(da.time) == 0.25
+        assert is_subdaily_axis(da, "time") is True
+        assert cadence_index_name(da, "time") == "hourofyear"
+
+    def test_an_axis_whose_every_spacing_is_nat_reports_daily(self):
+        """With nothing measurable left, the documented fallback is daily, not a sentinel."""
+        time = pd.DatetimeIndex(["2000-01-01", "NaT"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        assert _median_step_days(da.time) == 1.0
+        assert is_subdaily_axis(da, "time") is False
+        assert cadence_index_name(da, "time") == "dayofyear"
+
+    def test_a_decreasing_axis_still_reports_daily_through_the_guard(self):
+        """`cadence_index_name`'s non-positive guard stays live after the NaT fix.
+
+        A decreasing axis is the case it now exists for: the spacings are real, negative
+        and nothing masks them, so the guard is what keeps the wording honest.
+        """
+        time = pd.DatetimeIndex(["2000-01-04", "2000-01-03", "2000-01-02", "2000-01-01"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        assert _median_step_days(da.time) == -1.0
+        assert cadence_index_name(da, "time") == "dayofyear"
+
+    def test_infer_cycle_accepts_a_nat_bearing_axis_and_always_did(self):
+        """A NaT must NOT make `infer_cycle` raise. This is a regression pin.
+
+        The pre-fix bug was NaT-FRACTION dependent, which is easy to miss from a 4-point
+        example: the cadence is a median, so one NaT among 399 spacings never moved it and
+        this axis always inferred `dayofyear`. Measured 2026-09-09 on the pre-fix code, a
+        1096-point daily axis with one NaT ran `fixed_baseline` to completion and gave 872
+        extremes with `max|diff|` 0.0 against the same run with the NaT dropped. Rejecting
+        such an axis would kill a correct result, so nothing here rejects it.
+        """
+        time = pd.DatetimeIndex(pd.date_range("2000-01-01", periods=400, freq="D"))
+        time = time.delete(200).insert(200, pd.NaT)
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        cycle = marEx.infer_cycle(da.time, "time")
+        assert (cycle.index_name, cycle.length, cycle.step_days) == ("dayofyear", 366, 1.0)
+
+    def test_infer_cycle_is_nat_fraction_independent_after_the_mask(self):
+        """The short axis now answers what the long one always answered.
+
+        Pre-fix this 4-point axis RAISED (`non-positive median spacing`, -1.07e14) while
+        the 400-point axis above succeeded, purely because two of three spacings were NaT.
+        Masking removes the fraction dependence; the change from raise to daily is
+        deliberate and is the point of the fix.
+        """
+        time = pd.DatetimeIndex(["2000-01-01", "NaT", "2000-01-03", "2000-01-04"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        cycle = marEx.infer_cycle(da.time, "time")
+        assert (cycle.index_name, cycle.step_days) == ("dayofyear", 1.0)
+
+    def test_add_decimal_year_rejects_a_nat_axis_with_a_marex_error(self):
+        """The one function that genuinely cannot proceed says so in marEx's own error.
+
+        Its legacy branch builds `time.year.astype(str) + "-01-01"`; a NaT makes `.year`
+        float, the string reads "2000.0-01-01", and pandas raises `DateParseError` with no
+        suggestion attached. That is what a user hit before this guard.
+        """
+        time = pd.DatetimeIndex(["2000-01-01", "NaT", "2000-01-03", "2000-01-04"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        with pytest.raises(ConfigurationError, match="NaT"):
+            marEx.core.time_axis.add_decimal_year(da, "time")
+
+    def test_add_decimal_year_rejects_a_nat_in_an_object_dtype_axis(self):
+        """`pd.isna`, not `np.isnat`: a cftime/object axis can carry a NaT too.
+
+        `_step_days` returns None for an object array it cannot subtract, so the cadence
+        helpers report daily and nothing upstream notices. Pinned because the first version
+        of this guard used `np.isnat` and silently missed this case.
+        """
+        cftime = pytest.importorskip("cftime")
+        values = np.array(
+            [cftime.DatetimeNoLeap(2000, 1, 1), pd.NaT, cftime.DatetimeNoLeap(2000, 1, 3)],
+            dtype=object,
+        )
+        da = xr.DataArray(np.zeros(3, np.float32), dims=["time"], coords={"time": values})
+        with pytest.raises(ConfigurationError, match="NaT"):
+            marEx.core.time_axis.add_decimal_year(da, "time")
+
+    def test_an_axis_with_no_surviving_spacing_reports_daily_not_sub_daily(self):
+        """Every spacing NaT leaves nothing to measure, and daily is the documented answer.
+
+        Pre-fix this read sub-daily, but only because the sentinel was negative and
+        `< 1.0`; it was never a measurement of anything. Pinned as its own case because
+        the four-point tests all leave at least one real spacing behind.
+        """
+        time = pd.DatetimeIndex(["2000-01-01T00", "NaT", "2000-01-01T02"])
+        da = xr.DataArray(np.zeros(3, np.float32), dims=["time"], coords={"time": time})
+        assert _median_step_days(da.time) == 1.0
+        assert is_subdaily_axis(da, "time") is False
 
     def test_a_missing_coordinate_still_raises(self):
         """The no-raise guarantee is bounded to a coordinate that EXISTS.

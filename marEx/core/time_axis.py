@@ -133,12 +133,24 @@ DAILY_CYCLE = SeasonalCycle("dayofyear", _DAYS_PER_YEAR, 1.0)
 
 
 def _step_days(time_coord: xr.DataArray) -> Optional[np.ndarray]:
-    """Spacings of ``time_coord`` in days, or ``None`` if they cannot be derived."""
+    """Spacings of ``time_coord`` in days, or ``None`` if they cannot be derived.
+
+    ``NaT`` spacings are DROPPED, and the masking has to happen while the array is still
+    ``timedelta64``. ``NaT`` is the ``int64`` minimum, and nothing about the cast to float
+    turns it into a ``NaN``: ``np.timedelta64("NaT").astype(np.float64) / 86400`` is
+    ``-1.0675e14``, a finite, plainly negative number that then survives every ``isfinite``
+    guard downstream and reads as sub-daily. So a single missing timestamp used to answer
+    "finer than daily" for a daily axis. Masking on ``np.isnat`` before the cast lets the
+    axis be described by the spacings it does have; an axis with nothing left is reported
+    as unmeasurable by the callers' own ``size == 0`` branches, which is the documented
+    daily fallback. ``np.nanmedian`` would NOT fix this -- there is no NaN to ignore.
+    """
     values = np.asarray(time_coord.values).reshape(-1)
     if values.size < 2:
         return None
     if np.issubdtype(values.dtype, np.datetime64):
-        return np.diff(values.astype("datetime64[ns]")).astype("timedelta64[s]").astype(np.float64) / 86400.0
+        diffs = np.diff(values.astype("datetime64[ns]")).astype("timedelta64[s]")
+        return diffs[~np.isnat(diffs)].astype(np.float64) / 86400.0
     if values.dtype == np.dtype("O"):
         try:
             return np.array([(b - a).total_seconds() for a, b in zip(values[:-1], values[1:])], dtype=np.float64) / 86400.0
@@ -160,7 +172,12 @@ def infer_cycle(time_coord: xr.DataArray, dim: str = "time") -> SeasonalCycle:
     can override with the ``cycle=`` escape hatch.
 
     An axis too short to measure (fewer than two timesteps), or one that is not
-    datetime-like, falls back to :data:`DAILY_CYCLE`.
+    datetime-like, falls back to :data:`DAILY_CYCLE`. A ``NaT`` in the coordinate is NOT
+    rejected here and never was: the cadence is a MEDIAN, so a handful of missing
+    timestamps among many leaves it untouched, and a run over such an axis produces the
+    same answer as one over the axis with those timestamps dropped (measured: identical
+    extreme counts, ``max|diff|`` 0.0). Masking the ``NaT`` spacings in :func:`_step_days`
+    only extends that to the short axes where they used to outvote the real steps.
 
     **Sub-daily ceiling.** ``extremes/histogram.py`` builds its flox ``expected_groups``
     as ``uint16``, so a cycle longer than 65535 slots would wrap. That bound is
@@ -279,7 +296,7 @@ def cadence_index_name(da: xr.DataArray, coord_name: str, cycle: Optional[Season
     bite here every reduction upstream has already indexed the same coordinate.
 
     An axis whose spacing is unmeasurable -- one step, or a non-positive median, which is
-    what a ``NaT`` in the coordinate produces -- is reported as daily. That is what every
+    what a DECREASING axis produces -- is reported as daily. That is what every
     pre-Phase-C run recorded, and it is the conservative answer: :func:`infer_cycle`
     rejects a non-positive median outright, so guessing a cycle from one would be worse
     than saying the thing the code has always said.
@@ -289,11 +306,10 @@ def cadence_index_name(da: xr.DataArray, coord_name: str, cycle: Optional[Season
     if cycle is not None:
         return cycle.index_name
     step_days = _median_step_days(da[coord_name])
-    # `_median_step_days` returns a large NEGATIVE number when the coordinate contains
-    # `NaT`, which would otherwise read as sub-daily and word a daily run "Hour-of-year".
-    # Guarded here, not in `_median_step_days`: that helper is shared with
-    # `is_subdaily_axis`, where the same input flips a `detrend_harmonic` REJECTION, and
-    # changing a guard's behaviour is not this change's business.
+    # A non-positive median is now only what a DECREASING axis produces: `_step_days`
+    # masks the `NaT` spacings that used to land here as -1.07e14. The guard stays because
+    # that case is real and unmasked -- an axis sorted the wrong way has genuine negative
+    # spacings -- and because wording an output must not be the thing that fails a run.
     if not np.isfinite(step_days) or step_days <= 0:
         return "dayofyear"
     if step_days >= 28:
@@ -360,6 +376,25 @@ def add_decimal_year(
     # Use coordinate name if provided, otherwise use dimension name
     coord_name = coord if coord is not None else dim
     time_coord = da[coord_name]
+
+    # A NaT is rejected HERE, and only here, because this is the one function that cannot
+    # proceed: the legacy branch below builds `time.year.astype(str) + "-01-01"`, and a
+    # NaT makes `.year` float, so the string is "2000.0-01-01" and pandas raises
+    # `DateParseError` -- an unhandled third-party exception with no suggestion attached.
+    # `infer_cycle` deliberately does NOT reject: its cadence is a median and it gives the
+    # right answer on a NaT-bearing axis. `pd.isna` is used rather than `np.isnat` so the
+    # object-dtype (cftime) branch is covered too; a cftime array can carry a `pd.NaT`.
+    if bool(pd.isna(np.asarray(time_coord.values).reshape(-1)).any()):
+        n_nat = int(pd.isna(np.asarray(time_coord.values).reshape(-1)).sum())
+        raise ConfigurationError(
+            f"Time axis '{coord_name}' contains {n_nat} NaT timestamp(s)",
+            details="A decimal year cannot be derived for a missing timestamp.",
+            suggestions=[
+                f"Drop the missing timestamps, e.g. da.sel({{'{coord_name}': da['{coord_name}'].notnull()}})",
+                f"Reindex '{coord_name}' onto a complete regular axis",
+            ],
+            context={"n_nat": n_nat, "n_time": int(np.asarray(time_coord.values).size)},
+        )
 
     if subdaily is None:
         diffs = _step_days(time_coord)
