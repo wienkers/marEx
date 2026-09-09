@@ -219,7 +219,7 @@ field is always held whole, deliberately (§5.2).
 | mode | peak RAM | anomaly graph runs | disk |
 | --- | --- | --- | --- |
 | `persist` (default) | ~0.6 × input pinned *[measured, ICON]* | once | none |
-| `lazy` | a few chunks *[reasoned]* | 2–3× *[reasoned]* | none |
+| `lazy` | a few chunks *[reasoned]* | *[struck — see below]* | none |
 | `streaming` | a few chunks *[measured]* | once | ~2 × input |
 
 *[measured]* `persist` spilled **9.2–10.5 GB** to disk while `streaming` spilled **0.00 GB**,
@@ -228,6 +228,18 @@ in three independent runs across a 5.3× range of per-worker RAM — including o
 
 *[measured]* Output is **bit-identical** between `persist` and `streaming`: `extreme_events`
 0 of 354,715,200 elements differing; `thresholds` `max_abs_diff` 0.0 including its NaN mask.
+
+**On the struck cell.** The `lazy` row's **anomaly graph runs** entry used to read "2-3x",
+reasoned rather than measured, and it has been struck rather than replaced. Two things stopped a
+number going back in. The count is not a property of `lazy` alone: `lazy` re-reads its input
+once more for every traversal of the outputs, so the total depends on how the *caller* consumes
+the result, and a caller computing two variables separately pays more than one computing them
+together. And a source read is not the same event as a subgraph execution in either direction,
+so it cannot stand in for the quantity this column names. What is safe to say qualitatively is
+what the rest of this section already implies: under `lazy` the upstream work is repeated, under
+`persist` and `streaming` it is not, and if you use `lazy` you should materialise what you need
+in one pass. The measurements behind the strike, with their job id and their limits, are in
+`DECISIONS.md` (D-063).
 
 **The caveat that remains for `detect`: the per-task floor.** `streaming` removes the
 *pinned* ceiling. It cannot remove the memory one task needs, which is set by the algorithm
