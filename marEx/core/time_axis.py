@@ -264,6 +264,45 @@ def is_subdaily_axis(da: xr.DataArray, coord_name: str, cycle: Optional[Seasonal
     return bool(_median_step_days(da[coord_name]) < 1.0)
 
 
+def cadence_index_name(da: xr.DataArray, coord_name: str, cycle: Optional[SeasonalCycle] = None) -> str:
+    """Name the within-year index an axis groups on, for a coordinate that exists.
+
+    Same reasoning as :func:`is_subdaily_axis`, and for the same reason it does not go
+    through :func:`infer_cycle`: this exists to WORD an output attribute, and metadata
+    wording must never be the thing that fails a run which would otherwise succeed.
+    ``global_percentile`` uses no within-year cycle at all, so it can be handed an axis
+    ``infer_cycle`` would reject.
+
+    The guarantee is bounded, and the bound is the honest one: **it does not raise for a
+    coordinate that exists on** ``da``. A missing ``coord_name`` still raises ``KeyError``,
+    because that is a caller bug rather than a data condition, and by the time it could
+    bite here every reduction upstream has already indexed the same coordinate.
+
+    An axis whose spacing is unmeasurable -- one step, or a non-positive median, which is
+    what a ``NaT`` in the coordinate produces -- is reported as daily. That is what every
+    pre-Phase-C run recorded, and it is the conservative answer: :func:`infer_cycle`
+    rejects a non-positive median outright, so guessing a cycle from one would be worse
+    than saying the thing the code has always said.
+
+    Returns one of ``"month"``, ``"dayofyear"`` or ``"hourofyear"``.
+    """
+    if cycle is not None:
+        return cycle.index_name
+    step_days = _median_step_days(da[coord_name])
+    # `_median_step_days` returns a large NEGATIVE number when the coordinate contains
+    # `NaT`, which would otherwise read as sub-daily and word a daily run "Hour-of-year".
+    # Guarded here, not in `_median_step_days`: that helper is shared with
+    # `is_subdaily_axis`, where the same input flips a `detrend_harmonic` REJECTION, and
+    # changing a guard's behaviour is not this change's business.
+    if not np.isfinite(step_days) or step_days <= 0:
+        return "dayofyear"
+    if step_days >= 28:
+        return "month"
+    if step_days >= 1:
+        return "dayofyear"
+    return "hourofyear"
+
+
 def resolve_cycle(da: xr.DataArray, coord_name: str, cycle: Optional[SeasonalCycle] = None) -> SeasonalCycle:
     """Return ``cycle`` if the caller supplied one, otherwise infer it from ``da``."""
     if cycle is not None:

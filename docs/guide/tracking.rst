@@ -59,6 +59,31 @@ Simple Event Tracking
    # Run tracking algorithm
    tracked_events = event_tracker.run()
 
+Fields With No Mask
+-------------------
+
+``mask`` marks which cells are valid, and for SST that is the land-sea mask. An
+atmospheric field has no equivalent -- every cell carries data -- so ``mask`` is
+optional. Omit it and every cell is treated as valid:
+
+.. code-block:: python
+
+   # Atmospheric heatwaves: no land-sea mask to apply
+   event_tracker = marEx.tracker(
+       extremes_ds.extreme_events,
+       R_fill=8,
+       area_filter_absolute=100
+   )
+
+This is exactly equivalent to passing an all-``True`` mask by hand; the tracking
+result is identical either way.
+
+.. note::
+
+   ``mask`` is the second *positional* parameter and ``R_fill`` the third, so
+   ``marEx.tracker(events, 8)`` binds ``8`` to ``mask``. Pass ``R_fill`` by
+   keyword whenever you leave the mask out.
+
 Advanced Tracking Configuration
 -------------------------------
 

@@ -11,14 +11,15 @@ from typing import Literal, Optional, Union
 
 import xarray as xr
 
+from ..exceptions import ConfigurationError
 from .tracker import tracker
 
 
 def regional_tracker(
     data_bin: xr.DataArray,
-    mask: xr.DataArray,
-    coordinate_units: Literal["degrees", "radians"],
-    R_fill: Union[int, float],
+    mask: Optional[xr.DataArray] = None,
+    coordinate_units: Optional[Literal["degrees", "radians"]] = None,
+    R_fill: Optional[Union[int, float]] = None,
     area_filter_quartile: Optional[float] = None,
     area_filter_absolute: Optional[int] = None,
     **kwargs,
@@ -34,12 +35,16 @@ def regional_tracker(
     ----------
     data_bin : xr.DataArray
         Binary data to identify and track objects in (True = object, False = background)
-    mask : xr.DataArray
-        Binary mask indicating valid regions (True = valid, False = invalid)
+    mask : xr.DataArray, optional
+        Binary mask indicating valid regions (True = valid, False = invalid). Omit it
+        for a field with no invalid region and every cell is treated as valid.
     coordinate_units : {'degrees', 'radians'}
-        Units of the coordinate system. Must be specified for regional data.
+        Units of the coordinate system. Required for regional data -- auto-detection
+        is unreliable over a partial coordinate range, which is why this wrapper
+        exists. It carries a signature default only so ``mask`` can be omitted.
     R_fill : int or float
-        Radius for filling holes/gaps in spatial domain (in grid cells)
+        Radius for filling holes/gaps in spatial domain (in grid cells). Required;
+        the signature default exists only so ``mask`` can be omitted.
     area_filter_quartile : float, optional
         Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%).
         Mutually exclusive with area_filter_absolute. Default is 0.5 if neither parameter is provided.
@@ -92,6 +97,16 @@ def regional_tracker(
     ... )
     >>> events = absolute_regional.run()
     """
+    # `coordinate_units` and `R_fill` are required; they carry signature defaults only
+    # because `mask` now precedes them and is genuinely optional. `tracker` rejects a
+    # missing `R_fill` itself, so only `coordinate_units` needs saying here.
+    if coordinate_units is None:
+        raise ConfigurationError(
+            "coordinate_units is required for regional_tracker",
+            details="Auto-detection of degrees vs radians is unreliable over a partial coordinate range",
+            suggestions=["Pass coordinate_units='degrees'", "Pass coordinate_units='radians'"],
+        )
+
     return tracker(
         data_bin=data_bin,
         mask=mask,

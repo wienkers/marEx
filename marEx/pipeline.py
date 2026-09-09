@@ -20,7 +20,7 @@ from .anomaly.api import _anomaly_core
 from .core.compute_mode import Materialiser, create_staging_dir
 from .core.dimensions import resolve_dims
 from .core.finalise import finalise_dataset, split_large_chunks
-from .core.time_axis import SeasonalCycle
+from .core.time_axis import SeasonalCycle, cadence_index_name
 from .extremes.api import _effective_window_spatial, _extreme_steps, _extremes_core, _log_extreme_summary
 from .logging_config import configure_logging, get_logger
 
@@ -257,10 +257,19 @@ def preprocess_data(
 
         # Merge the extremes stage's metadata onto the anomaly stage's. Each stage
         # appends its own steps, so the chained list reads in execution order.
-        effective_window_spatial = _effective_window_spatial(method_extreme, window_spatial, dimensions, ds)
+        # `method_percentile` is threaded rather than left to the helper's own default:
+        # the exact path ignores `window_spatial` entirely, so defaulting it there would
+        # record a 5x5 window the run never used.
+        effective_window_spatial = _effective_window_spatial(method_extreme, window_spatial, dimensions, ds, method_percentile)
         ds.attrs.update({"method_extreme": method_extreme, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
-            method_extreme, window_days, effective_window_spatial
+            method_extreme,
+            window_days,
+            effective_window_spatial,
+            # `cadence_index_name`, not `resolve_cycle`: it never raises, so wording an
+            # attribute cannot fail a `global_percentile` run on a mixed-cadence axis.
+            cadence_index_name(ds, coordinates["time"], cycle),
+            tail,
         )
         if method_extreme == "seasonal_percentile":
             ds.attrs.update({"window_days": window_days})

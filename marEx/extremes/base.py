@@ -70,6 +70,40 @@ _FALLBACK_PRECISION = 0.01
 _FALLBACK_MAX_ANOMALY = 5.0
 
 
+def reject_empty_series(da: xr.DataArray) -> None:
+    """Reject a zero-length anomaly with a cause, not a symptom.
+
+    An empty series reaches the histogram's range reduction as a zero-size array, where
+    `nanmin` raises "zero-size array to reduction operation fmin which has no identity";
+    on the explicit-bins path it survives to a bare `ZeroDivisionError` deeper in the
+    histogram; and on the ``method_percentile="exact"`` path, which builds no histogram
+    and so never reaches :func:`resolve_bin_spec`, it reached a bare `ZeroDivisionError`
+    too. All three are unintelligible, and the cause is nearly always a baseline window
+    longer than the series it is given (`shifting_baseline` trims the first
+    `window_years` years, so `window_years=3` on 2.7 years of data leaves nothing).
+
+    Lives outside :func:`resolve_bin_spec` so that the exact path -- which has no bin
+    geometry to resolve -- still reports it identically.
+    """
+    if da.size != 0:
+        return
+    empty_dims = [str(d) for d, n in zip(da.dims, da.shape) if n == 0]
+    raise ConfigurationError(
+        f"Cannot identify extremes: the anomaly series is empty ({', '.join(f'{d}=0' for d in empty_dims)})",
+        details=(
+            "Identifying extremes needs at least one sample. "
+            "An empty anomaly usually means the baseline window consumed the whole series: "
+            "`shifting_baseline` removes the first `window_years` years before computing anomalies."
+        ),
+        suggestions=[
+            "Reduce `window_years` so it is shorter than the input time series",
+            "Lengthen the input time series",
+            "Use `method_anomaly='detrend_harmonic'` or `'fixed_baseline'`, which do not trim the series",
+        ],
+        context={"shape": tuple(da.shape), "dims": tuple(str(d) for d in da.dims)},
+    )
+
+
 def resolve_bin_spec(
     da: xr.DataArray,
     precision: Optional[float],
@@ -94,30 +128,7 @@ def resolve_bin_spec(
     NaN-mask pass the 2-D path already makes. It is skipped entirely for
     ``method_percentile='exact'``, which never builds a histogram.
     """
-    # An empty series reaches the reduction below as a zero-size array, where
-    # `nanmin` raises "zero-size array to reduction operation fmin which has no
-    # identity" -- and on the explicit-bins path it survives to a bare
-    # ZeroDivisionError deeper in the histogram. Both are unintelligible, and the
-    # cause is nearly always a baseline window longer than the series it is given
-    # (`shifting_baseline` trims the first `window_years` years, so
-    # `window_years=3` on 2.7 years of data leaves nothing). Checked before the
-    # early return, so both bin paths report it the same way.
-    if da.size == 0:
-        empty_dims = [str(d) for d, n in zip(da.dims, da.shape) if n == 0]
-        raise ConfigurationError(
-            f"Cannot identify extremes: the anomaly series is empty ({', '.join(f'{d}=0' for d in empty_dims)})",
-            details=(
-                "The histogram bin geometry is derived from the data range, which needs at least one sample. "
-                "An empty anomaly usually means the baseline window consumed the whole series: "
-                "`shifting_baseline` removes the first `window_years` years before computing anomalies."
-            ),
-            suggestions=[
-                "Reduce `window_years` so it is shorter than the input time series",
-                "Lengthen the input time series",
-                "Use `method_anomaly='detrend_harmonic'` or `'fixed_baseline'`, which do not trim the series",
-            ],
-            context={"shape": tuple(da.shape), "dims": tuple(str(d) for d in da.dims)},
-        )
+    reject_empty_series(da)
 
     if precision is not None and max_anomaly is not None:
         return float(precision), float(max_anomaly)

@@ -28,6 +28,7 @@ import pytest
 import xarray as xr
 
 import marEx
+from marEx.core.time_axis import _median_step_days, cadence_index_name
 from marEx.exceptions import ConfigurationError
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -524,3 +525,112 @@ class TestExplicitCycle:
             dask_chunks={"time": 24},
         )
         assert ds.sizes["month"] == 12
+
+
+# --------------------------------------------------------------------------------------
+# What the output SAYS it did (the cadence half of `preprocessing_steps`)
+# --------------------------------------------------------------------------------------
+
+
+class TestCadenceIndexName:
+    """`cadence_index_name` names the within-year index WITHOUT ever raising.
+
+    It exists to word an output attribute. `infer_cycle` raises on a mixed-cadence axis
+    and `global_percentile` needs no cycle at all, so resolving a real cycle for the
+    wording would fail runs that otherwise succeed -- the same shape as the Phase C
+    eager-resolution finding. Every case below is one `infer_cycle` would reject or
+    answer differently.
+    """
+
+    @pytest.mark.parametrize(
+        "freq,expected",
+        [("MS", "month"), ("D", "dayofyear"), ("6h", "hourofyear"), ("h", "hourofyear")],
+    )
+    def test_it_names_the_cadence(self, freq, expected):
+        time = pd.date_range("2000-01-01", periods=200, freq=freq)
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        assert cadence_index_name(da, "time") == expected
+
+    def test_a_supplied_cycle_wins_over_inference(self):
+        """The caller's `cycle=` escape hatch has to reach the attribute too."""
+        time = pd.date_range("2000-01-01", periods=50, freq="D")
+        da = xr.DataArray(np.zeros(50, np.float32), dims=["time"], coords={"time": time})
+        assert cadence_index_name(da, "time", marEx.SeasonalCycle("month", 12, 30.0)) == "month"
+
+    def test_a_mixed_cadence_axis_does_not_raise(self):
+        """`infer_cycle` REJECTS this axis. Wording it must not."""
+        time = pd.DatetimeIndex(["2000-01-01", "2000-01-02", "2000-03-01", "2000-03-02", "2000-09-14", "2000-09-15"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        with pytest.raises(ConfigurationError):
+            marEx.infer_cycle(da.time, "time")
+        assert cadence_index_name(da, "time") in {"month", "dayofyear", "hourofyear"}
+
+    def test_an_unmeasurable_axis_reports_daily(self):
+        """One step gives no diff at all. Daily is what every pre-Phase-C run recorded."""
+        time = pd.date_range("2000-01-01", periods=1, freq="D")
+        da = xr.DataArray(np.zeros(1, np.float32), dims=["time"], coords={"time": time})
+        assert cadence_index_name(da, "time") == "dayofyear"
+
+    def test_a_nat_in_the_coordinate_does_not_read_as_sub_daily(self):
+        """`_median_step_days` returns a large NEGATIVE number on a NaT-bearing axis.
+
+        Ungated, that is `< 1.0` and a plain daily run gets worded "Hour-of-year". The
+        guard is local to `cadence_index_name`: `is_subdaily_axis` shares the helper and
+        still answers True here, which flips a `detrend_harmonic` rejection rather than a
+        string, so it needs its own reasoning and is deliberately left alone.
+        """
+        time = pd.DatetimeIndex(["2000-01-01", "NaT", "2000-01-03", "2000-01-04"])
+        da = xr.DataArray(np.zeros(len(time), np.float32), dims=["time"], coords={"time": time})
+        assert _median_step_days(da.time) < 0  # the input the guard exists for
+        assert cadence_index_name(da, "time") == "dayofyear"
+
+    def test_a_missing_coordinate_still_raises(self):
+        """The no-raise guarantee is bounded to a coordinate that EXISTS.
+
+        A missing name is a caller bug, not a data condition, and swallowing it would
+        silently word every run "Day-of-year". Pinned so the bound stays deliberate.
+        """
+        time = pd.date_range("2000-01-01", periods=10, freq="D")
+        da = xr.DataArray(np.zeros(10, np.float32), dims=["time"], coords={"time": time})
+        with pytest.raises(KeyError):
+            cadence_index_name(da, "not_a_coordinate")
+
+
+class TestPreprocessingStepsNameTheCadence:
+    """End-to-end: the attribute a monthly or sub-daily run writes about itself."""
+
+    def test_a_monthly_run_says_monthly(self, monthly_sst):
+        ds = marEx.preprocess_data(
+            monthly_sst,
+            method_anomaly="fixed_baseline",
+            method_extreme="seasonal_percentile",
+            dimensions=DIMENSIONS,
+            dask_chunks={"time": 24},
+        )
+        step = ds.attrs["preprocessing_steps"][-1]
+        assert step.startswith("Monthly thresholds")
+        assert "Day-of-year" not in step
+
+    def test_a_sixhourly_run_says_hour_of_year(self, sixhourly_sst):
+        ds = marEx.preprocess_data(
+            sixhourly_sst,
+            method_anomaly="fixed_baseline",
+            method_extreme="seasonal_percentile",
+            dimensions=DIMENSIONS,
+            dask_chunks={"time": 400},
+        )
+        step = ds.attrs["preprocessing_steps"][-1]
+        assert step.startswith("Hour-of-year thresholds")
+
+    def test_a_daily_run_still_says_day_of_year(self):
+        """The regression guard: the daily wording is what the goldens were captured with."""
+        sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to
+        ds = marEx.preprocess_data(
+            sst.chunk({"time": 200}),
+            method_anomaly="fixed_baseline",
+            method_extreme="seasonal_percentile",
+            window_days=11,
+            dimensions=DIMENSIONS,
+            dask_chunks={"time": 200},
+        )
+        assert ds.attrs["preprocessing_steps"][-1].startswith("Day-of-year thresholds with 11 day window")
