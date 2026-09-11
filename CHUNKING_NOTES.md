@@ -222,9 +222,12 @@ field is always held whole, deliberately (§5.2).
 | `lazy` | a few chunks *[reasoned]* | *[struck — see below]* | none |
 | `streaming` | a few chunks *[measured]* | once | ~2 × input |
 
-*[measured]* `persist` spilled **9.2–10.5 GB** to disk while `streaming` spilled **0.00 GB**,
-in three independent runs across a 5.3× range of per-worker RAM — including one where
-`streaming` ran **7× longer** and still spilled nothing.
+*[measured, residual]* In three independent runs across a 5.3× range of per-worker RAM,
+`persist` left **9.2–10.5 GB** of spill on disk while `streaming` left **0.00 GB**. Read both
+qualifiers: it is *residual* spill, an end-of-run `du` of the spill directory and so a lower
+bound rather than a peak; and every one of those runs FAILED (`KilledWorker` or
+`P2PConsistencyError`), the `streaming` comparators included, so the figures describe how the
+two modes fail, not what a completing run spills.
 
 *[measured]* Output is **bit-identical** between `persist` and `streaming`: `extreme_events`
 0 of 354,715,200 elements differing; `thresholds` `max_abs_diff` 0.0 including its NaN mask.

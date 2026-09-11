@@ -63,7 +63,8 @@ Every one of these exists because its absence has already produced a wrong answe
   count, and a figure is printed only when `workers_sampled == n_workers == n_workers_requested`.
   Deriving it from the cluster is not sufficient: `n_workers` is itself `len(client.run(...))`
   and would inherit the same undercount one call earlier.
-  Re-measured on that basis, the headline gridded-track leg (nt=3804, 4 x 4 GB) reports
+  Re-measured on that basis, the headline gridded-track leg (nt=3804, 24 GiB allocation,
+  4 x 4 GB dask budget) reports
   **0 bytes spilled across 333 successful samples, every one of them covering all 4 workers**.
   At a 5 s interval over a 1676 s run that is essentially every interval, so the sampler
   demonstrably ran, demonstrably reached the whole cluster, and never caught a byte in the spill
@@ -116,26 +117,29 @@ provisioning-dependent**: the same workload peaked 22.1 GB given a 32 GB budget 
 given 96 GB, because dask expands into available memory and releases under pressure. Size a
 squeeze from an *arithmetic invariant* instead (the whole int32 field, `n_time x n_cells x 4 B`).
 
-**The headline result -- gridded tracker, nt=3804, whole int32 field 15.8 GB, cluster 4 x 4 GB
-= 16 GB:**
+**The headline result -- gridded tracker, nt=3804, whole int32 field 15.8 GB, in a 24 GiB SLURM
+allocation at a 4 x 4 GB = 16 GB dask budget:**
 
 | leg | mode | outcome | evidence | peak |
 | --- | --- | --- | --- | ---: |
 | `g2_persist` | persist | **OOM-KILLED** | SLURM `OUT_OF_MEMORY`, `Detected 1 oom_kill event`, MaxRSS 23.83 GB | - |
 | `g2_persist_r2` | persist | **OOM-KILLED** | same, MaxRSS 24.10 GB | - |
 | `g2_stream` | streaming | **completed** | five reductions match the 32 GB and 192 GB runs (`id_field_sum` 826033161263, 4388 events, 18712 merges) | 7.3 GB |
+| `g2_persist`, 3 later runs | persist | **OOM-KILLED** | same signature all three times; one ran back to back with a `g2_stream` run in ONE job on ONE node, its `cgroup_peak` closing 2.43 MiB above the 24 GiB limit | - |
+| the same leg under streaming, 6 later runs (5 of them as `sc_stream_3804*`) | streaming | **completed** | `id_field_sum`, events and merges identical every time, including the run that shared that job and node | 6.65 - 7.30 GB |
 
-**And the property that actually matters -- peak near-flat in series length, same 16 GB budget:**
+**And the property that actually matters -- peak near-flat in series length, same 24 GiB
+allocation and same 16 GB dask budget:**
 
 | n_time | whole int32 field | peak | wall |
 | ---: | ---: | ---: | ---: |
 | 951 | 3.9 GB | 6.2 GB | 355 s |
 | 1902 | 7.9 GB | 6.9 GB | 849 s |
-| 3804 | **15.8 GB** | **6.65 - 7.29 GB** (five replicates) | 1600 - 1676 s |
+| 3804 | **15.8 GB** | **6.65 - 7.30 GB** (seven runs) | 1600 - 1676 s |
 
-The field being tracked grows **4x** across that span; peak grows by **at most ~17 %**, and on
-the closest pair of runs by ~7 %. Do not read a precise percentage off this table. Five
-replicates of the nt=3804 leg spread 6.65 / 6.75 / 6.91 / 7.11 / 7.29 GB, a 0.64 GB spread at a
+The field being tracked grows **4x** across that span; peak grows by **at most ~18 %**, and on
+the closest pair of runs by ~7 %. Do not read a precise percentage off this table. Seven runs of
+the nt=3804 leg spread 6.65 / 6.75 / 6.91 / 6.93 / 7.11 / 7.29 / 7.30 GB, a 0.65 GB spread at a
 single length, which is the same size as the growth being measured. The defensible statement is the
 qualitative one: **peak is near-flat in series length, growing by a small fraction of the 4x the
 data grows.** Anything sharper than that is reading noise.
@@ -145,7 +149,62 @@ n=1 or a small handful, taken on several different nodes, over a record whose ev
 grows (1130, 2142, 4388 events), so wall may be tracking work rather than length. Read the peak
 column qualitatively; treat the wall column as an order of magnitude.
 
-**Unstructured tracker, nt=1096, cluster 4 x 8 GB = 32 GB:** `persist` did not complete
+**How far apart the two modes are -- the same leg across allocations, dask budget held at
+4 x 4 GB = 16 GB** (one run per cell unless stated):
+
+| allocation | `persist` | `streaming` |
+| ---: | --- | --- |
+| 15 GiB | not run | **completed** |
+| 16 GiB | not run | **completed** |
+| 20 GiB | not run | **completed** |
+| 24 GiB | **OOM-KILLED**, 5 of 5 runs | **completed**, 7 of 7 runs |
+| 28 GiB | **did not finish**: no OOM, stopped by the 12000 s deadline after merge-loop chunk 150 of 153 | not run |
+| 40 GiB | **completed**, 2 of 2 runs, but not cleanly (see below) | not run |
+
+15 GiB is the smallest whole-GiB allocation that admits a 16 GB dask budget (`build_cluster`
+refuses a budget larger than the allocation, and 14 GiB is only 15.0 GB), so `streaming` was not
+squeezed further at this budget. Every run in the table that completed, in either mode, reproduces `id_field_sum`
+826033161263, 4388 events and 18712 merges; the 15, 16, 20 and 40 GiB runs were also checked on
+`n_nonzero_cells` (384891778) and `max_id` (4388). At 40 GiB `persist` also completes with 6 or
+8 GB per worker; that is a different budget and is not a point on this table, but those two
+runs and the 40 GiB rows are together the first `persist` completions at nt=3804 on the current
+code, so this is now a persist-against-streaming match and not streaming reproducing itself.
+
+What this does and does not show. It does **not** show a clean allocation threshold for
+`persist`. One 40 GiB run froze for about 90 minutes right after merge-loop chunk 150 of 153,
+the same point at which the 28 GiB run stalled: memory flat at 24.6 GiB, far below its limit,
+one of the four workers paused by dask with all 49 tasks the scheduler had assigned, while the
+other three sat idle, and then it resumed, for a reason these runs do not reveal. The other 40 GiB run, with
+dask's worker `pause` threshold switched off, did not freeze, but the nanny restarted a worker
+ten times for crossing its terminate threshold. (The 15, 16, 20, 28 and 40 GiB runs, and the two
+24 GiB `persist` runs whose client memory is quoted in this section, went through
+instrumentation wrappers that are not part of this directory. They record worker state and the
+memory of the client and the cgroup, which is where the paused-worker and client-memory figures
+here come from. `submit.sh` reproduces
+each leg's workload and allocation but not those records, and cannot reproduce the pause-off
+run at all.) So at 4 GB per worker
+`persist` was killed (24 GiB), stalled (28 GiB, and for a time at 40 GiB) or churned through
+worker restarts; on these few runs the allocation decided whether the kernel killed it, not
+whether it ran smoothly. In the three
+`streaming` runs where worker state was recorded (15, 16 and 20 GiB), no worker was ever paused.
+The 28 GiB row is unresolved, not a failure: the 40 GiB run froze at the same stage and
+recovered, and the 28 GiB run might have too, given longer than its 12000 s deadline. No
+persist/streaming peak ratio is formed -- a peak is a function of the room it is given (see
+above).
+
+Why the allocation, and not the dask budget, is the number to state. `memory_limit` governs
+dask's *workers* only, and under `persist` it is the *client* process that grows: 15.8 GiB PSS
+at its largest in the 40 GiB run (16.0 GiB in the 28 GiB run), against 1.9 GiB for the client of
+the 15 GiB `streaming` run. In the two 24 GiB runs instrumented to see it, the client held
+13.4 GiB PSS at the last sample before the kill, and in both the job shell reports the client process
+(`track_gridded.py`) as `Killed`, alongside the cgroup's single `oom_kill` event. A 16 GB dask budget therefore bounds
+`streaming`, which keeps the client small, and says little about what `persist` needs.
+
+The 15-40 GiB runs are single draws on `shared` nodes, several of them sharing a node at the
+same time, so their wall clocks are not compared.
+
+**Unstructured tracker, nt=1096, 4 x 8 GB = 32 GB dask budget on a whole node (a 235 GiB
+allocation, so here the dask budget and not the cgroup is the bound):** `persist` did not complete
 within 5 h on either of two replicates, while `streaming` completed in 3 h 50 min with matching
 output reductions.
 
@@ -177,7 +236,8 @@ Every leg's raw numbers live in its `<label>_summary.json`; `report.py` collates
 | E3 | gridded detect | 3650 | 8 × 8 GB | persist vs streaming vs lazy |
 
 Gridded-track equivalence at nt=3804 is carried by the five order-invariant reductions matching
-across the 16 / 32 / 192 GB runs, so it is not repeated here. That is reduction equality, not an
+across the 16 / 32 / 192 GB runs and, on the current code, between `persist` at 40 GiB and
+`streaming` at 15-24 GiB (see the allocation table), so it is not repeated here. That is reduction equality, not an
 array comparison: the streaming staging directory is cleared at the end of each leg, so no
 full-field reference survives at squeeze scale. The array-level check lives in the test suite,
 at fixture scale and zero tolerance.
@@ -196,10 +256,15 @@ on 48 GB, and the specified leg is 6.7x that data -- so squeezing it demonstrate
 `compute_mode`. F3 consumes F1's output store and is therefore blocked by construction, as are
 the `v_merge_off` and `v_fill` variants; F2 is independent of F1 (it reads the EERIE catalogue
 directly) and is simply unrun.
-**F4 and the `g2_*` gridded-track legs are the validated ones**, and they are what the results
-above rest on.
+**F4, the gridded-track `g2_*`, `g1_*` and `sc_*` legs, and the unstructured `u2_*` and `u3_*`
+legs are the validated ones**, and they are what the results above rest on.
 
 ```bash
+./slurm/submit.sh headline       # g2_*: persist twice and streaming once, 24 GiB, 4 x 4 GB
+./slurm/submit.sh allocation     # the same leg at 15-40 GiB (and the 6/8 GB budget arm)
+./slurm/submit.sh scaling        # sc_*: streaming peak against series length
+./slurm/submit.sh calibration    # g1_* (gridded, 4 x 8 GB) and u2_* (unstructured)
+./slurm/submit.sh unstructured   # u3_*: persist twice and streaming once, whole node
 ./slurm/submit.sh preflight      # small probes: does each configuration run at all?
 ./slurm/submit.sh feasibility    # F1-F4 (see the note above: only F4 is live), persist twice each
 ./slurm/submit.sh equivalence    # E1-E3
