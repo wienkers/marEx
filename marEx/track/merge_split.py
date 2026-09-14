@@ -21,15 +21,17 @@ in as explicit arguments. Behaviour and numerics are identical to the original
 method wrappers.
 """
 
-import gc
+import hashlib
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+import shutil
+from typing import Any, Dict, List, Optional, Tuple
 
+import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
+import zarr
 from dask import persist
-from dask.distributed import wait
 from numpy.typing import NDArray
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
@@ -48,6 +50,84 @@ from .partitioning import (
 from .region_writer import ObjectIDRegionWriter
 
 logger = get_logger(__name__)
+
+# Record widths of the unstructured merge kernel. They size the per-merge arrays only (a few KB
+# per chunk); the earlier update-slot bound MAX_MERGES * (MAX_PARENTS - 1) <= 255 no longer exists
+# because the kernel writes int32 labels directly. Both are guarded: a child with more accepted
+# parents than MAX_PARENTS, or a timestep with more merges than MAX_MERGES, raises TrackingError.
+# MAX_PARENTS must stay <= 255: ``parent_masks_uint`` is uint8 with 255 as its "no parent" value.
+MAX_MERGES = 64
+MAX_PARENTS = 64
+
+
+def _consolidate_slice(
+    ids_prev: NDArray[np.int32],
+    ids_cur: NDArray[np.int32],
+    area: NDArray[np.float32],
+    overlap_threshold: float,
+) -> List[int]:
+    """Array-only counterpart of ``overlap.consolidate_object_ids`` for the unstructured kernel.
+
+    A parent at ``ids_prev`` that overlaps two or more objects at ``ids_cur`` (each pair at
+    ``overlap / min(area) >= overlap_threshold``) hands all of them the smallest child ID, so a
+    split keeps one ID per lineage. Parents are visited in ascending ID and the renames compose
+    in that order, with the serial path's skip rules: a group whose first child was already
+    renamed is skipped, and already-renamed children are not renamed again. ``ids_cur`` is
+    relabelled IN PLACE.
+
+    Returns the surviving IDs whose cells grew (empty when nothing changed).
+    """
+    both = (ids_prev > 0) & (ids_cur > 0)
+    if not both.any():
+        return []
+    prev_fg = ids_prev[both].astype(np.int64)
+    cur_fg = ids_cur[both].astype(np.int64)
+    max_id = np.int64(max(int(ids_prev.max()), int(ids_cur.max()) + 1))
+    pairs, pair_inv = np.unique(prev_fg * max_id + cur_fg, return_inverse=True)
+    overlap = np.bincount(pair_inv.reshape(-1), weights=area[both]).astype(np.float32)
+    pair_parent = pairs // max_id
+    pair_child = pairs % max_id
+
+    def _areas(ids: NDArray[np.int32], wanted: NDArray[np.int64]) -> NDArray[np.float32]:
+        fg = ids > 0
+        labels, inv = np.unique(ids[fg], return_inverse=True)
+        sums = np.bincount(inv.reshape(-1), weights=area[fg]).astype(np.float32)
+        return sums[np.searchsorted(labels, wanted)]
+
+    min_area = np.minimum(_areas(ids_prev, pair_parent), _areas(ids_cur, pair_child))
+    accepted = overlap / min_area >= overlap_threshold
+    pair_parent = pair_parent[accepted]
+    pair_child = pair_child[accepted]
+    parents, counts = np.unique(pair_parent, return_counts=True)
+    splitting = parents[counts > 1]
+    if not splitting.size:
+        return []
+
+    target: Dict[int, int] = {}  # renamed child -> surviving ID
+    grown: List[int] = []
+    for parent in splitting:
+        children = [int(c) for c in pair_child[pair_parent == parent]]
+        first = children[0]
+        if first in target:
+            continue
+        others = [c for c in children[1:] if c not in target]
+        if not others:
+            continue
+        for renamed, survivor in list(target.items()):
+            if survivor in others:
+                target[renamed] = first
+        for c in others:
+            target[c] = first
+        if first not in grown:
+            grown.append(first)
+    grown = [g for g in grown if g not in target]
+    renamed_ids = np.fromiter(target.keys(), dtype=np.int64, count=len(target))
+    survivors = np.fromiter(target.values(), dtype=np.int64, count=len(target))
+    order = np.argsort(renamed_ids)
+    renamed_ids, survivors = renamed_ids[order], survivors[order]
+    cells = np.where(np.isin(ids_cur, renamed_ids))[0]
+    ids_cur[cells] = survivors[np.searchsorted(renamed_ids, ids_cur[cells])].astype(ids_cur.dtype)
+    return grown
 
 
 def _anchor_field(obj, label, materialiser):
@@ -350,37 +430,65 @@ def cluster_rename_objects_and_props(
         IDs_data: NDArray[np.int32],
         IDs_coords: Dict[str, Any],
     ) -> xr.DataArray:
-        """Process all mergers for a single block of timesteps."""
+        """Process all mergers for a single block of timesteps.
+
+        Writes are POSITIONAL, never ``.loc`` on the ``ID`` label. ``xr.map_blocks`` hands every
+        block the same single-chunk ``ID`` coordinate, so all blocks on a worker share one pandas
+        index engine, and its first-use population is not thread-safe: a concurrent
+        ``get_indexer`` can read ``is_unique == False`` off a unique index and raise
+        ``InvalidIndexError`` (D-079: one block of 73 failed on a full-year ICON run, not
+        reproducible from the data). Positions come from ``np.searchsorted`` on the block's own
+        ``ID`` values, which are sorted and unique by construction (asserted by the caller).
+        """
         result = xr.full_like(time_block, -1)
+        values = result.data  # numpy inside map_blocks; written in place
+        dims = result.dims
+        t_axis, id_axis, sib_axis = dims.index(timedim), dims.index("ID"), dims.index("sibling_ID")
+        id_values = np.asarray(time_block["ID"].values)
+        n_sib = time_block.sizes["sibling_ID"]
 
-        # Get unique times in this block
-        # time_block might not have the coordinate, so get it from the dimension index
         if timecoord in time_block.coords:
-            unique_times = np.unique(time_block.coords[timecoord])
+            block_times = np.asarray(time_block.coords[timecoord].values)
         else:
-            # Fall back to using the dimension index
-            unique_times = np.unique(time_block[timedim])
+            block_times = np.asarray(time_block[timedim].values)
 
-        for time_val in unique_times:
-            # Get IDs for this time
-            time_mask = IDs_coords["merge_time"] == time_val
+        merge_times = np.asarray(IDs_coords["merge_time"])
+        for t_pos, time_val in enumerate(block_times):
+            time_mask = merge_times == time_val
             if not np.any(time_mask):
                 continue
-
-            # IDs_data[time_mask] always retains the parent_idx axis, so IDs_at_time is 2D
-            # (n_mergers_at_time, n_parent_idx); iterate over each merger's parent vector.
-            IDs_at_time = IDs_data[time_mask]
-
-            for merger_IDs in IDs_at_time:
-                valid_mask = merger_IDs > 0
-                if np.any(valid_mask):
-                    expanded_IDs = np.broadcast_to(
-                        merger_IDs,
-                        (len(time_block.sibling_ID), len(merger_IDs)),
+            # IDs_data[time_mask] keeps the parent_idx axis: (n_mergers_at_time, n_parent_idx)
+            for merger_IDs in IDs_data[time_mask]:
+                valid = merger_IDs[merger_IDs > 0]
+                if not valid.size:
+                    continue
+                id_pos = np.searchsorted(id_values, valid)
+                if np.any(id_pos >= id_values.size) or np.any(id_values[np.minimum(id_pos, id_values.size - 1)] != valid):
+                    raise TrackingError(
+                        "Merge ledger parent not in the event ID axis",
+                        details=f"time {time_val}: event IDs {valid.tolist()} vs ID axis of {id_values.size}",
                     )
-                    result.loc[{timedim: time_val, "ID": merger_IDs[valid_mask]}] = expanded_IDs[:, valid_mask]
+                # Same values the label-based write produced: at (time, ID=valid[i], sibling j) the
+                # entry is valid[i] for every j.
+                index = [slice(None)] * 3
+                index[t_axis] = t_pos
+                index[id_axis] = id_pos
+                index[sib_axis] = slice(0, n_sib)
+                if id_axis < sib_axis:
+                    block = np.broadcast_to(valid[:, None], (valid.size, n_sib))
+                else:
+                    block = np.broadcast_to(valid[None, :], (n_sib, valid.size))
+                values[tuple(index)] = block
 
         return result
+
+    for name in (timedim, "ID"):
+        index = merge_ledger.indexes[name]
+        if not (index.is_unique and index.is_monotonic_increasing):
+            raise TrackingError(
+                f"The merge ledger's {name!r} axis must be unique and increasing",
+                details=f"{name}: {len(index)} labels, unique={index.is_unique}, increasing={index.is_monotonic_increasing}",
+            )
 
     # Map blocks in parallel
     merge_ledger = xr.map_blocks(
@@ -982,12 +1090,17 @@ def split_and_merge_objects(
             if iteration == 10:
                 logger.warning(f"Resolving mergers at timestep {absolute_t} did not converge after 10 iterations")
 
-        # End-of-chunk consolidation: consolidate the last timestep if chunk has multiple timesteps
-        if chunk_data.sizes[timedim] >= 2:
+        # End-of-chunk consolidation of the last timestep, against the timestep before it. A
+        # one-timestep chunk takes that reference from the previous chunk: skipping it left the
+        # slice unconsolidated, so the result depended on the time chunking (D-087).
+        if chunk_data.sizes[timedim] >= 2 or updated_chunks:
 
             # Get last and second-to-last timesteps
             last_t_data = chunk_data.isel({timedim: -1})
-            second_last_t_data = chunk_data.isel({timedim: -2})
+            if chunk_data.sizes[timedim] >= 2:
+                second_last_t_data = chunk_data.isel({timedim: -2})
+            else:
+                second_last_t_data = updated_chunks[-1][2][-1]
 
             # Consolidate last timestep using second-to-last as reference
             consolidated_last, object_props = _overlap.consolidate_object_ids(
@@ -1262,313 +1375,235 @@ def split_and_merge_objects_parallel(
     tuple
         (object_id_field, object_props, overlap_objects_list, merge_events)
     """
-    # Constants for memory allocation
-    # Sized from measurement, not judgement: job 27105655 instrumented 5 x 24-timestep
-    # windows of the ICON R02B09 store (MAX_PARENTS=100/MAX_MERGES=200 so nothing capped)
-    # and saw, over 707 real merges, max n_parents = 10 (99th pct 7) and max merges/timestep
-    # = 8 (99th pct 6). Both constants are bounded together by the per-timestep update-id
-    # space -- `updates_array` is uint8 with 255 as its "no update" sentinel and
-    # `updates_ids` has exactly 255 slots -- giving
-    #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
-    # 16 x 15 = 240 fits. MAX_MERGES comes DOWN 20 -> 16 (still 2x the measured max of 8)
-    # to buy parent slots, because the parent tail is what actually failed: run 27098021
-    # died at global t~767 on a 10-parent child. The windowed histogram is a LOWER BOUND on
-    # that tail -- a 24-step window restarts the merge loop from a clean `data_m1`, so
-    # build-up across a 1096-step run is not reproduced -- which is why the margin over the
-    # observed 10 is deliberately wide rather than one or two slots.
-    # If a full run still exceeds these, the fix is NOT another bump: it is widening
-    # updates_array/updates_ids to uint16, or lowering R_fill.
-    # See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
-    MAX_MERGES = 16  # Maximum number of merges per timestep (measured max 8)
-    MAX_PARENTS = 16  # Maximum number of parents per merge (measured max 10)
-    # NOTE: this also sets MAX_CHILDREN, the width of `child_ids_iter`. Children-per-split
-    # was NOT measured; 10 -> 16 only widens that array, so it can add headroom but never
-    # remove any.
-    MAX_CHILDREN = MAX_PARENTS
+    # -------------------------------------------------------------------------------------
+    # Structure (2026-09, Q8). Every time chunk is processed from its PRISTINE input labels
+    # with the FINAL labels of the previous chunk's last timestep as its t-1 boundary. A chunk
+    # is (re)run whenever that boundary, or the queue of objects handed across it, changed since
+    # the chunk last ran; the loop ends when nothing changes. Inside a chunk the kernel is
+    # sequential in time against the updated t-1, exactly as a single-chunk run, so the fixpoint
+    # equals the single-chunk result whatever the chunking. The previous scheme ran every chunk
+    # from the iteration's UPDATED field and deferred cross-chunk cascades: a boundary object was
+    # partitioned against stale parents, the re-queue dedup dropped it, and its sibling pieces
+    # were never repaired, so events depended on the time chunking (D-082).
+    # The accumulator is a zarr copy of the pristine field (``temp_field_path``); a chunk task
+    # writes its own region and returns only small results, so no whole-field array is ever
+    # held for the update. Records of a re-run chunk replace that chunk's earlier records.
+    # -------------------------------------------------------------------------------------
+    # Record widths: module-level MAX_MERGES / MAX_PARENTS (read here, at call time).
+    id_stride = MAX_MERGES * (MAX_PARENTS - 1)  # IDs a timestep can mint, so ranges never overlap
 
+    if object_id_field_unique.dims != (timedim, xdim):
+        object_id_field_unique = object_id_field_unique.transpose(timedim, xdim)
+    time_axis = 0
+    space_chunks = object_id_field_unique.chunks[1]
+    if len(space_chunks) != 1:
+        raise TrackingError(
+            "The unstructured merge loop needs the spatial dimension in one chunk",
+            details=f"{xdim} is split into {len(space_chunks)} chunks",
+            suggestions=[f"Rechunk the input with {{'{xdim}': -1}}"],
+        )
+    chunk_sizes = tuple(int(c) for c in object_id_field_unique.chunks[time_axis])
+    if len(chunk_sizes) > 2 and len(set(chunk_sizes[:-1])) != 1:
+        raise TrackingError(
+            "Time chunks must be uniform except for the last one",
+            details=f"time chunk sizes {chunk_sizes}",
+            suggestions=[f"Rechunk the input with {{'{timedim}': {max(chunk_sizes)}}}"],
+        )
+    chunk_starts = np.concatenate([[0], np.cumsum(chunk_sizes)]).astype(int)
+    n_chunks = len(chunk_sizes)
+    n_time = int(object_id_field_unique.sizes[timedim])
+
+    # -- the kernel -----------------------------------------------------------------------
     def process_chunk(
-        chunk_data_m1_full: NDArray[np.int32],
-        chunk_data_p1_full: NDArray[np.int32],
-        merging_objects: NDArray[np.int64],
-        next_id_start: NDArray[np.int64],
+        chunk_pristine: NDArray[np.int32],
+        boundary: Optional[NDArray[np.int32]],
+        next_first: Optional[NDArray[np.int32]],
+        queue: List[List[int]],
+        id_offsets: NDArray[np.int64],
+        t0_abs: int,
         lat: NDArray[np.float32],
         lon: NDArray[np.float32],
         area: NDArray[np.float32],
         neighbours_int: NDArray[np.int32],
-    ) -> Tuple[
-        NDArray[np.int32],  # merge_child_ids
-        NDArray[np.int32],  # merge_parent_ids
-        NDArray[np.float32],  # merge_areas
-        NDArray[np.int16],  # merge_counts
-        NDArray[np.bool_],  # has_merge
-        NDArray[np.uint8],  # updates_array
-        NDArray[np.int32],  # updates_ids
-        NDArray[np.int32],  # final_merging_objects
-    ]:
-        """
-        Process a single chunk of merging objects.
-
-        This function handles the complex batch processing of splitting and merging objects
-        across timesteps within a single chunk. It finds overlapping objects, determines
-        parent-child relationships, and creates new IDs as needed.
+        zarr_path: str,
+        region_dirty: bool,
+    ) -> Tuple[List[Tuple[int, NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]], List[int], str, str, int, bool]:
+        """Run the split-and-merge kernel over one time chunk from its pristine labels.
 
         Parameters
         ----------
-        chunk_data_m1_full : numpy.ndarray
-            Data from previous timestep (t-1) and current timestep (t)
-        chunk_data_p1_full : numpy.ndarray
-            Data from next timestep (t+1)
-        merging_objects : (n_time, max_merges) numpy.ndarray
-            IDs of objects to process
-        next_id_start : (n_time, max_merges) numpy.ndarray
-            Starting ID values for new objects
-        lat, lon : numpy.ndarray
-            Latitude/longitude arrays
-        area : numpy.ndarray
-            Cell area array
-        neighbours_int : numpy.ndarray
-            Neighbor connectivity array
+        chunk_pristine : (n_time_chunk, ncells) int32
+            The chunk's labels from the INPUT field (never a previous iteration's output).
+        boundary : (ncells,) int32 or None
+            The previous chunk's last timestep as it stands in the accumulator (None = first chunk).
+        next_first : (ncells,) int32 or None
+            The pristine first timestep of the next chunk, for the forward search at the last
+            timestep of this chunk (None = last chunk).
+        queue : list per timestep of child IDs to examine (initial multi-parent children plus the
+            objects forwarded by the previous chunk into this chunk's first timestep).
+        id_offsets : (n_time_chunk,) int64
+            First new ID each timestep may mint.
+        region_dirty : bool
+            True when an earlier run of this chunk wrote its region, so the accumulator no longer
+            holds the pristine labels and must be rewritten even if this run changes nothing.
 
         Returns
         -------
-        tuple
-            Contains merge events, object updates, and newly created objects
+        records : list of (absolute t, child_ids, parent_ids, overlap_areas)
+        forwarded : sorted list of object IDs at the next chunk's first timestep to examine
+        last_hash, boundary_hash : digests of this chunk's final last slice and of the boundary
+            it consumed (the driver decides re-runs from them)
+        max_parents_seen : largest accepted-parent count in this run of the chunk
+        wrote : whether this run wrote the chunk's region
         """
-        # Fix Broadcasted dimensions of inputs:
-        #    Remove extra dimension if present while preserving time chunks
-        #    N.B.: This is a weird artefact/choice of xarray apply_ufunc broadcasting...
-        #           (i.e. 'nv' dimension gets injected into all the other arrays!)
+        data = np.array(chunk_pristine, dtype=np.int32, copy=True)
+        while data.ndim > 2:
+            data = data.squeeze(axis=-1)
+        n_t, n_pts = data.shape
+        if boundary is None:
+            boundary_arr = np.zeros(n_pts, dtype=np.int32)
+        else:
+            boundary_arr = np.asarray(boundary, dtype=np.int32).reshape(n_pts)
+        if next_first is None:
+            next_first_arr = np.zeros(n_pts, dtype=np.int32)
+        else:
+            next_first_arr = np.asarray(next_first, dtype=np.int32).reshape(n_pts)
+        boundary_hash = hashlib.blake2b(boundary_arr.tobytes(), digest_size=16).hexdigest()
 
-        # Squeeze only the injected trailing (e.g. 'nv') axes, never the time axis. A blanket
-        # .squeeze() drops the time dimension for a size-1 time chunk (n_time % timechunks == 1),
-        # after which [0]/[1] index cells instead of the stacked (prev, current) slices and
-        # merges in that chunk are silently dropped or crash. Target shape is (2, time, ncells).
-        while chunk_data_m1_full.ndim > 3:
-            chunk_data_m1_full = chunk_data_m1_full.squeeze(axis=-1)
-        # `.astype()` already returns a fresh, writable buffer that does not alias the task
-        # input (numpy's `copy` argument defaults to True, even when the dtype is unchanged),
-        # so the trailing `.copy()` these three lines used to carry was a second full
-        # duplicate of each array, purely transient: two single time slices and one whole
-        # chunk, ~358 MB per task on the ICON mesh at timechunks=4. The no-aliasing property
-        # the merge loop relies on (it mutates `data_t` in place) is a property of `astype`,
-        # not of the dropped copy.
-        #
-        # `chunk_data_m1_full` is the field shifted forward one step, so its first two TIME
-        # entries are (field[t-1], field[t]) for this chunk's first timestep -- which is why
-        # both come from the m1 argument and are single slices, not whole chunks.
-        chunk_data_m1 = chunk_data_m1_full[0].astype(np.int32)
-        chunk_data = chunk_data_m1_full[1].astype(np.int32)
-        del chunk_data_m1_full  # Free memory immediately
-        chunk_data_p1 = chunk_data_p1_full.astype(np.int32)
-        # Remove any singleton dimensions except time and space
-        while chunk_data_p1.ndim > 2:
-            chunk_data_p1 = chunk_data_p1.squeeze(axis=-1)
-        del chunk_data_p1_full
-
-        # Extract and prepare input arrays
-        lat = lat.squeeze().astype(np.float32)
-        lon = lon.squeeze().astype(np.float32)
-        area = area.squeeze().astype(np.float32)
-        next_id_start = next_id_start.squeeze()
-
-        # Handle neighbours_int with correct dimensions (nv, ncells)
-        neighbours_int = neighbours_int.squeeze()
-        if neighbours_int.shape[1] != lat.shape[0]:
+        lat = np.asarray(lat, dtype=np.float32).reshape(n_pts)
+        lon = np.asarray(lon, dtype=np.float32).reshape(n_pts)
+        area = np.asarray(area, dtype=np.float32).reshape(n_pts)
+        neighbours_int = np.asarray(neighbours_int, dtype=np.int32)
+        if neighbours_int.ndim == 2 and neighbours_int.shape[1] != n_pts:
             neighbours_int = neighbours_int.T
 
-        # Handle multiple merging objects - ensure proper dimensionality
-        merging_objects = merging_objects.squeeze()
-        if merging_objects.ndim == 1:
-            merging_objects = merging_objects[:, None]  # Add dimension for max_merges
-
-        # Pre-convert lat/lon to Cartesian coordinates for efficiency
+        # Cartesian coordinates for the area-weighted parent centroids
         x = (np.cos(np.radians(lat)) * np.cos(np.radians(lon))).astype(np.float32)
         y = (np.cos(np.radians(lat)) * np.sin(np.radians(lon))).astype(np.float32)
         z = np.sin(np.radians(lat)).astype(np.float32)
 
-        # Pre-allocate output arrays
-        n_time = chunk_data_p1.shape[0]
-        n_points = chunk_data_p1.shape[1]
+        merging_objects_list = [list(queue[t]) for t in range(n_t)]
+        records = []
+        forwarded: List[int] = []
+        changed = False
+        max_parents_seen = 0
 
-        merge_child_ids = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.int32)
-        merge_parent_ids = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.int32)
-        merge_areas = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.float32)
-        merge_counts = np.zeros(n_time, dtype=np.int16)  # Number of merges per timestep
+        for t in range(n_t):
+            next_new_id = int(id_offsets[t])
+            data_m1 = boundary_arr if t == 0 else data[t - 1]
+            data_t = data[t]  # a view: in-place writes land in `data`
+            data_p1 = data[t + 1] if t < n_t - 1 else next_first_arr
+            merges_at_t = 0
 
-        updates_array = np.full((n_time, n_points), 255, dtype=np.uint8)
-        updates_ids = np.full((n_time, 255), -1, dtype=np.int32)
-        has_merge = np.zeros(n_time, dtype=np.bool_)
-
-        # Prepare merging objects list for each timestep
-        merging_objects_list = [list(merging_objects[i][merging_objects[i] > 0]) for i in range(merging_objects.shape[0])]
-        final_merging_objects = np.full((n_time, MAX_MERGES), -1, dtype=np.int32)
-        final_merge_count = 0
-
-        # Process each timestep
-        data_p1 = []
-        for t in range(n_time):
-            next_new_id = next_id_start[t]  # Use the offset for this timestep
-
-            # Get current time slice data
-            if t == 0:
-                data_m1 = chunk_data_m1
-                data_t = chunk_data
-                del chunk_data_m1, chunk_data  # Free memory
-            else:
-                data_m1 = data_t  # Previous data_t becomes data_m1
-                data_t = data_p1  # Previous data_p1 becomes data_t
-            data_p1 = chunk_data_p1[t]
-
-            # Process each merging object at this timestep
             while merging_objects_list[t]:
                 child_id = merging_objects_list[t].pop(0)
 
-                # Get child mask and identify overlapping parents
                 child_mask = data_t == child_id
-                # Ascending cell indices of the child. Hoisted here from after the
-                # partitioning step, where it used to be recomputed; child_mask is not
-                # modified in between. Objects are tiny next to the mesh, so testing a
-                # candidate parent AT these indices costs O(child) where intersecting two
-                # whole-field boolean masks costs O(ncells).
+                # Ascending cell indices of the child. Objects are tiny next to the mesh, so
+                # testing a candidate parent AT these indices costs O(child) where intersecting
+                # two whole-field boolean masks costs O(ncells).
                 child_cells = np.where(child_mask)[0].astype(np.int32)
+                if child_cells.size == 0:
+                    continue
 
-                # Find parent objects that overlap with this child
                 potential_parents = np.unique(data_m1[child_mask])
-                # Loop-invariant: the child's own area was recomputed once per candidate
-                # parent inside the scan below.
                 child_area = area[child_mask].sum()
-                parent_iterator = 0
-                parent_masks_uint = np.full(n_points, 255, dtype=np.uint8)
+                parent_masks_uint = np.full(n_pts, 255, dtype=np.uint8)
                 parent_centroids = np.full((MAX_PARENTS, 2), -1.0e10, dtype=np.float32)
                 parent_ids = np.full(MAX_PARENTS, -1, dtype=np.int32)
                 parent_areas = np.zeros(MAX_PARENTS, dtype=np.float32)
                 overlap_areas = np.zeros(MAX_PARENTS, dtype=np.float32)
                 n_parents = 0
 
-                # Find all unique parent IDs with significant overlap
                 for parent_id in potential_parents[potential_parents > 0]:
                     parent_mask = data_m1 == parent_id
-                    # Ascending, and exactly `np.where(parent_mask & child_mask)[0]` -- but
-                    # evaluated only at the child's own cells, so it replaces two whole-mesh
-                    # boolean intersections (the `any` test and the overlap gather) with two
-                    # O(child) lookups.
                     overlap_cells = child_cells[parent_mask[child_cells]]
-                    if overlap_cells.size:
-                        # Calculate overlap area and check if it's large enough
-                        area_0 = area[parent_mask].sum()  # Parent area
-                        area_1 = child_area  # Child area
-                        min_area = np.minimum(area_0, area_1)
-                        overlap_area = area[overlap_cells].sum()
+                    if not overlap_cells.size:
+                        continue
+                    area_0 = area[parent_mask].sum()
+                    min_area = np.minimum(area_0, child_area)
+                    overlap_area = area[overlap_cells].sum()
+                    if overlap_area / min_area < overlap_threshold:
+                        continue
 
-                        # Skip if overlap is below threshold
-                        if overlap_area / min_area < overlap_threshold:
-                            continue
-
-                        # Only now is this candidate an ACCEPTED parent, so only now can it
-                        # exhaust the fixed-width arrays. Checking at the top of the loop
-                        # instead -- as this did until 2026-08-20 -- raises whenever
-                        # MAX_PARENTS are accepted and ANY further candidate id remains in
-                        # `potential_parents`, even though every one of those may be about to
-                        # fail the overlap threshold above and the arrays hold indices
-                        # 0..MAX_PARENTS-1 exactly. On a basin-scale child `potential_parents`
-                        # is mostly such rejects, so that fired on merges the arrays could
-                        # hold. See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
-                        if n_parents >= MAX_PARENTS:  # pragma: no cover
-                            raise TrackingError(
-                                "Too many parent objects for tracking",
-                                details=(
-                                    f"Child {child_id} at timestep {t} has more than "
-                                    f"{MAX_PARENTS} parents (limit: {MAX_PARENTS})"
-                                ),
-                                suggestions=[
-                                    "Raise MAX_PARENTS, honouring MAX_MERGES * (MAX_PARENTS - 1) <= 255",
-                                    "Increase overlap_threshold (weak: wholly-absorbed parents score ~1.0)",
-                                    "Apply stronger area filtering",
-                                ],
-                                context={
-                                    "child_id": child_id,
-                                    "timestep": t,
-                                    "n_parents": n_parents,
-                                    "limit": MAX_PARENTS,
-                                },
-                            )
-
-                        # Record parent information
-                        parent_masks_uint[parent_mask] = parent_iterator
-                        parent_ids[n_parents] = parent_id
-                        overlap_areas[n_parents] = overlap_area
-
-                        # Calculate area-weighted centroid for this parent
-                        mask_area = area[parent_mask]
-                        weighted_coords = np.array(
-                            [
-                                np.sum(mask_area * x[parent_mask]),
-                                np.sum(mask_area * y[parent_mask]),
-                                np.sum(mask_area * z[parent_mask]),
+                    # Only an ACCEPTED parent can exhaust the fixed-width arrays; a candidate that
+                    # fails the threshold above must never trip the guard (2026-08-20).
+                    if n_parents >= MAX_PARENTS:  # pragma: no cover
+                        raise TrackingError(
+                            "Too many parent objects for tracking",
+                            details=(
+                                f"Child {child_id} at timestep {t0_abs + t} has more than "
+                                f"{MAX_PARENTS} parents (limit: {MAX_PARENTS})"
+                            ),
+                            suggestions=[
+                                "Raise MAX_PARENTS in split_and_merge_objects_parallel",
+                                "Increase overlap_threshold (weak: wholly-absorbed parents score ~1.0)",
+                                "Apply stronger area filtering",
                             ],
-                            dtype=np.float32,
+                            context={
+                                "child_id": int(child_id),
+                                "timestep": int(t0_abs + t),
+                                "n_parents": int(n_parents),
+                                "limit": MAX_PARENTS,
+                            },
                         )
 
-                        norm = np.sqrt(np.sum(weighted_coords * weighted_coords))
+                    parent_masks_uint[parent_mask] = n_parents
+                    parent_ids[n_parents] = parent_id
+                    overlap_areas[n_parents] = overlap_area
 
-                        # Convert back to lat/lon
-                        parent_centroids[n_parents, 0] = np.degrees(np.arcsin(weighted_coords[2] / norm))
-                        parent_centroids[n_parents, 1] = np.degrees(np.arctan2(weighted_coords[1], weighted_coords[0]))
+                    mask_area = area[parent_mask]
+                    weighted = np.array(
+                        [
+                            np.sum(mask_area * x[parent_mask]),
+                            np.sum(mask_area * y[parent_mask]),
+                            np.sum(mask_area * z[parent_mask]),
+                        ],
+                        dtype=np.float32,
+                    )
+                    norm = np.sqrt(np.sum(weighted * weighted))
+                    parent_centroids[n_parents, 0] = np.degrees(np.arcsin(weighted[2] / norm))
+                    parent_centroids[n_parents, 1] = np.degrees(np.arctan2(weighted[1], weighted[0]))
+                    if parent_centroids[n_parents, 1] > 180:
+                        parent_centroids[n_parents, 1] -= 360
+                    elif parent_centroids[n_parents, 1] < -180:
+                        parent_centroids[n_parents, 1] += 360
+                    parent_areas[n_parents] = area_0
+                    n_parents += 1
 
-                        # Fix longitude range to [-180, 180]
-                        if parent_centroids[n_parents, 1] > 180:
-                            parent_centroids[n_parents, 1] -= 360
-                        elif parent_centroids[n_parents, 1] < -180:
-                            parent_centroids[n_parents, 1] += 360
-
-                        parent_areas[n_parents] = area_0
-                        parent_iterator += 1
-                        n_parents += 1
-
-                # Need at least 2 parents for merging
                 if n_parents < 2:
                     continue
+                max_parents_seen = max(max_parents_seen, n_parents)
 
-                # Create new IDs for each partition
-                new_child_ids = np.arange(next_new_id, next_new_id + (n_parents - 1), dtype=np.int32)
-                child_ids = np.concatenate((np.array([child_id]), new_child_ids))
-
-                # Record merge event
-                curr_merge_idx = merge_counts[t]
-                if curr_merge_idx >= MAX_MERGES:  # pragma: no cover
+                if merges_at_t >= MAX_MERGES:  # pragma: no cover
                     raise TrackingError(
                         "Too many merge operations",
-                        details=f"Timestep {t} requires {curr_merge_idx + 1} merges (limit: {MAX_MERGES})",
+                        details=f"Timestep {t0_abs + t} requires {merges_at_t + 1} merges (limit: {MAX_MERGES})",
                         suggestions=[
+                            "Raise MAX_MERGES in split_and_merge_objects_parallel",
                             "Increase area_filter_quartile to reduce small objects",
-                            "Consider adjusting tracking parameters",
                         ],
-                        context={
-                            "timestep": t,
-                            "merge_count": curr_merge_idx,
-                            "limit": MAX_MERGES,
-                        },
+                        context={"timestep": int(t0_abs + t), "merge_count": int(merges_at_t), "limit": MAX_MERGES},
                     )
+                merges_at_t += 1
 
-                merge_child_ids[t, curr_merge_idx, :n_parents] = child_ids[:n_parents]
-                merge_parent_ids[t, curr_merge_idx, :n_parents] = parent_ids[:n_parents]
-                merge_areas[t, curr_merge_idx, :n_parents] = overlap_areas[:n_parents]
-                merge_counts[t] += 1
-                has_merge[t] = True
+                new_child_ids = np.arange(next_new_id, next_new_id + (n_parents - 1), dtype=np.int32)
+                child_ids = np.concatenate((np.array([child_id], dtype=np.int32), new_child_ids))
+                next_new_id += n_parents - 1
+                records.append(
+                    (
+                        int(t0_abs + t),
+                        child_ids.copy(),
+                        parent_ids[:n_parents].copy(),
+                        overlap_areas[:n_parents].copy(),
+                    )
+                )
 
-                # Partition the child object based on parent associations
                 if nn_partitioning:
-                    # Estimate maximum search distance based on object size
-                    max_area = parent_areas.max() / mean_cell_area
+                    max_area = parent_areas[:n_parents].max() / mean_cell_area
                     max_distance = int(np.sqrt(max_area) * 2.0)
-
-                    # Use optimised nearest-neighbor partitioning.
-                    #
-                    # No defensive copies here: the kernel makes its own working copy of
-                    # parent_frontiers (the only array it writes) and merely reads
-                    # child_mask and neighbours_int. Copying neighbours_int was by far the
-                    # worst of the three -- (3, ncells) int32 is 178 MB on the ICON mesh,
-                    # allocated and thrown away on EVERY merge event.
+                    # No defensive copies: the kernel copies parent_frontiers itself and only
+                    # reads child_mask and neighbours_int ((3, ncells) int32 is 178 MB on ICON).
                     new_labels_uint = partition_nn_unstructured_optimised(
                         child_mask,
                         parent_masks_uint,
@@ -1578,824 +1613,262 @@ def split_and_merge_objects_parallel(
                         lon,
                         max_distance=max(max_distance, 20) * 2,
                     )
-                    # Returned 'new_labels_uint' is just the index of the child_ids
                     new_labels = child_ids[new_labels_uint]
-
-                    # Help garbage collection
                     new_labels_uint = None
-
                 else:
-                    # Use centroid-based partitioning
                     new_labels = partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon)
 
-                # Update slice data for subsequent merging in process_chunk
                 data_t[child_mask] = new_labels
+                changed = True
 
-                # Record which cells get which new IDs for later updates
-                spatial_indices_all = child_cells
-                child_mask = None  # Free memory
-                # No gc.collect() here. CPython frees these arrays by refcount the moment
-                # the last name is rebound; a full collection only breaks reference
-                # CYCLES, of which this loop creates none. It ran once per merge event and
-                # walks the WHOLE process heap each time, so its cost grows with the
-                # worker's live object count rather than with anything this loop does.
-
-                # Record update information for each new ID
-                for new_id in child_ids[1:]:
-                    free_slots = np.where(updates_ids[t] == -1)[0].astype(np.int32)
-                    if free_slots.size == 0:  # pragma: no cover
-                        # `updates_array` is uint8 with 255 as its "no update" sentinel, so
-                        # `updates_ids` has exactly 255 slots per timestep and every new id
-                        # minted at this timestep consumes one. Each merge mints
-                        # `n_parents - 1`, giving the joint invariant
-                        #     MAX_MERGES * (MAX_PARENTS - 1) <= 255
-                        # which the two constants must be raised together under. Without
-                        # this branch the loop indexes an empty array and dies on a bare
-                        # IndexError hours into a run.
-                        raise TrackingError(
-                            "Exhausted the per-timestep update-id space",
-                            details=(
-                                f"Timestep {t} minted more than {updates_ids.shape[1]} new IDs; "
-                                f"MAX_MERGES={MAX_MERGES} x (MAX_PARENTS-1)={MAX_PARENTS - 1} "
-                                f"= {MAX_MERGES * (MAX_PARENTS - 1)}"
-                            ),
-                            suggestions=[
-                                "Lower MAX_MERGES or MAX_PARENTS so their product stays within the slot count",
-                                "Widen updates_array to uint16 and updates_ids to match (costs a whole extra "
-                                "(time, ncells) byte-field per iteration)",
-                            ],
-                            context={
-                                "timestep": t,
-                                "slots": int(updates_ids.shape[1]),
-                                "max_merges": MAX_MERGES,
-                                "max_parents": MAX_PARENTS,
-                            },
-                        )
-                    update_idx = free_slots[0]  # Next free index in updates_ids
-                    updates_ids[t, update_idx] = new_id
-                    updates_array[t, spatial_indices_all[new_labels == new_id]] = update_idx
-
-                next_new_id += n_parents - 1
-
-                # Find all child objects in the next timestep that overlap with our newly labeled regions
+                # Forward search: children at t+1 that overlap the new pieces above threshold.
+                # Every cell holding a new id was in child_mask, so `child_cells[new_labels ==
+                # new_id]` is exactly what `data_t == new_id` would find, ascending, at O(child).
                 new_merging_list = []
                 for new_id in child_ids:
-                    # Every cell holding new_id is a cell of the child just partitioned:
-                    # the new ids are freshly minted, and all cells that held child_id were
-                    # in child_mask by construction. So this is the same set `data_t ==
-                    # new_id` would find, ascending, without touching the whole field.
-                    parent_cells = spatial_indices_all[new_labels == new_id]
-                    if parent_cells.size:
-                        area_0 = area[parent_cells].sum()
-                        potential_children = np.unique(data_p1[parent_cells])
+                    parent_cells = child_cells[new_labels == new_id]
+                    if not parent_cells.size:
+                        continue
+                    area_0 = area[parent_cells].sum()
+                    for potential_child in np.unique(data_p1[parent_cells]):
+                        if potential_child <= 0:
+                            continue
+                        potential_child_mask = data_p1 == potential_child
+                        area_1 = area[potential_child_mask].sum()
+                        min_area = min(area_0, area_1)
+                        overlap_cells = parent_cells[potential_child_mask[parent_cells]]
+                        overlap_area = area[overlap_cells].sum()
+                        if overlap_area / min_area > overlap_threshold:
+                            new_merging_list.append(int(potential_child))
 
-                        for potential_child in potential_children[potential_children > 0]:
-                            potential_child_mask = data_p1 == potential_child
-                            area_1 = area[potential_child_mask].sum()
-                            min_area = min(area_0, area_1)
-                            # Ascending, and exactly the cells the whole-mesh
-                            # `parent_mask & potential_child_mask` would have selected.
-                            overlap_cells = parent_cells[potential_child_mask[parent_cells]]
-                            overlap_area = area[overlap_cells].sum()
-
-                            if overlap_area / min_area > overlap_threshold:
-                                new_merging_list.append(potential_child)
-
-                # Add newly found merging objects to processing queue
-                if t < n_time - 1:
-                    # Add to next timestep in this chunk
+                if t < n_t - 1:
                     for new_object_id in new_merging_list:
                         if new_object_id not in merging_objects_list[t + 1]:
                             merging_objects_list[t + 1].append(new_object_id)
                 else:
-                    # Record for next chunk
                     for new_object_id in new_merging_list:
-                        # Dedup first: an already-queued object needs no new slot, so it must
-                        # not trip the capacity guard.
-                        if np.any(final_merging_objects[t][:final_merge_count] == new_object_id):
-                            continue
-                        if final_merge_count >= MAX_MERGES:  # pragma: no cover
-                            raise TrackingError(
-                                "Excessive merge operations detected",
-                                details=f"Final merge count {final_merge_count + 1} exceeds limit {MAX_MERGES} at timestep {t}",
-                                suggestions=[
-                                    "Increase area_filter_quartile to reduce small objects",
-                                    "Consider adjusting tracking parameters",
-                                ],
-                                context={
-                                    "timestep": t,
-                                    "final_merge_count": final_merge_count,
-                                    "limit": MAX_MERGES,
-                                },
-                            )
-                        final_merging_objects[t][final_merge_count] = new_object_id
-                        final_merge_count += 1
+                        if new_object_id not in forwarded:
+                            forwarded.append(new_object_id)
 
-        return (
-            merge_child_ids,
-            merge_parent_ids,
-            merge_areas,
-            merge_counts,
-            has_merge,
-            updates_array,
-            updates_ids,
-            final_merging_objects,
-        )
+            # Consolidate t against its final t-1 before t+1 reads it: the serial path's order
+            # (it consolidates t-1 against t-2 at the top of step t). Without this a split keeps
+            # one ID per piece, and a split that rejoins is re-partitioned and logged as a merge
+            # on every later day (D-087). A consolidated object is larger, so it can newly pass
+            # the threshold against a child at t+1: queue those children for the parent check.
+            grown = _consolidate_slice(data_m1, data_t, area, overlap_threshold)
+            if grown:
+                changed = True
+                grown_cells = np.where(np.isin(data_t, grown))[0]
+                for potential_child in np.unique(data_p1[grown_cells]):
+                    if potential_child <= 0:
+                        continue
+                    target_queue = merging_objects_list[t + 1] if t < n_t - 1 else forwarded
+                    if int(potential_child) not in target_queue:
+                        target_queue.append(int(potential_child))
 
-    def update_object_id_field_inplace(
-        object_id_field: xr.DataArray,
-        id_lookup: Dict[int, int],
-        updates_array: xr.DataArray,
-        updates_ids: xr.DataArray,
-        has_merge: xr.DataArray,
-    ) -> xr.DataArray:  # pragma: no cover
-        """
-        Update the object field with chunk results using xarray operations.
+        # `last_hash` describes `data`, so the accumulator must hold `data`: a re-run that changes
+        # nothing still rewrites a region an earlier run of this chunk changed, or the successor
+        # reads stale labels whose hash never matches and stays dirty forever.
+        if changed or region_dirty:
+            zarr.open_group(zarr_path, mode="r+")["temp"][t0_abs : t0_abs + n_t, :] = data
+        last_hash = hashlib.blake2b(data[-1].tobytes(), digest_size=16).hexdigest()
+        return records, sorted(forwarded), last_hash, boundary_hash, int(max_parents_seen), bool(changed)
 
-        This is memory efficient as it avoids creating full copies of the object_id_field.
+    # -- initial queue: children with >= 2 parents on the pristine field ---------------------
+    overlap_objects_list = _overlap.find_overlapping_objects(
+        object_id_field_unique, timedim, unstructured_grid, ydim, xdim, cell_area
+    )
+    overlap_objects_list = _overlap.enforce_overlap_threshold(
+        overlap_objects_list, _objects.ObjectPropsStore.from_dataset(object_props), unstructured_grid, overlap_threshold
+    )
+    logger.info("Finished finding overlapping objects")
+    unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)
+    initial_children = [int(c) for c in unique_children[children_counts > 1]]
+    del overlap_objects_list
+    global_id_counter = int(object_props.ID.max().item()) + 1
 
-        Parameters
-        ----------
-        object_id_field : xarray.DataArray
-            The full object field to update
-        id_lookup : dict
-            Dictionary mapping temporary IDs to new IDs
-        updates_array : xarray.DataArray
-            Array indicating which spatial indices to update
-        updates_ids : xarray.DataArray
-            The new IDs to assign to updated indices
-        has_merge : xarray.DataArray
-            Boolean indicating whether each timestep has merges
-
-        Returns
-        -------
-        xarray.DataArray
-            Updated object field
-        """
-        # Quick return if no merges to update
-        if not has_merge.any():
-            return object_id_field
-
-        def update_timeslice(
-            data: NDArray[np.int32],
-            updates: NDArray[np.uint8],
-            update_ids: NDArray[np.int32],
-            lookup_values: NDArray[np.int32],
-        ) -> NDArray[np.int32]:
-            """Process a single timeslice."""
-            # Extract valid update IDs
-            valid_ids = update_ids[update_ids > -1]
-            if len(valid_ids) == 0:
-                return data
-
-            # Create result array starting with original values
-            result = data.copy()
-
-            # Apply each update
-            for idx, update_id in enumerate(valid_ids):
-                mask = updates == idx
-                if mask.any():
-                    result = np.where(mask, lookup_values[update_id], result)
-
-            return result
-
-        # Convert lookup dict to array for vectorized access
-        max_id = max(id_lookup.keys()) + 1
-        lookup_array = np.full(max_id, -1, dtype=np.int32)
-        for temp_id, new_id in id_lookup.items():
-            lookup_array[temp_id] = new_id
-
-        # Apply updates in parallel
-        result = xr.apply_ufunc(
-            update_timeslice,
-            object_id_field,
-            updates_array,
-            updates_ids,
-            kwargs={"lookup_values": lookup_array},
-            input_core_dims=[[xdim], [xdim], ["update_idx"]],
-            output_core_dims=[[xdim]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[np.int32],
-        )
-
-        return result
-
-    def update_object_id_field_zarr(
-        object_id_field: xr.DataArray,
-        id_lookup: Dict[int, int],
-        updates_array: xr.DataArray,
-        updates_ids: xr.DataArray,
-        has_merge: xr.DataArray,
-    ) -> xr.DataArray:
-        """
-        Update object field using a temporary zarr store for better memory efficiency.
-
-        This approach minimises memory usage by writing changes directly to disk,
-        allowing for more efficient parallel processing of large datasets.
-
-        Parameters
-        ----------
-        object_id_field : xarray.DataArray
-            The object field to update
-        id_lookup : dict
-            Dictionary mapping temporary IDs to new IDs
-        updates_array : xarray.DataArray
-            Array indicating which spatial indices to update
-        updates_ids : xarray.DataArray
-            The new IDs to assign to updated indices
-        has_merge : xarray.DataArray
-            Boolean indicating whether each timestep has merges
-
-        Returns
-        -------
-        xarray.DataArray
-            Updated object field from zarr store
-        """
-        # Early return if no merges to save memory
-        if not bool(has_merge.any().compute().item()):
-            return object_id_field
-
-        zarr_path = temp_field_path
-
-        # Initialise zarr store if needed
-        if not os.path.exists(zarr_path):
-            object_id_field.name = "temp"
-            object_id_field.to_zarr(zarr_path, mode="w")
-
-        def write_receipt(ds_chunk: xr.Dataset) -> xr.DataArray:
-            """One byte per timestep, standing in for the chunk this pass just wrote.
-
-            ``update_time_chunk`` is SIDE-EFFECTING: each chunk writes its own zarr region
-            and the returned array is thrown away (``del result`` below). Returning the
-            field itself made ``result.persist()`` materialise a whole int32 field purely
-            to force those writes -- measured at **19.1 GB, 54.8 % of everything this path
-            pins**, on the n_time=32 ICON slice. A receipt forces the writes identically,
-            because each output block still depends on its own input block, for n_time
-            bytes instead of n_time x ncells x 4.
-
-            Must be returned from EVERY branch, including the no-merge early return, or
-            ``map_blocks`` raises on a template mismatch for exactly the chunks that skip
-            the write.
-            """
-            return xr.DataArray(
-                np.zeros(ds_chunk.sizes[timedim], dtype=np.int8),
-                dims=[timedim],
-                coords={timecoord: ds_chunk[timecoord].values},
-            )
-
-        def update_time_chunk(ds_chunk: xr.Dataset, lookup_dict: Dict[int, int]) -> xr.DataArray:
-            """Process a single chunk with optimised memory usage."""
-            # Skip processing if no merges in this chunk
-            needs_update = bool(ds_chunk["has_merge"].any().compute().item())
-            if not needs_update:
-                return write_receipt(ds_chunk)
-
-            # Extract data from the chunk
-            chunk_data = ds_chunk["object_field"]
-            chunk_updates = ds_chunk["updates"]
-            chunk_update_ids = ds_chunk["update_ids"]
-
-            # Get zarr region indices
-            time_idx_start = int(ds_chunk["time_indices"].values[0])
-            time_idx_end = int(ds_chunk["time_indices"].values[-1]) + 1
-
-            updated_chunk = chunk_data.copy()
-
-            # Process each time slice in the chunk
-            for t in range(chunk_data.sizes[timedim]):
-                # Get update information for this time
-                updates_slice = chunk_updates.isel({timedim: t}).values
-                update_ids_slice = chunk_update_ids.isel({timedim: t}).values
-
-                # Get valid update IDs
-                valid_mask = update_ids_slice > -1
-                if not np.any(valid_mask):
-                    continue
-
-                valid_ids = update_ids_slice[valid_mask]
-
-                # Get the time slice data and apply updates
-                result_slice = updated_chunk.isel({timedim: t})
-
-                for idx, update_id in enumerate(valid_ids):
-                    mask = updates_slice == idx
-                    if np.any(mask):
-                        new_id = lookup_dict.get(int(update_id), update_id)
-                        result_slice = xr.where(mask, new_id, result_slice)
-
-                # Store updated slice
-                updated_chunk[t] = result_slice
-
-            # Write the updated chunk directly to zarr
-            updated_chunk.name = "temp"
-            updated_chunk.to_zarr(
-                zarr_path,
-                region={timedim: slice(time_idx_start, time_idx_end)},
-            )
-
-            return write_receipt(ds_chunk)  # Not the field: see write_receipt's docstring
-
-        # Create time indices for slicing
-        time_coords = object_id_field[timecoord].values
-        time_indices = np.arange(len(time_coords), dtype=np.int32)
-        time_index_da = xr.DataArray(time_indices, dims=[timedim], coords={timecoord: time_coords})
-
-        # Create dataset with all necessary components
-        ds = xr.Dataset(
-            {
-                "object_field": object_id_field,
-                "updates": updates_array,
-                "update_ids": updates_ids,
-                "time_indices": time_index_da,
-                "has_merge": has_merge,
-            }
-        ).chunk({timedim: timechunks})
-
-        # Process chunks in parallel. The template is the RECEIPT shape, not the field --
-        # this pass exists for its zarr writes, not its return value.
-        receipt_template = xr.DataArray(
-            np.zeros(len(time_coords), dtype=np.int8),
-            dims=[timedim],
-            coords={timecoord: time_coords},
-        ).chunk({timedim: timechunks})
-
-        result = xr.map_blocks(
-            update_time_chunk,
-            ds,
-            kwargs={"lookup_dict": id_lookup},
-            template=receipt_template,
-        )
-
-        # Force computation to ensure all writes complete
-        result = result.persist()
-        wait(result)
-
-        # Release resources
-        del result, ds, object_id_field
-        gc.collect()
-
-        # Load the updated data from zarr store
-        object_id_field_new = xr.open_zarr(zarr_path, chunks={timedim: timechunks}).temp
-
-        return object_id_field_new
-
-    def merge_objects_parallel_iteration(
-        object_id_field_unique: xr.DataArray,
-        merging_objects: Set[int],
-        global_id_counter: int,
-        iteration_index: int = 0,
-    ) -> Tuple[
-        xr.DataArray,  # updated_field
-        Tuple[
-            NDArray[np.int32],
-            NDArray[np.int32],
-            NDArray[np.float32],
-            NDArray[np.int32],
-        ],  # merge_data
-        Set[int],  # new_merging_objects
-        int,  # updated_counter
-    ]:
-        """
-        Perform a single iteration of the parallel merging process.
-
-        This function handles one complete batch of merging objects across all
-        timesteps, updating object IDs and tracking merge events.
-
-        Parameters
-        ----------
-        object_id_field_unique : xarray.DataArray
-            Field of unique object IDs
-        merging_objects : set
-            Set of object IDs to process in this iteration
-        global_id_counter : int
-            Current counter for assigning new global IDs
-
-        Returns
-        -------
-        tuple
-            (updated_field, merge_data, new_merging_objects, updated_counter)
-        """
-        n_time = len(object_id_field_unique[timecoord])
-
-        # Pre-allocate arrays for this iteration
-        child_ids_iter = np.full((n_time, MAX_MERGES, MAX_CHILDREN), -1, dtype=np.int32)  # List of child ID arrays for this time
-        parent_ids_iter = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.int32)  # List of parent ID arrays for this time
-        merge_areas_iter = np.full((n_time, MAX_MERGES, MAX_PARENTS), -1, dtype=np.float32)  # List of areas for this time
-        merge_counts_iter = np.zeros(n_time, dtype=np.int32)
-
-        # Prepare neighbour information
-        neighbours_int_local = neighbours_int.chunk({xdim: -1, "nv": -1})
-
-        logger.info(f"Processing Parallel Iteration {iteration + 1} with {len(merging_objects)} Merging Objects...")
-
-        # Pre-compute the child_time_idx for merging_objects
+    initial_queue: List[List[int]] = [[] for _ in range(n_time)]
+    if initial_children:
         time_index_map = _overlap.compute_id_time_dict(
             object_id_field_unique,
-            list(merging_objects),
+            initial_children,
             global_id_counter,
             timedim,
             unstructured_grid,
             ydim,
             xdim,
-            # Only the merging IDs are ever looked up below, so restrict the search
-            # instead of broadcasting a (time x buffer x max_objects) boolean over every
-            # possible ID -- multi-GB chunks for a map of a few hundred entries
-            # (review finding 6.8).
+            # Only the queued IDs are looked up, so restrict the search instead of broadcasting
+            # a (time x buffer x max_objects) boolean over every possible ID (review finding 6.8).
             all_objects=False,
         )
-        logger.debug("Finished Mapping Children to Time Indices")
-
-        # Bucket the merging objects by time index in a single pass. The previous form
-        # rescanned the whole merging set once per timestep, twice over (finding 5.12).
-        objects_by_time: List[List[int]] = [[] for _ in range(n_time)]
-        for merging_object in merging_objects:
-            t_idx = time_index_map.get(merging_object, -1)
+        for child in initial_children:
+            t_idx = time_index_map.get(child, -1)
             if 0 <= t_idx < n_time:
-                objects_by_time[t_idx].append(merging_object)
+                initial_queue[t_idx].append(child)
+        for t in range(n_time):
+            initial_queue[t].sort()
+    logger.debug("Finished Mapping Children to Time Indices")
 
-        # Create uniform array of merging objects for each timestep
-        max_merges = max(len(objects_at_t) for objects_at_t in objects_by_time)
-        uniform_merging_objects_array = np.zeros((n_time, max_merges), dtype=np.int32)
-        for t, objects_at_t in enumerate(objects_by_time):
-            if objects_at_t:  # Only fill if there are objects at this time
-                uniform_merging_objects_array[t, : len(objects_at_t)] = np.array(objects_at_t, dtype=np.int32)
+    # -- the accumulator: a zarr copy of the pristine field -------------------------------
+    zarr_path = temp_field_path
+    if os.path.exists(zarr_path):
+        shutil.rmtree(zarr_path)
+    pristine = object_id_field_unique.rename("temp")
+    pristine.to_zarr(zarr_path, mode="w")
+    pristine_blocks = pristine.data  # (n_chunks, 1) blocks, persisted or staged upstream
 
-        # Create DataArrays for parallel processing
-        merging_objects_da = xr.DataArray(
-            uniform_merging_objects_array,
-            dims=[timedim, "merges"],
-            coords={timecoord: object_id_field_unique[timecoord]},
-        )
+    # Static arrays as single-chunk dask arrays: one key each, moved to a worker once, instead
+    # of a numpy copy embedded in every chunk task.
+    def _as_single_chunk(arr):
+        values = arr.data if hasattr(arr, "data") else arr
+        if isinstance(values, da.Array):
+            return values.rechunk(-1).persist()
+        return da.from_array(np.asarray(values), chunks=-1).persist()
 
-        # Calculate ID offsets for each timestep to ensure unique IDs. Stride by the hard
-        # worst case (MAX_MERGES merges each spawning up to MAX_PARENTS-1 new IDs) rather
-        # than the data-dependent `max_merges * timechunks` (whose initial queue can be as
-        # small as 1). A too-small stride lets one timestep's cascade merges overrun into
-        # the next timestep's ID range, silently fusing two distinct events under one ID.
-        id_stride = MAX_MERGES * (MAX_PARENTS - 1)
-        next_id_offsets = np.arange(n_time, dtype=np.int64) * id_stride + global_id_counter
-        next_id_offsets_da = xr.DataArray(
-            next_id_offsets,
-            dims=[timedim],
-            coords={timecoord: object_id_field_unique[timecoord]},
-        )
+    lat_d = _as_single_chunk(lat)
+    lon_d = _as_single_chunk(lon)
+    area_d = _as_single_chunk(cell_area)
+    neighbours_d = _as_single_chunk(neighbours_int)
 
-        # Create shifted arrays for time connectivity
-        object_id_field_unique_p1 = object_id_field_unique.shift({timedim: -1}, fill_value=0)
-        object_id_field_unique_m1 = object_id_field_unique.shift({timedim: 1}, fill_value=0)
+    def _boundary_slice(t_abs: int) -> NDArray[np.int32]:
+        return np.asarray(zarr.open_group(zarr_path, mode="r")["temp"][t_abs, :], dtype=np.int32)
 
-        # Align chunks for better parallel processing
-        object_id_field_unique_m1 = object_id_field_unique_m1.chunk({timedim: timechunks})
-        object_id_field_unique_p1 = object_id_field_unique_p1.chunk({timedim: timechunks})
-        merging_objects_da = merging_objects_da.chunk({timedim: timechunks})
-        next_id_offsets_da = next_id_offsets_da.chunk({timedim: timechunks})
-
-        # Process chunks in parallel
-        results = xr.apply_ufunc(
-            process_chunk,
-            object_id_field_unique_m1,
-            object_id_field_unique_p1,
-            merging_objects_da,
-            next_id_offsets_da,
-            lat,
-            lon,
-            cell_area,
-            neighbours_int_local,
-            input_core_dims=[
-                [xdim],
-                [xdim],
-                ["merges"],
-                [],
-                [xdim],
-                [xdim],
-                [xdim],
-                ["nv", xdim],
-            ],
-            output_core_dims=[
-                ["merge", "parent"],
-                ["merge", "parent"],
-                ["merge", "parent"],
-                [],
-                [],
-                [xdim],
-                ["update_idx"],
-                ["merge"],
-            ],
-            output_dtypes=[
-                np.int32,
-                np.int32,
-                np.float32,
-                np.int16,
-                np.bool_,
-                np.uint8,
-                np.int32,
-                np.int32,
-            ],
-            dask_gufunc_kwargs={
-                "output_sizes": {
-                    "merge": MAX_MERGES,
-                    "parent": MAX_PARENTS,
-                    "update_idx": 255,
-                }
-            },
-            vectorize=False,
-            dask="parallelized",
-        )
-
-        # Unpack and persist results
-        (
-            merge_child_ids,
-            merge_parent_ids,
-            merge_areas,
-            merge_counts,
-            has_merge,
-            updates_array,
-            updates_ids,
-            final_merging_objects,
-        ) = results
-
-        # This persist is LOAD-BEARING FOR CORRECTNESS, not just memory, and must stay
-        # unconditional in every mode. These arrays are lazy expressions over
-        # `object_id_field_unique`, and `update_object_id_field_zarr` below REWRITES the
-        # zarr store that field reads from. Leaving them lazy means they are recomputed
-        # after that rewrite, against updated IDs, and the merge ledgers silently change.
-        # Routing them through `Materialiser.pin` (a no-op outside persist mode) reproduced
-        # exactly that: streaming found 10 events where persist found 11 on the unstructured
-        # fixture. They are small -- per-timestep ledgers, a few MB -- so pinning them in
-        # every mode costs nothing.
-        #
-        # `updates_array` is a whole (time, ncells) uint8 field -- 2.382 GB of the 34.8 GB
-        # this path pinned at n_time=32 -- so it is ANCHORED separately below, to disk under
-        # streaming. Staging it is safe for the same reason the persist is needed: `stage`
-        # WRITES it immediately, so it is materialised before the store rewrite, not left
-        # lazy over it.
-        #
-        # It must nonetheless be named in THIS persist call, even though the very next line
-        # anchors it again. All eight arrays are `getitem`s on ONE shared blockwise task --
-        # the `process_chunk` call. Materialising seven of them lets the scheduler release
-        # that shared task, so anchoring the eighth afterwards RE-RUNS `process_chunk` over
-        # every time chunk: the whole merge kernel, including the BFS partitioner that is
-        # 93 % of this stage's CPU, executed a second time per iteration. Measured, exactly
-        # 2x and not a scheduling race: the instrumented ICON runs logged 80 invocations at
-        # n_time=32 (5 iterations x 8 time chunks = 40) and 160 at n_time=64 (5 x 16 = 80).
-        # Naming it here computes the shared task once and hands `stage` a materialised
-        # array to write, which costs one transient whole-field pin (uint8, ~1 GB/worker
-        # spread over 16 workers at n_time=1096) and saves an entire second execution.
-        #
-        # Anchoring inside this call instead is NOT an alternative: `to_zarr(compute=False)`
-        # re-optimises its source graph and renames the shared keys, so a deferred write
-        # submitted alongside the seven does not share them and still costs 2x. Verified
-        # against a counting kernel: persist-seven-then-write 20 calls for 10 chunks,
-        # deferred-write-in-one-submission 20, persist-all-then-write 10.
-        #
-        # The label MUST carry the iteration index. This runs once per merge-loop iteration
-        # with a different array each time, and staging writes <label>.zarr with mode="w",
-        # so a fixed label would rewrite the store the previous iteration's array is still
-        # reading. Materialiser._reject_relabel turns that mistake into an immediate error.
-        (
-            merge_child_ids,
-            merge_parent_ids,
-            merge_areas,
-            merge_counts,
-            has_merge,
-            updates_array,
-            updates_ids,
-            final_merging_objects,
-        ) = persist(
-            merge_child_ids,
-            merge_parent_ids,
-            merge_areas,
-            merge_counts,
-            has_merge,
-            updates_array,
-            updates_ids,
-            final_merging_objects,
-        )
-        updates_array = _anchor_field(updates_array, f"updates_array_iter{iteration_index}", materialiser)
-
-        # Get time indices where merges occurred
-        has_merge = has_merge.compute()
-        time_indices = np.where(has_merge)[0].astype(np.int32)
-
-        # Clean up temporary arrays to save memory
-        del (
-            object_id_field_unique_p1,
-            object_id_field_unique_m1,
-            merging_objects_da,
-            next_id_offsets_da,
-        )
-        gc.collect()
-
-        logger.debug("Finished Batch Processing Step")
-
-        # ====== Global Consolidation of Data ======
-
-        # 1. Collect all temporary IDs and create global mapping
-        all_temp_ids = np.unique(merge_child_ids.where(merge_child_ids >= global_id_counter, other=0).compute().values)
-        all_temp_ids = all_temp_ids[all_temp_ids > 0]  # Remove the 0
-
-        if not len(all_temp_ids):  # If no temporary IDs exist
-            id_lookup = {}
-        else:
-            # Create mapping from temporary to permanent IDs
-            id_lookup = {
-                temp_id: np.int32(new_id)
-                for temp_id, new_id in zip(
-                    all_temp_ids,
-                    range(global_id_counter, global_id_counter + len(all_temp_ids)),
-                )
-            }
-            global_id_counter += len(all_temp_ids)
-
-        logger.debug("Finished Consolidation Step 1: Temporary ID Mapping")
-
-        # 2. Update object ID field with new IDs
-        update_on_disk = True  # This is more memory efficient because it refreshes the dask graph every iteration
-
-        if update_on_disk:
-            object_id_field_unique = update_object_id_field_zarr(
-                object_id_field_unique,
-                id_lookup,
-                updates_array,
-                updates_ids,
-                has_merge,
-            )
-        else:  # pragma: no cover
-            object_id_field_unique = update_object_id_field_inplace(
-                object_id_field_unique,
-                id_lookup,
-                updates_array,
-                updates_ids,
-                has_merge,
-            )
-            object_id_field_unique = object_id_field_unique.chunk({timedim: timechunks})  # Rechunk to avoid accumulating chunks...
-
-        # Clean up arrays no longer needed
-        del updates_array, updates_ids
-        gc.collect()
-
-        logger.debug("Finished Consolidation Step 2: Data Field Update")
-
-        # 3. Update merge events
-        new_merging_objects = set()
-        merge_counts = merge_counts.compute()
-        # Materialise the three small persisted ledgers once. Indexing them lazily inside
-        # the loop below cost a blocking scheduler round-trip per merge event -- thousands
-        # of them per merge-loop iteration for arrays of a few MB (review finding 5.11).
-        merge_child_ids_local = merge_child_ids.compute()
-        merge_parent_ids_local = merge_parent_ids.compute()
-        merge_areas_local = merge_areas.compute()
-
-        for t in time_indices:
-            count = int(merge_counts.isel({timedim: t}).item())
-            if count > 0:
-                merge_counts_iter[t] = count
-
-                # Extract valid IDs and areas for each merge event
-                for merge_idx in range(count):
-                    # Get child IDs
-                    child_ids = merge_child_ids_local.isel({timedim: t, "merge": merge_idx}).values
-                    child_ids = child_ids[child_ids >= 0]
-
-                    # Get parent IDs and areas
-                    parent_ids = merge_parent_ids_local.isel({timedim: t, "merge": merge_idx}).values
-                    areas = merge_areas_local.isel({timedim: t, "merge": merge_idx}).values
-                    valid_mask = parent_ids >= 0
-                    parent_ids = parent_ids[valid_mask]
-                    areas = areas[valid_mask]
-
-                    # Map temporary IDs to permanent IDs
-                    mapped_child_ids = [id_lookup.get(int(id_.item()), int(id_.item())) for id_ in child_ids]
-                    mapped_parent_ids = [id_lookup.get(int(id_.item()), int(id_.item())) for id_ in parent_ids]
-
-                    # Store in pre-allocated arrays
-                    child_ids_iter[t, merge_idx, : len(mapped_child_ids)] = mapped_child_ids
-                    parent_ids_iter[t, merge_idx, : len(mapped_parent_ids)] = mapped_parent_ids
-                    merge_areas_iter[t, merge_idx, : len(areas)] = areas
-
-        # Process final merging objects for next iteration
-        final_merging_objects = final_merging_objects.compute().values
-        final_merging_objects = final_merging_objects[final_merging_objects > 0]
-        mapped_final_objects = [id_lookup.get(id_, id_) for id_ in final_merging_objects]
-        new_merging_objects.update(mapped_final_objects)
-
-        logger.debug("Finished Consolidation Step 3: Merge List Dictionary Consolidation")
-
-        # Clean up memory
-        del merge_child_ids, merge_parent_ids, merge_areas, merge_counts, has_merge
-        gc.collect()
-
-        return (
-            object_id_field_unique,
-            (child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter),
-            new_merging_objects,
-            global_id_counter,
-        )
-
-    # ============================
-    # Main Loop for Parallel Merging
-    # ============================
-
-    # Find overlapping objects
-    overlap_objects_list = _overlap.find_overlapping_objects(
-        object_id_field_unique, timedim, unstructured_grid, ydim, xdim, cell_area
-    )  # List object pairs that overlap by at least overlap_threshold percent
-    # enforce_overlap_threshold consumes an ObjectPropsStore; this (unstructured) path keeps
-    # object_props as a Dataset and recomputes it wholesale, so wrap it for the two enforce calls.
-    overlap_objects_list = _overlap.enforce_overlap_threshold(
-        overlap_objects_list, _objects.ObjectPropsStore.from_dataset(object_props), unstructured_grid, overlap_threshold
-    )
-    logger.info("Finished finding overlapping objects")
-
-    # Find initial merging objects
-    unique_children, children_counts = np.unique(overlap_objects_list[:, 1], return_counts=True)
-    merging_objects = set(unique_children[children_counts > 1].astype(np.int32))
-    del overlap_objects_list
-
-    # Process chunks iteratively until no new merging objects remain
-
+    # -- the loop: run dirty chunks until no boundary or forwarded queue changes -------------
+    records_by_chunk: Dict[int, list] = {}
+    forwarded_by_chunk: Dict[int, List[int]] = {k: [] for k in range(n_chunks)}
+    last_hash: Dict[int, str] = {}
+    consumed_boundary: Dict[int, str] = {}
+    consumed_forwarded: Dict[int, List[int]] = {}
+    max_parents_run = 0
+    region_written: set = set()
+    dirty = set(range(n_chunks))
     iteration = 0
-    processed_chunks = set()
-    global_id_counter = int(object_props.ID.max().item()) + 1
 
-    # Initialise global merge event tracking
-    global_child_ids = []
-    global_parent_ids = []
-    global_merge_areas = []
-    global_merge_tidx = []
+    while dirty:
+        if iteration >= max_iteration:  # pragma: no cover
+            raise TrackingError(
+                "Maximum iterations reached in tracking algorithm",
+                details=f"{len(dirty)} time chunks still changing after {max_iteration} iterations",
+                suggestions=["Increase max_iteration parameter", "Increase area_filter_quartile to reduce small objects"],
+                context={"max_iteration": max_iteration, "dirty_chunks": sorted(dirty)},
+            )
+        logger.info(f"Merge loop iteration {iteration + 1}: {len(dirty)} of {n_chunks} time chunks to process")
 
-    while merging_objects and iteration < max_iteration:
-        (
-            object_id_field_new,
-            merge_data_iter,
-            new_merging_objects,
-            global_id_counter,
-        ) = merge_objects_parallel_iteration(object_id_field_unique, merging_objects, global_id_counter, iteration)
-        child_ids_iter, parent_ids_iter, merge_areas_iter, merge_counts_iter = merge_data_iter
+        # Two phases by chunk parity: a chunk reads its boundary from the accumulator, and no
+        # chunk in the same phase writes it, so a read can never see a half-written slice.
+        for parity in (0, 1):
+            todo = sorted(k for k in dirty if k % 2 == parity)
+            if not todo:
+                continue
+            tasks = []
+            for k in todo:
+                t0, t1 = int(chunk_starts[k]), int(chunk_starts[k + 1])
+                queue_k = [list(initial_queue[t]) for t in range(t0, t1)]
+                fwd_in = list(forwarded_by_chunk[k - 1]) if k > 0 else []
+                for obj in fwd_in:
+                    if obj not in queue_k[0]:
+                        queue_k[0].append(obj)
+                consumed_forwarded[k] = fwd_in
+                boundary = dask.delayed(_boundary_slice)(t0 - 1) if k > 0 else None
+                next_first = pristine_blocks.blocks[k + 1, 0][0] if k + 1 < n_chunks else None
+                id_offsets = global_id_counter + np.arange(t0, t1, dtype=np.int64) * id_stride
+                tasks.append(
+                    dask.delayed(process_chunk)(
+                        pristine_blocks.blocks[k, 0],
+                        boundary,
+                        next_first,
+                        queue_k,
+                        id_offsets,
+                        t0,
+                        lat_d,
+                        lon_d,
+                        area_d,
+                        neighbours_d,
+                        zarr_path,
+                        k in region_written,
+                    )
+                )
+            results = dask.compute(*tasks)
+            for k, (recs, fwd, h_last, h_boundary, max_p, wrote) in zip(todo, results):
+                if wrote:
+                    region_written.add(k)
+                else:
+                    region_written.discard(k)
+                records_by_chunk[k] = recs
+                forwarded_by_chunk[k] = fwd
+                last_hash[k] = h_last
+                consumed_boundary[k] = h_boundary
+                max_parents_run = max(max_parents_run, max_p)
 
-        # Consolidate merge events from this iteration
-        for t in range(len(merge_counts_iter)):
-            count = merge_counts_iter[t]
-            if count > 0:
-                for merge_idx in range(count):
-                    # Extract valid children
-                    children = child_ids_iter[t, merge_idx]
-                    children = children[children >= 0]
-
-                    # Extract valid parents and areas
-                    parents = parent_ids_iter[t, merge_idx]
-                    areas = merge_areas_iter[t, merge_idx]
-                    valid_mask = parents >= 0
-                    parents = parents[valid_mask]
-                    areas = areas[valid_mask]
-
-                    # Record valid merge events
-                    if len(children) > 0 and len(parents) > 0:
-                        global_child_ids.append(children)
-                        global_parent_ids.append(parents)
-                        global_merge_areas.append(areas)
-                        global_merge_tidx.append(t)
-
-        # Prepare for next iteration - only process objects not already handled
-        merging_objects = new_merging_objects - processed_chunks
-        processed_chunks.update(new_merging_objects)
+        # A chunk must run again when what it consumed from its predecessor is no longer
+        # what the predecessor produced.
+        next_dirty = set()
+        for k in range(1, n_chunks):
+            producer_hash = last_hash.get(k - 1)
+            if producer_hash is None:
+                continue
+            if consumed_boundary.get(k) != producer_hash or consumed_forwarded.get(k) != forwarded_by_chunk[k - 1]:
+                next_dirty.add(k)
+        dirty = next_dirty
         iteration += 1
 
-        # Update the object field
-        object_id_field_unique = object_id_field_new
-        del object_id_field_new
+    n_records = sum(len(r) for r in records_by_chunk.values())
+    logger.info(
+        f"Merge loop converged after {iteration} iterations: {n_records} merge records, " f"max accepted parents {max_parents_run}"
+    )
 
-    # Check if we reached maximum iterations
-    if iteration == max_iteration:  # pragma: no cover
-        raise TrackingError(
-            "Maximum iterations reached in tracking algorithm",
-            details=f"Algorithm failed to converge after {max_iteration} iterations",
-            suggestions=[
-                "Increase max_iteration parameter",
-                "Increase area_filter_quartile to reduce small objects",
-                "Consider adjusting tracking parameters",
-            ],
-            context={
-                "max_iteration": max_iteration,
-                "reached_iteration": iteration,
-            },
-        )
+    # -- compaction: minted IDs become contiguous after the input's maximum ------------------
+    all_records = []
+    for k in range(n_chunks):
+        all_records.extend(records_by_chunk.get(k, []))
+    minted = set()
+    for _, children, parents, _ in all_records:
+        minted.update(int(c) for c in children if c >= global_id_counter)
+        minted.update(int(p) for p in parents if p >= global_id_counter)
+    temp_sorted = np.array(sorted(minted), dtype=np.int64)
+    permanent = np.arange(global_id_counter, global_id_counter + len(temp_sorted), dtype=np.int32)
 
-    # Process the collected merge events
+    def _compact(values: NDArray) -> NDArray:
+        values = np.asarray(values)
+        mask = values >= global_id_counter
+        if not mask.any():
+            return values
+        out = values.copy()
+        out[mask] = permanent[np.searchsorted(temp_sorted, values[mask])]
+        return out
 
+    if len(temp_sorted):
+
+        def _compact_region(t0: int, t1: int) -> int:
+            group = zarr.open_group(zarr_path, mode="r+")["temp"]
+            block = np.asarray(group[t0:t1, :])
+            mask = block >= global_id_counter
+            if mask.any():
+                block[mask] = permanent[np.searchsorted(temp_sorted, block[mask])]
+                group[t0:t1, :] = block
+            return int(mask.sum())
+
+        dask.compute(*[dask.delayed(_compact_region)(int(chunk_starts[k]), int(chunk_starts[k + 1])) for k in range(n_chunks)])
+        all_records = [(t, _compact(c), _compact(p), a) for t, c, p, a in all_records]
+
+    object_id_field_unique = xr.open_zarr(zarr_path, chunks={timedim: chunk_sizes}).temp
+    object_id_field_unique = object_id_field_unique.rename(pristine.name if pristine.name != "temp" else None)
+
+    # -- merge events (same layout as the serial path) ---------------------------------------
+    all_records.sort(key=lambda r: r[0])
     times = object_id_field_unique[timecoord].values
+    global_child_ids = [r[1] for r in all_records]
+    global_parent_ids = [r[2] for r in all_records]
+    global_merge_areas = [r[3] for r in all_records]
+    global_merge_tidx = np.array([r[0] for r in all_records], dtype=int)
 
-    # Find maximum dimensions for arrays
-    # Handle case where there are no merge events
     if global_parent_ids and global_child_ids:
         max_parents = max(len(ids) for ids in global_parent_ids)
         max_children = max(len(ids) for ids in global_child_ids)
     else:
-        max_parents = 1  # Default minimum size
+        max_parents = 1
         max_children = 1
 
-    # Create padded arrays for merge events
     parent_ids_array = np.full((len(global_parent_ids), max_parents), -1, dtype=np.int32)
     child_ids_array = np.full((len(global_child_ids), max_children), -1, dtype=np.int32)
     overlap_areas_array = np.full(
@@ -2403,18 +1876,13 @@ def split_and_merge_objects_parallel(
         -1,
         dtype=np.float32 if unstructured_grid else np.int32,
     )
-
-    # Fill arrays with merge data
     for i, parents in enumerate(global_parent_ids):
         parent_ids_array[i, : len(parents)] = parents
-
     for i, children in enumerate(global_child_ids):
         child_ids_array[i, : len(children)] = children
-
     for i, areas in enumerate(global_merge_areas):
         overlap_areas_array[i, : len(areas)] = areas
 
-    # Create merge events dataset
     merge_events = xr.Dataset(
         {
             "parent_IDs": (("merge_ID", "parent_idx"), parent_ids_array),
@@ -2433,12 +1901,6 @@ def split_and_merge_objects_parallel(
         attrs={"fill_value": -1},
     )
 
-    # Recompute object properties and overlaps after all merging. This field has TWO
-    # consumers below -- calculate_object_properties and find_overlapping_objects -- so it
-    # is an anchor, not a bounded intermediate: leaving it lazy would re-run the whole
-    # merge loop's output graph once per consumer. `stage` in persist mode is
-    # `obj.persist()`, and `optimize_graph=True` was already dask's default, so the default
-    # path is byte-for-byte unchanged.
     object_id_field_unique = _anchor_field(object_id_field_unique, "merged_id_field", materialiser)
     object_props = _objects.calculate_object_properties(
         object_id_field_unique,
@@ -2453,7 +1915,6 @@ def split_and_merge_objects_parallel(
         properties=["area", "centroid"],
     ).persist(optimize_graph=True)
 
-    # Recompute overlaps based on final object configuration
     overlap_objects_list = _overlap.find_overlapping_objects(
         object_id_field_unique, timedim, unstructured_grid, ydim, xdim, cell_area
     )

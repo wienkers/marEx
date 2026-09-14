@@ -590,14 +590,28 @@ class tracker:
         # unify_coordinates); the input data_bin is no longer mutated in place (§1.3).
         self.lat = self.data_bin[self.ycoord].persist()
         self.lon = self.data_bin[self.xcoord].persist()
-        if data_bin.chunks is not None:
-            self.timechunks = data_bin.chunks[data_bin.dims.index(self.timedim)][0]
-        else:
+        if data_bin.chunks is None:
             raise create_data_validation_error(
                 "Data must be chunked",
                 details="The input data_bin must have chunk information",
                 suggestions=["Use data_bin.chunk({'time': 10}) to chunk the data"],
             )
+        time_chunks = data_bin.chunks[data_bin.dims.index(self.timedim)]
+        if not _is_uniform_time_chunking(time_chunks):
+            # Every consumer of the time chunking writes zarr regions (the refresh store, the
+            # streaming region writer, the unstructured merge loop's accumulator), and zarr can
+            # only encode chunks that are uniform except for a smaller last one. A ragged input
+            # (open_mfdataset over uneven per-year files) is therefore re-tiled once, here. This
+            # does not change the result: tracking is invariant in the time chunking (D-077).
+            width = int(max(time_chunks))
+            logger.warning(
+                f"Input time chunks are not uniform ({_format_chunk_pattern(time_chunks)}); "
+                f"rechunking {self.timedim!r} to {width} for the zarr region writes"
+            )
+            self.data_bin = self.data_bin.chunk({self.timedim: width})
+            data_bin = self.data_bin
+            time_chunks = data_bin.chunks[data_bin.dims.index(self.timedim)]
+        self.timechunks = int(time_chunks[0])
         self.unstructured_grid = unstructured_grid
         self.checkpoint = checkpoint
         self.debug = debug
@@ -669,21 +683,9 @@ class tracker:
         # common case. A genuinely ragged chunking (e.g. open_mfdataset over uneven per-year
         # files) would otherwise reach the zarr write intact and fail there with a confusing
         # low-level zarr ValueError, after potentially hours of earlier processing.
-        if compute_mode == "streaming":
-            time_chunks = data_bin.chunks[data_bin.dims.index(self.timedim)]
-            if not _is_uniform_time_chunking(time_chunks):
-                raise ConfigurationError(
-                    "compute_mode='streaming' requires uniform time chunking",
-                    details=(
-                        f"Every chunk along {self.timedim!r} must be equal except the last, which "
-                        f"may be smaller. Got: {_format_chunk_pattern(time_chunks)}"
-                    ),
-                    suggestions=[
-                        f"Rechunk uniformly, e.g. data_bin.chunk({{'{self.timedim}': k}})",
-                        "Use compute_mode='persist' if the input cannot be rechunked uniformly",
-                    ],
-                    context={"provided_mode": compute_mode, "time_chunks": _format_chunk_pattern(time_chunks)},
-                )
+        # Time chunking was made uniform (except for a smaller last chunk) above, for both
+        # grid types and both compute modes, so the zarr region writes downstream are legal.
+        assert _is_uniform_time_chunking(data_bin.chunks[data_bin.dims.index(self.timedim)])
 
         self.compute_mode = compute_mode
         self.staging_dir = create_staging_dir(temp_dir) if compute_mode == "streaming" else None

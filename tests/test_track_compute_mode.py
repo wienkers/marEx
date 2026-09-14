@@ -121,9 +121,11 @@ class TestTrackerComputeModeValidation:
         )
         assert tr.materialiser.is_streaming is True
 
-    def test_streaming_rejects_ragged_time_chunking(self, extremes, tmp_path):
+    def test_streaming_retiles_ragged_time_chunking(self, extremes, tmp_path):
         """A genuinely ragged chunking (e.g. from open_mfdataset over uneven per-year
-        files) must be rejected at construction time, not fail inside the zarr write."""
+        files) is re-tiled once at construction to a uniform width, for both modes, so the
+        zarr region writes downstream are legal (D-077). Tracking is chunk-invariant, so the
+        result does not depend on it."""
         n_time = extremes.sizes["time"]
         ragged = tuple([3, 5] * ((n_time // 8) + 1))[: n_time // 8 * 2]
         remainder = n_time - sum(ragged)
@@ -133,14 +135,16 @@ class TestTrackerComputeModeValidation:
         assert len(ragged) > 1
         data_bin = extremes.extreme_events.chunk({"lat": -1, "lon": -1}).chunk({"time": ragged})
 
-        with pytest.raises(ConfigurationError, match="uniform"):
-            marEx.tracker(
-                data_bin,
-                extremes.mask,
-                compute_mode="streaming",
-                temp_dir=str(tmp_path),
-                **TRACKER_KWARGS,
-            )
+        tr = marEx.tracker(
+            data_bin,
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        time_chunks = tr.data_bin.chunks[tr.data_bin.dims.index("time")]
+        assert set(time_chunks[:-1]) == {5} and time_chunks[-1] <= 5
+        assert tr.timechunks == 5
 
 
 class TestStagingLifetime:
