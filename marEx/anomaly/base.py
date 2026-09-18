@@ -13,6 +13,7 @@ import xarray as xr
 from dask.base import is_dask_collection
 
 from ..core.compute_mode import Materialiser
+from ..core.dimensions import canonical_time_chunks
 from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
@@ -235,6 +236,43 @@ def compute_normalised_anomaly(
             ],
         )
 
+    # Reduce on a canonical layout (time whole, spatial tiles) so the answer does not depend on how
+    # the caller chunked the input, then hand back the caller's layout (D-091).
+    caller_chunks = dict(zip(da.dims, da.chunks))
+    ds = _dispatch_anomaly(
+        da.chunk(canonical_time_chunks(da, dimensions)),
+        method_anomaly,
+        dimensions,
+        coordinates,
+        window_years,
+        smooth_days,
+        standardise,
+        detrend_orders,
+        force_zero_mean,
+        reference_period,
+        materialiser,
+        cycle,
+    )
+    for name in ("dat_anomaly", "dat_stn"):
+        if name in ds and dimensions["time"] in ds[name].dims:
+            ds[name] = ds[name].chunk({d: caller_chunks[d] for d in ds[name].dims if d in caller_chunks})
+    return ds
+
+
+def _dispatch_anomaly(
+    da: xr.DataArray,
+    method_anomaly: str,
+    dimensions: Dict[str, str],
+    coordinates: Dict[str, str],
+    window_years: int,
+    smooth_days: int,
+    standardise: bool,
+    detrend_orders: Optional[List[int]],
+    force_zero_mean: bool,
+    reference_period: Optional[Tuple[int, int]],
+    materialiser: Optional[Materialiser],
+    cycle: Optional[SeasonalCycle],
+) -> xr.Dataset:
     if method_anomaly == "detrend_harmonic":
         logger.debug(
             f"Detrended baseline parameters: standardise={standardise}, orders={detrend_orders}, zero_mean={force_zero_mean}"

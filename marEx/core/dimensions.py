@@ -157,7 +157,13 @@ def tile_spatial_chunks(
     # leaves the tile 11x smaller than it may be, which is 11x the tasks for nothing.
     # Taking the short dimensions whole first hands their unused share to the long
     # ones, and reduces to exactly `budget ** (1/rank)` when all dims are long.
-    current = obj.chunksizes
+    # The array's own chunks, not `obj.chunksizes`: that unifies across dask-backed coordinates
+    # too, and raises when a coordinate on the time axis is chunked differently from the data
+    # (a centred rolling mean splits the data's last time block but not its coordinates).
+    if isinstance(obj, xr.DataArray):
+        current = dict(zip(obj.dims, obj.chunks)) if obj.chunks else {}
+    else:
+        current = {d: c for v in obj.data_vars.values() if v.chunks for d, c in zip(v.dims, v.chunks)}
     remaining_cells = cells_per_tile
     chunks: Dict[str, int] = {}
     ordered = sorted(present, key=lambda d: int(obj.sizes[d]))
@@ -173,6 +179,41 @@ def tile_spatial_chunks(
     logger.debug(
         f"Spatial tiling: {cells_per_tile} cells/task over {len(present)} dims "
         f"(input {input_elements_per_cell}, output {output_elements_per_cell} per cell) -> {chunks}"
+    )
+    return chunks
+
+
+def canonical_time_chunks(
+    obj: Union[xr.DataArray, xr.Dataset],
+    dimensions: Dict[str, str],
+    input_elements_per_cell: Optional[int] = None,
+    output_elements_per_cell: int = 1,
+) -> Dict[str, int]:
+    """Chunk dict holding the time axis whole inside bounded spatial tiles.
+
+    Every reduction along time in the anomaly stage (a rolling mean, a flox
+    group mean, a harmonic fit) accumulates block by block, so its floating-point
+    result depends on where the time chunk boundaries fall: ~1e-4 K on SST, enough
+    to move a threshold across a 0.01 bin (D-091). Holding time whole makes the
+    answer a property of the data alone. It also keeps the graph small: flox's
+    task count scales with tiles x time chunks, and a 27-year daily input at
+    30-day chunks never finished building (D-090).
+
+    The spatial side is capped with :func:`tile_spatial_chunks`, so one task's
+    working set stays near :data:`TASK_ELEMENTS` whatever the caller passed in.
+    Each cell is reduced independently, so the spatial layout never moves values.
+    """
+    timedim = dimensions["time"]
+    if input_elements_per_cell is None:
+        input_elements_per_cell = int(obj.sizes[timedim])
+    chunks: Dict[str, int] = {timedim: -1}
+    chunks.update(
+        tile_spatial_chunks(
+            obj,
+            spatial_dims(obj, dimensions),
+            input_elements_per_cell=input_elements_per_cell,
+            output_elements_per_cell=output_elements_per_cell,
+        )
     )
     return chunks
 

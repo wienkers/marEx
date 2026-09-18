@@ -1686,6 +1686,11 @@ def split_and_merge_objects_parallel(
     initial_children = [int(c) for c in unique_children[children_counts > 1]]
     del overlap_objects_list
     global_id_counter = int(object_props.ID.max().item()) + 1
+    # Temp IDs are minted from above the range compaction writes into. Every timestep can mint at most
+    # `id_stride` IDs, so the compacted range [global_id_counter, global_id_counter + n_minted) never reaches
+    # `mint_base`, and a compaction task that dask retries after a worker restart cannot remap an ID it has
+    # already compacted (D-093). Compaction keeps sorted order, so the final IDs do not depend on the base.
+    mint_base = global_id_counter + n_time * id_stride
 
     initial_queue: List[List[int]] = [[] for _ in range(n_time)]
     if initial_children:
@@ -1771,7 +1776,7 @@ def split_and_merge_objects_parallel(
                 consumed_forwarded[k] = fwd_in
                 boundary = dask.delayed(_boundary_slice)(t0 - 1) if k > 0 else None
                 next_first = pristine_blocks.blocks[k + 1, 0][0] if k + 1 < n_chunks else None
-                id_offsets = global_id_counter + np.arange(t0, t1, dtype=np.int64) * id_stride
+                id_offsets = mint_base + np.arange(t0, t1, dtype=np.int64) * id_stride
                 tasks.append(
                     dask.delayed(process_chunk)(
                         pristine_blocks.blocks[k, 0],
@@ -1842,7 +1847,7 @@ def split_and_merge_objects_parallel(
         def _compact_region(t0: int, t1: int) -> int:
             group = zarr.open_group(zarr_path, mode="r+")["temp"]
             block = np.asarray(group[t0:t1, :])
-            mask = block >= global_id_counter
+            mask = block >= mint_base
             if mask.any():
                 block[mask] = permanent[np.searchsorted(temp_sorted, block[mask])]
                 group[t0:t1, :] = block

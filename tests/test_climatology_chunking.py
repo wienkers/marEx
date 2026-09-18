@@ -1,11 +1,9 @@
 """Chunk-size invariance and chunking validation for the smoothed rolling climatology."""
 
 import numpy as np
-import pytest
 import xarray as xr
 
 from marEx.anomaly.climatology import smoothed_rolling_climatology
-from marEx.exceptions import ConfigurationError
 
 SMOOTH_DAYS = 21
 
@@ -28,48 +26,45 @@ def _synthetic(nt=1100, ncells=60, seed=0):
 
 
 class TestChunkSizeInvariance:
-    """The climatology must not depend on how the time axis happens to be chunked."""
+    """The climatology must not depend on how the input is chunked (D-091)."""
 
-    def test_output_across_time_chunks_agrees_to_float32_precision(self):
-        # bottleneck's move_mean restarts its running sum at each dask block boundary, so
-        # the climatology shifts slightly with the chunk layout. That is accepted: the
-        # spread is a few float32 ULP of the input field. This test pins it as SMALL, so a
-        # future change that makes chunking matter materially fails here.
-        #
-        # Exact bit-identity is achievable by accumulating in float64, but that doubles the
-        # reduction's working set and exhausted the workers in a distributed run.
+    def test_output_is_bit_identical_across_time_and_space_chunks(self):
+        # bottleneck's move_mean restarts its running sum at each dask block boundary, and flox
+        # accumulates its grouped mean block by block, so before D-091 the result moved by a
+        # few float32 ULP with the time chunking -- enough to flip a 0.01 threshold bin. The
+        # reduction now runs with time whole, so every layout gives the same bits.
         da = _synthetic()
         dims = {"time": "time", "x": "ncells"}
         coords = {"time": "time", "x": "lon", "y": "lat"}
 
-        a = smoothed_rolling_climatology(da.chunk({"time": 21, "ncells": -1}), 2, SMOOTH_DAYS, dims, coords).compute()
-        b = smoothed_rolling_climatology(da.chunk({"time": 40, "ncells": -1}), 2, SMOOTH_DAYS, dims, coords).compute()
+        ref = smoothed_rolling_climatology(da.chunk({"time": -1, "ncells": -1}), 2, SMOOTH_DAYS, dims, coords).compute()
+        for layout in ({"time": 2, "ncells": -1}, {"time": 21, "ncells": -1}, {"time": 40, "ncells": 7}):
+            got = smoothed_rolling_climatology(da.chunk(layout), 2, SMOOTH_DAYS, dims, coords).compute()
+            assert np.array_equal(got.values, ref.values, equal_nan=True), f"climatology moved under {layout}"
 
-        assert np.array_equal(np.isnan(a.values), np.isnan(b.values)), "NaN pattern must not depend on chunking"
-        spread = np.nanmax(np.abs(a.values - b.values))
-        # ~280 K field: 1e-2 is far above the observed ~1e-4 but far below anything
-        # that would indicate the overlap itself had broken.
-        assert spread < 1e-2, f"chunk-dependence grew to {spread:.3e}"
+    def test_caller_layout_is_restored(self):
+        da = _synthetic().chunk({"time": 40, "ncells": 7})
+        result = smoothed_rolling_climatology(
+            da, 2, SMOOTH_DAYS, {"time": "time", "x": "ncells"}, {"time": "time", "x": "lon", "y": "lat"}
+        )
+        assert dict(result.chunksizes) == dict(da.chunksizes)
 
 
 class TestTimeChunkValidation:
-    """A time chunk shorter than the smoothing window cannot produce a rolling mean."""
+    """Time chunks shorter than the smoothing window used to fail inside bottleneck."""
 
-    def test_time_chunk_below_smoothing_window_raises_configuration_error(self):
-        # Previously this surfaced as bottleneck's
-        # "Moving window (=21) must between 1 and 20, inclusive", which names neither
-        # the parameter nor the chunk that caused it.
-        # 20 % 2 == 0, so the padding forms a 20-element block against a 21-day window.
-        da = _synthetic().chunk({"time": 2, "ncells": -1})
+    def test_time_chunk_below_smoothing_window_is_accepted(self):
+        # 20 % 2 == 0 formed a 20-element block against a 21-day window, which raised
+        # (first from bottleneck, later as a ConfigurationError). The smoothing now sees the
+        # time axis whole, so the chunking cannot produce a short block.
+        da = _synthetic()
+        dims = {"time": "time", "x": "ncells"}
+        coords = {"time": "time", "x": "lon", "y": "lat"}
 
-        with pytest.raises(ConfigurationError, match=r"21-day centred rolling mean"):
-            smoothed_rolling_climatology(
-                da,
-                2,
-                SMOOTH_DAYS,
-                {"time": "time", "x": "ncells"},
-                {"time": "time", "x": "lon", "y": "lat"},
-            )
+        got = smoothed_rolling_climatology(da.chunk({"time": 2, "ncells": -1}), 2, SMOOTH_DAYS, dims, coords).compute()
+        ref = smoothed_rolling_climatology(da.chunk({"time": -1, "ncells": -1}), 2, SMOOTH_DAYS, dims, coords).compute()
+
+        assert np.array_equal(got.values, ref.values, equal_nan=True)
 
     def test_chunk_not_dividing_the_pad_is_accepted(self):
         # chunk 4 with an 11-day window: 10 % 4 == 2, so no short block forms and this

@@ -93,7 +93,7 @@ def test_serial_path_is_the_oracle(reference, name, tmp_path):
     events, objects, n_merges = _track(binary, sc["nrow"], sc["ncol"], NT, tmp_path, serial=True)
     assert n_merges == ref_merges
     assert same_partition(objects, ref_objects), "object-level partition differs from the serial path"
-    assert same_partition(events, ref_events)
+    assert np.array_equal(events, ref_events), "a compaction retry changed event IDs"
 
 
 @pytest.mark.parametrize("width", [3, 1])
@@ -163,3 +163,36 @@ def test_merge_ledger_is_written_positionally(reference, tmp_path):
     merge_times = np.unique(merges.merge_time.values)
     time_has_row = filled.any(axis=(1, 2))
     assert time_has_row[np.isin(events.time.values, merge_times)].all()
+
+
+@pytest.mark.parametrize("name", ["S3", "seed5"])
+def test_compaction_survives_a_task_retry(reference, name, tmp_path, monkeypatch):
+    """A worker restart makes dask re-run a compaction task whose first attempt already wrote its
+    region. Minted IDs used to share a range with the compacted ones, so the retry remapped IDs a
+    second time and the run crashed or relabelled cells (D-093). Every region is compacted once up
+    front, then the real compute runs over the already-compacted store."""
+    import dask
+
+    from marEx.track import merge_split
+
+    sc, binary, lineage, bridge_day, _ = reference[name]
+    (tmp_path / "once").mkdir()
+    (tmp_path / "retried").mkdir()
+    ref_events, ref_objects, ref_merges = _track(binary, sc["nrow"], sc["ncol"], 5, tmp_path / "once")
+    real_compute = dask.compute
+    first_attempts = []
+
+    def _compute_with_retry(*args, **kwargs):
+        regions = [a for a in args if str(getattr(a, "key", "")).startswith("_compact_region")]
+        if regions:
+            first_attempts.extend(real_compute(*regions, scheduler="synchronous"))
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(merge_split.dask, "compute", _compute_with_retry)
+    events, objects, n_merges = _track(binary, sc["nrow"], sc["ncol"], 5, tmp_path / "retried")
+    monkeypatch.undo()
+
+    assert first_attempts, "no compaction task was re-executed, so nothing was tested"
+    assert n_merges == ref_merges
+    assert np.array_equal(objects, ref_objects), "a compaction retry changed object IDs"
+    assert np.array_equal(events, ref_events), "a compaction retry changed event IDs"
