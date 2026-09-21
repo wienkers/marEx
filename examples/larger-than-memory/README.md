@@ -122,8 +122,8 @@ allocation at a 4 x 4 GB = 16 GB dask budget:**
 
 | leg | mode | outcome | evidence | peak |
 | --- | --- | --- | --- | ---: |
-| `g2_persist` | persist | **OOM-KILLED** | SLURM `OUT_OF_MEMORY`, `Detected 1 oom_kill event`, MaxRSS 23.83 GB | - |
-| `g2_persist_r2` | persist | **OOM-KILLED** | same, MaxRSS 24.10 GB | - |
+| `g2_persist` | persist | **OOM-KILLED** | SLURM `OUT_OF_MEMORY`, `Detected 1 oom_kill event`, MaxRSS 23.83 GiB | - |
+| `g2_persist_r2` | persist | **OOM-KILLED** | same, MaxRSS 24.10 GiB | - |
 | `g2_stream` | streaming | **completed** | five reductions match the 32 GB and 192 GB runs (`id_field_sum` 826033161263, 4388 events, 18712 merges) | 7.3 GB |
 | `g2_persist`, 3 later runs | persist | **OOM-KILLED** | same signature all three times; one ran back to back with a `g2_stream` run in ONE job on ONE node, its `cgroup_peak` closing 2.43 MiB above the 24 GiB limit | - |
 | the same leg under streaming, 6 later runs (5 of them as `sc_stream_3804*`) | streaming | **completed** | `id_field_sum`, events and merges identical every time, including the run that shared that job and node | 6.65 - 7.30 GB |
@@ -172,7 +172,7 @@ code, so this is now a persist-against-streaming match and not streaming reprodu
 
 What this does and does not show. It does **not** show a clean allocation threshold for
 `persist`. One 40 GiB run froze for about 90 minutes right after merge-loop chunk 150 of 153,
-the same point at which the 28 GiB run stalled: memory flat at 24.6 GiB, far below its limit,
+the same point at which the 28 GiB run stalled: memory near 24.6 GiB (brief excursions to 27.9 GiB), far below its limit,
 one of the four workers paused by dask with all 49 tasks the scheduler had assigned, while the
 other three sat idle, and then it resumed, for a reason these runs do not reveal. The other 40 GiB run, with
 dask's worker `pause` threshold switched off, did not freeze, but the nanny restarted a worker
