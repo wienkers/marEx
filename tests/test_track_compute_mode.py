@@ -158,13 +158,34 @@ class TestStagingLifetime:
             **TRACKER_KWARGS,
         )
         events = tr.run()
-        staged = events.attrs.get("marex_staging_dir")
+        staged = events.encoding.get("marex_staging_dir")
         assert staged is not None, "streaming output must advertise its staging dir"
         assert Path(staged).exists(), "staging dir must OUTLIVE run(); the result reads from it"
         # The result must still be readable -- this is the trap clear_staging-on-return causes.
         assert int(events.ID_field.max().compute()) >= 0
         marEx.clear_staging(events)
         assert not Path(staged).exists()
+
+    @pytest.mark.slow
+    def test_written_output_does_not_carry_a_dead_staging_dir(self, extremes, tmp_path, dask_client):
+        """The on-disk store must not record marex_staging_dir: clear_staging deletes that
+        path right after the write, so persisted attrs carrying it would point at a
+        directory that no longer exists (D-118 falsifier finding 6)."""
+        tr = marEx.tracker(
+            extremes.extreme_events.chunk(CHUNK_SIZE),
+            extremes.mask,
+            compute_mode="streaming",
+            temp_dir=str(tmp_path),
+            **TRACKER_KWARGS,
+        )
+        events = tr.run()
+        staged = Path(events.encoding["marex_staging_dir"])
+        out = tmp_path / "out.zarr"
+        events.to_zarr(out, mode="w")
+        marEx.clear_staging(events)
+        assert not staged.exists(), "clear_staging must actually remove the directory"
+        reopened = xr.open_zarr(out)
+        assert "marex_staging_dir" not in reopened.attrs
 
 
 class TestCrossModeEquivalence:
@@ -653,7 +674,7 @@ class TestMergeLedgerStaging:
         )
         events = tr.run()
 
-        staged = Path(events.attrs["marex_staging_dir"])
+        staged = Path(events.encoding["marex_staging_dir"])
         assert (staged / "merge_ledger.zarr").exists(), (
             "streaming must stage merge_ledger to disk; a bare .persist() here keeps the "
             "largest remaining streaming pin in RAM and it grows quadratically in time. "
@@ -677,6 +698,7 @@ class TestMergeLedgerStaging:
         events = tr.run()
 
         assert "marex_staging_dir" not in events.attrs
+        assert "marex_staging_dir" not in events.encoding
         assert not list(tmp_path.glob("**/merge_ledger.zarr")), "persist mode must not stage anything"
         ledger = events.merge_ledger.compute()
         assert int((ledger > 0).sum()) > 0

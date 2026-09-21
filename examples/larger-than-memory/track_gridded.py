@@ -103,7 +103,7 @@ def run_and_fingerprint(tracker, args) -> dict:
         "id_field_sum": int(id_field.sum(dtype=np.int64).compute()),
         "n_nonzero_cells": int((id_field != 0).sum().compute()),
         "max_id": int(id_field.max().compute()),
-        "staging_dir": events_ds.attrs.get("marex_staging_dir"),
+        "staging_dir": events_ds.encoding.get("marex_staging_dir"),
     }
     if args.mode == "streaming":
         marEx.clear_staging(events_ds)

@@ -69,8 +69,13 @@ def finalise_dataset(
     materialiser
         The materialisation policy. Only ``persist`` mode materialises here.
     staging_dir
-        Staging directory to record on ``ds.attrs["marex_staging_dir"]`` so that
-        :func:`marEx.clear_staging` can find it later.
+        Staging directory to record on ``ds.encoding["marex_staging_dir"]`` so that
+        :func:`marEx.clear_staging` can find it later. Kept off ``ds.attrs`` deliberately:
+        attrs are copied verbatim into whatever the caller writes the dataset to, and the
+        staging directory is deleted by ``clear_staging`` immediately after that write, so
+        an attrs-recorded path would be a dead reference baked into the caller's output.
+        ``encoding`` travels with the in-memory object but is never serialised by
+        ``to_zarr``/``to_netcdf``.
     extra_dims
         The field's extra (non-time, non-horizontal) dimensions -- depth, level,
         member -- resolved from the *input* by :func:`marEx.core.resolve_dims`.
@@ -89,9 +94,11 @@ def finalise_dataset(
     """
     # Record the staging directory so `marEx.clear_staging(ds)` can find it. In streaming
     # mode the returned Dataset reads lazily from this directory, so it deliberately
-    # outlives this call; the caller clears it after writing their output.
+    # outlives this call; the caller clears it after writing their output. Stashed in
+    # `encoding`, not `attrs`: `attrs` is copied into the caller's written output, and by
+    # the time that write happens the staging directory is about to be deleted.
     if staging_dir is not None:
-        ds.attrs["marex_staging_dir"] = str(staging_dir)
+        ds.encoding["marex_staging_dir"] = str(staging_dir)
 
     # Final rechunking. Fall back to the documented default time chunk (25), not 10,
     # so a partial dask_chunks dict does not silently get 10-step chunks.

@@ -219,7 +219,10 @@ class tracker:
           staged zarr store, so the staging directory deliberately **outlives**
           ``run()``. Write your output first, then call
           ``marEx.clear_staging(events_ds)`` -- the path is on
-          ``events_ds.attrs["marex_staging_dir"]``. An ``atexit`` hook cleans up on
+          ``events_ds.encoding["marex_staging_dir"]`` (not ``attrs``: attrs are copied
+          verbatim into whatever you write ``events_ds`` to, and by the time
+          ``clear_staging`` runs that directory is gone, so an attrs-recorded path would
+          be a dead reference baked into your output). An ``atexit`` hook cleans up on
           normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
           wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
           §3.1/§5.2 for the full contract and measurements.
@@ -979,9 +982,11 @@ class tracker:
         # so the staging directory deliberately OUTLIVES this call. The caller writes its
         # output first, then calls marEx.clear_staging(events_ds). Note the atexit backstop
         # does NOT survive SIGKILL -- a wall-clock kill leaves the directory behind -- so
-        # sweep temp_dir periodically.
+        # sweep temp_dir periodically. Stashed in `encoding`, not `attrs`: attrs are copied
+        # into the caller's written output, and clear_staging deletes this directory right
+        # after that write, so an attrs-recorded path would be a dead reference on disk.
         if self.staging_dir is not None:
-            events_ds.attrs["marex_staging_dir"] = str(self.staging_dir)
+            events_ds.encoding["marex_staging_dir"] = str(self.staging_dir)
 
         if self.allow_merging and return_merges:
             logger.debug("Returning both events and merge datasets")

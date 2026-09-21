@@ -93,7 +93,7 @@ def clear_staging(target: Union[str, Path, xr.Dataset]) -> None:
     ----------
     target : str or pathlib.Path or xarray.Dataset
         The staging directory, or a Dataset returned by streaming mode (its
-        ``marex_staging_dir`` attribute is used).
+        ``marex_staging_dir`` encoding entry is used).
 
     Notes
     -----
@@ -102,9 +102,12 @@ def clear_staging(target: Union[str, Path, xr.Dataset]) -> None:
     lazily from the staged stores.
     """
     if isinstance(target, xr.Dataset):
-        recorded = target.attrs.get("marex_staging_dir")
+        recorded = target.encoding.get("marex_staging_dir")
         if not recorded:
-            logger.debug("Dataset carries no marex_staging_dir attribute; nothing to clear")
+            # A debug-level no-op here would be silent about a real leak: operations like
+            # `xr.merge`/`xr.concat` drop Dataset-level `encoding` (unlike `attrs`), so a
+            # streaming result passed through one loses its only handle on the staging dir.
+            logger.warning("Dataset carries no marex_staging_dir encoding entry; nothing to clear")
             return
         path = Path(recorded)
     else:
