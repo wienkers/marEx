@@ -10,7 +10,7 @@ logging).
 """
 
 import warnings
-from typing import Callable, Dict, Literal, Optional
+from typing import Callable, Dict, List, Literal, Optional
 
 import dask
 import flox.xarray
@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from xhistogram.xarray import histogram
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import horizontal_dims, spatial_dims
+from ..core.dimensions import check_tile_fit, horizontal_dims, spatial_dims
 from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
 from ..logging_config import get_logger
 
@@ -241,6 +241,17 @@ def _chunk_spatial_for_histogram(
 
     chunks = {d: min(int(da.sizes[d]), side) for d in spatial_dims}
     chunks[dim] = -1
+    # No spatial-window floor on this path, so the only way the budget goes unmet is a
+    # single cell costing more than the whole of it -- which a caller-supplied
+    # `target_elements` can produce even though the default never does.
+    check_tile_fit(
+        chunks,
+        spatial_dims,
+        divisor,
+        target_elements,
+        stage="Histogram spatial tiling",
+        itemsize=da.dtype.itemsize,
+    )
     return da.chunk(chunks)
 
 
@@ -284,11 +295,28 @@ def _histogram_tile_chunks(
 
     horizontal_present = set(horizontal_dims(dimensions))
     chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    floor_bound: List[str] = []
     for dim in spatial_dims_present:
         side = tile_side
         if window_spatial is not None and window_spatial > 1 and dim in horizontal_present:
             side = max(side, int(window_spatial))
         chunk_dict[dim] = min(int(da.sizes[dim]), side)
+        if side > tile_side and chunk_dict[dim] > tile_side:
+            floor_bound.append(dim)
+
+    # A sub-daily cycle shrinks the cell budget in proportion while `window_spatial`
+    # does not move, so this is the one shipped path where the window can force a tile
+    # the budget cannot pay for. Warn; never resize.
+    check_tile_fit(
+        chunk_dict,
+        spatial_dims_present,
+        max(ntime, cycle_length * max(1, n_bins)),
+        _HISTOGRAM_TASK_ELEMENTS,
+        floor_bound_dims=floor_bound,
+        floor=int(window_spatial) if window_spatial else 1,
+        stage="Day-of-year histogram tiling",
+        itemsize=da.dtype.itemsize,
+    )
     return chunk_dict
 
 

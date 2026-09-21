@@ -38,6 +38,10 @@ COORDINATE_KEYS: Tuple[str, ...] = ("time",) + HORIZONTAL_KEYS
 # tiling decision so a single number governs the per-task working set.
 TASK_ELEMENTS = 50_000_000
 
+# Stable substring of the fit warning, so a caller (or a test) can recognise one
+# without matching the whole sentence.
+FIT_WARNING_MARKER = "exceeds the per-task element budget"
+
 
 def horizontal_dims(dimensions: Dict[str, str]) -> Tuple[str, ...]:
     """Names of the horizontal dimensions, in ``(y, x)`` order.
@@ -88,6 +92,115 @@ def spatial_chunks(
 ) -> Dict[str, Union[int, str]]:
     """Chunk dict setting every spatial dimension of ``obj`` to ``size``."""
     return {dim: size for dim in spatial_dims(obj, dimensions, exclude)}
+
+
+def check_tile_fit(
+    chunks: Dict[str, int],
+    tiled_dims: Sequence[str],
+    elements_per_cell: int,
+    target_elements: int,
+    *,
+    floor_bound_dims: Sequence[str] = (),
+    floor: int = 1,
+    stage: str = "Canonical rechunk",
+    itemsize: Optional[int] = None,
+) -> Optional[str]:
+    """Warn when a tile could not be brought under its per-task element budget.
+
+    The design behind the canonical layout was "time-whole spatial
+    tiles **plus a fit warning**": warn, with the remedy named, before a rechunk
+    that cannot fit crashes the run. The tiles shipped; this is the warning.
+
+    A tile is normally brought under budget by shrinking it, and that is not a
+    misfit however small the budget -- the tiler did its job. Only two things make
+    the budget unreachable, and only they fire here:
+
+    * **a spatial-window floor.** ``window_spatial`` needs every horizontal chunk
+      at least as wide as the window, so a window wider than the tile the budget
+      allows overrides the budget. Reachable today through
+      :func:`marEx.extremes.histogram._histogram_tile_chunks`, where a sub-daily
+      cycle shrinks the cell budget into single figures while the window does not
+      move.
+    * **a single cell over budget.** When one spatial cell alone reads or writes
+      more than ``target_elements``, no tile is small enough.
+
+    Deliberately NOT a trigger: a tile a little above the cell budget because the
+    tile side was rounded up. That is a property of the tiler, not of the caller's
+    configuration, it is bounded by the rounding, and warning on it would put a
+    warning on the ordinary path -- which is worse than no warning at all.
+
+    This is **observation only**. It never changes a chunk: the tile a caller gets
+    is the same whether or not this fires, so a warning can never move a result
+    (the standing rule that bit-identity is blind to the graph cuts both ways).
+
+    Parameters
+    ----------
+    chunks
+        The tile that was decided, as ``{dim: size}``.
+    tiled_dims
+        The spatial dimensions of ``chunks`` that make up one task's tile. Any
+        held-whole axis in ``chunks`` (time, typically) is excluded by leaving it
+        out of this list; its length belongs in ``elements_per_cell``.
+    elements_per_cell
+        Elements one spatial cell costs -- the larger of the read and written
+        sides, as the tiling itself budgets it.
+    target_elements
+        The per-task element budget the tile was sized against.
+    floor_bound_dims
+        Dimensions whose chunk was raised to a floor **above** what the budget
+        allowed. Empty when no floor bound anything.
+    floor
+        The floor that bound them, reported so the user can recognise it as their
+        own ``window_spatial``.
+    stage
+        Human-readable name of the rechunk, used to open the message.
+    itemsize
+        Bytes per element, when known, so the message can carry a size in bytes
+        as well as in elements.
+
+    Returns
+    -------
+    str or None
+        The message that was logged, or ``None`` when the tile fits.
+    """
+    cells = 1
+    for dim in tiled_dims:
+        cells *= max(1, int(chunks[dim]))
+    estimate = cells * max(1, int(elements_per_cell))
+    if estimate <= int(target_elements):
+        return None
+
+    floor_bound = list(floor_bound_dims)
+    single_cell_over = int(elements_per_cell) > int(target_elements)
+    if not (floor_bound or single_cell_over):
+        return None
+
+    size = ""
+    if itemsize:
+        size = f", ~{estimate * int(itemsize) / 1e6:.0f} MB at {int(itemsize)} B/element"
+    message = (
+        f"{stage}: one task would touch {estimate:,} elements{size}, which {FIT_WARNING_MARKER} "
+        f"of {int(target_elements):,} ({estimate / max(1, int(target_elements)):.1f}x)."
+    )
+    if floor_bound:
+        widths = ", ".join(f"{d}={int(chunks[d])}" for d in floor_bound)
+        message += (
+            f" The {int(floor)}-cell spatial window holds {widths}, wider than the tile the budget allows"
+            f" -- a rolling window may not cross a chunk boundary, so the floor wins over the budget."
+        )
+    if single_cell_over:
+        message += (
+            f" A single spatial cell alone touches {int(elements_per_cell):,} elements, more than the "
+            f"whole budget, so no tile is small enough."
+        )
+    message += (
+        " The tile is used as it stands -- this warning changes nothing. If the run then dies on memory,"
+        " the levers are: a narrower window_spatial, a shorter window_years, or fewer histogram bins"
+        " (each cuts the per-cell element count); fewer threads per worker, so one task gets more of the"
+        " worker's memory; or compute_mode='streaming'."
+    )
+    logger.warning(message)
+    return message
 
 
 def tile_spatial_chunks(
@@ -166,19 +279,35 @@ def tile_spatial_chunks(
         current = {d: c for v in obj.data_vars.values() if v.chunks for d, c in zip(v.dims, v.chunks)}
     remaining_cells = cells_per_tile
     chunks: Dict[str, int] = {}
+    floor_bound: list = []
     ordered = sorted(present, key=lambda d: int(obj.sizes[d]))
     for position, dim in enumerate(ordered):
         side = max(1, int(round(remaining_cells ** (1.0 / (len(ordered) - position)))))
+        budget_side = side
         if dim in floor_dims:
             side = max(side, int(floor))
         existing = current.get(dim)
         existing_max = max(existing) if existing else int(obj.sizes[dim])
         chunks[dim] = max(1, min(side, int(existing_max), int(obj.sizes[dim])))
+        # Record only a floor that actually widened this chunk past what the budget
+        # allowed: a floor the tile was already above binds nothing.
+        if dim in floor_dims and chunks[dim] > budget_side:
+            floor_bound.append(dim)
         remaining_cells = max(1, remaining_cells // chunks[dim])
 
     logger.debug(
         f"Spatial tiling: {cells_per_tile} cells/task over {len(present)} dims "
         f"(input {input_elements_per_cell}, output {output_elements_per_cell} per cell) -> {chunks}"
+    )
+    check_tile_fit(
+        chunks,
+        ordered,
+        divisor,
+        target_elements,
+        floor_bound_dims=floor_bound,
+        floor=floor,
+        stage="Canonical rechunk",
+        itemsize=obj.dtype.itemsize if isinstance(obj, xr.DataArray) else None,
     )
     return chunks
 
