@@ -88,6 +88,12 @@ _MIN_FIG_ASPECT = 0.15
 _MAX_FRAME_PIXELS = 4096
 _DEFAULT_FIG_ASPECT = 5.0 / 7.0
 
+# Frames are computed in batches of this size (one `dask.compute()` call per batch), so a
+# non-time-varying coordinate persisted once before the loop (see _materialise_dask_coords)
+# must survive being referenced across MULTIPLE separate compute submissions, not just one --
+# a module-level constant so a test can shrink it and exercise that multi-batch path cheaply.
+_FRAME_BATCH_SIZE = 200
+
 
 def _even_height(height_inches: float) -> float:
     """Round a figure height so ``height * _FRAME_DPI`` lands on an even pixel count.
@@ -157,6 +163,55 @@ def _domain_figsize(projection, x_values, y_values, show_colorbar: bool):
     return (_FIG_WIDTH_INCHES, _even_height(height))
 
 
+def _materialise_dask_coords(da: xr.DataArray, time_dim: str) -> xr.DataArray:
+    """``.persist()`` any dask-backed coordinate that does not vary with ``time_dim``.
+
+    Works around a graph-construction bug in the xarray/dask/distributed stack: a
+    dask-backed coordinate that is identical across every frame (i.e. does not depend on
+    ``time_dim``) is the same shared dependency in every per-frame ``dask.delayed`` task
+    ``_animate`` builds. Reproduced with a marEx-independent probe (a plain
+    ``xr.open_zarr`` DataArray, no marEx involved): touching such a coordinate through
+    ``.where()`` and then slicing it per frame fails ``dask.compute()`` INSTANTLY with
+    ``distributed.client.FutureCancelledError: ... cancelled for reason: lost
+    dependencies`` -- independent of array scale or chunking, and with no worker error to
+    point at it. The trigger is the ``.where()`` CONDITION being sourced from a coordinate:
+    an otherwise-identical ``.where()`` sourced from a plain dask-backed data variable
+    never fails, even when the array still carries other, untouched dask coordinates. See
+    D-120, D-123.
+
+    Uses ``dask.persist``, NOT ``.compute()``: computing eagerly turns the coordinate into
+    a plain numpy array, which ``dask.delayed`` then EMBEDS as a literal in every one of
+    the N per-frame task specs -- at ICON scale (14.9M-cell lat/lon, ~119 MB each) that is
+    ~238 MB duplicated into every frame, which is exactly D-122's separate large-graph
+    crash (a falsifier review round caught a `.compute()`-based first attempt doing this;
+    measured 0.01 MB -> 4.80 MB per frame at 300k cells, and confirmed it silently undid
+    render_2013.py's own D-122 workaround). ``dask.persist`` keeps the coordinate a dask
+    array -- now backed by an already-resolved remote Future rather than a lazy graph --
+    so every frame task references it by key instead of re-embedding it: measured 0.008 MB
+    per frame, same order as the unfixed lazy case, while still fixing D-120 -- persisting
+    resolves the coordinate under its OWN key, ahead of time, so a frame's graph never has to
+    re-traverse the fragile lineage back through the original ``.where()`` at all (observed:
+    persisting one array's coordinate also fixed a SEPARATE, independently-built array that
+    happened to share the same underlying coordinate object, consistent with key-level
+    resolution -- the exact mechanism inside dask/xarray is still not traced further than
+    that). The data variable itself is untouched and stays lazy, sliced independently per
+    frame.
+
+    The small-graph benefit needs an ACTIVE distributed client: with no client, persist has
+    nowhere else to keep the result and embeds it in the graph exactly like ``.compute()``
+    would (confirmed empirically). ``_animate`` always runs under one in practice -- that is
+    the entire reason it batches frames through ``dask.delayed`` in the first place -- but a
+    caller invoking ``_animate`` with only the default local/synchronous scheduler gets no
+    graph-size benefit from this function, only the D-120 fix (which is itself a
+    distributed-specific failure mode, so is unlikely to be hit that way either).
+    """
+    targets = {name: coord for name, coord in da.coords.items() if time_dim not in coord.dims and hasattr(coord.data, "dask")}
+    if not targets:
+        return da
+    persisted_arrays = dask.persist(*(coord.data for coord in targets.values()))
+    return da.assign_coords({name: (coord.dims, arr) for (name, coord), arr in zip(targets.items(), persisted_arrays)})
+
+
 def _animate(
     plotter,
     config,
@@ -221,6 +276,11 @@ def _animate(
     x_coord = coords_map.get("x", "lon")
     y_coord = coords_map.get("y", "lat")
 
+    # Every non-time-varying coordinate is shared, unchanged, by every per-frame delayed task
+    # below -- exactly the shape that trips the dask/xarray/distributed "lost dependencies"
+    # bug (see _materialise_dask_coords). Do this once, up front, not per frame.
+    da = _materialise_dask_coords(plotter.da, time_dim)
+
     plot_params = {
         "cmap": cmap,
         "norm": norm,
@@ -239,8 +299,8 @@ def _animate(
     # it per frame would reintroduce the varying-dimension problem that h264 rejects.
     plot_params["figsize"] = _domain_figsize(
         plot_params["projection"] or ccrs.Robinson(),
-        plotter.da[x_coord].values if x_coord in plotter.da.coords else None,
-        plotter.da[y_coord].values if y_coord in plotter.da.coords else None,
+        da[x_coord].values if x_coord in da.coords else None,
+        da[y_coord].values if y_coord in da.coords else None,
         bool(config.show_colorbar),
     )
 
@@ -275,20 +335,25 @@ def _animate(
     # doubles as the gridded/unstructured discriminator.
     wrap_fn = getattr(plotter, "wrap_lon", None)
 
-    # Use provided centroids or None if not provided
-    centroid_data = centroids
+    # Use provided centroids or None if not provided. Materialised for the same reason as
+    # `da` above: centroids/object_ids are separate DataArrays, each isel'd per frame into
+    # its own delayed task, and are just as exposed to the "lost dependencies" bug if either
+    # carries a dask-backed, non-time-varying coordinate (falsifier finding, reproduced with
+    # a fixed `da` but an unfixed `object_ids`).
+    centroid_data = _materialise_dask_coords(centroids, time_dim) if centroids is not None else None
+    object_ids_data = _materialise_dask_coords(object_ids, time_dim) if object_ids is not None else None
 
     try:
         # Generate frames using dask for parallel processing
         delayed_tasks = []
-        for time_ind in range(len(plotter.da[time_dim])):
-            data_slice = plotter.da.isel({time_dim: time_ind})
+        for time_ind in range(len(da[time_dim])):
+            data_slice = da.isel({time_dim: time_ind})
             if wrap_fn is not None:
                 data_slice = wrap_fn(data_slice)
 
             # Create fresh copy of plot_params for this frame to avoid shared references
             frame_params = plot_params.copy()
-            frame_params["time_str"] = str(plotter.da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
+            frame_params["time_str"] = str(da[time_coord].isel({time_dim: time_ind}).dt.strftime("%Y-%m-%d").values)
 
             # Extract centroids for this time step if available
             if centroid_data is not None:
@@ -301,9 +366,9 @@ def _animate(
                 frame_params["centroids"] = None
 
             # Extract object IDs for this time step if available
-            if object_ids is not None:
+            if object_ids_data is not None:
                 try:
-                    object_ids_time = object_ids.isel({time_dim: time_ind})
+                    object_ids_time = object_ids_data.isel({time_dim: time_ind})
                     # Wrap the ID field too so it stays shape-consistent with the wrapped data.
                     if wrap_fn is not None and x_coord in object_ids_time.coords:
                         object_ids_time = wrap_fn(object_ids_time)
@@ -316,10 +381,9 @@ def _animate(
             delayed_tasks.append(make_frame(data_slice, time_ind, temp_dir, frame_params, grid_info))
 
         # Process frames in batches to manage memory efficiently
-        batch_size = 200
         filenames = []
-        for i in range(0, len(delayed_tasks), batch_size):
-            batch = delayed_tasks[i : i + batch_size]
+        for i in range(0, len(delayed_tasks), _FRAME_BATCH_SIZE):
+            batch = delayed_tasks[i : i + _FRAME_BATCH_SIZE]
             batch_results = dask.compute(*batch)
             filenames.extend(batch_results)
             # Force garbage collection between batches to release memory
