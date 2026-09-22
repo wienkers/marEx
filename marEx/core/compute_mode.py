@@ -232,6 +232,27 @@ class Materialiser:
         (out,) = self.pin(obj)
         return out
 
+    def pin_bounded(self, obj: Any) -> Any:
+        """
+        Pin an intermediate whose size does not grow with the time axis, in ``streaming`` too.
+
+        For objects bounded by ``cycle x space`` (a threshold), not by ``time x space``.
+        Pinned in ``persist`` and ``streaming`` modes; a no-op in ``lazy`` mode.
+
+        Parameters
+        ----------
+        obj
+            A dask collection, or an xarray object wrapping one.
+
+        Returns
+        -------
+        object
+            The object, materialised unless in ``lazy`` mode.
+        """
+        if self.mode == "lazy":
+            return obj
+        return obj.persist()
+
     def stage(self, obj: xr.DataArray, label: str, preserve_chunks: bool = False) -> xr.DataArray:
         """
         Anchor an object that several downstream consumers read.

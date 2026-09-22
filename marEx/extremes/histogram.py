@@ -722,7 +722,12 @@ def _compute_histogram_quantile_2d(
     # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
     # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
-    threshold = materialiser.pin_one(threshold.where(~nan_mask))
+    # Pin BEFORE the bounds check computes on it, in streaming mode too: the threshold is
+    # bounded by cycle x space, not by time. `pin_one` (a no-op in streaming) left that
+    # eager compute running the whole histogram graph, and the caller's `stage` running it
+    # again. Writing it to zarr here instead still crashed at 731 x 120 x 1440 on
+    # 16 x 14 GB (2/2), where persisting the same graph completed 2/2 (D-125).
+    threshold = materialiser.pin_bounded(threshold.where(~nan_mask))
 
     # Validate threshold values against the sign-aware bounds. One scheduler round-trip
     # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.
@@ -825,7 +830,8 @@ def _compute_histogram_quantile_1d(
     )
     if f"{da.name}_bin" in threshold.coords:
         threshold = threshold.drop_vars(f"{da.name}_bin")
-    threshold = materialiser.pin_one(threshold)
+    # Pin before the bounds check -- see the matching comment in the 2D path (D-125).
+    threshold = materialiser.pin_bounded(threshold)
 
     # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
     # with the 2D path.

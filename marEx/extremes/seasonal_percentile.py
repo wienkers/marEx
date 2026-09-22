@@ -214,8 +214,10 @@ def _identify_extremes_seasonal(
     # a lazy expression over `thresholds`; anchoring after this line would leave it
     # pointing at the original graph and the whole threshold reduction would run a second
     # time. On an unstructured mesh `thresholds` is 366 x ncells x 4 B (21.8 GB at ICON
-    # R02B09) -- space-scaled, so no amount of time-chunking shrinks it, which is why
-    # streaming mode stages it to disk rather than pinning it in RAM.
+    # R02B09) -- space-scaled, so no amount of time-chunking shrinks it. In streaming mode
+    # the histogram driver has already pinned it in cluster RAM for the bounds check
+    # (`pin_bounded`, D-125); staging it here writes it to disk so the pin is released and
+    # every downstream consumer reads the store.
     thresholds = materialiser.stage(thresholds, threshold_label)
     grouped = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))})
     extremes = (grouped >= thresholds) if tail == "upper" else (grouped <= thresholds)
