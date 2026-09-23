@@ -20,7 +20,7 @@ dropped any dimension the ``dimensions`` mapping did not name.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 import xarray as xr
 
@@ -92,6 +92,58 @@ def spatial_chunks(
 ) -> Dict[str, Union[int, str]]:
     """Chunk dict setting every spatial dimension of ``obj`` to ``size``."""
     return {dim: size for dim in spatial_dims(obj, dimensions, exclude)}
+
+
+def extra_dim_chunks(
+    sizes: Mapping[str, int],
+    extra: Iterable[str],
+    horizontal_tile_cells: int,
+    horizontal_cells: int,
+    budget_cells: int,
+) -> Dict[str, int]:
+    """Chunk sizes for the extra dims (depth, level, member) of one tile.
+
+    One level per chunk while the horizontal tile is smaller than the whole
+    horizontal slice, so each level of a large field gets exactly its 2-D slice's
+    tiling at any extra-dim length (D-127). Spreading the budget over depth as well
+    gave tiles spanning several levels and peaked at the node's memory cap on the
+    slice_3d oracle.
+
+    Once a whole horizontal slice fits, the leftover budget stacks levels, shortest
+    extra dim first (D-128). Without that, a small horizontal extent -- a mooring, a
+    station mesh, an ensemble ``member`` axis -- became one tiny task per level:
+    5000 tasks of ~1.5e4 elements where 8 would do, and at the output 25-element
+    chunks. A tile the ``window_spatial`` floor already pushed over budget stacks
+    nothing.
+
+    Parameters
+    ----------
+    sizes
+        Dimension lengths of the array being tiled.
+    extra
+        The extra dims to chunk; names absent from ``sizes`` are skipped.
+    horizontal_tile_cells, horizontal_cells
+        Cells in one horizontal tile, and in the whole horizontal slice.
+    budget_cells
+        Cells one task may hold (the per-task element budget over the per-cell
+        cost).
+
+    Returns
+    -------
+    dict
+        ``{dim: chunk}`` for every extra dim present; empty for a 2-D field.
+    """
+    present = [d for d in extra if d in sizes]
+    chunks = {d: 1 for d in present}
+    if not present or horizontal_tile_cells < horizontal_cells:
+        return chunks
+    remaining = int(budget_cells) // max(1, int(horizontal_tile_cells))
+    for dim in sorted(present, key=lambda d: int(sizes[d])):
+        if remaining <= 1:
+            break
+        chunks[dim] = min(int(sizes[dim]), remaining)
+        remaining //= chunks[dim]
+    return chunks
 
 
 def check_tile_fit(

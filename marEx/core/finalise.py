@@ -17,7 +17,7 @@ import xarray as xr
 
 from ..logging_config import get_logger, log_dask_info, log_memory_usage, log_timing
 from .attrs import make_netcdf_safe_attrs
-from .dimensions import horizontal_dims
+from .dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims
 
 # Get module logger
 logger = get_logger(__name__)
@@ -64,8 +64,9 @@ def finalise_dataset(
     dimensions, coordinates
         Resolved dimension and coordinate name mappings.
     dask_chunks
-        Requested output chunking. Only the time entry is honoured; spatial
-        dimensions are always made whole, which is what the tracker requires.
+        Requested output chunking. Only the time entry is honoured; horizontal
+        dimensions are always made whole, which is what the tracker requires, and
+        extra dimensions are chunked per level (stacked only on a small grid).
     materialiser
         The materialisation policy. Only ``persist`` mode materialises here.
     staging_dir
@@ -79,7 +80,8 @@ def finalise_dataset(
     extra_dims
         The field's extra (non-time, non-horizontal) dimensions -- depth, level,
         member -- resolved from the *input* by :func:`marEx.core.resolve_dims`.
-        They are made whole alongside the horizontal dims.
+        They take the budget one whole-horizontal time block leaves (one level per
+        chunk on a large grid; see :func:`~marEx.core.dimensions.extra_dim_chunks`).
 
         Passed in rather than derived from ``ds``, because ``ds.dims`` is the union
         over every variable: on the unstructured path it also carries ``neighbours``'
@@ -104,11 +106,36 @@ def finalise_dataset(
     # so a partial dask_chunks dict does not silently get 10-step chunks.
     time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
-    # Every spatial dimension is made whole, extra dims (depth, level) included: the
-    # tracker requires it, and a consumer of a 3D+time anomaly wants the same layout.
-    chunk_dict = {dim: -1 for dim in horizontal_dims(dimensions) if dim in ds.dims}
-    chunk_dict.update({dim: -1 for dim in extra_dims if dim in ds.dims})
+    # The horizontal dims are made whole (the tracker requires it). Extra dims (depth,
+    # level) take whatever of the per-task budget one whole-horizontal time block leaves:
+    # one level per chunk on a large grid, several on a small one (D-128). Holding depth
+    # whole made one chunk 30 x depth x horizontal, 6.2 GB at depth 50 on 720x1440; one
+    # level per chunk everywhere made a 1-cell mooring 25-element chunks. The tracker
+    # rejects extra dims, so it never sees this layout; select a level first.
+    horizontal = [dim for dim in horizontal_dims(dimensions) if dim in ds.dims]
+    chunk_dict = {dim: -1 for dim in horizontal}
     chunk_dict[dimensions["time"]] = time_chunks
+    if extra_dims:
+        # Size the extra dims from the time chunk dask actually chose: `time_chunks` may be
+        # "auto", None, -1 or a tuple, none of which is a step count until it is applied.
+        timed = ds.chunk(chunk_dict)
+        steps = [
+            max(v.chunksizes[dimensions["time"]])
+            for v in timed.data_vars.values()
+            if dimensions["time"] in v.dims and v.chunks is not None
+        ]
+        horizontal_cells = 1
+        for dim in horizontal:
+            horizontal_cells *= int(ds.sizes[dim])
+        chunk_dict.update(
+            extra_dim_chunks(
+                ds.sizes,
+                extra_dims,
+                horizontal_tile_cells=horizontal_cells,
+                horizontal_cells=horizontal_cells,
+                budget_cells=TASK_ELEMENTS // max([1, *steps]),
+            )
+        )
     # A cycle-index dimension is only present when a seasonal threshold was computed,
     # so testing for it is equivalent to testing the extreme method -- and it keeps
     # this function ignorant of which method ran.

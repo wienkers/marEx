@@ -343,8 +343,10 @@ def compute(
         period. Anomalies are still returned for the full series. Supported for
         the two fixed-baseline methods only.
     dask_chunks
-        Output chunking. Only the time entry is honoured; spatial dimensions are
-        made whole. Defaults to ``{"time": 25}``.
+        Output chunking. Only the time entry is honoured; horizontal dimensions
+        are made whole, and extra dimensions (depth, level) are chunked one level
+        at a time on a large grid, stacked on a small one. Defaults to
+        ``{"time": 25}``.
     compute_mode
         Materialisation policy. ``'persist'`` holds the anomaly in cluster
         memory (fastest, needs it to fit); ``'lazy'`` holds nothing and accepts

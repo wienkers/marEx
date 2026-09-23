@@ -20,7 +20,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import spatial_dims
+from ..core.dimensions import horizontal_dims, spatial_dims
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
@@ -131,7 +131,9 @@ def _identify_extremes_seasonal(
         # Each cell yields one percentile per cycle slot (366 on daily data), so budget
         # the tile against that as well as against the time slab: a series shorter than
         # the cycle would otherwise get a tile whose output exceeds its own budget.
-        da_ufunc = _chunk_spatial_for_histogram(da, dimensions["time"], output_elements_per_cell=cycle.length)
+        da_ufunc = _chunk_spatial_for_histogram(
+            da, dimensions["time"], output_elements_per_cell=cycle.length, horizontal=horizontal_dims(dimensions)
+        )
         cycle_vals = cycle.index_of(da_ufunc[coordinates["time"]]).values
         half_w = window_steps // 2
 

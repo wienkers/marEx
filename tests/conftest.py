@@ -7,6 +7,7 @@ setup_coverage_environment()
 
 import gc
 import logging
+import os
 import time
 
 import dask
@@ -151,6 +152,12 @@ def configure_dask():
     # Use synchronous scheduler for small computations
     dask.config.set(
         {
+            # Cap the local threaded scheduler. Its default is one thread per core, and the
+            # seasonal histogram path runs one budgeted tile (~50M elements, several int
+            # intermediates) per thread: 16 at once SIGKILLed a 16 GB interactive node
+            # (RC=137), and `-n 4` workers each spawning a full pool oversubscribe the
+            # sbatch node 4x. Distributed clients ignore this setting.
+            "num_workers": min(4, os.cpu_count() or 1),
             "array.chunk-size": "32MB",
             "array.slicing.split_large_chunks": True,
             "distributed.worker.memory.recent-to-old-time": "10s",

@@ -98,8 +98,23 @@ class TestSliceEquivalence:
     @pytest.mark.slow
     @pytest.mark.parametrize("method_anomaly", ANOMALY_METHODS)
     @pytest.mark.parametrize("method_extreme", EXTREME_METHODS)
-    def test_each_level_matches_its_own_2d_run(self, sst_3d, method_anomaly, method_extreme):
-        result_3d = _run(sst_3d, method_anomaly, method_extreme).compute()
+    def test_each_level_matches_its_own_2d_run(self, sst_3d, method_anomaly, method_extreme, monkeypatch):
+        # The seasonal path's histogram is (cycle x n_bins) per cell: at the default 1000
+        # bins this fixture's is 3200 x 366 x 1000 counts, and the spatial window keeps
+        # neighbouring tiles live, which on a 2x4-tile level is all of them -- 15.2 GB peak
+        # for ONE param on the synchronous scheduler, so it could only run in a 96 GB batch
+        # job. 100 bins keeps the data-derived range (neither precision nor max_anomaly is
+        # given, so `resolve_bin_spec` still runs), and a 10x smaller task budget keeps the
+        # 12x12 tiling the default gives -- lat AND lon tile boundaries, under the window.
+        extra = {}
+        if method_extreme == "seasonal_percentile":
+            from marEx.extremes import histogram
+
+            extra = {"n_bins": 100}
+            monkeypatch.setattr(histogram, "_HISTOGRAM_TASK_ELEMENTS", histogram._HISTOGRAM_TASK_ELEMENTS // 10)
+            tile = histogram._histogram_tile_chunks(sst_3d, DIMENSIONS, 100, window_spatial=None)
+            assert tile["lat"] < sst_3d.sizes["lat"] and tile["lon"] < sst_3d.sizes["lon"], f"{tile}: fixture not tiled"
+        result_3d = _run(sst_3d, method_anomaly, method_extreme, **extra).compute()
 
         # The 3-D leg runs with the production default: bin geometry derived from the
         # data. That geometry is the one input which is legitimately NOT slice-invariant
@@ -121,7 +136,7 @@ class TestSliceEquivalence:
 
         for level in REAL_LEVELS:
             slice_2d = sst_3d.isel(depth=level, drop=True).chunk({"time": TIME_CHUNK, "lat": -1, "lon": -1})
-            result_2d = _run(slice_2d, method_anomaly, method_extreme, **bin_spec).compute()
+            result_2d = _run(slice_2d, method_anomaly, method_extreme, **bin_spec, **extra).compute()
             got = result_3d.isel(depth=level, drop=True)
 
             assert list(result_2d.time.values) == list(got.time.values), f"level {level}: time axis differs"
@@ -160,7 +175,12 @@ class TestExtraDimensionShape:
         assert bool(result.mask.isel(depth=0).values.all())
 
     def test_spatial_dims_are_whole_and_time_is_chunked(self, sst_3d):
-        """finalise makes every spatial dim whole -- the extra one included."""
+        """finalise makes the horizontal dims whole and chunks time as asked.
+
+        Depth comes out whole here only because a 20x40 slice is far below the task
+        budget, so the D-128 rule stacks every level; on a large grid it is one level
+        per chunk (tests/test_3d_extra_dim_paths.py::TestOutputLayoutOnExtraDim).
+        """
         result = _run(sst_3d, "fixed_baseline", "global_percentile")
 
         assert result.dat_anomaly.chunksizes["depth"] == (sst_3d.sizes["depth"],)
