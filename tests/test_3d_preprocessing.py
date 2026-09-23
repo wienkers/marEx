@@ -167,38 +167,33 @@ class TestExtraDimensionShape:
         assert result.dat_anomaly.chunksizes["lat"] == (sst_3d.sizes["lat"],)
         assert max(result.dat_anomaly.chunksizes["time"]) == TIME_CHUNK
 
-    def test_seasonal_tiling_bounds_the_task_over_all_spatial_dims(self, sst_3d):
-        """The histogram tile shrinks with rank instead of multiplying by depth.
+    def test_seasonal_tiling_is_the_per_level_2d_tiling(self, sst_3d):
+        """Each level of a 3-D field gets the tile its 2-D slice would, at any depth.
 
-        Asserted on the chunk dict the module actually chooses, not on values: a
-        rank-blind tiling leaves the extra dimension whole and the horizontal tile
-        unchanged, so the per-task cell count is multiplied by the depth length --
-        and every value-based check still passes while it does. That is precisely
-        the failure mode CLAUDE.md records for the shifted-window rechunk.
+        Asserted on the chunk dict the module actually chooses, not on values: every
+        tiling is value-identical, so a value check passes whether the extra dim is
+        left whole (per-task cells multiplied by the depth length) or spread into the
+        budget (the old rank-th root: (3, 5, 5) tiles peaked at 1.8x the RSS of the
+        per-level (1, 12, 12) layout on a lon-60 crop of the slice_3d oracle; on the
+        full oracle the old layout sat at the node's memory cap, the new one 3.2x
+        below it, n=1; bit-identical values).
+        Pinned as invariance in the extra dim's length, 1 through 50.
         """
         from marEx.extremes.histogram import _HISTOGRAM_TASK_ELEMENTS, _histogram_tile_chunks
 
         n_bins = 503  # default precision=0.01, max_anomaly=5.0
         ntime = int(sst_3d.sizes["time"])
         budget_cells = _HISTOGRAM_TASK_ELEMENTS // max(ntime, 366 * n_bins)
+        slice_tile = _histogram_tile_chunks(sst_3d.isel(depth=0, drop=True), DIMENSIONS, n_bins, window_spatial=5)
+        assert slice_tile["lat"] * slice_tile["lon"] <= budget_cells, slice_tile
 
-        cells = {}
         for ndepth in (1, 4, 25, 50):
             da = sst_3d.isel(depth=slice(0, 1)).reindex(depth=np.arange(ndepth, dtype=np.float32), method="nearest")
             tile = _histogram_tile_chunks(da, DIMENSIONS, n_bins, window_spatial=5)
-            assert set(tile) == {"time", "lat", "lon", "depth"}, tile
-            assert tile["time"] == -1, "the reduced axis must stay whole"
-            cells[ndepth] = tile["lat"] * tile["lon"] * tile["depth"]
-            assert cells[ndepth] <= budget_cells, f"depth={ndepth}: {cells[ndepth]} cells > budget {budget_cells}"
-
-        # Invariance in the extra dim's length, not an absolute bound: a bound loose
-        # enough to pass at depth=1 would also pass while depth=50 allocated 50x.
-        assert max(cells.values()) / min(cells.values()) < 8, f"tile grows with the depth axis: {cells}"
+            assert tile == {**slice_tile, "depth": 1}, f"depth={ndepth}: {tile} != per-level {slice_tile}"
 
         # The horizontal window floor applies, and only to the horizontal dims.
-        tile = _histogram_tile_chunks(sst_3d, DIMENSIONS, n_bins, window_spatial=5)
-        assert tile["lat"] >= 5 and tile["lon"] >= 5, tile
-        assert tile["depth"] <= sst_3d.sizes["depth"], tile
+        assert slice_tile["lat"] >= 5 and slice_tile["lon"] >= 5, slice_tile
 
 
 class TestRankGuards:

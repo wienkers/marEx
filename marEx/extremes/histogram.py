@@ -282,23 +282,33 @@ def _histogram_tile_chunks(
     A sub-daily cycle multiplies the output side by ``steps_per_day``, which shrinks the
     tile in proportion -- expensive, but bounded, which is the point.
 
-    **Every** spatial dimension is tiled, extra dims (depth, level) included, and the
-    side is the rank-th root of the cell budget -- so an extra dimension shrinks each
-    side rather than multiplying the task. The ``window_spatial`` floor applies to the
-    HORIZONTAL dims alone: the spatial window never rolls over an extra dimension, so
-    widening a depth chunk to the window width would buy nothing.
+    Extra dims (depth, level) are chunked at 1 and the horizontal side is the
+    root of the cell budget over the HORIZONTAL dims only, so each level of a 3-D
+    field gets exactly the tiling its 2-D slice would, whatever the extra dim's
+    length. The spatial window never rolls over an extra dim, so a level needs
+    nothing from its neighbours. Spreading the budget over depth as well (the
+    previous rank-th root) gave (3, 5, 5) tiles on a depth-3 field and peaked at
+    ~1.8x the RSS of the per-level (1, 12, 12) layout on a crop (n=3), and on the
+    full slice_3d oracle sat at the node's memory cap where this layout peaked
+    3.2x lower (n=1), values bit-identical (the
+    mechanism was not isolated; depth-1 5x5 tiles were NOT the cost). The
+    ``window_spatial`` floor applies to the horizontal dims alone.
     """
     spatial_dims_present = list(spatial_dims(da, dimensions))
+    horizontal_present = set(horizontal_dims(dimensions))
+    n_horizontal = sum(1 for dim in spatial_dims_present if dim in horizontal_present)
     ntime = max(1, int(da.sizes[dimensions["time"]]))
     cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, cycle_length * max(1, n_bins)))
-    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, len(spatial_dims_present))))))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, n_horizontal)))))
 
-    horizontal_present = set(horizontal_dims(dimensions))
     chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
     floor_bound: List[str] = []
     for dim in spatial_dims_present:
+        if dim not in horizontal_present:
+            chunk_dict[dim] = 1
+            continue
         side = tile_side
-        if window_spatial is not None and window_spatial > 1 and dim in horizontal_present:
+        if window_spatial is not None and window_spatial > 1:
             side = max(side, int(window_spatial))
         chunk_dict[dim] = min(int(da.sizes[dim]), side)
         if side > tile_side and chunk_dict[dim] > tile_side:
