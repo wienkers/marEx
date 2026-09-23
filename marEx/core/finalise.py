@@ -67,6 +67,15 @@ def finalise_dataset(
         Requested output chunking. Only the time entry is honoured; horizontal
         dimensions are always made whole, which is what the tracker requires, and
         extra dimensions are chunked per level (stacked only on a small grid).
+        An integer time entry is a step count, and with one, extra dimensions on
+        time-indexed variables are sized so a chunk stays within 50 million
+        elements where one level allows it. ``"auto"`` hands the time chunk to
+        dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
+        default), not elements: a 1-byte boolean variable gets more elements per
+        chunk than a float32 one, and can exceed 50 million. A seasonal
+        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
+        chunked from the same entry, capped at the cycle length, and is not held
+        to the element budget.
     materialiser
         The materialisation policy. Only ``persist`` mode materialises here.
     staging_dir
