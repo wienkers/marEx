@@ -20,7 +20,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import horizontal_dims, spatial_dims
+from ..core.dimensions import TASK_ELEMENTS, horizontal_dims, spatial_dims
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
 from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
@@ -205,9 +205,17 @@ def _identify_extremes_seasonal(
         thresholds = thresholds.drop_vars(coords_to_drop)
 
     # Rechunk thresholds BEFORE comparison to align with input data
-    # This eliminates expensive implicit rechunking during the groupby operation
-    logger.debug(f"Aligning threshold chunks to match input data spatial chunks: {spatial_chunks}")
-    thresholds = thresholds.chunk(spatial_chunks)
+    # This eliminates expensive implicit rechunking during the groupby operation.
+    # Bound the cycle axis as well. On a lat/lon grid the input is spatially whole, so
+    # `spatial_chunks` spans the field and an unchunked cycle axis makes the threshold ONE
+    # block of cycle.length x space: 1.5 GB at 0.25 deg. The comparison indexes that block
+    # once per run of consecutive slots, and each of those tasks holds a copy of it, which
+    # killed the L1 full run (D-132). Size the cycle chunk to the shared element budget.
+    spatial_block = int(np.prod(list(spatial_chunks.values()), dtype=np.int64))
+    cycle_chunk = max(1, min(cycle.length, TASK_ELEMENTS // max(1, spatial_block)))
+    align_chunks = {**spatial_chunks, cycle_dim: cycle_chunk}
+    logger.debug(f"Aligning threshold chunks to match input data spatial chunks: {align_chunks}")
+    thresholds = thresholds.chunk(align_chunks)
 
     # Compare anomalies to day-of-year specific thresholds
     # Assign the cycle-index coordinate and use UniqueGrouper for chunked arrays
