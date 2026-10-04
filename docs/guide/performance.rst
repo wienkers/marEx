@@ -52,9 +52,9 @@ Memory Requirements Estimation
      - Full time series
      - Requires careful chunking
    * - Approximate percentiles
-     - 1-2 GB
+     - Size-dependent
      - Any
-     - Memory efficient
+     - Marginal at 14 GB per 4-thread worker on global 0.25° daily; see :ref:`detect-memory-sizing`
 
 Exact vs Approximate Percentile Methods
 ----------------------------------------
@@ -73,7 +73,7 @@ When to Use Each Method
        max_anomaly=5.0,       # Histogram range ±5°C
        dask_chunks={'time': 365}  # Any chunking works
    )
-   # ✓ Memory efficient (1-2 GB/core)
+   # ✓ Bounded per-task working set (size the cluster from the detection guide)
    # ✓ Fast parallel computation
    # ✓ ~0.01°C precision (sufficient for most studies)
 
@@ -238,7 +238,9 @@ The histogram-based percentile kernels (the ``approximate`` method used by both
 internally tile the spatial dimensions before building the per-cell histograms, so a
 single task never has to hold the entire ``(time × space)`` field at once -- regardless
 of how the input was chunked. As a result, no manual graph-breaking or checkpointing is
-required, and the returned dataset can be written straight to Zarr or NetCDF.
+required, and the returned dataset can be written straight to Zarr or NetCDF. A bounded
+task is not a bounded worker, though: the memory each thread needs at full resolution is
+covered in :ref:`detect-memory-sizing`.
 
 .. note::
 

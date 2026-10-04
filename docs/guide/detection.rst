@@ -741,6 +741,97 @@ Multi-Variable Processing
            method_extreme='seasonal_percentile'
        )
 
+.. _detect-compute-mode:
+
+Compute Mode and Memory Sizing
+==============================
+
+``compute_mode`` decides where ``preprocess_data`` keeps the intermediates that more than one
+later stage reads (the anomaly field and the thresholds):
+
+* ``'persist'`` (default) pins them in cluster RAM. No staging directory is written (dask may
+  still spill to worker-local disk under memory pressure) and the returned dataset is held in
+  memory.
+* ``'streaming'`` writes them to Zarr under ``scratch_dir`` and reads them back. The
+  returned dataset reads lazily from that directory, which outlives the call, so write your
+  output first and then call :func:`marEx.clear_staging`.
+* ``'lazy'`` keeps nothing and recomputes the upstream graph for each consumer.
+
+.. code-block:: python
+
+   extremes_ds = marEx.preprocess_data(
+       sst,
+       method_anomaly='shifting_baseline',
+       method_extreme='seasonal_percentile',
+       compute_mode='streaming',
+       scratch_dir='/scratch/your_user/marex_staging',
+   )
+   extremes_ds.to_zarr('extremes.zarr')
+   marEx.clear_staging(extremes_ds)
+
+``'persist'`` and ``'streaming'`` have been compared byte for byte at full global 0.25°
+scale, and their data variables are identical. ``'streaming'`` changes the chunk layout of the
+returned ``dat_anomaly`` and the on-disk encoding of the coordinates (time units and dtype,
+compressor), not the data. ``'lazy'`` is checked against ``'persist'`` by the test suite on
+small fields only.
+
+.. _detect-memory-sizing:
+
+Memory Sizing
+-------------
+
+Two terms set the memory a run needs.
+
+**Pinned output** (``'persist'``) is about ``n_time × n_cells × 5`` bytes for the float32
+anomaly and the boolean event flags, plus ``n_cycle × n_cells × 4`` bytes for the thresholds.
+For global 0.25° data (1,036,800 cells) over 3438 output days with day-of-year thresholds,
+that is 14.3 + 3.6 + 1.5 ≈ 19 GB across the cluster, or about 1.2 GB per worker on 16
+workers. Under ``'streaming'`` the anomaly and thresholds end up on disk and the event flags
+are computed as the output is written, so most of this term drops away.
+
+**Histogram working memory** (every mode). The ``approximate`` percentile path regroups each
+spatial tile's full time series before it builds the per-cell histograms. Each task is
+bounded, but the shuffle buffers and the tasks running concurrently on a worker are not. Every
+worker restart in the measured runs below fell in this stage, in both modes, so
+``'streaming'`` does not remove the problem. Under ``'lazy'`` the anomaly is recomputed inside
+the same stage, which adds to it.
+
+The measured runs all used global 0.25° daily data (7091 input days),
+``shifting_baseline`` + ``seasonal_percentile``, input chunks
+``{'time': 25, 'lat': -1, 'lon': -1}`` and 16 workers of 4 threads and 14 GB each:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Mode
+     - Outcome
+   * - ``'persist'``
+     - Completed with 6 worker restarts. An earlier development version of the histogram
+       stage failed here with ``KilledWorker`` after 21 restarts.
+   * - ``'streaming'``
+     - Completed with 2 worker restarts.
+
+Read 14 GB per 4-thread worker as the edge at this size, not as a safe value, and budget
+above it. For a first estimate per worker, take that figure (about 3.5 GB per thread, of which
+roughly 1.2 GB per worker was pinned output under ``'persist'``) and scale the pinned part with
+your field. Only this one grid, cluster shape and thread count have been measured, and two or
+three runs do not give a crash rate.
+
+A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during
+extreme identification. A restart costs time because dask recomputes the lost tasks. In the
+measured runs, ``'persist'`` (6 restarts) and ``'streaming'`` (2 restarts) wrote byte-identical
+data variables. Two settings should move a run away from the edge, though neither has been
+measured at full scale yet:
+
+* **Fewer threads per worker** at the same ``memory_limit``, so fewer tiles are in memory at
+  once.
+* **A larger** ``memory_limit``, with fewer workers per node.
+
+Pass ``memory_limit`` to the cluster explicitly. Dask reads a memory cap from its own cgroup
+only. Where the batch system sets the cap on a parent cgroup, as some SLURM sites do, a
+``LocalCluster`` sizes itself from the node's physical RAM, so the limit it enforces can
+exceed what the job is given.
+
 Integration with Tracking
 =========================
 
@@ -834,7 +925,9 @@ Error Handling
 Common Issues and Solutions
 ---------------------------
 
-**Memory Errors**:
+**Memory Errors**: a ``KilledWorker`` or repeated worker restarts during extreme
+identification can mean the histogram stage is short of memory per thread. See
+:ref:`detect-memory-sizing` first, then:
 
 .. code-block:: python
 
@@ -890,6 +983,11 @@ Performance Benchmarks
 
 Method Performance Comparison
 -----------------------------
+
+.. note::
+
+   The memory figures below are indicative only. For full-resolution runs, size the
+   cluster from :ref:`detect-memory-sizing`.
 
 .. code-block:: python
 
