@@ -36,6 +36,7 @@ from typing import List, Tuple, Union
 
 import xarray as xr
 
+from ..core.encoding import write_zarr
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -70,14 +71,10 @@ class ObjectIDRegionWriter:
         """Write schema and coordinates, but no field data."""
         ds = self._template.to_dataset(name=self.name)
 
-        # Stale `chunks` encoding carried in from an upstream open_zarr conflicts with the
-        # dask chunking now being written -- the same trap Materialiser._stage_to_zarr hits.
-        for var in list(ds.variables):
-            ds[var].encoding.pop("chunks", None)
-
-        # compute=False writes metadata and eager (numpy) coordinates, leaving the dask-backed
-        # field unwritten. Every element is then supplied by write().
-        ds.to_zarr(self.path, mode="w", compute=False, consolidated=True)
+        # write_zarr drops the stale `chunks` and codec encoding carried in from an upstream
+        # open_zarr. compute=False writes metadata and eager (numpy) coordinates, leaving the
+        # dask-backed field unwritten. Every element is then supplied by write().
+        write_zarr(ds, self.path, mode="w", compute=False, consolidated=False)
         self._initialised = True
         logger.debug(f"Initialised ID-field region store at {self.path}")
 
@@ -103,7 +100,7 @@ class ObjectIDRegionWriter:
         # Coordinates were written by _initialise; a region write must carry only the
         # data variable, or zarr rejects the mismatched coordinate extents.
         ds = ds.drop_vars(list(ds.coords))
-        ds.to_zarr(self.path, region={self.timedim: slice(start, end)})
+        write_zarr(ds, self.path, region={self.timedim: slice(start, end)})
         self._n_written += 1
         self._regions.append((start, end))
 
@@ -138,7 +135,7 @@ class ObjectIDRegionWriter:
                 f"[0, {self._n_time}) along {self.timedim}. Written regions: {sorted(self._regions)}"
             )
 
-        reopened = xr.open_zarr(self.path, consolidated=True, chunks={})[self.name]
+        reopened = xr.open_zarr(self.path, consolidated=False, chunks={})[self.name]
 
         # Drop round-tripped encoding so a later save by the caller does not conflict.
         for coord in reopened.coords:

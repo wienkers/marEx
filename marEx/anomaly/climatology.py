@@ -15,6 +15,8 @@ import xarray as xr
 from dask import persist
 
 from ..core.dimensions import canonical_time_chunks, spatial_dims, tile_spatial_chunks
+from ..core.encoding import clear_store_encoding
+from ..core.numerics import rolling_numerics
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..logging_config import get_logger
@@ -231,7 +233,9 @@ def rolling_climatology(
     # Clean up dimensions and coordinates
     result = result.drop_vars(["target_year", cycle_dim])
 
-    return result.chunk(original_chunk_dict)
+    result = result.chunk(original_chunk_dict)
+    clear_store_encoding(result)  # the caller may write it; a format-2 input's codecs would not survive zarr 3
+    return result
 
 
 def smoothed_rolling_climatology(
@@ -382,8 +386,11 @@ def smoothed_rolling_climatology(
     da = da.chunk(canonical_time_chunks(da, dimensions))
 
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
-    da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().astype(np.float32)
+    with rolling_numerics():
+        da_smoothed = da.rolling({timedim: smooth_steps}, center=True).mean().astype(np.float32)
 
     clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates, cycle)
 
-    return clim.chunk(caller_chunks)
+    clim = clim.chunk(caller_chunks)
+    clear_store_encoding(clim)
+    return clim

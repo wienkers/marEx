@@ -13,6 +13,7 @@ import numpy as np
 import xarray as xr
 
 from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_dims
+from ..core.numerics import rolling_numerics
 from ..core.time_axis import SeasonalCycle, _median_step_days, add_decimal_year, is_subdaily_axis, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -303,9 +304,10 @@ def _compute_anomaly_detrended(
         pad_size = std_steps // 2 + 1
         n_doy = std_day.sizes[cycle_dim]
         std_day_wrap = std_day.pad({cycle_dim: pad_size}, mode="wrap")
-        std_rolling = np.sqrt((std_day_wrap**2).rolling({cycle_dim: std_steps}, center=True).mean()).isel(
-            {cycle_dim: slice(pad_size, n_doy + pad_size)}
-        )
+        with rolling_numerics():
+            std_rolling = np.sqrt((std_day_wrap**2).rolling({cycle_dim: std_steps}, center=True).mean()).isel(
+                {cycle_dim: slice(pad_size, n_doy + pad_size)}
+            )
 
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings

@@ -46,6 +46,7 @@ dependencies = [
     "xarray[complete]",
     "dask[complete]>=2025.9.0",
     "netcdf4",
+    "zarr>=2.18",
     "scipy",
     "scikit-image",
     "dask_image",

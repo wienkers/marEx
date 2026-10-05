@@ -16,6 +16,7 @@ import xarray as xr
 
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import spatial_dims
+from ..core.numerics import rolling_numerics
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -76,7 +77,10 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     # NaN-preserving (D-138 add. 2): average the finite rows in each window, then re-mask rows that
     # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
     # instead of losing half a window at each edge of its NaN season.
-    smoothed = padded.rolling({"_row": window}, center=True, min_periods=1).mean().isel({"_row": slice(window, window + n_rows)})
+    with rolling_numerics():
+        smoothed = (
+            padded.rolling({"_row": window}, center=True, min_periods=1).mean().isel({"_row": slice(window, window + n_rows)})
+        )
     smoothed = smoothed.where(rows.notnull())
     other = [d for d in dims if d != cycle_dim]
     smoothed = smoothed.transpose("_row", "_step", *other)

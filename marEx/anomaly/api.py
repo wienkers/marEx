@@ -22,6 +22,7 @@ from dask.base import is_dask_collection
 
 from ..core.compute_mode import Materialiser, create_staging_dir
 from ..core.dimensions import resolve_dims
+from ..core.encoding import clear_inherited_attrs
 from ..core.finalise import finalise_dataset, split_large_chunks
 from ..core.time_axis import SeasonalCycle
 from ..core.validation import _infer_dims_coords, _validate_data_values
@@ -271,6 +272,7 @@ def _anomaly_core(
     # climatology. This anchor is what makes `compute_mode` mean anything, which is why
     # it belongs to this module rather than to whoever calls it.
     ds["dat_anomaly"] = materialiser.stage(ds.dat_anomaly, "dat_anomaly")
+    clear_inherited_attrs(ds, ("dat_anomaly", "dat_stn", "STD"))
 
     ds.attrs.update({"method_anomaly": method})
     ds.attrs["preprocessing_steps"] = _anomaly_steps(

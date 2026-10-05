@@ -182,6 +182,7 @@ def _extremes_core(
     # that builds `extremes` was constructed on top of it), so this pin only covers
     # `extremes` itself in persist mode.
     extremes, thresholds = materialiser.pin(extremes, thresholds)
+    extremes.attrs = {}  # not the input's attrs, whatever xarray's keep_attrs default (see clear_inherited_attrs)
     return extremes, thresholds, bin_spec
 
 
