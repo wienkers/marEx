@@ -627,8 +627,9 @@ def _compute_histogram_quantile_2d(
         Within-year axis the histogram is resolved on. Defaults to the daily cycle,
         which is what the caller's ``dayofyear`` coordinate implies.
     tail : {'upper', 'lower'}, default='upper'
-        Which tail the threshold guards. Only the sign of the guard rail and of the
-        range check depend on it -- the quantile itself is ``q`` either way.
+        Which tail the threshold guards. The quantile is ``q`` either way; the lower
+        tail is evaluated as the mirror of the upper-tail estimator (see below), and
+        the guard rail and range check are sign-aware.
 
     Returns
     -------
@@ -674,8 +675,15 @@ def _compute_histogram_quantile_2d(
             # dropped by the flox expected_groups (which biased every approximate
             # threshold inwards). Clipping the data (not the index) preserves NaN, which
             # still digitizes out of range and is correctly dropped. The bottom clip is
-            # -inf, hence skipped, on the legacy asymmetric edges.
-            np.digitize(np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip), bin_edges) - 1,
+            # -inf, hence skipped, on the legacy asymmetric edges. The lower tail closes
+            # bins on the right, so a sample exactly on an edge lands in the mirror of the
+            # bin -x would (D-136); the clip keeps every value off the outermost edges.
+            np.digitize(
+                np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip),
+                bin_edges,
+                right=tail == "lower",
+            )
+            - 1,
             dims=da.dims,
             coords=da.coords,
             name="da_bin",
@@ -735,7 +743,24 @@ def _compute_histogram_quantile_2d(
 
         hist_raw = hist_rolled
 
+    # The estimator pairs each bin centre with the count THROUGH that bin, so it is not
+    # mirror-equivariant: run directly on the lower tail it sits one bin colder than the
+    # mirror of the upper tail and under-flags (-27 % events vs exact at 15 yr, D-136).
+    # Evaluate the lower tail on the reversed histogram at 1 - q and negate, which is the
+    # upper-tail estimator on -x exactly. The upper tail is untouched. Needs bin centres
+    # symmetric about zero; the legacy asymmetric edges cannot resolve a low tail anyway.
+    mirror = tail == "lower"
+    if mirror and not np.array_equal(bin_centers_array, -bin_centers_array[::-1]):
+        raise ValueError("tail='lower' on the histogram path needs bin edges symmetric about zero")
+
+    # `1.0 - q` is an ulp off `(100 - p) / 100` for some percentiles (p = 7, 32, 34, ...),
+    # which flips the kernel's `cumsum <= q * N` ties. Rebuild the percentile first so the
+    # complement is the one an upper-tail caller asking for 100 - p would get.
+    q_mirror = (100.0 - round(q * 100.0, 10)) / 100.0
+
     def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
+        if mirror:
+            return -_rolling_histogram_quantile(hist_chunk[:, ::-1], window_steps, q_mirror, bin_centers_chunk)
         return _rolling_histogram_quantile(hist_chunk, window_steps, q, bin_centers_chunk)
 
     # Rechunk histogram so core dimensions are unchunked for apply_ufunc
