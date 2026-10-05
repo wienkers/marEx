@@ -71,8 +71,10 @@ def test_1d_quantile_counts_out_of_range_high_mass():
     nt, nx = 5000, 6
     base = rng.normal(0.0, 1.0, size=(nt, nx)).astype(np.float32)
     outliers = base.copy()
-    # Push the top 8% of every column far above max_anomaly (=5).
-    k = int(0.08 * nt)
+    # Push the top 4% of every column far above max_anomaly (=5). Under 1 - q, so the
+    # counted 95th percentile stays inside the range: a share above 5% would put it in
+    # the clipped top bin, which is a ConfigurationError (D-138).
+    k = int(0.04 * nt)
     for j in range(nx):
         idx = np.argsort(base[:, j])[-k:]
         outliers[idx, j] = 20.0

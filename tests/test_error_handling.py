@@ -1303,8 +1303,8 @@ class TestQuantileThresholdWarnings:
             # Verify processing completes
             assert result is not None
 
-    def test_high_quantile_threshold_warning_global_percentile(self, dimensions_gridded):
-        """Test warning when quantiles exceed max_anomaly bounds with global_percentile (lines 2445)."""
+    def test_high_quantile_threshold_error_global_percentile(self, dimensions_gridded):
+        """Quantiles beyond the max_anomaly bounds raise with global_percentile (D-138)."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1326,10 +1326,9 @@ class TestQuantileThresholdWarnings:
         # Add extreme values that will push quantiles high
         data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
 
-        with warnings.catch_warnings(record=True) as _:
-            warnings.simplefilter("always")
-
-            result = marEx.preprocess_data(
+        # A threshold saturated in the top bin is an error, not a warning (D-138).
+        with pytest.raises(ConfigurationError, match="exceed expected range"):
+            marEx.preprocess_data(
                 data,
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
@@ -1337,14 +1336,11 @@ class TestQuantileThresholdWarnings:
                 method_extreme="global_percentile",
                 method_percentile="approximate",
                 threshold_percentile=99,
-                max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
+                max_anomaly=5.0,  # Too narrow for this field's high quantiles
             )
 
-            # Verify processing completes
-            assert result is not None
-
-    def test_high_quantile_threshold_warning_seasonal_percentile(self, dimensions_gridded):
-        """Test warning when quantiles exceed max_anomaly bounds with seasonal_percentile (line 2576)."""
+    def test_high_quantile_threshold_error_seasonal_percentile(self, dimensions_gridded):
+        """Quantiles beyond the max_anomaly bounds raise with seasonal_percentile (D-138)."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1366,10 +1362,9 @@ class TestQuantileThresholdWarnings:
         # Add extreme values that will push quantiles high
         data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
 
-        with warnings.catch_warnings(record=True) as _:
-            warnings.simplefilter("always")
-
-            result = marEx.preprocess_data(
+        # A threshold saturated in the top bin is an error, not a warning (D-138).
+        with pytest.raises(ConfigurationError, match="exceed expected range"):
+            marEx.preprocess_data(
                 data,
                 dimensions=dimensions_gridded,
                 dask_chunks={"time": 25},
@@ -1378,11 +1373,8 @@ class TestQuantileThresholdWarnings:
                 method_percentile="approximate",
                 window_days=5,
                 threshold_percentile=99,
-                max_anomaly=5.0,  # Low max_anomaly to trigger warning with high quantiles
+                max_anomaly=5.0,  # Too narrow for this field's high quantiles
             )
-
-            # Verify processing completes
-            assert result is not None
 
 
 class TestUnstructuredGridConfigurationErrors:

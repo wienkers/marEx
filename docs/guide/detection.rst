@@ -182,6 +182,7 @@ Anomaly Detection Methods
 
 **Characteristics:**
   * Anomaly relative to the daily climatology using full time series (or a specified ``reference_period``)
+  * Climatology smoothed with a ``smooth_days`` (default 21) moving average that wraps the year, as in Hobday et al. (2016)
   * Preserves long-term / climate trends
   * Simple interpretation and fast computation
   * Best for: Baseline comparison studies, trend-inclusive analysis, public outreach
@@ -259,7 +260,7 @@ Extreme Event Detection Methods
        method_extreme='seasonal_percentile',
        threshold_percentile=95,
        window_days=11,        # 11-day window
-       window_spatial=None    # No spatial clustering (default)
+       window_spatial=None    # Default: 5x5 pooling on gridded data (approximate method), none otherwise
    )
 
 **Characteristics:**
@@ -271,6 +272,14 @@ Spatial Window Enhancement (``window_spatial``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **New in v3.0+**: The Hobday extreme method supports optional spatial pooling window for more robust, spatially coherent thresholds.
+
+**Default**: ``window_spatial=None`` resolves to **5** (a 5×5 window) for
+``method_extreme='seasonal_percentile'`` with ``method_percentile='approximate'`` on
+gridded (lat/lon) data, and to no pooling everywhere else. The value actually used is
+recorded in the output's ``window_spatial`` attribute. Passing a value explicitly is an
+error on unstructured meshes, with ``global_percentile`` and with
+``method_percentile='exact'``. For traditional single-cell Hobday thresholds on a grid,
+pass ``window_spatial=1``.
 
 **Algorithm Details**:
 
@@ -316,7 +325,7 @@ For each grid cell ``(i, j)`` and each day-of-year ``d``:
        sst_0.1deg,
        method_extreme='seasonal_percentile',
        window_days=11,
-       window_spatial=None
+       window_spatial=1         # Single cell (None would default to 5x5 here)
    )
 
    # Short time-series: use spatial pooling to increase robustness of threshold calculation
@@ -424,8 +433,12 @@ Anomaly Method Parameters
 
 **Fixed Baseline Parameters:**
 
-**smooth_days** : int, default=11
-  Number of days for smoothing the daily climatology
+**smooth_days** : int, default=21
+  Number of days for smoothing the daily climatology, as in Hobday et al. (2016): a
+  centred moving average over the day-of-year climatology that wraps the year, so
+  31 December is averaged with 1 January. ``smooth_days=1`` disables it. Converted to
+  slots of the within-year cycle (one per day on daily data); on a
+  monthly axis 21 days is under one slot and no smoothing is applied, which is logged.
 
 **reference_period** : tuple of (int, int), optional
   Year range ``(start_year, end_year)`` inclusive for computing the daily climatology.
@@ -437,8 +450,9 @@ Anomaly Method Parameters
 **detrend_orders** : list of int, default=[1]
   Polynomial orders for detrending (e.g., [1, 2] for linear + quadratic)
 
-**smooth_days** : int, default=11
-  Number of days for smoothing the daily climatology after detrending
+**smooth_days** : int, default=21
+  Number of days for smoothing the daily climatology after detrending (same circular
+  smoothing as ``fixed_baseline``; ``smooth_days=1`` disables it)
 
 **force_zero_mean** : bool, default=True
   Whether to explicitly enforce zero mean in final anomalies
@@ -552,6 +566,22 @@ n_bins``. Both resolved values are logged at INFO and recorded in the output att
    no histogram. It costs one pass over the anomaly, which is cheap in the default
    ``persist`` mode (the anomaly is already staged) but walks the whole anomaly graph
    under ``compute_mode='lazy'``. Pin ``max_anomaly`` there if that matters.
+
+.. warning::
+
+   A threshold that lands in the **outermost** bin of a range **you pinned**
+   (``max_anomaly``, or ``precision`` alone, which gives ``precision=0.01`` -> ±5.0) is
+   rejected with a ``ConfigurationError`` ("Quantile values exceed expected range", or
+   "below expected range" for ``tail='lower'``). Samples beyond ``max_anomaly`` are
+   clipped into that bin, so a threshold there is set by ``max_anomaly``, not by your
+   data: widen the range, omit both so it is derived from the data, or use
+   ``method_percentile='exact'``.
+
+   With the range **derived from the data** nothing is clipped (its edge is the data's
+   own largest anomaly), so the same condition is only a ``UserWarning``: the window
+   holding the most extreme sample has too few samples to resolve the percentile. It
+   happens on short or coarse series at high percentiles (roughly fewer than
+   ``0.5 / (1 - q)`` samples per window, i.e. under 10 at the 95th percentile).
 
 Time Resolution
 ---------------

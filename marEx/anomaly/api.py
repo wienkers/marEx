@@ -58,12 +58,14 @@ def _anomaly_steps(
             steps.append(f"Daily climatology computed from {reference_period[0]}-{reference_period[1]}")
         else:
             steps.append("Daily climatology computed from full time series")
+        steps.append(f"Climatology smoothed with {smooth_days}-day circular window")
     elif method == "detrend_fixed_baseline":
         steps.append(f"Removed polynomial trend orders={detrend_orders}")
         if reference_period is not None:
             steps.append(f"Daily climatology computed from detrended data ({reference_period[0]}-{reference_period[1]})")
         else:
             steps.append("Daily climatology computed from detrended data")
+        steps.append(f"Climatology smoothed with {smooth_days}-day circular window")
 
     return steps
 
@@ -90,11 +92,15 @@ def _anomaly_attrs(
             "smooth_days": smooth_days,
         }
     if method == "fixed_baseline":
-        return {"reference_period": list(reference_period)} if reference_period is not None else {}
+        fixed: Dict[str, object] = {"smooth_days": smooth_days}
+        if reference_period is not None:
+            fixed["reference_period"] = list(reference_period)
+        return fixed
     if method == "detrend_fixed_baseline":
         attrs: Dict[str, object] = {
             "detrend_orders": detrend_orders,
             "force_zero_mean": force_zero_mean,
+            "smooth_days": smooth_days,
         }
         if reference_period is not None:
             attrs["reference_period"] = list(reference_period)
@@ -328,8 +334,11 @@ def compute(
         Number of preceding years in the rolling climatology
         (``shifting_baseline`` only).
     smooth_days
-        Width of the centred smoothing window applied to the climatology
-        (``shifting_baseline`` only).
+        Width of the centred smoothing window applied to the climatology, in
+        days (``shifting_baseline``, ``fixed_baseline`` and
+        ``detrend_fixed_baseline``). The fixed baselines smooth their
+        day-of-year climatology with a moving average that wraps the year, as
+        in Hobday et al. (2016); ``smooth_days=1`` disables it.
     detrend_orders
         Polynomial orders to remove, e.g. ``[1]`` for a linear trend
         (harmonic methods only). Defaults to ``[1]``.

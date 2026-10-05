@@ -125,7 +125,7 @@ marEx extends/generalises the standard Hobday et al. (2016) temporal window by a
 * Structured grids only (not supported for unstructured/irregular grids)
 * Requires ``method_percentile='approximate'``
 
-**Code reference:** :mod:`marEx.anomaly.preprocess_data` with ``window_spatial`` parameter (default=5)
+**Code reference:** :func:`marEx.preprocess_data` with ``window_spatial`` parameter (``None`` resolves to 5 on gridded data with ``method_percentile='approximate'``, and to no pooling otherwise)
 
 Histogram-Based Approximate Percentiles
 ----------------------------------------

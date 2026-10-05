@@ -142,6 +142,9 @@ def _extremes_core(
     # Checked here rather than only inside `resolve_bin_spec`, which the exact path
     # skips: an empty series otherwise reached a bare ZeroDivisionError there.
     reject_empty_series(anomalies)
+    # Whether the caller fixed the binned range: only then can a threshold in the outermost
+    # bin be blamed on the range (D-138 add. 2). Read before resolution overwrites both.
+    range_pinned = precision is not None or max_anomaly is not None
     bin_spec = (None, None) if method_percentile == "exact" else resolve_bin_spec(anomalies, precision, max_anomaly, n_bins)
     precision, max_anomaly = bin_spec
 
@@ -171,6 +174,7 @@ def _extremes_core(
             threshold_label=threshold_label,
             cycle=cycle,
             tail=tail,
+            range_pinned=range_pinned,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -248,9 +252,12 @@ def identify(
         Width of the rolling day-of-year window
         (``seasonal_percentile`` only).
     window_spatial
-        Width of the spatial pooling window (``seasonal_percentile`` on gridded
-        data only). Defaults to 5 on gridded input, and is unavailable on
-        unstructured meshes.
+        Width in cells (odd) of the square spatial pooling window
+        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
+        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
+        on that path and to no pooling everywhere else. Passing a value is an
+        error on unstructured meshes, with ``global_percentile`` and with
+        ``method_percentile='exact'``.
     method_percentile
         ``'approximate'`` (default) uses a histogram-based quantile, which is
         what allows the reduction to stream. ``'exact'`` computes a true

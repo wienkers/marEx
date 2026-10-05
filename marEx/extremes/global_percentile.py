@@ -30,6 +30,7 @@ def _identify_extremes_constant(
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     tail: Literal["upper", "lower"] = "upper",
+    range_pinned: bool = True,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events beyond a constant (in time) percentile threshold.
@@ -102,6 +103,7 @@ def _identify_extremes_constant(
             materialiser=materialiser,
             tail=tail,
             horizontal=horizontal_dims(dimensions),
+            range_pinned=range_pinned,
         )
 
     # Clean up coordinates if needed

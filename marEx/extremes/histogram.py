@@ -23,6 +23,7 @@ from xhistogram.xarray import histogram
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import check_tile_fit, extra_dim_chunks, horizontal_dims, spatial_dims
 from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
+from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
 # Get module logger
@@ -104,8 +105,10 @@ def _apply_threshold_bounds(
     tail: Literal["upper", "lower"],
     guard_notnull: bool,
     clamp: Optional[Callable[[xr.DataArray], xr.DataArray]] = None,
+    range_pinned: bool = True,
 ) -> xr.DataArray:
-    """Warn on out-of-range thresholds and clamp them off the zero guard rail.
+    """Reject (pinned range) or warn on (derived range) out-of-range thresholds; warn on and
+    clamp them off the zero guard rail.
 
     Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
     the top bin (the range check) nor fall below ``+one bin`` (the guard); for
@@ -141,20 +144,44 @@ def _apply_threshold_bounds(
 
     any_range, any_guard, thr_max, thr_min = dask.compute(out_of_range.any(), on_guard.any(), threshold.max(), threshold.min())
 
+    # A threshold inside the outermost bin is not a threshold when the caller pinned the range:
+    # every sample beyond it was clipped into that bin, so the true quantile could be anywhere
+    # past it. Fail rather than return a saturated field that looks plausible (D-138). When the
+    # range was DERIVED from the data, its edge is the data's own max |anomaly| and nothing was
+    # clipped; reaching the outermost bin then means too few samples per window resolve this
+    # percentile in the cell holding the extreme, which is worth saying but not fatal (add. 2).
     if bool(any_range):
         if tail == "upper":
-            message = (
-                f"Quantile values exceed expected range: max={float(thr_max):.4f} > {range_bound:.4f}. "
-                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
-                "or using a lower percentile threshold."
-            )
+            reached = f"max={float(thr_max):.4f} > {range_bound:.4f}, inside the top histogram bin"
+            percentile_remedy = "Use a lower threshold_percentile"
+            phrase = "exceed"
         else:
-            message = (
-                f"Quantile values below expected range: min={float(thr_min):.4f} < {range_bound:.4f}. "
-                f"Consider increasing max_anomaly parameter (currently {max_anomaly:.2f}) "
-                "or using a higher percentile threshold."
+            reached = f"min={float(thr_min):.4f} < {range_bound:.4f}, inside the bottom histogram bin"
+            percentile_remedy = "Use a higher threshold_percentile"
+            phrase = "below"
+        if range_pinned:
+            raise ConfigurationError(
+                f"Quantile values {phrase} expected range: {reached} at max_anomaly={max_anomaly:.4g}",
+                details=(
+                    "The threshold saturated at the edge of the binned range you set, so it is set by "
+                    "max_anomaly, not by the data. Samples beyond the range are clipped into the outermost bin."
+                ),
+                suggestions=[
+                    "Increase max_anomaly (or precision), or omit both so the range is derived from the data",
+                    percentile_remedy,
+                    "Use method_percentile='exact', which builds no histogram",
+                ],
+                context={"max_anomaly": max_anomaly, "range_bound": range_bound, "tail": tail},
             )
-        warnings.warn(message, UserWarning, stacklevel=2)
+        warnings.warn(
+            f"Quantile values {phrase} expected range: {reached} of the range derived from the data "
+            f"(max_anomaly={max_anomaly:.4g}, the data's own max |anomaly|). Nothing was clipped: the "
+            "window holding the most extreme sample has too few samples to resolve this percentile. "
+            f"{percentile_remedy}, a longer series or window (window_days, window_spatial), or "
+            "method_percentile='exact'.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if bool(any_guard):
         if tail == "upper":
@@ -600,6 +627,7 @@ def _compute_histogram_quantile_2d(
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
+    range_pinned: bool = True,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -805,7 +833,7 @@ def _compute_histogram_quantile_2d(
     # The predicates there deliberately lack the ``& notnull()`` guard the 1D path
     # carries: NaN comparisons are False either way, but adding it would alter the
     # clamp mask.
-    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=False)
+    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=False, range_pinned=range_pinned)
 
     return threshold
 
@@ -820,6 +848,7 @@ def _compute_histogram_quantile_1d(
     materialiser: Optional[Materialiser] = None,
     tail: Literal["upper", "lower"] = "upper",
     horizontal: Optional[Sequence[str]] = None,
+    range_pinned: bool = True,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -910,6 +939,8 @@ def _compute_histogram_quantile_1d(
 
     # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
     # with the 2D path.
-    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one)
+    threshold = _apply_threshold_bounds(
+        threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one, range_pinned=range_pinned
+    )
 
     return threshold

@@ -43,6 +43,7 @@ def _identify_extremes_seasonal(
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
+    range_pinned: bool = True,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -61,7 +62,9 @@ def _identify_extremes_seasonal(
     window_days : int, default=11
         Window in days
     window_spatial : int, default=None
-        Window size in cells
+        Width in cells of the square spatial pooling window. Used as given here: the
+        default of 5 on gridded data is applied upstream by
+        :func:`marEx.extremes.base.resolve_window_spatial`, so ``None`` means no pooling.
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, default=0.01
@@ -181,6 +184,7 @@ def _identify_extremes_seasonal(
             materialiser=materialiser,
             cycle=cycle,
             tail=tail,
+            range_pinned=range_pinned,
         )
 
     # Extract spatial chunk sizes from input data for alignment

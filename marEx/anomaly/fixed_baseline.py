@@ -7,6 +7,7 @@ a fixed daily climatology). These back the ``fixed_baseline`` and
 ``detrend_fixed_baseline`` anomaly methods respectively.
 """
 
+from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 import flox.xarray
@@ -25,6 +26,67 @@ from .harmonic import _compute_anomaly_detrended
 logger = get_logger(__name__)
 
 
+def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smooth_days: float) -> xr.DataArray:
+    """Smooth a per-cycle-slot climatology with a centred moving average that wraps the year.
+
+    Hobday et al. (2016)'s smoothing step: the climatology is a closed cycle, so 31 December
+    is averaged with 1 January rather than losing the window's half-width at either end.
+    Even windows use the same ``center=True`` alignment as ``shifting_baseline``. NaN slots
+    are skipped in the average and stay NaN, so each cell keeps the valid days it had.
+
+    The average runs across DAYS at a fixed time of day. On sub-daily cycles the slots are
+    viewed as ``(day, step-of-day)`` and only the day axis is smoothed: a moving average over
+    consecutive hours would average the diurnal cycle out of the climatology and leave it in
+    the anomaly. Daily and monthly cycles have one step per row, so this is the plain moving
+    average along the cycle. ``smooth_days`` is converted with the row width (one day, or one
+    month), not the data cadence.
+
+    Operates on the single-chunk cycle axis, so it costs ``cycle.length x space`` and does
+    not depend on how the input was chunked.
+    """
+    cycle_dim = cycle.index_name
+    steps_per_row = cycle.steps_per_day if cycle.is_subdaily else 1
+    n_rows = cycle.length // steps_per_row
+    row_days = cycle.slot_days * steps_per_row
+    window = replace(cycle, step_days=row_days).steps_for_days(smooth_days, name="smooth_days")
+    if window >= n_rows:
+        raise ConfigurationError(
+            f"smooth_days={smooth_days} spans {window} of the {n_rows} rows of the {cycle_dim} cycle",
+            details="Smoothing the fixed-baseline climatology over a whole cycle would remove the seasonal cycle itself",
+            suggestions=["Use a smooth_days shorter than one year (the default is 21)", "Set smooth_days=1 to disable smoothing"],
+            context={"smooth_days": smooth_days, "window": window, "cycle_rows": n_rows},
+        )
+    if window == 1:
+        if smooth_days > 1:
+            logger.info(
+                "smooth_days=%s is under one %g-day %s row: the fixed-baseline climatology is not smoothed.",
+                smooth_days,
+                row_days,
+                cycle_dim,
+            )
+        return clim
+
+    # View the cycle as (row, step-of-row), pad the row axis by a whole window on each side
+    # so every kept row sees a full window, cut the original span back out, then fold back.
+    # The coordinate is dropped first: wrapping it would duplicate labels.
+    labels = clim[cycle_dim].values
+    dims = clim.dims
+    rows = clim.drop_vars(cycle_dim).coarsen({cycle_dim: steps_per_row}).construct({cycle_dim: ("_row", "_step")})
+    padded = rows.pad({"_row": (window, window)}, mode="wrap")
+    # NaN-preserving (D-138 add. 2): average the finite rows in each window, then re-mask rows that
+    # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
+    # instead of losing half a window at each edge of its NaN season.
+    smoothed = padded.rolling({"_row": window}, center=True, min_periods=1).mean().isel({"_row": slice(window, window + n_rows)})
+    smoothed = smoothed.where(rows.notnull())
+    other = [d for d in dims if d != cycle_dim]
+    smoothed = smoothed.transpose("_row", "_step", *other)
+    folded = smoothed.data.reshape((cycle.length,) + smoothed.shape[2:])
+    out = xr.DataArray(
+        folded, dims=(cycle_dim, *other), coords={cycle_dim: labels, **{k: v for k, v in clim.coords.items() if k != cycle_dim}}
+    )
+    return out.transpose(*dims).astype(np.float32).chunk({cycle_dim: -1})
+
+
 def _compute_anomaly_fixed_baseline(
     da: xr.DataArray,
     dimensions: Optional[Dict[str, str]] = None,
@@ -32,12 +94,14 @@ def _compute_anomaly_fixed_baseline(
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_days: float = 21,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed baseline method with full time series climatology.
 
     This method computes a daily climatology using all available years in the dataset
-    (or a specified reference period), then subtracts this climatology from the
+    (or a specified reference period), smooths it with a ``smooth_days`` centred moving
+    average that wraps the year (Hobday et al. 2016), then subtracts it from the
     original data to obtain anomalies.
 
     Parameters
@@ -52,6 +116,9 @@ def _compute_anomaly_fixed_baseline(
         Year range (start_year, end_year) inclusive for computing the daily climatology.
         If None (default), uses all available years. Anomalies are still computed for
         the full time series.
+    smooth_days : float, default=21
+        Width of the circular moving average applied to the climatology, in days.
+        ``smooth_days=1`` disables smoothing.
 
     Returns
     -------
@@ -119,6 +186,7 @@ def _compute_anomaly_fixed_baseline(
     daily_climatology = (
         daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
     )
+    daily_climatology = _smooth_climatology_circular(daily_climatology, cycle, smooth_days)
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
@@ -162,6 +230,7 @@ def _compute_anomaly_detrend_fixed_baseline(
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_days: float = 21,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed detrended baseline method.
@@ -186,6 +255,9 @@ def _compute_anomaly_detrend_fixed_baseline(
         Year range (start_year, end_year) inclusive for computing the daily climatology.
         If None (default), uses all available years. Only affects the climatology step,
         not the polynomial detrending.
+    smooth_days : float, default=21
+        Width of the circular moving average applied to the climatology, in days.
+        ``smooth_days=1`` disables smoothing.
 
     Returns
     -------
@@ -223,6 +295,7 @@ def _compute_anomaly_detrend_fixed_baseline(
         reference_period=reference_period,
         materialiser=materialiser,
         cycle=cycle,
+        smooth_days=smooth_days,
     )
 
     return final_result

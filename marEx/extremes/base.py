@@ -191,6 +191,7 @@ def identify_extremes(
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
+    range_pinned: Optional[bool] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -210,7 +211,9 @@ def identify_extremes(
     window_days : int, default=11
         Window for day-of-year threshold (seasonal_percentile only)
     window_spatial : int, default=None
-        Window for day-of-year threshold spatial clustering (seasonal_percentile only)
+        Width in cells (odd) of the square spatial pooling window (seasonal_percentile
+        with method_percentile='approximate' on gridded data only). ``None`` resolves
+        to 5 (a 5x5 window) on that path and to no pooling everywhere else.
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, optional
@@ -227,6 +230,11 @@ def identify_extremes(
         ``data >= threshold``, ``'lower'`` flags ``data <= threshold``. The
         threshold is the ``threshold_percentile``-th percentile in both cases, so
         the coldest 5 % is ``threshold_percentile=5, tail='lower'``.
+    range_pinned : bool, optional
+        Whether the histogram range was set by the caller. A threshold in the outermost
+        bin raises when it was, and only warns when the range came from the data. Read
+        from ``precision``/``max_anomaly`` when omitted; callers that resolve the bins
+        before calling pass it explicitly.
 
     Returns
     -------
@@ -428,8 +436,9 @@ def identify_extremes(
     # now symmetric about zero (`extremes/histogram.py::_symmetric_bin_edges`), so a low
     # percentile is resolved at exactly the same precision as a high one and the
     # rejection is obsolete. The genuine remaining failure mode -- a threshold landing in
-    # a clipped end bin -- is reported by the out-of-range UserWarning, which now fires
-    # symmetrically at both ends.
+    # a clipped end bin -- raises a ConfigurationError in
+    # `extremes/histogram.py::_apply_threshold_bounds` when the caller pinned the range, and
+    # warns when it was derived (nothing clipped), symmetrically at both ends (D-138 add. 2).
 
     # Validate window_spatial parameter
     if window_spatial is not None:
@@ -559,6 +568,10 @@ def identify_extremes(
     # Resolve the bin geometry once, here, and hand concrete numbers down. Skipped for
     # the exact path, which builds no histogram -- deriving there would cost a full pass
     # over the anomaly for nothing, and would defeat the sentinel check above.
+    # `range_pinned` is passed by a caller that has already resolved the bins (and so can no
+    # longer tell from `precision`/`max_anomaly` whether the user set them); otherwise read it here.
+    if range_pinned is None:
+        range_pinned = precision is not None or max_anomaly is not None
     if method_percentile != "exact":
         precision, max_anomaly = resolve_bin_spec(da, precision, max_anomaly, n_bins)
 
@@ -574,6 +587,7 @@ def identify_extremes(
             materialiser,
             threshold_label,
             tail=tail,
+            range_pinned=range_pinned,
         )
     elif method_extreme == "seasonal_percentile":
         logger.debug(f"Seasonal percentile method - window_days={window_days}, method_percentile={method_percentile}")
@@ -592,6 +606,7 @@ def identify_extremes(
             threshold_label,
             resolved_cycle,
             tail=tail,
+            range_pinned=range_pinned,
         )
     else:
         logger.error(f"Unknown extreme method: {method_extreme}")

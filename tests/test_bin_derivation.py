@@ -95,10 +95,10 @@ class TestScaling:
         np.testing.assert_allclose(ds.thresholds.values, reference, atol=5 * ds.attrs["precision"])
         assert ds.attrs["max_anomaly"] > 40
 
-    def test_the_same_field_pinned_to_max_anomaly_5_warns_and_clips(self):
-        """The failure the derivation removes, still reachable when pinned explicitly."""
+    def test_the_same_field_pinned_to_max_anomaly_5_raises(self):
+        """The failure the derivation removes, still reachable when pinned explicitly (D-138: an error)."""
         da = _field(scale=15.0, seed=3)
-        with pytest.warns(UserWarning, match="exceed expected range"):
+        with pytest.raises(ConfigurationError, match="exceed expected range"):
             marEx.extremes.identify(
                 da,
                 method="global_percentile",

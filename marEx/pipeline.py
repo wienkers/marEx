@@ -87,10 +87,22 @@ def preprocess_data(
         cold spells, drought, or any low-side extreme. The threshold is the
         ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
         is ``threshold_percentile=5, tail='lower'``.
-    window_years, smooth_days
-        Rolling-climatology parameters (``shifting_baseline`` only).
-    window_days, window_spatial
-        Day-of-year and spatial pooling windows (``seasonal_percentile`` only).
+    window_years
+        Rolling-climatology length (``shifting_baseline`` only).
+    smooth_days
+        Climatology smoothing window in days (``shifting_baseline``,
+        ``fixed_baseline`` and ``detrend_fixed_baseline``). The fixed baselines
+        smooth their day-of-year climatology with a moving average that wraps
+        the year, as in Hobday et al. (2016); ``smooth_days=1`` disables it.
+    window_days
+        Day-of-year window in days (``seasonal_percentile`` only).
+    window_spatial
+        Width in cells (odd) of the square spatial pooling window
+        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
+        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
+        on that path and to no pooling everywhere else. Passing a value is an
+        error on unstructured meshes, with ``global_percentile`` and with
+        ``method_percentile='exact'``.
     standardise
         Also threshold a standardised series, adding ``dat_stn``, ``STD``,
         ``extreme_events_stn`` and ``thresholds_stn``. Requires
