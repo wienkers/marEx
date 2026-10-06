@@ -101,11 +101,14 @@ def _identify_extremes_seasonal(
     N_above_threshold = N_samples * tail_fraction
     if N_above_threshold < 50:
         # Make warning
+        # No advice to switch to method_percentile='exact': it cannot pool spatially, so on
+        # a grid it sees fewer samples than the default approximate path, not more (D-142).
         logger.warning(
             f"Not enough samples for accurate extreme detection: {N_above_threshold} < 50. "
             "Consider using a lower threshold_percentile, increasing your time-series size, "
-            "increasing the window_days, or using a larger window_spatial."
-            "If your time-series is very short, consider using method_percentile='exact'."
+            "increasing the window_days, or (method_percentile='approximate' only) using a larger "
+            "window_spatial. Below this count the threshold depends on the percentile convention "
+            "as much as on the data: exact and approximate can differ by many histogram bins."
         )
 
     # Add day-of-year coordinate (compute it to avoid chunked groupby issues).
@@ -137,26 +140,34 @@ def _identify_extremes_seasonal(
         da_ufunc = _chunk_spatial_for_histogram(
             da, dimensions["time"], output_elements_per_cell=cycle.length, horizontal=horizontal_dims(dimensions)
         )
-        cycle_vals = cycle.index_of(da_ufunc[coordinates["time"]]).values
+        cycle_vals = np.asarray(cycle.index_of(da_ufunc[coordinates["time"]]).values, dtype=np.int32)
         half_w = window_steps // 2
-
-        # Pre-compute boolean masks (which time indices contribute to each cycle slot)
-        doy_masks = []
-        for slot in range(1, cycle.length + 1):
-            mask = np.zeros(len(cycle_vals), dtype=bool)
-            for offset in range(-half_w, half_w + 1):
-                target = ((slot - 1 + offset) % cycle.length) + 1
-                mask |= cycle_vals == target
-            doy_masks.append(mask)
-
         n_slots = cycle.length
 
-        def _doy_percentiles(data, doy_masks, percentile):
+        def _slot_members(cycle_vals):
+            """Yield, slot by slot (1, 2, ...), the ascending time indices contributing to it.
+
+            Built inside the task from the per-step cycle index, which is all the graph carries
+            (n_time ints). The previous cycle.length x n_time boolean table was built in the
+            client and rode in the graph: 2 MB daily, ~2.3 GB at hourly x 30 yr (D-142). Sorted,
+            these indices select exactly the elements, in exactly the order, the mask did.
+            """
+            order = np.argsort(cycle_vals, kind="stable")
+            bounds = np.searchsorted(cycle_vals[order], np.arange(1, n_slots + 2))
+            # A generator: one slot's indices live at a time. Building every slot's list up front
+            # held window_steps x n_time int64 per task (557 MB at hourly x 30 yr).
+            for slot in range(1, n_slots + 1):
+                targets = [((slot - 1 + offset) % n_slots) + 1 for offset in range(-half_w, half_w + 1)]
+                # A window wider than the cycle revisits a slot; the mask counted it once.
+                parts = [order[bounds[t - 1] : bounds[t]] for t in sorted(set(targets))]
+                yield np.sort(np.concatenate(parts)) if parts else np.empty(0, dtype=np.intp)
+
+        def _doy_percentiles(data, cycle_vals, percentile):
             """Per-slot percentiles. data: (*spatial, time) -> (*spatial, cycle.length)."""
             result = np.full(data.shape[:-1] + (n_slots,), np.nan, dtype=np.float32)
-            for i, mask in enumerate(doy_masks):
-                if mask.any():
-                    result[..., i] = np.nanpercentile(data[..., mask], percentile, axis=-1)
+            for i, idx in enumerate(_slot_members(cycle_vals)):
+                if idx.size:
+                    result[..., i] = np.nanpercentile(data[..., idx], percentile, axis=-1)
             return result
 
         thresholds = xr.apply_ufunc(
@@ -165,7 +176,7 @@ def _identify_extremes_seasonal(
             input_core_dims=[[dimensions["time"]]],
             output_core_dims=[[cycle_dim]],
             dask="parallelized",
-            kwargs={"doy_masks": doy_masks, "percentile": threshold_percentile},
+            kwargs={"cycle_vals": cycle_vals, "percentile": threshold_percentile},
             output_dtypes=[np.float32],
             dask_gufunc_kwargs={"output_sizes": {cycle_dim: cycle.length}},
         )

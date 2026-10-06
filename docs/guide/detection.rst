@@ -583,6 +583,67 @@ n_bins``. Both resolved values are logged at INFO and recorded in the output att
    happens on short or coarse series at high percentiles (roughly fewer than
    ``0.5 / (1 - q)`` samples per window, i.e. under 10 at the 95th percentile).
 
+Exact and Approximate Percentiles
+---------------------------------
+
+``method_percentile='exact'`` sorts every sample a cell contributes and takes
+``np.nanpercentile`` with numpy's default linear rule. ``'approximate'`` (the default)
+counts the samples into ``n_bins`` histogram bins and interpolates inside the bin where
+the cumulative count crosses the percentile. How closely the two agree depends on how
+many samples sit in the tail, and much less on ``precision``.
+
+``global_percentile`` pools the whole series per cell. Near the threshold, neighbouring
+samples are far closer together than one bin, so the approximate threshold tracks the
+exact one to about one bin. Measured on 20 years of daily data, the largest gap across
+four distributions and five percentiles was 1.09 bins. The agreement weakens as the tail
+thins. With 10 years at the 99th percentile (about 37 samples above it per cell) the gap
+reached up to 7.8 bins, depending on the random draw and the distribution.
+
+``seasonal_percentile`` pools only the days within ``window_days`` of each day of year,
+across all years, which is 220 samples for 20 years and an 11-day window. Here the two methods take
+different order statistics of the same samples. The histogram returns, to within 1.5 bins, the
+sample of rank ``floor(q * n) + 1`` in the window (for whole-number percentiles this is
+usually numpy's ``'higher'`` rule in the upper tail and ``'lower'`` in the lower tail),
+while ``'exact'`` interpolates between two samples. In a tail of 220 samples
+those neighbours are several bins apart, so the two threshold fields can differ by tens
+of bins in places. That gap is the sampling resolution of the data, and a finer
+``precision`` does not close it. Neither choice is wrong. They are two conventions for a
+percentile of a small sample, and marEx keeps both.
+
+The extreme-event mask moves far less than the threshold values suggest, apparently
+because both thresholds usually fall in the same gap between samples. On 20 years of Gaussian
+anomalies at the 90th percentile, ``'exact'`` flagged 10.01 % of days and
+``'approximate'`` with ``window_spatial=1`` flagged 10.16 %. The approximate excess grows
+with the bin width. With the range derived from heavy-tailed data the bins were nine times
+wider, and the approximate method flagged 10.97 %. Pass ``precision`` explicitly if the
+derived bin is coarse for your variable.
+
+.. note::
+
+   On a grid, the approximate seasonal path pools a 5×5 spatial window by default
+   (``window_spatial=5``), giving 25 times the samples. ``'exact'`` cannot pool spatially,
+   so out of the box the two compute different statistics. Compare them with
+   ``window_spatial=1``. The "Not enough samples" warning counts the spatial window, so
+   it fires on exact runs (and on ``window_spatial=1``) far sooner than on the default.
+
+Memory and Chunking of the Exact Path
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every percentile path, exact and approximate alike, needs each cell's whole series in
+one task. The anomaly keeps the time chunking of your input, so a time-chunked input is
+rechunked to ``time: -1`` per spatial tile by both paths, an all-to-all transpose whose cost
+grows with the number of time chunks (the exact path moves float32, the approximate path
+uint16 bin indices). The exact path has three further limits:
+
+* it sorts the raw float series of a tile rather than counting it into integer bins, so a task
+  needs several copies of ``n_time × cells-per-tile`` floats
+* it has no way to process time in pieces: a cell's percentile needs every sample at once
+* it cannot use ``window_spatial``
+
+The approximate path is the one exercised at scale (27 years of daily 0.25° data). No
+at-scale measurement of the exact path exists yet, so size an exact run from a short
+pilot rather than from the approximate path's memory.
+
 Time Resolution
 ---------------
 

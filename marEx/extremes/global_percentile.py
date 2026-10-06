@@ -63,6 +63,12 @@ def _identify_extremes_constant(
             # cannot change the result -- only the task count.
             n_cells = da[dimensions["x"]].size
             rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
+            # Each cell brings its whole series, so cap the tile at the element budget over
+            # the series length: sized from n_cells alone, a task grew linearly with n_time
+            # (5700 cells x 262,980 hourly steps = 6 GB float32 on ICON R02B09, D-142). The
+            # 100-cell floor still bounds the task count on very long series.
+            n_time = max(1, int(da.sizes[dimensions["time"]]))
+            rechunk_size = min(rechunk_size, max(min(n_cells, 100), TASK_ELEMENTS // n_time))
         # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
         # Gridded: "auto" on every spatial dim, extra dims included -- dask bounds the bytes per
         # chunk, measured at 3.3e7 elements per task at depth 50 on 720x1440. On a mesh the

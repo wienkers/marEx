@@ -68,6 +68,9 @@ def resolve_window_spatial(
 # defaults, in kelvin.
 _FALLBACK_PRECISION = 0.01
 _FALLBACK_MAX_ANOMALY = 5.0
+# A derived bin wider than this fraction of the anomaly std triggers the coarse-bin warning in
+# `resolve_bin_spec` (D-142). n_bins=1000 reaches it once max|anomaly| exceeds 15 std.
+_COARSE_BIN_FRACTION_OF_STD = 0.03
 
 
 def reject_empty_series(da: xr.DataArray) -> None:
@@ -153,7 +156,8 @@ def resolve_bin_spec(
         )
 
     if max_anomaly is None and precision is None:
-        lo, hi = dask.compute(da.min(), da.max())
+        # The std rides in the same fused pass: it only feeds the coarse-bin warning below.
+        lo, hi, spread = dask.compute(da.min(), da.max(), da.std())
         scale = max(abs(float(lo)), abs(float(hi)))
         if not np.isfinite(scale) or scale <= 0:
             logger.warning(
@@ -164,6 +168,17 @@ def resolve_bin_spec(
             return _FALLBACK_PRECISION, _FALLBACK_MAX_ANOMALY
         max_anomaly = scale
         precision = 2.0 * max_anomaly / n_bins
+        spread = float(spread)
+        if np.isfinite(spread) and spread > 0 and precision > _COARSE_BIN_FRACTION_OF_STD * spread:
+            # One outlier sets the range, so it sets every bin. Measured (D-142): bins of 0.0095 std
+            # over-flagged a 90th-percentile seasonal mask by 1.5 % relative to exact, bins of 0.088 std
+            # by 10 %. Warn only; the derived value is kept.
+            logger.warning(
+                f"Derived histogram bins are coarse: precision={precision:.4g} is {precision / spread:.3f} x the "
+                f"anomaly std ({spread:.4g}), because max|anomaly|={max_anomaly:.4g} is {max_anomaly / spread:.1f} std. "
+                "Approximate thresholds are then accurate only to this bin width. Pass `precision` "
+                "(e.g. ~0.01 x the std) or a larger `n_bins` if that matters for your variable."
+            )
     elif max_anomaly is None:
         max_anomaly = precision * n_bins / 2.0
     else:

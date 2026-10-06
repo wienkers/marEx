@@ -217,7 +217,8 @@ class TestDerivationCost:
         monkeypatch.setattr(marEx.extremes.base.dask, "compute", counting_compute)
         resolve_bin_spec(_field(n_time=400), None, None, 1000)
         assert len(calls) == 1
-        assert len(calls[0]) == 2
+        # min, max and the std behind the coarse-bin warning (D-142), all in that one call.
+        assert len(calls[0]) == 3
 
 
 class TestLogging:
