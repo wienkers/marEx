@@ -14,7 +14,7 @@ import xarray as xr
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_chunks, spatial_dims
 from ..logging_config import get_logger
-from .histogram import _compute_histogram_quantile_1d
+from .histogram import _clamp_exact_threshold, _compute_histogram_quantile_1d
 
 # Get module logger
 logger = get_logger(__name__)
@@ -30,7 +30,7 @@ def _identify_extremes_constant(
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     tail: Literal["upper", "lower"] = "upper",
-    range_pinned: bool = True,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events beyond a constant (in time) percentile threshold.
@@ -98,6 +98,7 @@ def _identify_extremes_constant(
 
         # Calculate threshold
         threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
+        threshold = _clamp_exact_threshold(threshold, tail)
 
     else:  # Use an efficient histogram-based method with specified accuracy
         threshold = _compute_histogram_quantile_1d(
@@ -109,7 +110,7 @@ def _identify_extremes_constant(
             materialiser=materialiser,
             tail=tail,
             horizontal=horizontal_dims(dimensions),
-            range_pinned=range_pinned,
+            range_mode=range_mode,
         )
 
     # Clean up coordinates if needed

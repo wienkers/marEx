@@ -14,9 +14,10 @@ the time coordinate (``dayofyear``, ``month`` or ``hourofyear``), overridable vi
 
 ``tail='lower'`` flags the low side of the distribution (cold spells, drought) instead
 of the high side, and the histogram bins are symmetric about zero so both tails resolve
-at the same precision. The bin range itself (``max_anomaly``) is derived from the data
-when not supplied, which is what lets the defaults work on a variable that is not an
-SST anomaly in kelvin.
+at the same precision. The bin range is always derived from the data (the requested
+tail's extreme, lowered by a per-cell estimate of the largest threshold and regrown if a
+threshold reaches it), which is what lets the defaults work on a variable that is not an
+SST anomaly in kelvin; ``precision`` alone sets the bin width.
 
 For method-selection guidance, worked examples, and the tail, bin-geometry and
 time-resolution tables, see :doc:`../guide/detection`.

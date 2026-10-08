@@ -1,14 +1,20 @@
-"""Auto-derived histogram bin geometry.
+"""Auto-derived histogram bin geometry (D-152).
 
-``precision=0.01, max_anomaly=5.0`` are calibrated for SST anomalies in kelvin. On
+``precision=0.01, max_anomaly=5.0`` were calibrated for SST anomalies in kelvin. On
 precipitation (mm/day, anomalies of tens) that range clips almost everything into the
-end bins; on pressure in Pa it is off by three orders of magnitude. Phase D therefore
-derives whichever of the two the caller does not state, with ``n_bins`` as the
-invariant.
+end bins; on pressure in Pa it is off by three orders of magnitude. So only ``precision``
+is public, and the range is derived from the data in its own units:
 
-The fixed point matters as much as the derivation: ``precision=0.01`` alone still
-spans +/-5.0, because ``0.01 * 1000 / 2 == 5.0``. Anyone who pinned ``precision``
-gets exactly the bins they had.
+* the requested tail's own extreme (``max`` upper, ``-min`` lower) is a hard cap, since a
+  threshold is a quantile of those samples;
+* a per-cell normal estimate, ``3 * max_cells(mean + z_p * std)``, lowers it when that
+  extreme is an outlier;
+* a threshold that reaches the edge of an estimated range regrows it to the cap at the same
+  ``precision`` and is recomputed, bit-identical to a run over the cap.
+
+``precision`` defaults to 3000 bins over the range; given, the bin count follows (a warning
+above 10000, an error above 65000). ``max_anomaly`` and ``n_bins`` are deprecated: the
+first still pins the range, the second replaces the 3000-bin target.
 """
 
 import logging
@@ -20,7 +26,8 @@ import xarray as xr
 
 import marEx
 from marEx.exceptions import ConfigurationError
-from marEx.extremes.base import resolve_bin_spec
+from marEx.extremes import base
+from marEx.extremes.base import _derive_bin_spec, resolve_bin_spec
 
 DIMENSIONS = {"time": "time", "x": "lon", "y": "lat"}
 
@@ -45,9 +52,10 @@ class TestResolution:
     def test_both_supplied_are_honoured_untouched(self):
         assert resolve_bin_spec(_field(), 0.02, 3.0, 1000) == (0.02, 3.0)
 
-    def test_precision_alone_reproduces_the_historical_range(self):
-        """The fixed point: the old defaults are what the old default arguments give."""
-        assert resolve_bin_spec(_field(), 0.01, None, 1000) == (0.01, 5.0)
+    def test_precision_alone_keeps_its_width_and_derives_the_range(self):
+        """D-152 retires the old fixed point (``0.01`` alone spanned +/-5.0): the range is the data's."""
+        da = _field()
+        assert resolve_bin_spec(da, 0.01, None) == (0.01, pytest.approx(float(da.max())))
 
     def test_max_anomaly_alone_derives_the_precision(self):
         precision, max_anomaly = resolve_bin_spec(_field(), None, 40.0, 1000)
@@ -57,7 +65,7 @@ class TestResolution:
     def test_neither_derives_the_range_from_the_data(self):
         da = _field(scale=10.0)
         precision, max_anomaly = resolve_bin_spec(da, None, None, 1000)
-        observed = float(max(abs(da.min().compute()), abs(da.max().compute())))
+        observed = float(da.max())  # the upper tail's own extreme
         assert max_anomaly == pytest.approx(observed)
         assert precision == pytest.approx(2 * observed / 1000)
 
@@ -111,8 +119,191 @@ class TestScaling:
     def test_the_resolved_geometry_is_what_the_attributes_report(self):
         da = _field(scale=15.0, seed=3)
         ds = marEx.extremes.identify(da, method="global_percentile", dimensions=DIMENSIONS)
-        assert ds.attrs["precision"] == pytest.approx(2 * ds.attrs["max_anomaly"] / 1000)
-        assert ds.attrs["max_anomaly"] == pytest.approx(float(max(abs(da.min()), abs(da.max()))), rel=1e-6)
+        # A Gaussian field: the per-cell estimate (3 x 1.645 sigma) lies past the data's own maximum,
+        # so the range is that maximum and the width gives 3000 bins over it (D-152).
+        assert ds.attrs["max_anomaly"] == pytest.approx(float(da.max()), rel=1e-6)
+        assert ds.attrs["precision"] == pytest.approx(2 * float(da.max()) / 3000, rel=1e-6)
+
+
+def _capture_warnings(fn):
+    """Run ``fn`` and return (its result, the marEx WARNING messages it logged)."""
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture(level=logging.WARNING)
+    marEx_logger = logging.getLogger("marEx")
+    marEx_logger.addHandler(handler)
+    try:
+        return fn(), records
+    finally:
+        marEx_logger.removeHandler(handler)
+
+
+def _outlier_field(n_time=1095, storm=400.0, seed=4):
+    """A field whose upper extreme is one far outlier, so the per-cell estimate binds."""
+    da = _field(n_time=n_time, n_y=6, n_x=6, seed=seed)
+    data = da.values.copy()
+    data[100, 2, 2] = storm
+    return da.copy(data=data).chunk({"time": 200, "lat": 3, "lon": 3})
+
+
+class TestDefaultGeometry:
+    """D-152: the range comes from the requested tail, the default width gives 3000 bins."""
+
+    def test_the_upper_tail_range_is_the_data_maximum(self):
+        da = _field(scale=3.0, offset=1.0)  # skewed in sign: max and -min differ
+        precision, max_anomaly = resolve_bin_spec(da, None, None)
+        assert max_anomaly == pytest.approx(float(da.max()))
+        assert precision == pytest.approx(2 * max_anomaly / 3000)
+
+    def test_the_lower_tail_range_is_minus_the_data_minimum(self):
+        da = _field(scale=3.0, offset=1.0)
+        precision, max_anomaly = resolve_bin_spec(da, None, None, tail="lower")
+        assert max_anomaly == pytest.approx(-float(da.min()))
+        assert precision == pytest.approx(2 * max_anomaly / 3000)
+
+    def test_the_per_cell_estimate_lowers_an_outlier_range(self):
+        da = _outlier_field()
+        spec = _derive_bin_spec(da, None, None, None, 95, "upper", "time")
+        assert spec.mode == "estimated"
+        assert spec.cap == pytest.approx(400.0)
+        assert spec.max_anomaly < 100  # far below the single 400 outlier
+        assert spec.n_bins == pytest.approx(3000, abs=1)
+
+    def test_a_gaussian_field_keeps_the_data_maximum(self):
+        """3 x (mean + 1.645 std) lies past a normal sample's own maximum: the estimate never binds."""
+        da = _field(scale=2.0)
+        spec = _derive_bin_spec(da, None, None, None, 95, "upper", "time")
+        assert spec.mode == "data"
+        assert spec.max_anomaly == pytest.approx(float(da.max()))
+
+    def test_a_large_unit_field_gets_3000_bins_whatever_its_units(self):
+        da = _field(scale=1000.0)  # pressure-like, in Pa
+        precision, max_anomaly = resolve_bin_spec(da, None, None)
+        assert 2 * max_anomaly / precision == pytest.approx(3000)
+        assert max_anomaly > 2000
+
+
+class TestPrecisionOnly:
+    """With only ``precision``, the range is still derived and the bin count follows."""
+
+    def test_the_bin_count_follows_the_derived_range(self):
+        da = _field(scale=3.0)
+        precision, max_anomaly = resolve_bin_spec(da, 0.01, None)
+        assert precision == 0.01
+        assert max_anomaly == pytest.approx(float(da.max()))
+
+    def test_more_than_10000_bins_warns(self):
+        da = _field(scale=3.0)  # max ~12: 0.001 needs ~24000 bins
+        (precision, _), records = _capture_warnings(lambda: resolve_bin_spec(da, 0.001, None))
+        assert precision == 0.001
+        assert any("10000 bins" in m for m in records), records
+
+    def test_fewer_than_10000_bins_is_silent(self):
+        _, records = _capture_warnings(lambda: resolve_bin_spec(_field(scale=3.0), 0.01, None))
+        assert not any("10000 bins" in m for m in records), records
+
+    def test_more_than_65000_bins_is_rejected_before_any_histogram(self):
+        with pytest.raises(ConfigurationError, match="above the 65000"):
+            resolve_bin_spec(_field(scale=1000.0), 0.01, None)
+
+
+class TestRegrow:
+    """An estimated range that a threshold reaches is regrown to the data's extreme, exactly."""
+
+    @staticmethod
+    def _run(da, monkeypatch, safety, **kwargs):
+        monkeypatch.setattr(base, "_RANGE_SAFETY", safety)
+        used = []
+        extremes, thresholds = base.identify_extremes(
+            da, method_extreme="global_percentile", threshold_percentile=99, bin_spec_out=used, **kwargs
+        )
+        return extremes.compute(), thresholds.compute(), used[0]
+
+    def test_a_saturated_estimate_is_regrown_and_matches_a_run_over_the_cap(self, monkeypatch):
+        da = _outlier_field()
+        data = da.values.copy()
+        data[::40, 4, 4] = 150.0  # 2.5 % of one cell's days: its p99 IS 150, past a 0.5x estimate
+        da = da.copy(data=data).chunk({"time": 200, "lat": 3, "lon": 3})
+        (ext, thr, spec), records = _capture_warnings(lambda: self._run(da, monkeypatch, 0.5))
+        assert spec.mode == "data" and spec.max_anomaly == pytest.approx(400.0)
+        assert any("recomputing the thresholds" in m for m in records), records
+        # The reference: the same bin width over the cap from the start (estimate disabled).
+        ext_ref, thr_ref, spec_ref = self._run(da, monkeypatch, 1e9, precision=spec.precision)
+        assert spec_ref == spec
+        xr.testing.assert_identical(thr, thr_ref)
+        xr.testing.assert_identical(ext, ext_ref)
+
+    def test_an_unsaturated_estimate_is_bit_identical_to_the_cap(self, monkeypatch):
+        """At a fixed width the interior edges are the same floats whatever the range, so the range
+        only matters where a threshold reaches its edge (the premise of the regrow)."""
+        da = _outlier_field()
+        ext, thr, spec = self._run(da, monkeypatch, 3.0)
+        assert spec.mode == "estimated" and spec.max_anomaly < 100
+        ext_ref, thr_ref, spec_ref = self._run(da, monkeypatch, 1e9, precision=spec.precision)
+        assert spec_ref.mode == "data" and spec_ref.max_anomaly == pytest.approx(400.0)
+        xr.testing.assert_identical(thr, thr_ref)
+        xr.testing.assert_identical(ext, ext_ref)
+
+    def test_a_seasonal_end_bin_crossing_below_the_inner_edge_is_regrown(self, monkeypatch):
+        """The 2-D path interpolates between bin CENTRES, so a quantile crossing in the clipped end
+        bin can land below that bin's inner edge (falsifier finding 3). Here every window's end-bin
+        mass is 2/30 of its samples, between (1-q) and 2(1-q) at q=0.95, so no threshold passes the
+        inner edge: only a centre-based bound sees the saturation."""
+        n_years = 30
+        time = pd.date_range("2001-01-01", "2030-12-31", freq="D")
+        rng = np.random.default_rng(7)
+        data = rng.normal(0.0, 1.0, size=(len(time), 4, 4)).astype(np.float32)
+        data[time.year < 2003] = 50.0  # two of thirty years: the same storm mass in every window
+        da = xr.DataArray(
+            data,
+            dims=("time", "lat", "lon"),
+            coords={"time": time, "lat": np.arange(4.0), "lon": np.arange(4.0)},
+            name="dat_anomaly",
+        ).chunk({"time": 730})
+        assert len(set(time.year)) == n_years
+
+        def run(safety, **kwargs):
+            monkeypatch.setattr(base, "_RANGE_SAFETY", safety)
+            used = []
+            extremes, thresholds = base.identify_extremes(
+                da, method_extreme="seasonal_percentile", threshold_percentile=95, bin_spec_out=used, **kwargs
+            )
+            return extremes.compute(), thresholds.compute(), used[0]
+
+        ext, thr, spec = run(0.3)
+        assert spec.mode == "data", spec  # regrown from the estimate to the cap
+        assert float(thr.min()) > 40  # the storms, not the clipped estimate (~7)
+        ext_ref, thr_ref, spec_ref = run(1e9, precision=spec.precision)
+        assert spec_ref == spec
+        xr.testing.assert_identical(thr, thr_ref)
+        xr.testing.assert_identical(ext, ext_ref)
+
+
+class TestDeprecatedArguments:
+    def test_max_anomaly_warns_and_still_pins(self):
+        da = _field(scale=15.0, seed=3)
+        with pytest.warns(FutureWarning, match="`max_anomaly` is deprecated"):
+            with pytest.raises(ConfigurationError, match="exceed expected range"):
+                marEx.extremes.identify(da, method="global_percentile", precision=0.01, max_anomaly=5.0, dimensions=DIMENSIONS)
+
+    def test_n_bins_warns_and_replaces_the_3000_bin_target(self):
+        da = _field(scale=3.0)
+        with pytest.warns(FutureWarning, match="`n_bins` is deprecated"):
+            ds = marEx.extremes.identify(da, method="global_percentile", n_bins=500, dimensions=DIMENSIONS)
+        assert 2 * ds.attrs["max_anomaly"] / ds.attrs["precision"] == pytest.approx(500)
+
+    def test_one_sided_max_anomaly_keeps_the_1000_bin_invariant(self):
+        assert resolve_bin_spec(_field(), None, 40.0) == (pytest.approx(0.08), 40.0)
+
+    def test_the_default_range_is_not_pinned(self):
+        """Only a caller-supplied range turns an out-of-range threshold into an error (D-138 r3)."""
+        da = _field(scale=15.0, seed=3)
+        ds = marEx.extremes.identify(da, method="global_percentile", threshold_percentile=95, dimensions=DIMENSIONS).compute()
+        assert ds.attrs["max_anomaly"] > 40
 
     def test_exact_percentile_reports_no_bin_geometry(self):
         """Nothing is binned on that path, so nothing is claimed about bins."""
@@ -135,6 +326,14 @@ class TestExactCompatibility:
     def test_explicit_max_anomaly_is_still_rejected_with_exact(self):
         with pytest.raises(ConfigurationError, match="Parameter 'max_anomaly' cannot be used"):
             marEx.extremes.identify_extremes(_field(n_time=400), method_percentile="exact", max_anomaly=10.0)
+
+    def test_precision_is_rejected_with_exact_through_identify(self):
+        """aec73e9's `_extremes_core` replaced the caller's values with None on the exact path,
+        so `identify` and `preprocess_data` ignored `precision` silently instead of raising."""
+        with pytest.raises(ConfigurationError, match="Parameter 'precision' cannot be used"):
+            marEx.extremes.identify(
+                _field(n_time=400), method="global_percentile", method_percentile="exact", precision=0.02, dimensions=DIMENSIONS
+            )
 
     def test_the_historical_default_values_are_now_rejected_too(self):
         """0.01 and 5.0 stopped being defaults, so passing them IS an explicit request."""
@@ -231,9 +430,13 @@ class TestLogging:
 
         handler = _Capture(level=logging.INFO)
         marEx_logger = logging.getLogger("marEx")
+        # A `quiet=True` run elsewhere in the session leaves the logger at WARNING: pin INFO here.
+        previous_level = marEx_logger.level
+        marEx_logger.setLevel(logging.INFO)
         marEx_logger.addHandler(handler)
         try:
             resolve_bin_spec(_field(scale=10.0), None, None, 1000)
         finally:
             marEx_logger.removeHandler(handler)
+            marEx_logger.setLevel(previous_level)
         assert any("Histogram bins derived from the data" in m for m in records), records

@@ -47,7 +47,7 @@ def preprocess_data(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: Optional[float] = None,
     max_anomaly: Optional[float] = None,
-    n_bins: int = 1000,
+    n_bins: Optional[int] = None,
     dask_chunks: Optional[Dict[str, int]] = None,
     compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
     scratch_dir: Optional[str] = None,
@@ -115,14 +115,17 @@ def preprocess_data(
     method_percentile
         ``'approximate'`` (default) uses a histogram-based quantile; ``'exact'``
         computes a true quantile per cell.
-    precision, max_anomaly, n_bins
-        Histogram bin geometry for ``method_percentile='approximate'``.
-        ``max_anomaly`` is the half-width of the binned range and ``precision`` the
-        bin width; ``n_bins`` (default 1000) derives whichever of the two is left
-        unset. With both unset the range is taken from the data, which is what makes
-        the defaults work on a variable that is not an SST anomaly in kelvin --
-        precipitation in mm/day, or pressure in Pa. Supplying ``precision=0.01``
-        alone reproduces the historical ``+/-5.0`` range exactly.
+    precision
+        Histogram bin width for ``method_percentile='approximate'``, in the variable's
+        units. The binned range is derived from the data, so the default works for any
+        variable and units: the requested tail's own extreme is a hard cap, a per-cell
+        normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
+        when that extreme is an outlier, and a threshold that reaches the edge regrows the
+        range and is recomputed. Omitted, ``precision`` gives 3000 bins over that range;
+        given, the bin count follows (a warning above 10000 bins, an error above 65000).
+    max_anomaly, n_bins
+        Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
+        threshold then raises); ``n_bins`` replaces the 3000-bin target.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
         An integer time entry is a step count, and with one, extra dimensions on

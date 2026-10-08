@@ -7,6 +7,9 @@ extreme-detection parameters and delegates to one of the concrete methods
 ``method_extreme`` argument.
 """
 
+import warnings
+from dataclasses import dataclass, replace
+from statistics import NormalDist
 from typing import Dict, Literal, Optional, Tuple
 
 import dask
@@ -20,6 +23,7 @@ from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import configure_logging, get_logger
 from .global_percentile import _identify_extremes_constant
+from .histogram import _RangeSaturated
 from .seasonal_percentile import _identify_extremes_seasonal
 
 # Get module logger
@@ -63,14 +67,75 @@ def resolve_window_spatial(
     return window_spatial
 
 
-# Bin geometry used when neither `precision` nor `max_anomaly` is supplied and the data
-# gives no usable scale (all-NaN, or constant). These are the historical SST-calibrated
-# defaults, in kelvin.
+# Bin geometry used when the data gives no usable scale (all-NaN, or constant). These are the
+# historical SST-calibrated defaults, in kelvin.
 _FALLBACK_PRECISION = 0.01
 _FALLBACK_MAX_ANOMALY = 5.0
 # A derived bin wider than this fraction of the anomaly std triggers the coarse-bin warning in
-# `resolve_bin_spec` (D-142). n_bins=1000 reaches it once max|anomaly| exceeds 15 std.
+# `resolve_bin_spec` (D-142: bins of 0.0095 std over-flagged a seasonal p90 mask by 1.5 % against
+# exact, bins of 0.088 std by 10 %).
 _COARSE_BIN_FRACTION_OF_STD = 0.03
+# Bin count over the derived range when `precision` is not given (D-152). The range is the
+# tail's own estimate, so the bins land where thresholds can be: 0.25 deg OSTIA p95 gets
+# +/-21.04 K, i.e. precision 0.014 K.
+_TARGET_N_BINS = 3000
+# Bin count used with the deprecated one-sided `max_anomaly` pass (the historical invariant).
+_DEFAULT_N_BINS = 1000
+# Above this many bins the histogram stage gets markedly slower (and, on the global path, its
+# tiles smaller and more numerous), so say so.
+_WARN_N_BINS = 10000
+# Ceiling on any bin count. The bin index is uint16 and n_bins=65535 already realises 65536 bins
+# (NEXT Discovered), so stay clear of the edge.
+_MAX_DERIVED_N_BINS = 65000
+# Safety factor on the per-cell normal estimate of the most extreme threshold,
+# max over cells of (mean + z_p * std). Measured on 0.25 deg OSTIA p95 seasonal (D-152):
+# the true largest threshold is 2.19x that estimate (variance concentrated in one season,
+# e.g. at the ice edge). The estimate only ever LOWERS the range below the data's own
+# extreme, and a range that turns out too narrow is regrown (see `_regrow_bin_spec`).
+_RANGE_SAFETY = 3.0
+
+
+@dataclass(frozen=True)
+class BinSpec:
+    """The approximate path's histogram geometry, and where it came from.
+
+    ``cap`` is the data's own most extreme value on the requested tail's side
+    (``max`` for ``tail='upper'``, ``-min`` for ``'lower'``). No threshold can lie
+    beyond it, because a threshold is a quantile of those very samples.
+
+    ``mode`` says what a threshold in the outermost bin means:
+
+    * ``'pinned'``: the caller set the range (deprecated ``max_anomaly``); samples
+      past it were clipped, so the threshold is meaningless and it raises.
+    * ``'estimated'``: the range is the per-cell normal estimate, below ``cap``;
+      samples past it were clipped, so the bins are regrown to ``cap`` and the
+      threshold recomputed (once).
+    * ``'data'``: the range is ``cap`` itself, so nothing on the tail's side was
+      clipped; reaching the end bin only means too few samples, and it warns.
+    """
+
+    precision: float
+    max_anomaly: float
+    cap: float
+    mode: Literal["pinned", "estimated", "data"]
+
+    @property
+    def n_bins(self) -> int:
+        """Number of bins spanning ``[-max_anomaly, max_anomaly]`` at ``precision``."""
+        return int(round(2.0 * self.max_anomaly / self.precision))
+
+
+def _warn_deprecated_bin_args(max_anomaly: Optional[float], n_bins: Optional[int]) -> None:
+    """``max_anomaly`` and ``n_bins`` are no longer part of the public interface (D-152)."""
+    for name, value in (("max_anomaly", max_anomaly), ("n_bins", n_bins)):
+        if value is not None:
+            warnings.warn(
+                f"`{name}` is deprecated and will be removed: the histogram range is now derived from the "
+                "data (the requested tail's side, regrown if a threshold reaches its edge), and `precision` "
+                "alone sets the bin width.",
+                FutureWarning,
+                stacklevel=3,
+            )
 
 
 def reject_empty_series(da: xr.DataArray) -> None:
@@ -107,45 +172,28 @@ def reject_empty_series(da: xr.DataArray) -> None:
     )
 
 
-def resolve_bin_spec(
+def _derive_bin_spec(
     da: xr.DataArray,
     precision: Optional[float],
     max_anomaly: Optional[float],
-    n_bins: int,
-) -> Tuple[float, float]:
-    """Resolve the histogram bin width and range, deriving whatever was not supplied.
-
-    ``precision=0.01, max_anomaly=5.0`` are calibrated for SST anomalies in kelvin.
-    On precipitation (mm/day, anomalies of tens) that range clips nearly everything
-    into the end bins; on pressure it is off by three orders of magnitude. So the
-    range is derived from the data when the caller does not state it.
-
-    ``n_bins`` is the invariant whenever exactly one of the two is given, which is
-    what makes the old defaults a fixed point: ``precision=0.01`` alone still spans
-    ``+/-5.0``, because ``0.01 * 1000 / 2 == 5.0``.
-
-    With NEITHER supplied, the range comes from the data: one fused
-    ``dask.compute(min, max)``, then ``max(|min|, |max|)``. **That is a full pass over
-    the anomaly.** In ``persist`` mode the anomaly is already staged at the seam, so
-    it is cheap; in ``lazy`` mode it walks the whole anomaly graph, exactly like the
-    NaN-mask pass the 2-D path already makes. It is skipped entirely for
-    ``method_percentile='exact'``, which never builds a histogram.
-    """
+    n_bins: Optional[int] = None,
+    threshold_percentile: Optional[float] = None,
+    tail: Literal["upper", "lower"] = "upper",
+    time_dim: Optional[str] = None,
+) -> BinSpec:
+    """Resolve the histogram geometry for the approximate path; see :func:`resolve_bin_spec`."""
     reject_empty_series(da)
 
-    if precision is not None and max_anomaly is not None:
-        return float(precision), float(max_anomaly)
-
-    if n_bins < 2:
+    if n_bins is not None and n_bins < 2:
         raise ConfigurationError(
             f"n_bins must be at least 2, got {n_bins}",
             details="n_bins sets the number of histogram bins spanning [-max_anomaly, +max_anomaly]",
-            suggestions=["Use the default n_bins=1000", "Increase n_bins for a finer threshold estimate"],
+            suggestions=["Omit n_bins and set `precision` instead", "Increase n_bins for a finer threshold estimate"],
             context={"n_bins": n_bins},
         )
     # The bin index is stored as uint16 (`extremes/histogram.py`'s flox expected_groups),
     # so a count above 65535 would wrap silently rather than fail.
-    if n_bins > 65535:
+    if n_bins is not None and n_bins > 65535:
         raise ConfigurationError(
             f"n_bins must not exceed 65535, got {n_bins}",
             details=(
@@ -155,37 +203,159 @@ def resolve_bin_spec(
             context={"n_bins": n_bins, "max_supported": 65535},
         )
 
-    if max_anomaly is None and precision is None:
-        # The std rides in the same fused pass: it only feeds the coarse-bin warning below.
-        lo, hi, spread = dask.compute(da.min(), da.max(), da.std())
-        scale = max(abs(float(lo)), abs(float(hi)))
-        if not np.isfinite(scale) or scale <= 0:
-            logger.warning(
-                f"Could not derive a histogram range from the data (max|anomaly|={scale}); "
-                f"falling back to precision={_FALLBACK_PRECISION}, max_anomaly={_FALLBACK_MAX_ANOMALY}. "
-                "Pass max_anomaly explicitly if this field is not an SST-like anomaly in kelvin."
-            )
-            return _FALLBACK_PRECISION, _FALLBACK_MAX_ANOMALY
-        max_anomaly = scale
-        precision = 2.0 * max_anomaly / n_bins
-        spread = float(spread)
-        if np.isfinite(spread) and spread > 0 and precision > _COARSE_BIN_FRACTION_OF_STD * spread:
-            # One outlier sets the range, so it sets every bin. Measured (D-142): bins of 0.0095 std
-            # over-flagged a 90th-percentile seasonal mask by 1.5 % relative to exact, bins of 0.088 std
-            # by 10 %. Warn only; the derived value is kept.
-            logger.warning(
-                f"Derived histogram bins are coarse: precision={precision:.4g} is {precision / spread:.3f} x the "
-                f"anomaly std ({spread:.4g}), because max|anomaly|={max_anomaly:.4g} is {max_anomaly / spread:.1f} std. "
-                "Approximate thresholds are then accurate only to this bin width. Pass `precision` "
-                "(e.g. ~0.01 x the std) or a larger `n_bins` if that matters for your variable."
-            )
-    elif max_anomaly is None:
-        max_anomaly = precision * n_bins / 2.0
-    else:
-        precision = 2.0 * max_anomaly / n_bins
+    # A caller-set range (deprecated): honoured exactly, as before, and a saturated threshold raises.
+    if max_anomaly is not None:
+        if precision is None:
+            precision = 2.0 * max_anomaly / (n_bins or _DEFAULT_N_BINS)
+        spec = BinSpec(float(precision), float(max_anomaly), float(max_anomaly), "pinned")
+        _warn_on_bin_count(spec, precision_given=True)
+        return spec
 
-    logger.info(f"Histogram bins derived from the data: precision={precision:.6g}, max_anomaly={max_anomaly:.6g}")
-    return float(precision), float(max_anomaly)
+    # One fused pass: the global extremes (the tail's hard cap), the global std (coarse-bin
+    # warning) and, when the percentile is known, the per-cell normal estimate of the most
+    # extreme threshold, max over cells of (mean + z * std) along time. The per-cell maps are
+    # reduced to a scalar inside the graph, so only four numbers come back.
+    estimate_wanted = threshold_percentile is not None and time_dim is not None and time_dim in da.dims
+    reductions = [da.min(), da.max(), da.std()]
+    if estimate_wanted:
+        z = NormalDist().inv_cdf(min(max(threshold_percentile / 100.0, 1e-9), 1 - 1e-9))
+        cell_threshold = da.mean(time_dim) + z * da.std(time_dim)
+        reductions.append(cell_threshold.max() if tail == "upper" else -cell_threshold.min())
+    computed = dask.compute(*reductions)
+    lo, hi, spread = (float(v) for v in computed[:3])
+    cell_extreme = float(computed[3]) if estimate_wanted else np.nan
+
+    # Every threshold is a quantile of samples on its own side, so the side's extreme bounds it.
+    cap = hi if tail == "upper" else -lo
+    if not np.isfinite(cap) or cap <= 0:
+        # Nothing on the tail's side of zero: every threshold sits on the guard rail, so any
+        # finite range will do. Use the other side's scale, then the historical defaults.
+        cap = max(abs(lo), abs(hi))
+    if not np.isfinite(cap) or cap <= 0:
+        logger.warning(
+            f"Could not derive a histogram range from the data (min={lo}, max={hi}); "
+            f"falling back to precision={_FALLBACK_PRECISION}, max_anomaly={_FALLBACK_MAX_ANOMALY}."
+        )
+        return BinSpec(_FALLBACK_PRECISION, _FALLBACK_MAX_ANOMALY, _FALLBACK_MAX_ANOMALY, "data")
+
+    estimate = _RANGE_SAFETY * cell_extreme
+    if np.isfinite(estimate) and 0 < estimate < cap:
+        max_anomaly, mode = estimate, "estimated"
+    else:
+        max_anomaly, mode = cap, "data"
+
+    precision_given = precision is not None
+    if precision is None:
+        precision = 2.0 * max_anomaly / (n_bins or _TARGET_N_BINS)
+    elif 2.0 * max_anomaly / precision > _MAX_DERIVED_N_BINS:
+        raise ConfigurationError(
+            f"precision={precision:.4g} needs {2.0 * max_anomaly / precision:.0f} histogram bins over the derived "
+            f"range +/-{max_anomaly:.4g}, above the {_MAX_DERIVED_N_BINS} the uint16 bin index allows",
+            details=(
+                f"The range is derived from the data (the {tail} tail's extreme, or a per-cell estimate of the "
+                f"largest threshold below it), and the bin count is 2 * range / precision."
+            ),
+            suggestions=[
+                f"Use precision >= {2.0 * max_anomaly / _MAX_DERIVED_N_BINS:.3g}",
+                f"Omit precision ({_TARGET_N_BINS} bins over the derived range)",
+            ],
+            context={"precision": precision, "max_anomaly": max_anomaly, "max_n_bins": _MAX_DERIVED_N_BINS},
+        )
+    spec = BinSpec(float(precision), float(max_anomaly), float(cap), mode)
+    _warn_on_bin_count(spec, precision_given)
+
+    # An explicit `precision` is the caller's choice and is never second-guessed.
+    if not precision_given and np.isfinite(spread) and spread > 0 and spec.precision > _COARSE_BIN_FRACTION_OF_STD * spread:
+        hint = (
+            f" The {tail} tail's extreme ({cap:.4g}) is {cap / spread:.0f} std: check for unmasked fill values."
+            if cap > 50 * spread
+            else ""
+        )
+        logger.warning(
+            f"Derived histogram bins are coarse: precision={spec.precision:.4g} is {spec.precision / spread:.3f} x the "
+            f"anomaly std ({spread:.4g}) over the range +/-{spec.max_anomaly:.4g}. Approximate thresholds are then "
+            f"accurate only to this bin width.{hint} Pass a smaller `precision` (e.g. ~0.01 x the std) if that "
+            "matters for your variable."
+        )
+    logger.info(
+        f"Histogram bins derived from the data: precision={spec.precision:.6g}, max_anomaly={spec.max_anomaly:.6g} "
+        f"({spec.n_bins} bins; range {spec.mode}, {tail}-tail extreme {cap:.6g})"
+    )
+    return spec
+
+
+def _warn_on_bin_count(spec: BinSpec, precision_given: bool) -> None:
+    if spec.n_bins > _WARN_N_BINS:
+        cause = "The requested precision" if precision_given else "This geometry"
+        logger.warning(
+            f"{cause} gives {spec.n_bins} histogram bins (precision={spec.precision:.4g} over "
+            f"+/-{spec.max_anomaly:.4g}). Above {_WARN_N_BINS} bins the threshold stage is markedly slower and, "
+            "for global_percentile, needs more memory per cell. A coarser `precision` reduces the bin count."
+        )
+
+
+def _regrow_bin_spec(spec: BinSpec) -> BinSpec:
+    """Widen an ``'estimated'`` range to the data's own extreme after a threshold reached its edge.
+
+    The bin width is kept, so every threshold that was inside the old range is reproduced
+    bit-for-bit (the positive edges are ``arange(-p, max + p, p)``, the same floats at the same
+    index whatever ``max``), and the saturated ones become exact quantiles. Past ``cap`` nothing
+    is clipped, so one regrow is final. Only above the uint16 ceiling is the width widened.
+    """
+    regrown = replace(spec, max_anomaly=spec.cap, mode="data")
+    if regrown.n_bins > _MAX_DERIVED_N_BINS:
+        widened = 2.0 * spec.cap / _MAX_DERIVED_N_BINS
+        logger.warning(
+            f"Keeping precision={spec.precision:.4g} over +/-{spec.cap:.4g} would need {regrown.n_bins} bins; "
+            f"widened to precision={widened:.4g} ({_MAX_DERIVED_N_BINS} bins)."
+        )
+        regrown = replace(regrown, precision=widened)
+    else:
+        _warn_on_bin_count(regrown, precision_given=False)
+    return regrown
+
+
+def resolve_bin_spec(
+    da: xr.DataArray,
+    precision: Optional[float],
+    max_anomaly: Optional[float],
+    n_bins: Optional[int] = None,
+    *,
+    threshold_percentile: Optional[float] = None,
+    tail: Literal["upper", "lower"] = "upper",
+    time_dim: Optional[str] = None,
+) -> Tuple[float, float]:
+    """Resolve the histogram bin width and range, deriving whatever was not supplied (D-152).
+
+    Only ``precision`` is a public input. The range ``max_anomaly`` (the half-width of the
+    symmetric bins) is derived from the data in whatever units it is in:
+
+    1. **The tail's own extreme is a hard cap.** A threshold is a quantile of the samples,
+       so it can never pass ``max(anomaly)`` (``tail='upper'``) or ``-min(anomaly)``
+       (``'lower'``). The other side may be clipped freely: those samples still count in
+       the tail's CDF.
+    2. **A per-cell normal estimate lowers it** when that extreme is far out (heavy tails, a
+       single storm): ``3 * max_cells(mean + z_p * std)`` along time, with ``z_p`` the normal
+       quantile of ``threshold_percentile``. The factor 3 covers seasonal variance and heavy
+       tails (on OSTIA p95 the largest threshold is 2.19x the bare estimate, D-152).
+    3. **A threshold that still reaches the end bin regrows the range** to the cap at the same
+       ``precision`` and recomputes it (once; :func:`_regrow_bin_spec`), so an estimate that
+       is too low costs time, never a wrong threshold.
+
+    ``precision`` defaults to ``2 * max_anomaly / 3000``. Passed explicitly, the bin count
+    follows the derived range; above 10000 bins it warns, and above 65000 (the uint16 bin
+    index) it raises. The deprecated ``max_anomaly`` pins the range as before, and the
+    deprecated ``n_bins`` replaces the 3000-bin target.
+
+    Deriving costs one fused ``dask.compute`` -- a full pass over the anomaly, cheap when it is
+    already staged (``persist``), a walk of the anomaly graph otherwise. It is skipped for
+    ``method_percentile='exact'``, which builds no histogram. ``threshold_percentile`` and
+    ``time_dim`` enable step 2; without them the range is the cap.
+
+    Returns ``(precision, max_anomaly)``.
+    """
+    spec = _derive_bin_spec(da, precision, max_anomaly, n_bins, threshold_percentile, tail, time_dim)
+    return spec.precision, spec.max_anomaly
 
 
 def identify_extremes(
@@ -199,14 +369,14 @@ def identify_extremes(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: Optional[float] = None,
     max_anomaly: Optional[float] = None,
-    n_bins: int = 1000,
+    n_bins: Optional[int] = None,
     verbose: Optional[bool] = None,
     quiet: Optional[bool] = None,
     materialiser: Optional[Materialiser] = None,
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
-    range_pinned: Optional[bool] = None,
+    bin_spec_out: Optional[list] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events exceeding a percentile threshold using specified method.
@@ -232,25 +402,23 @@ def identify_extremes(
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, optional
-        Histogram bin width for the approximate method. Derived from
-        ``max_anomaly`` and ``n_bins`` when omitted.
+        Histogram bin width for the approximate method, in the variable's units. The
+        binned range is derived from the data (the requested tail's extreme, lowered by a
+        per-cell normal estimate of the largest threshold and regrown if a threshold
+        reaches its edge; see ``resolve_bin_spec``). Omitted, it is ``range / 1500``
+        (3000 bins over +/- range). Warns above 10000 bins; raises above 65000.
     max_anomaly : float, optional
-        Half-width of the binned range. Derived from the data when omitted (and
-        from ``precision`` and ``n_bins`` when only ``precision`` is given).
-    n_bins : int, default=1000
-        Number of histogram bins spanning ``[-max_anomaly, +max_anomaly]``. Used to
-        derive whichever of the two above was not supplied.
+        Deprecated. Pins the half-width of the binned range; a threshold reaching it raises.
+    n_bins : int, optional
+        Deprecated. Replaces the 3000-bin target when ``precision`` is omitted.
     tail : {'upper', 'lower'}, default='upper'
         Which side of the distribution counts as extreme. ``'upper'`` flags
         ``data >= threshold``, ``'lower'`` flags ``data <= threshold``. The
         threshold is the ``threshold_percentile``-th percentile in both cases, so
         the coldest 5 % is ``threshold_percentile=5, tail='lower'``.
-    range_pinned : bool, optional
-        Whether the histogram range was set by the caller. A threshold in the outermost
-        bin raises when it was, and only warns when the range came from the data. Read
-        from ``precision``/``max_anomaly`` when omitted; callers that resolve the bins
-        before calling pass it explicitly.
-
+    bin_spec_out : list, optional
+        Internal. When given, the :class:`BinSpec` actually used (after any regrow; ``None``
+        on the exact path) is appended, so a caller can record it in its output attributes.
     Returns
     -------
     tuple
@@ -369,6 +537,7 @@ def identify_extremes(
         configure_logging(verbose=verbose, quiet=quiet)
 
     logger.debug(f"Identifying extremes using {method_extreme} method - {threshold_percentile}th percentile")
+    _warn_deprecated_bin_args(max_anomaly, n_bins)
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
@@ -580,50 +749,7 @@ def identify_extremes(
             },
         )
 
-    # Resolve the bin geometry once, here, and hand concrete numbers down. Skipped for
-    # the exact path, which builds no histogram -- deriving there would cost a full pass
-    # over the anomaly for nothing, and would defeat the sentinel check above.
-    # `range_pinned` is passed by a caller that has already resolved the bins (and so can no
-    # longer tell from `precision`/`max_anomaly` whether the user set them); otherwise read it here.
-    if range_pinned is None:
-        range_pinned = precision is not None or max_anomaly is not None
-    if method_percentile != "exact":
-        precision, max_anomaly = resolve_bin_spec(da, precision, max_anomaly, n_bins)
-
-    if method_extreme == "global_percentile":
-        logger.debug(f"Global extreme method - method_percentile={method_percentile}")
-        return _identify_extremes_constant(
-            da,
-            threshold_percentile,
-            method_percentile,
-            dimensions,
-            precision,
-            max_anomaly,
-            materialiser,
-            threshold_label,
-            tail=tail,
-            range_pinned=range_pinned,
-        )
-    elif method_extreme == "seasonal_percentile":
-        logger.debug(f"Seasonal percentile method - window_days={window_days}, method_percentile={method_percentile}")
-
-        return _identify_extremes_seasonal(
-            da,
-            threshold_percentile,
-            window_days,
-            window_spatial,
-            method_percentile,
-            dimensions,
-            coordinates,
-            precision,
-            max_anomaly,
-            materialiser,
-            threshold_label,
-            resolved_cycle,
-            tail=tail,
-            range_pinned=range_pinned,
-        )
-    else:
+    if method_extreme not in ("global_percentile", "seasonal_percentile"):
         logger.error(f"Unknown extreme method: {method_extreme}")
         raise ConfigurationError(
             f"Unknown extreme method '{method_extreme}'",
@@ -637,3 +763,67 @@ def identify_extremes(
                 "valid_methods": ["global_percentile", "seasonal_percentile"],
             },
         )
+
+    # Resolve the bin geometry once, here, and hand concrete numbers down. Skipped for
+    # the exact path, which builds no histogram -- deriving there would cost a full pass
+    # over the anomaly for nothing, and would defeat the sentinel check above.
+    spec: Optional[BinSpec] = None
+    if method_percentile != "exact":
+        spec = _derive_bin_spec(da, precision, max_anomaly, n_bins, threshold_percentile, tail, dimensions["time"])
+
+    def _dispatch(spec: Optional[BinSpec]) -> Tuple[xr.DataArray, xr.DataArray]:
+        bin_precision = None if spec is None else spec.precision
+        bin_max_anomaly = None if spec is None else spec.max_anomaly
+        range_mode = "pinned" if spec is None else spec.mode
+        if method_extreme == "global_percentile":
+            logger.debug(f"Global extreme method - method_percentile={method_percentile}")
+            return _identify_extremes_constant(
+                da,
+                threshold_percentile,
+                method_percentile,
+                dimensions,
+                bin_precision,
+                bin_max_anomaly,
+                materialiser,
+                threshold_label,
+                tail=tail,
+                range_mode=range_mode,
+            )
+        logger.debug(f"Seasonal percentile method - window_days={window_days}, method_percentile={method_percentile}")
+        return _identify_extremes_seasonal(
+            da,
+            threshold_percentile,
+            window_days,
+            window_spatial,
+            method_percentile,
+            dimensions,
+            coordinates,
+            bin_precision,
+            bin_max_anomaly,
+            materialiser,
+            threshold_label,
+            resolved_cycle,
+            tail=tail,
+            range_mode=range_mode,
+        )
+
+    try:
+        result = _dispatch(spec)
+    except _RangeSaturated as saturated:
+        # The estimated range was too narrow somewhere: regrow it to the data's own extreme at
+        # the same bin width and recompute (D-152). Nothing past that extreme exists, so the
+        # second attempt cannot saturate this way again. The first attempt staged nothing under
+        # `threshold_label` (thresholds are staged only after the bounds check), so the label
+        # is free; its anonymous pin is released with it.
+        regrown = _regrow_bin_spec(spec)
+        logger.warning(
+            f"A threshold reached the estimated histogram range +/-{spec.max_anomaly:.4g} "
+            f"({saturated.reached:.4g}); recomputing the thresholds over the data's {tail}-tail extreme "
+            f"+/-{regrown.max_anomaly:.4g} ({regrown.n_bins} bins, precision={regrown.precision:.4g})."
+        )
+        spec = regrown
+        result = _dispatch(spec)
+
+    if bin_spec_out is not None:
+        bin_spec_out.append(spec)
+    return result

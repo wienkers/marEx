@@ -153,7 +153,8 @@ class TestCoarseDerivedBins:
         with _CaptureMarExLogs() as captured:
             precision, max_anomaly = resolve_bin_spec(da, None, None, 1000)
         assert any("Derived histogram bins are coarse" in m for m in captured.messages), captured.messages
-        observed = float(np.abs(da).max())
+        # The range is the upper tail's own extreme (D-152), not max|anomaly|.
+        observed = float(da.max())
         assert max_anomaly == pytest.approx(observed)
         assert precision == pytest.approx(2 * observed / 1000)
 

@@ -489,16 +489,15 @@ Extreme Detection Parameters
   Method for percentile calculation
 
 **precision** : float, optional
-  Histogram bin width for the approximate percentile calculation. Derived from
-  ``max_anomaly`` and ``n_bins`` when omitted.
+  Histogram bin width for the approximate percentile calculation, in the units of your
+  data. Omitted, it gives 3000 bins over the range marEx derives from the data (see
+  `Bin Geometry and Non-SST Variables`_). Given, the bin count follows that range: a
+  warning above 10,000 bins, an error above 65,000.
 
-**max_anomaly** : float, optional
-  Half-width of the binned range, in the units of your data. Derived from the data
-  itself when omitted.
-
-**n_bins** : int, default=1000
-  Number of histogram bins spanning ``[-max_anomaly, +max_anomaly]``. Used to derive
-  whichever of ``precision`` and ``max_anomaly`` was not supplied.
+**max_anomaly**, **n_bins** : deprecated
+  Still accepted, with a ``FutureWarning``. ``max_anomaly`` pins the half-width of the
+  binned range (a threshold reaching its edge then raises); ``n_bins`` replaces the
+  3000-bin target.
 
 Which Tail
 ----------
@@ -529,7 +528,11 @@ Two consequences worth knowing:
   rejected outright. That restriction is gone.
 * The guard rail that keeps a constant-zero anomaly (sea ice, a permanently masked
   cell) from being flagged as extreme is applied on **both** sides. A flat-zero cell is
-  never a cold extreme either.
+  never a cold extreme either. ``method_percentile='exact'`` has no bins, so it applies
+  the same rule with the smallest normal float32 as the rail: a threshold at zero or on
+  the wrong side of it is moved to ``±1.18e-38``. Without that, a near-constant cell's
+  exact threshold equals its own value and every tie counts as extreme (at 0.25° global
+  this tripled the exact path's flagged fraction, almost all of it poleward of 60°).
 
 ``tail='both'`` is not supported: it would need a second threshold array and an extra
 output dimension. Run the two tails separately if you need both.
@@ -537,58 +540,71 @@ output dimension. Run the two tails separately if you need both.
 Bin Geometry and Non-SST Variables
 ----------------------------------
 
-``precision=0.01`` and ``max_anomaly=5.0`` are calibrated for **SST anomalies in
-kelvin**. On precipitation in mm/day, with anomalies of tens, that range clips almost
-everything into the end bins; on pressure in Pa it is off by three orders of magnitude.
+The old defaults, ``precision=0.01`` and ``max_anomaly=5.0``, were calibrated for **SST
+anomalies in kelvin**. On precipitation in mm/day, with anomalies of tens, that range
+clips almost everything into the end bins; on pressure in Pa it is off by three orders
+of magnitude. So only ``precision`` is a parameter now, and the range is derived from
+your data in its own units, in three steps:
 
-So when neither is supplied, marEx derives the range from your data -- one fused
-min/max pass, then ``max(|min|, |max|)`` -- and sets ``precision = 2 * max_anomaly /
-n_bins``. Both resolved values are logged at INFO and recorded in the output attributes.
+1. **The tail's own extreme is a hard cap.** A threshold is a percentile of the samples,
+   so it can never pass the largest anomaly (``tail='upper'``) or the most negative one
+   (``tail='lower'``). The other side of the distribution may be clipped freely: those
+   samples still count towards the percentile.
+2. **A per-cell estimate lowers it when that extreme is an outlier.** marEx takes each
+   cell's mean and standard deviation along time and estimates its threshold as
+   ``mean + z_p * std``, with ``z_p`` the normal quantile of ``threshold_percentile``
+   (1.645 at the 95th). The range is three times the largest of these, if that is below
+   the cap. The factor covers the two ways a real threshold outruns a normal estimate:
+   variance concentrated in one season, and heavy tails. On 0.25° OSTIA the largest 95th
+   percentile threshold is 2.19 times the bare estimate.
+3. **A threshold that reaches the edge regrows the range.** If the estimate was still too
+   low somewhere, marEx widens the range to the cap at the same bin width and recomputes
+   the thresholds, with a WARNING. The bin edges are the same numbers at any range, so
+   every threshold that was inside the old range comes out identical, and past the cap
+   there is nothing left to clip, so this happens at most once. It costs a second
+   threshold pass, never a wrong threshold.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
+The bin width then gives 3000 bins over that range. On global 0.25° OSTIA the 95th
+percentile range is the warmest anomaly, ±21.0 K (the estimate, 24.7 K, does not bind),
+so the bins are 0.014 K wide. A synthetic precipitation-like (gamma) field with one
+400 mm/day storm gets a range set by the estimate instead, and bins six times finer than
+the storm alone would allow.
 
-   * - You supply
-     - What marEx uses
-   * - nothing
-     - ``max_anomaly`` from the data; ``precision = 2 * max_anomaly / n_bins``
-   * - ``precision`` only
-     - ``max_anomaly = precision * n_bins / 2`` (so ``precision=0.01`` still spans ±5.0)
-   * - ``max_anomaly`` only
-     - ``precision = 2 * max_anomaly / n_bins``
-   * - both
-     - exactly what you gave; ``n_bins`` is ignored
+The width matters more than its effect on the thresholds suggests. On 0.25° OSTIA
+(2003-2022), bins of 0.055 K -- what a fixed 1000-bin default gave there, because one
+27 K anomaly set the range -- moved thresholds by at most 0.08 K against 0.01 K bins,
+yet flagged 10-13 % more extreme days. If your variable needs finer bins than 3000 over
+its range give, pass ``precision``; beyond 10,000 bins marEx warns that the threshold
+stage gets markedly slower, and beyond 65,000 (the limit of the bin index) it raises
+before any work is done. Both resolved values are logged at INFO and recorded in the
+output attributes.
 
 .. note::
 
    The derivation is skipped entirely for ``method_percentile='exact'``, which builds
    no histogram. It costs one pass over the anomaly, which is cheap in the default
    ``persist`` mode (the anomaly is already staged) but walks the whole anomaly graph
-   under ``compute_mode='lazy'``. Pin ``max_anomaly`` there if that matters.
+   under ``compute_mode='lazy'``, as does a regrow.
 
 .. warning::
 
-   A threshold that lands in the **outermost** bin of a range **you pinned**
-   (``max_anomaly``, or ``precision`` alone, which gives ``precision=0.01`` -> ±5.0) is
-   rejected with a ``ConfigurationError`` ("Quantile values exceed expected range", or
-   "below expected range" for ``tail='lower'``). Samples beyond ``max_anomaly`` are
-   clipped into that bin, so a threshold there is set by ``max_anomaly``, not by your
-   data: widen the range, omit both so it is derived from the data, or use
-   ``method_percentile='exact'``.
-
-   With the range **derived from the data** nothing is clipped (its edge is the data's
-   own largest anomaly), so the same condition is only a ``UserWarning``: the window
+   With the range **derived from the data**, a threshold in the outermost bin of the
+   cap is only a ``UserWarning``: nothing on that side was clipped, but the window
    holding the most extreme sample has too few samples to resolve the percentile. It
    happens on short or coarse series at high percentiles (roughly fewer than
    ``0.5 / (1 - q)`` samples per window, i.e. under 10 at the 95th percentile).
+
+   A range **you pinned** with the deprecated ``max_anomaly`` keeps the old rule: a
+   threshold in its outermost bin is rejected with a ``ConfigurationError``
+   ("Quantile values exceed expected range", or "below expected range" for
+   ``tail='lower'``), because samples beyond it were clipped into that bin.
 
 Exact and Approximate Percentiles
 ---------------------------------
 
 ``method_percentile='exact'`` sorts every sample a cell contributes and takes
 ``np.nanpercentile`` with numpy's default linear rule. ``'approximate'`` (the default)
-counts the samples into ``n_bins`` histogram bins and interpolates inside the bin where
+counts the samples into histogram bins and interpolates inside the bin where
 the cumulative count crosses the percentile. How closely the two agree depends on how
 many samples sit in the tail, and much less on ``precision``.
 
@@ -810,7 +826,6 @@ Performance Optimisations
        # Use approximate percentiles for speed
        method_percentile='approximate',
        precision=0.05,  # Coarser precision for speed
-       max_anomaly=10.0
    )
 
 Multi-Variable Processing

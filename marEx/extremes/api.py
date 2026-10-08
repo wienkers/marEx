@@ -23,7 +23,7 @@ from ..core.time_axis import SeasonalCycle, cadence_index_name
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
-from .base import identify_extremes, reject_empty_series, resolve_bin_spec, resolve_window_spatial
+from .base import identify_extremes, reject_empty_series, resolve_window_spatial
 
 # Get module logger
 logger = get_logger(__name__)
@@ -103,7 +103,7 @@ def _extremes_core(
     method_percentile: str,
     precision: Optional[float],
     max_anomaly: Optional[float],
-    n_bins: int,
+    n_bins: Optional[int],
     dimensions: Dict[str, str],
     coordinates: Dict[str, str],
     materialiser: Materialiser,
@@ -134,19 +134,12 @@ def _extremes_core(
             suggestions=[f"Use method='{METHODS[0]}' (the default)"],
         )
 
-    # Resolve the bin geometry ONCE, here, before anything is built on it. With both
-    # `precision` and `max_anomaly` unset this costs a fused min/max pass over the
-    # anomaly, so it must not happen twice -- `identify_extremes` re-resolves, but by
-    # then both are concrete and the call is a no-op. Skipped for the exact path, which
-    # builds no histogram.
-    # Checked here rather than only inside `resolve_bin_spec`, which the exact path
-    # skips: an empty series otherwise reached a bare ZeroDivisionError there.
+    # Checked here rather than only inside `identify_extremes`'s bin derivation, which the
+    # exact path skips: an empty series otherwise reached a bare ZeroDivisionError there.
+    # `identify_extremes` resolves the bin geometry once (a fused pass over the anomaly when
+    # it is derived), regrows it if a threshold reached its edge, and hands back what it used.
     reject_empty_series(anomalies)
-    # Whether the caller fixed the binned range: only then can a threshold in the outermost
-    # bin be blamed on the range (D-138 add. 2). Read before resolution overwrites both.
-    range_pinned = precision is not None or max_anomaly is not None
-    bin_spec = (None, None) if method_percentile == "exact" else resolve_bin_spec(anomalies, precision, max_anomaly, n_bins)
-    precision, max_anomaly = bin_spec
+    used_spec: list = []
 
     with log_timing(
         logger,
@@ -174,7 +167,7 @@ def _extremes_core(
             threshold_label=threshold_label,
             cycle=cycle,
             tail=tail,
-            range_pinned=range_pinned,
+            bin_spec_out=used_spec,
         )
         log_memory_usage(logger, "After extreme identification", logging.DEBUG)
 
@@ -183,6 +176,8 @@ def _extremes_core(
     # `extremes` itself in persist mode.
     extremes, thresholds = materialiser.pin(extremes, thresholds)
     extremes.attrs = {}  # not the input's attrs, whatever xarray's keep_attrs default (see clear_inherited_attrs)
+    spec = used_spec[0] if used_spec else None
+    bin_spec = (None, None) if spec is None else (spec.precision, spec.max_anomaly)
     return extremes, thresholds, bin_spec
 
 
@@ -215,7 +210,7 @@ def identify(
     method_percentile: Literal["exact", "approximate"] = "approximate",
     precision: Optional[float] = None,
     max_anomaly: Optional[float] = None,
-    n_bins: int = 1000,
+    n_bins: Optional[int] = None,
     dask_chunks: Optional[Dict[str, int]] = None,
     compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
     scratch_dir: Optional[str] = None,
@@ -263,14 +258,17 @@ def identify(
         ``'approximate'`` (default) uses a histogram-based quantile, which is
         what allows the reduction to stream. ``'exact'`` computes a true
         quantile and needs the full series resident per cell.
-    precision, max_anomaly, n_bins
-        Histogram bin geometry for ``method_percentile='approximate'``.
-        ``max_anomaly`` is the half-width of the binned range and ``precision`` the
-        bin width; ``n_bins`` (default 1000) derives whichever of the two is left
-        unset. With both unset the range is taken from the data, which is what makes
-        the defaults work on a variable that is not an SST anomaly in kelvin --
-        precipitation in mm/day, or pressure in Pa. Supplying ``precision=0.01``
-        alone reproduces the historical ``+/-5.0`` range exactly.
+    precision
+        Histogram bin width for ``method_percentile='approximate'``, in the variable's
+        units. The binned range is derived from the data, so the default works for any
+        variable and units: the requested tail's own extreme is a hard cap, a per-cell
+        normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
+        when that extreme is an outlier, and a threshold that reaches the edge regrows the
+        range and is recomputed. Omitted, ``precision`` gives 3000 bins over that range;
+        given, the bin count follows (a warning above 10000 bins, an error above 65000).
+    max_anomaly, n_bins
+        Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
+        threshold then raises); ``n_bins`` replaces the 3000-bin target.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
         An integer time entry is a step count, and with one, extra dimensions on

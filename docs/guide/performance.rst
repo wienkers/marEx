@@ -69,8 +69,7 @@ When to Use Each Method
    extremes = marEx.preprocess_data(
        sst,
        method_percentile='approximate',
-       precision=0.01,        # ~0.01°C bins
-       max_anomaly=5.0,       # Histogram range ±5°C
+       precision=0.01,        # ~0.01°C bins; the range is derived from the data
        dask_chunks={'time': 365}  # Any chunking works
    )
    # ✓ Bounded per-task working set (size the cluster from the detection guide)

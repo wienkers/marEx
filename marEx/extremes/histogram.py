@@ -10,7 +10,7 @@ logging).
 """
 
 import warnings
-from typing import Callable, Dict, List, Literal, Optional, Sequence
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import dask
 import dask.array
@@ -86,6 +86,46 @@ def _zero_bin_edges(bin_edges: NDArray[np.floating]) -> tuple:
     return float(upper), float(lower)
 
 
+def _clamp_exact_threshold(threshold: xr.DataArray, tail: Literal["upper", "lower"]) -> xr.DataArray:
+    """Keep an exact threshold strictly on its own side of zero, so a constant anomaly never flags.
+
+    The exact path's counterpart of the approximate path's guard rail (D-147, Aaron ruling (a)).
+    A cell whose anomaly is (near-)constant -- sea ice -- has an exact threshold EQUAL to that
+    constant, and the inclusive comparison (``>=`` / ``<=``) then flags every tie: 9.8 % of all
+    cell-days at L1 instead of ~3 %, almost all poleward of 60 degrees. The approximate path never
+    does this because it clamps a threshold on the zero bin pair to one bin width. The exact
+    path has no bins, so the guard is the smallest NORMAL float32 past zero: an upper threshold
+    ``<= 0`` becomes ``+finfo(float32).tiny`` (1.18e-38), a lower one ``>= 0`` becomes its
+    negative. An anomaly at or below zero is then never an upper-tail extreme (and mirrored),
+    and every threshold already strictly past zero is untouched. Normal, not subnormal
+    (``nextafter``), so the guard survives a flush-to-zero/denormals-are-zero process (a library
+    built with fast-math sets that process-wide) and a float64 -> float32 cast of the output.
+
+    Lazy (a ``where``), with no ``.any()`` probe and no warning: on an unstaged exact threshold
+    that probe would re-run the whole reduction. NaN thresholds (land) stay NaN.
+    """
+    tiny = np.asarray(np.finfo(np.float32).tiny, dtype=threshold.dtype)
+    if tail == "upper":
+        keep = (threshold > 0) | threshold.isnull()
+        guard = tiny
+    else:
+        keep = (threshold < 0) | threshold.isnull()
+        guard = -tiny
+    return threshold.where(keep, guard)
+
+
+class _RangeSaturated(Exception):
+    """A threshold reached the end bin of an ESTIMATED range: regrow the bins and recompute.
+
+    Internal control flow between :func:`_apply_threshold_bounds` and
+    ``marEx.extremes.base``'s dispatch; never reaches a user.
+    """
+
+    def __init__(self, reached: float):
+        super().__init__(f"threshold reached the estimated histogram range ({reached:.4g})")
+        self.reached = reached
+
+
 def _end_clips(bin_edges: NDArray[np.floating]) -> tuple:
     """Midpoints of the outermost bins, used to clip out-of-range samples inwards.
 
@@ -106,10 +146,23 @@ def _apply_threshold_bounds(
     tail: Literal["upper", "lower"],
     guard_notnull: bool,
     clamp: Optional[Callable[[xr.DataArray], xr.DataArray]] = None,
-    range_pinned: bool = True,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
+    saturation_bounds: Optional[Tuple[float, float]] = None,
 ) -> xr.DataArray:
-    """Reject (pinned range) or warn on (derived range) out-of-range thresholds; warn on and
-    clamp them off the zero guard rail.
+    """Handle out-of-range thresholds by ``range_mode``; warn on and clamp them off the zero guard rail.
+
+    A threshold in the outermost bin raises when the caller pinned the range (``'pinned'``),
+    raises :class:`_RangeSaturated` for the caller to regrow the bins when the range was a
+    per-cell estimate below the data's extreme (``'estimated'``), and only warns when the
+    range is the data's own extreme on the tail's side (``'data'``), where nothing was clipped.
+
+    ``saturation_bounds`` is ``(upper, lower)``: past it a threshold was interpolated from the
+    outermost bin, the one holding clipped samples. It defaults to the inner edges of the
+    outermost bins, which is right for the 1-D path (it interpolates between EDGES). The 2-D
+    path interpolates between bin CENTRES, so a crossing in the outermost bin can land up to
+    half a bin inside its inner edge; it passes the second and second-to-last centres, and
+    only the ``'estimated'`` check uses them (D-152 falsifier finding 3). Below that bound every
+    cumulative count the threshold reads is the same integer whatever the range.
 
     Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
     the top bin (the range check) nor fall below ``+one bin`` (the guard); for
@@ -143,14 +196,23 @@ def _apply_threshold_bounds(
         out_of_range = out_of_range & threshold.notnull()
         on_guard = on_guard & threshold.notnull()
 
-    any_range, any_guard, thr_max, thr_min = dask.compute(out_of_range.any(), on_guard.any(), threshold.max(), threshold.min())
+    reductions = [out_of_range.any(), on_guard.any(), threshold.max(), threshold.min()]
+    if range_mode == "estimated":
+        upper_bound, lower_bound = saturation_bounds if saturation_bounds is not None else (bin_edges[-2], bin_edges[1])
+        saturated = threshold > float(upper_bound) if tail == "upper" else threshold < float(lower_bound)
+        reductions.append((saturated & threshold.notnull()).any())
+    computed = dask.compute(*reductions)
+    any_range, any_guard, thr_max, thr_min = computed[:4]
 
-    # A threshold inside the outermost bin is not a threshold when the caller pinned the range:
-    # every sample beyond it was clipped into that bin, so the true quantile could be anywhere
-    # past it. Fail rather than return a saturated field that looks plausible (D-138). When the
-    # range was DERIVED from the data, its edge is the data's own max |anomaly| and nothing was
+    # A threshold inside the outermost bin is not a threshold when samples were clipped there:
+    # every sample beyond the range sits in that bin, so the true quantile could be anywhere
+    # past it. With a caller-pinned range, fail rather than return a saturated field that looks
+    # plausible (D-138); with an estimated range, hand back to the caller to regrow it (D-152).
+    # When the range IS the data's own extreme on the tail's side, nothing on that side was
     # clipped; reaching the outermost bin then means too few samples per window resolve this
-    # percentile in the cell holding the extreme, which is worth saying but not fatal (add. 2).
+    # percentile in the cell holding the extreme, which is worth saying but not fatal (D-138 add. 2).
+    if range_mode == "estimated" and bool(computed[4]):
+        raise _RangeSaturated(float(thr_max) if tail == "upper" else float(thr_min))
     if bool(any_range):
         if tail == "upper":
             reached = f"max={float(thr_max):.4f} > {range_bound:.4f}, inside the top histogram bin"
@@ -160,7 +222,7 @@ def _apply_threshold_bounds(
             reached = f"min={float(thr_min):.4f} < {range_bound:.4f}, inside the bottom histogram bin"
             percentile_remedy = "Use a higher threshold_percentile"
             phrase = "below"
-        if range_pinned:
+        if range_mode == "pinned":
             raise ConfigurationError(
                 f"Quantile values {phrase} expected range: {reached} at max_anomaly={max_anomaly:.4g}",
                 details=(
@@ -176,7 +238,7 @@ def _apply_threshold_bounds(
             )
         warnings.warn(
             f"Quantile values {phrase} expected range: {reached} of the range derived from the data "
-            f"(max_anomaly={max_anomaly:.4g}, the data's own max |anomaly|). Nothing was clipped: the "
+            f"(max_anomaly={max_anomaly:.4g}, the data's own extreme on this side). Nothing was clipped: the "
             "window holding the most extreme sample has too few samples to resolve this percentile. "
             f"{percentile_remedy}, a longer series or window (window_days, window_spatial), or "
             "method_percentile='exact'.",
@@ -584,6 +646,10 @@ def _histogram_quantile_block(
     """
     eps = 1e-10
     total = hist_block.sum(axis=-1, keepdims=True)
+    # Normalise-then-cumulate is load-bearing for golden A (D-018). It makes the CDF, and so a
+    # threshold, depend at float64 ULP level (~1e-15) on how the samples below it are split
+    # across bins, i.e. on the binned range: cumulating integer counts first fails golden A
+    # (D-152 falsifier finding 2), so D-152's "regrow = run over the cap" holds to ULP here.
     pdf = hist_block / (total + eps)
     cdf = np.cumsum(pdf, axis=-1)
 
@@ -825,7 +891,7 @@ def _compute_histogram_quantile_2d(
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
-    range_pinned: bool = True,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
     engine: Literal["slab", "dense"] = "slab",
 ) -> xr.DataArray:
     """
@@ -1062,7 +1128,17 @@ def _compute_histogram_quantile_2d(
     # The predicates there deliberately lack the ``& notnull()`` guard the 1D path
     # carries: NaN comparisons are False either way, but adding it would alter the
     # clamp mask.
-    threshold = _apply_threshold_bounds(threshold, bin_edges, max_anomaly, tail, guard_notnull=False, range_pinned=range_pinned)
+    # Centres, not edges, bound the 'estimated' check here: this path interpolates between centres.
+    centres32 = bin_centers_array.astype(np.float32)
+    threshold = _apply_threshold_bounds(
+        threshold,
+        bin_edges,
+        max_anomaly,
+        tail,
+        guard_notnull=False,
+        range_mode=range_mode,
+        saturation_bounds=(float(centres32[-2]), float(centres32[1])),
+    )
 
     return threshold
 
@@ -1077,7 +1153,7 @@ def _compute_histogram_quantile_1d(
     materialiser: Optional[Materialiser] = None,
     tail: Literal["upper", "lower"] = "upper",
     horizontal: Optional[Sequence[str]] = None,
-    range_pinned: bool = True,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -1169,7 +1245,7 @@ def _compute_histogram_quantile_1d(
     # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
     # with the 2D path.
     threshold = _apply_threshold_bounds(
-        threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one, range_pinned=range_pinned
+        threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one, range_mode=range_mode
     )
 
     return threshold

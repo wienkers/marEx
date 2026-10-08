@@ -23,7 +23,7 @@ from ..core.compute_mode import Materialiser
 from ..core.dimensions import TASK_ELEMENTS, horizontal_dims, spatial_dims
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
-from .histogram import _chunk_spatial_for_histogram, _compute_histogram_quantile_2d
+from .histogram import _chunk_spatial_for_histogram, _clamp_exact_threshold, _compute_histogram_quantile_2d
 
 # Get module logger
 logger = get_logger(__name__)
@@ -43,7 +43,7 @@ def _identify_extremes_seasonal(
     threshold_label: str = "thresholds",
     cycle: Optional[SeasonalCycle] = None,
     tail: Literal["upper", "lower"] = "upper",
-    range_pinned: bool = True,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
     Identify extreme events using day-of-year (i.e. climatological percentile threshold).
@@ -183,6 +183,7 @@ def _identify_extremes_seasonal(
 
         # Assign cycle coordinate values and move the cycle dim to first position
         thresholds = thresholds.assign_coords({cycle_dim: np.arange(1, cycle.length + 1)}).transpose(cycle_dim, ...)
+        thresholds = _clamp_exact_threshold(thresholds, tail)
     else:  # Optimised histogram approximation method
         thresholds = _compute_histogram_quantile_2d(
             da,
@@ -195,7 +196,7 @@ def _identify_extremes_seasonal(
             materialiser=materialiser,
             cycle=cycle,
             tail=tail,
-            range_pinned=range_pinned,
+            range_mode=range_mode,
         )
 
     # Extract spatial chunk sizes from input data for alignment
