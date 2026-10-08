@@ -492,7 +492,9 @@ Extreme Detection Parameters
   Histogram bin width for the approximate percentile calculation, in the units of your
   data. Omitted, it gives 3000 bins over the range marEx derives from the data (see
   `Bin Geometry and Non-SST Variables`_). Given, the bin count follows that range: a
-  warning above 10,000 bins, an error above 65,000.
+  warning above 10,000 bins, an error above 65,000. Passing ``precision`` (or the
+  deprecated ``max_anomaly``) with ``method_percentile='exact'`` raises a
+  ``ConfigurationError``: the exact path builds no histogram, so the value would be ignored.
 
 **max_anomaly**, **n_bins** : deprecated
   Still accepted, with a ``FutureWarning``. ``max_anomaly`` pins the half-width of the
@@ -656,9 +658,10 @@ uint16 bin indices). The exact path has three further limits:
 * it has no way to process time in pieces: a cell's percentile needs every sample at once
 * it cannot use ``window_spatial``
 
-The approximate path is the one exercised at scale (27 years of daily 0.25° data). No
-at-scale measurement of the exact path exists yet, so size an exact run from a short
-pilot rather than from the approximate path's memory.
+Both paths have been run at scale. The approximate path has processed 40 years of daily
+0.25° global data; the exact path has been measured once, on 20 years of daily 0.25° global
+data, where it peaked at about 80 GB with 16 workers of 6 GB each. That is a single run, so
+size an exact run from a short pilot rather than from the approximate path's memory.
 
 Time Resolution
 ---------------
