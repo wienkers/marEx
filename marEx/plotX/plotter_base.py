@@ -162,7 +162,7 @@ class PlotterBase:
                 else:
                     sampled_da = self.da
                 # Every 10th timestep of a full-resolution field is still multi-GB pulled
-                # into driver memory for two percentiles (review finding 8.9). Stride the
+                # into driver memory for two percentiles. Stride the
                 # spatial dimensions as well once the sample would exceed the budget below.
                 # Fields under the budget -- which is every case the tests cover -- are
                 # sampled exactly as before, so their colour limits are unchanged.

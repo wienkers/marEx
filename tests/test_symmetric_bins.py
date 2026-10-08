@@ -1,6 +1,6 @@
 """Symmetric histogram bins: construction, guard rails, and legacy equivalence.
 
-Phase D replaced the ``[-inf, -precision, 0, precision, ..., max_anomaly]`` binning
+The bins replaced the ``[-inf, -precision, 0, precision, ..., max_anomaly]`` binning
 -- one bin for every negative value -- with finite bins symmetric about zero, which
 is what makes a low-tail percentile resolvable at all.
 
@@ -26,7 +26,7 @@ MAX_ANOMALY = 5.0
 
 
 def legacy_bin_edges(precision=PRECISION, max_anomaly=MAX_ANOMALY, dtype=np.float64):
-    """The pre-Phase-D asymmetric edges, verbatim from each driver."""
+    """The legacy asymmetric edges, verbatim from each driver."""
     if dtype == np.float32:
         return np.concatenate(
             [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32

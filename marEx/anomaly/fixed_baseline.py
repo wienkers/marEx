@@ -74,7 +74,7 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     dims = clim.dims
     rows = clim.drop_vars(cycle_dim).coarsen({cycle_dim: steps_per_row}).construct({cycle_dim: ("_row", "_step")})
     padded = rows.pad({"_row": (window, window)}, mode="wrap")
-    # NaN-preserving (D-138 add. 2): average the finite rows in each window, then re-mask rows that
+    # NaN-preserving: average the finite rows in each window, then re-mask rows that
     # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
     # instead of losing half a window at each edge of its NaN season.
     with rolling_numerics():

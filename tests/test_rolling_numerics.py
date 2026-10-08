@@ -1,4 +1,4 @@
-"""``rolling_numerics`` pins xarray's rolling means to the numpy path on every xarray release (D-141).
+"""``rolling_numerics`` pins xarray's rolling means to the numpy path on every xarray release.
 
 bottleneck's ``move_mean`` keeps a float32 running sum over the whole chunk, so on a time-whole
 series (the canonical layout detect smooths on) its error grows with the series length: ~6e-3 K

@@ -1,4 +1,4 @@
-"""Graph-shape pins for ``method_percentile='exact'`` (D-142).
+"""Graph-shape pins for ``method_percentile='exact'``.
 
 Values cannot catch these: both changes are pure layout, bit-identical by construction.
 What they bound is how a task grows with the series length.

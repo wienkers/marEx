@@ -1,6 +1,6 @@
 """The MAX_PARENTS guard fired on merges the fixed-width arrays could actually hold.
 
-Job 27098021 (full ICON R02B09, nt=1096) died at global timestep ~767 with
+A full ICON R02B09 run (nt=1096) died at global timestep ~767 with
 ``Child 23060 at timestep 3 has 10 parents (limit: 10)``. The guard sat at the *top* of the
 candidate loop in ``process_chunk``::
 
@@ -19,8 +19,6 @@ of those was about to fail the overlap threshold. ``potential_parents`` is
 ``np.unique(data_m1[child_mask])``, which on a basin-scale child is mostly such rejects, so the
 failure was also order-dependent: the identical set of parents passed if the rejects happened
 to sort first.
-
-See docs/superpowers/reports/REPORT_max_parents_diagnosis.md.
 """
 
 from pathlib import Path
@@ -128,7 +126,7 @@ class TestSourceStructure:
 class TestRecordWidthGuards:
     """The kernel's record widths and the two guards that protect them, exercised on a real run.
 
-    Design R (D-084) removed the uint8 ``updates_array`` and its 255-slot table, so the old
+    The per-chunk merge kernel removed the uint8 ``updates_array`` and its 255-slot table, so the old
     ``MAX_MERGES * (MAX_PARENTS - 1) <= 255`` coupling is gone. What remains: ``parent_masks_uint``
     is still uint8 with 255 as "no parent", and a child with more accepted parents than
     ``MAX_PARENTS``, or a timestep with more merges than ``MAX_MERGES``, raises TrackingError.

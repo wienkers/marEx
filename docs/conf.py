@@ -91,7 +91,6 @@ exclude_patterns = [
     "Thumbs.db",
     ".DS_Store",
     "**.ipynb_checkpoints",
-    "superpowers",
 ]
 
 source_suffix = {

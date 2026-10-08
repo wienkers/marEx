@@ -1,6 +1,6 @@
 """Unit tests for the Materialiser and the compute_mode plumbing.
 
-``compute_mode`` is the Phase 3 knob that decides how ``preprocess_data`` materialises its
+``compute_mode`` is the knob that decides how ``preprocess_data`` materialises its
 intermediates. These tests cover the policy object itself and the wiring at the public
 entry point; cross-mode bit-identity lives in ``test_compute_mode_equivalence.py``.
 """
@@ -462,7 +462,7 @@ class TestStreamingMode:
     def test_written_output_does_not_carry_a_dead_staging_dir(self, tmp_path):
         """The on-disk store must not record marex_staging_dir: clear_staging deletes that
         path right after the write, so persisted attrs carrying it would point at a
-        directory that no longer exists (D-118 falsifier finding 6)."""
+        directory that no longer exists."""
         ds = self._run(tmp_path)
         staged = Path(ds.encoding["marex_staging_dir"])
         out = tmp_path / "out.zarr"

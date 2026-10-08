@@ -297,8 +297,8 @@ def fill_time_gaps(
     # step rebalanced stays rebalanced: a (..., 25, 1) record comes back as (..., 24, 2) and a
     # (..., 3, 1) one as (..., 4). Both are illegal for zarr, which permits a short FINAL chunk
     # and nothing else, so ObjectIDRegionWriter._initialise dies mid-merge under
-    # compute_mode="streaming" -- observed at n_time=951, time chunk 25, T_fill=4 (job
-    # 27272708). The realignment touches only the tail chunks, so it is not an all-to-all.
+    # compute_mode="streaming" -- observed at n_time=951, time chunk 25, T_fill=4. The
+    # realignment touches only the tail chunks, so it is not an all-to-all.
     if input_time_chunks is not None and data_bin_filled.chunks is not None:
         if data_bin_filled.chunks[time_axis] != input_time_chunks:
             data_bin_filled = data_bin_filled.chunk({timedim: input_time_chunks})
@@ -544,7 +544,7 @@ def filter_small_objects(
 
         # With an absolute threshold the keep-decision is known before the area census, so
         # one labelling pass can produce both. The quartile mode still needs two, because
-        # its threshold is a percentile of the census (review finding 6.10). Both outputs
+        # its threshold is a percentile of the census. Both outputs
         # are persisted together so the shared pass is actually shared -- computing them
         # separately would label every slice twice again.
         data_bin_filtered = None

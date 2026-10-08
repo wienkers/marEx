@@ -165,7 +165,7 @@ def find_overlapping_objects(
     """
     # Materialise cell_area once. It is bound into the functools.partial below, so it is
     # shipped to every task: a dask-backed array there means each task re-gathers it, and
-    # check_overlap_slice reads .values on every call (review finding 6.7). The structured
+    # check_overlap_slice reads .values on every call. The structured
     # branch never touches it, so only pay this on unstructured grids.
     if unstructured_grid and is_dask_collection(getattr(cell_area, "data", None)):
         cell_area = cell_area.compute()
@@ -236,7 +236,7 @@ def enforce_overlap_threshold(
 
     # Filter out overlaps where either ID doesn't exist in object_props. One vectorised
     # membership test over both ID columns rather than a Python comprehension per row --
-    # this list runs to millions of rows on a full-length run (review finding 5.14).
+    # this list runs to millions of rows on a full-length run.
     valid_mask = object_props.contains_many(overlap_objects_list[:, 0]) & object_props.contains_many(overlap_objects_list[:, 1])
 
     if not np.any(valid_mask):
@@ -347,8 +347,7 @@ def consolidate_object_ids(
                 continue
 
             # Rename all other children to first_child_id. One vectorised pass over the
-            # slice for the whole group rather than a full-slice .where() per child
-            # (review finding 5.13).
+            # slice for the whole group rather than a full-slice .where() per child.
             other_children = [int(c) for c in children_for_parent[1:] if int(c) in object_props]
             if other_children:
                 values = data_t_minus_1.values

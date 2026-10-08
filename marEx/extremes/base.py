@@ -72,10 +72,10 @@ def resolve_window_spatial(
 _FALLBACK_PRECISION = 0.01
 _FALLBACK_MAX_ANOMALY = 5.0
 # A derived bin wider than this fraction of the anomaly std triggers the coarse-bin warning in
-# `resolve_bin_spec` (D-142: bins of 0.0095 std over-flagged a seasonal p90 mask by 1.5 % against
+# `resolve_bin_spec` (bins of 0.0095 std over-flagged a seasonal p90 mask by 1.5 % against
 # exact, bins of 0.088 std by 10 %).
 _COARSE_BIN_FRACTION_OF_STD = 0.03
-# Bin count over the derived range when `precision` is not given (D-152). The range is the
+# Bin count over the derived range when `precision` is not given. The range is the
 # tail's own estimate, so the bins land where thresholds can be: 0.25 deg OSTIA p95 gets
 # +/-21.04 K, i.e. precision 0.014 K.
 _TARGET_N_BINS = 3000
@@ -88,7 +88,7 @@ _WARN_N_BINS = 10000
 # (NEXT Discovered), so stay clear of the edge.
 _MAX_DERIVED_N_BINS = 65000
 # Safety factor on the per-cell normal estimate of the most extreme threshold,
-# max over cells of (mean + z_p * std). Measured on 0.25 deg OSTIA p95 seasonal (D-152):
+# max over cells of (mean + z_p * std). Measured on 0.25 deg OSTIA p95 seasonal:
 # the true largest threshold is 2.19x that estimate (variance concentrated in one season,
 # e.g. at the ice edge). The estimate only ever LOWERS the range below the data's own
 # extreme, and a range that turns out too narrow is regrown (see `_regrow_bin_spec`).
@@ -126,7 +126,7 @@ class BinSpec:
 
 
 def _warn_deprecated_bin_args(max_anomaly: Optional[float], n_bins: Optional[int]) -> None:
-    """``max_anomaly`` and ``n_bins`` are no longer part of the public interface (D-152)."""
+    """``max_anomaly`` and ``n_bins`` are no longer part of the public interface."""
     for name, value in (("max_anomaly", max_anomaly), ("n_bins", n_bins)):
         if value is not None:
             warnings.warn(
@@ -325,7 +325,7 @@ def resolve_bin_spec(
     tail: Literal["upper", "lower"] = "upper",
     time_dim: Optional[str] = None,
 ) -> Tuple[float, float]:
-    """Resolve the histogram bin width and range, deriving whatever was not supplied (D-152).
+    """Resolve the histogram bin width and range, deriving whatever was not supplied.
 
     Only ``precision`` is a public input. The range ``max_anomaly`` (the half-width of the
     symmetric bins) is derived from the data in whatever units it is in:
@@ -337,7 +337,7 @@ def resolve_bin_spec(
     2. **A per-cell normal estimate lowers it** when that extreme is far out (heavy tails, a
        single storm): ``3 * max_cells(mean + z_p * std)`` along time, with ``z_p`` the normal
        quantile of ``threshold_percentile``. The factor 3 covers seasonal variance and heavy
-       tails (on OSTIA p95 the largest threshold is 2.19x the bare estimate, D-152).
+       tails (on OSTIA p95 the largest threshold is 2.19x the bare estimate).
     3. **A threshold that still reaches the end bin regrows the range** to the cap at the same
        ``precision`` and recomputes it (once; :func:`_regrow_bin_spec`), so an estimate that
        is too low costs time, never a wrong threshold.
@@ -622,7 +622,7 @@ def identify_extremes(
     # rejection is obsolete. The genuine remaining failure mode -- a threshold landing in
     # a clipped end bin -- raises a ConfigurationError in
     # `extremes/histogram.py::_apply_threshold_bounds` when the caller pinned the range, and
-    # warns when it was derived (nothing clipped), symmetrically at both ends (D-138 add. 2).
+    # warns when it was derived (nothing clipped), symmetrically at both ends.
 
     # Validate window_spatial parameter
     if window_spatial is not None:
@@ -708,7 +708,7 @@ def identify_extremes(
     # Resolved ONLY for the seasonal method. `infer_cycle` raises on a mixed-cadence
     # axis, and `global_percentile` has no within-year cycle at all -- resolving
     # unconditionally would make it fail on axes where it has always worked, naming a
-    # problem it does not have. Same shape as the Phase B `validate_rank` finding.
+    # problem it does not have.
     resolved_cycle = resolve_cycle(da, coordinates["time"], cycle) if method_extreme == "seasonal_percentile" else cycle
     if method_extreme == "seasonal_percentile" and resolved_cycle.is_daily and window_days is not None and window_days % 2 == 0:
         logger.error(f"window_days={window_days} is not an odd number")
@@ -811,7 +811,7 @@ def identify_extremes(
         result = _dispatch(spec)
     except _RangeSaturated as saturated:
         # The estimated range was too narrow somewhere: regrow it to the data's own extreme at
-        # the same bin width and recompute (D-152). Nothing past that extreme exists, so the
+        # the same bin width and recompute. Nothing past that extreme exists, so the
         # second attempt cannot saturate this way again. The first attempt staged nothing under
         # `threshold_label` (thresholds are staged only after the bounds check), so the label
         # is free; its anonymous pin is released with it.

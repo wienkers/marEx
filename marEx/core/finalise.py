@@ -118,7 +118,7 @@ def finalise_dataset(
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     # The horizontal dims are made whole (the tracker requires it). Extra dims (depth,
     # level) take whatever of the per-task budget one whole-horizontal time block leaves:
-    # one level per chunk on a large grid, several on a small one (D-128). Holding depth
+    # one level per chunk on a large grid, several on a small one. Holding depth
     # whole made one chunk 30 x depth x horizontal, 6.2 GB at depth 50 on 720x1440; one
     # level per chunk everywhere made a 1-cell mooring 25-element chunks. The tracker
     # rejects extra dims, so it never sees this layout; select a level first.

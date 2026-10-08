@@ -241,8 +241,7 @@ together. And a source read is not the same event as a subgraph execution in eit
 so it cannot stand in for the quantity this column names. What is safe to say qualitatively is
 what the rest of this section already implies: under `lazy` the upstream work is repeated, under
 `persist` and `streaming` it is not, and if you use `lazy` you should materialise what you need
-in one pass. The measurements behind the strike, with their job id and their limits, are in
-`DECISIONS.md` (D-063).
+in one pass.
 
 **The caveat that remains for `detect`: the per-task floor.** `streaming` removes the
 *pinned* ceiling. It cannot remove the memory one task needs, which is set by the algorithm
@@ -330,8 +329,7 @@ silently partial.** It keeps its own `update_object_id_field_zarr` closure outsi
 `Materialiser`, so `compute_mode="streaming"` with `unstructured_grid=True` is rejected at
 construction time with `ConfigurationError` (see §3.1): the shared preprocessing stages
 would stream but the unstructured merge/split core would not, and that combination has zero
-coverage. Unifying the two writers is separate, unstarted work, deliberately out of scope
-for this effort (see NEXT.md).
+coverage. Unifying the two writers is separate, unstarted work.
 
 *[measured]* The practical limit for unstructured today, unchanged by this work: tracking of a
 1096-timestep ICON run did not complete on a single node — merge iteration 1 with 681 objects

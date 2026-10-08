@@ -552,7 +552,7 @@ class tracker:
         _validation.validate_rank(data_bin, unstructured_grid, self.timedim, self.xdim, self.ydim)
 
         # Validate coordinate presence before touching them, so a missing coordinate raises
-        # the descriptive error rather than a bare KeyError from the indexing below (§4.4).
+        # the descriptive error rather than a bare KeyError from the indexing below.
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
 
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
@@ -591,7 +591,7 @@ class tracker:
         self.nn_partitioning = nn_partitioning
         self.overlap_threshold = overlap_threshold
         # Read the degree-unit coordinates from self.data_bin (the converted output of
-        # unify_coordinates); the input data_bin is no longer mutated in place (§1.3).
+        # unify_coordinates); the input data_bin is no longer mutated in place.
         self.lat = self.data_bin[self.ycoord].persist()
         self.lon = self.data_bin[self.xcoord].persist()
         if data_bin.chunks is None:
@@ -606,7 +606,7 @@ class tracker:
             # streaming region writer, the unstructured merge loop's accumulator), and zarr can
             # only encode chunks that are uniform except for a smaller last one. A ragged input
             # (open_mfdataset over uneven per-year files) is therefore re-tiled once, here. This
-            # does not change the result: tracking is invariant in the time chunking (D-077).
+            # does not change the result: tracking is invariant in the time chunking.
             width = int(max(time_chunks))
             logger.warning(
                 f"Input time chunks are not uniform ({_format_chunk_pattern(time_chunks)}); "
@@ -623,7 +623,7 @@ class tracker:
         # Resolve the scratch directory used for checkpointing and temporary zarr stores.
         # This must be available on BOTH grid branches: previously it was only set inside the
         # unstructured setup, so checkpoint='save'/'load' raised AttributeError on structured
-        # grids (§4.1). The path is kept stable and user-managed so that a later
+        # grids. The path is kept stable and user-managed so that a later
         # checkpoint='load' can find the files written by an earlier checkpoint='save' run.
         if self.checkpoint and not temp_dir:
             raise ConfigurationError(
@@ -754,7 +754,7 @@ class tracker:
             # Validation already done in _validate_inputs, but the spatial chunking of
             # neighbours/cell_areas still has to be enforced here: self.cell_area is
             # persisted below, before setup_unstructured_grid runs, so a rechunk applied
-            # any later would never reach it (§4.2).
+            # any later would never reach it.
             neighbours, cell_areas = _validation.validate_unstructured_chunking(neighbours, cell_areas, self.xdim)
         else:
             # Handle structured grids
@@ -1064,8 +1064,7 @@ class tracker:
             # rather than being deferred into the later "Small object filtering" step.
             # raw_area rides along in the same persist: it is only consumed much later, for
             # one scalar diagnostic, and by then self.data_bin has been released -- so on
-            # its own it forced a second full read of the entire raw input
-            # (review finding 4.3).
+            # its own it forced a second full read of the entire raw input.
             data_bin_filled, raw_area = self.materialiser.pin(self.fill_holes(self.data_bin), raw_area)
             if self.materialiser.is_streaming:
                 # pin is a no-op in streaming, which would leave raw_area lazy and force the
@@ -1150,7 +1149,7 @@ class tracker:
             )
             # The zarr store is already reloaded above (its contents have not changed since),
             # and object_stats holds the values just written -- re-reading the npz only
-            # replaced Python scalars with 0-d numpy arrays (§4.6).
+            # replaced Python scalars with 0-d numpy arrays.
 
         return data_bin_filtered, object_stats
 
@@ -1739,8 +1738,7 @@ class tracker:
 
         # Rechunk final output. The time dimension is deliberately left alone here: run()
         # rechunks the returned dataset to {time: 1} immediately afterwards, so setting it
-        # to timechunks first only layered a superseded rechunk over the graph
-        # (review finding 4.7).
+        # to timechunks first only layered a superseded rechunk over the graph.
         chunk_dict = {
             "ID": -1,
             "component": -1,

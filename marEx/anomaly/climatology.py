@@ -183,8 +183,8 @@ def rolling_climatology(
     # tests/test_climatology_tiling.py).
     #
     # The time axis is held whole in the same rechunk. Flox's grouped mean and the rolling mean
-    # before it accumulate block by block, so a time chunk boundary moves the result (D-091),
-    # and flox's task count scales with tiles x time chunks (D-090). `original_chunk_dict` was
+    # before it accumulate block by block, so a time chunk boundary moves the result,
+    # and flox's task count scales with tiles x time chunks. `original_chunk_dict` was
     # captured before this point, so the restore at the end returns the caller's own layout.
     spatial_tile = tile_spatial_chunks(
         da,
@@ -379,7 +379,7 @@ def smoothed_rolling_climatology(
 
     # Smooth on a canonical layout: bottleneck's move_mean restarts its running sum at every dask
     # block boundary, so a chunked time axis shifts the smoothed field by a few float32 ULP, enough
-    # to move a 0.01 threshold bin (D-091). With time whole the only boundary left is the one xarray's
+    # to move a 0.01 threshold bin. With time whole the only boundary left is the one xarray's
     # centred padding adds near the end of the series, which depends on its length alone, so the result
     # does not depend on the caller's chunking, and a time chunk shorter than the window is no longer an error.
     caller_chunks = dict(zip(da.dims, da.chunks))

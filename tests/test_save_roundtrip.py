@@ -167,7 +167,7 @@ def test_clear_store_encoding_drops_codecs_and_keeps_cf_keys(tmp_path):
 
 def test_detect_outputs_do_not_inherit_input_attrs(gridded_extremes_lazy):
     """xarray >= 2025.11 keeps attrs by default: the input SST's standard_name, units and
-    valid_min/valid_max must not reappear on the anomaly or the boolean event mask (D-139)."""
+    valid_min/valid_max must not reappear on the anomaly or the boolean event mask."""
     assert DATA_DIR.joinpath("sst_gridded.zarr").exists()
     for name in ("dat_anomaly", "extreme_events"):
         assert gridded_extremes_lazy[name].attrs == {}, name

@@ -1,5 +1,5 @@
 """
-Each float rolling mean in detect runs under ``rolling_numerics`` (D-141), one test per site.
+Each float rolling mean in detect runs under ``rolling_numerics``, one test per site.
 
 A spy on xarray's rolling ``mean`` records the accelerator options in force when it is
 called (the graph is built there, and that is when xarray reads them). ``preprocess_data``

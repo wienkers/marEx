@@ -321,7 +321,7 @@ def _compute_anomaly_detrended(
 
         # Rechunk data for efficient processing: horizontal whole, extra dims (depth, level)
         # per level unless a small grid leaves budget to stack them -- the layout `finalise`
-        # gives the output (D-128). Holding depth whole here made each chunk depth-times
+        # gives the output. Holding depth whole here made each chunk depth-times
         # its 2-D size before finalise split it again.
         horizontal = [dim for dim in chunk_dict_mask if dim in horizontal_dims(dimensions)]
         extra = [dim for dim in chunk_dict_mask if dim not in horizontal]

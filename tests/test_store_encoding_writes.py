@@ -1,5 +1,5 @@
 """
-Every marEx zarr write must survive a format-2 input under zarr-python 3 (D-139).
+Every marEx zarr write must survive a format-2 input under zarr-python 3.
 
 A variable opened from a format-2 store carries ``numcodecs`` codecs in ``.encoding``;
 xarray re-applies them on ``to_zarr`` and zarr 3 refuses them in a format-3 store
@@ -41,7 +41,7 @@ def _codec_keys(obj):
 
 
 def test_gridded_checkpoint_save_then_load(extremes_gridded, scratch, dask_client):
-    """tracker.run_preprocess(checkpoint='save') writes the format-2 input's coords (D-139 add. 2)."""
+    """tracker.run_preprocess(checkpoint='save') writes the format-2 input's coords."""
     events = extremes_gridded.extreme_events.chunk({"time": 2, "lat": -1, "lon": -1})
     kwargs = {"area_filter_quartile": 0.5, "R_fill": 2, "T_fill": 2, "temp_dir": scratch, "quiet": True}
 
@@ -77,7 +77,7 @@ def test_write_zarr_leaves_the_callers_encoding_alone(scratch):
 
 
 def test_every_to_zarr_goes_through_write_zarr():
-    """Tripwire: a write that bypasses the helper is how D-139 missed three sites twice."""
+    """Tripwire: a write that bypasses the helper is how three sites were missed twice."""
     offenders = []
     for path in PACKAGE_DIR.rglob("*.py"):
         if path.name == "encoding.py" and path.parent.name == "core":

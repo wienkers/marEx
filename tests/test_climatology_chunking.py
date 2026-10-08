@@ -26,11 +26,11 @@ def _synthetic(nt=1100, ncells=60, seed=0):
 
 
 class TestChunkSizeInvariance:
-    """The climatology must not depend on how the input is chunked (D-091)."""
+    """The climatology must not depend on how the input is chunked."""
 
     def test_output_is_bit_identical_across_time_and_space_chunks(self):
         # bottleneck's move_mean restarts its running sum at each dask block boundary, and flox
-        # accumulates its grouped mean block by block, so before D-091 the result moved by a
+        # accumulates its grouped mean block by block, so the result used to move by a
         # few float32 ULP with the time chunking -- enough to flip a 0.01 threshold bin. The
         # reduction now runs with time whole, so every layout gives the same bits.
         da = _synthetic()

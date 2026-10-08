@@ -16,13 +16,13 @@ Both use ``method_percentile='approximate'`` (the histogram approximation, the d
 
 Baselines are captured to zarr stores under ``tests/data/`` (zarr rather than NetCDF
 because the pipeline emits boolean dataset attributes NetCDF cannot serialise). They were
-regenerated from the histogram-quantile fixes (§3.x: edge-based 1D interpolation, top-bin
+regenerated from the histogram-quantile fixes (edge-based 1D interpolation, top-bin
 clipping, unified NaN policy) and validated positively against ``np.percentile`` -- config A
 threshold mean error ~0.0017 vs the true per-cell percentile. The input is the last
 ``N_GOLDEN_STEPS`` of the deterministic ``sst_gridded.zarr`` fixture (kept short so the golden
 stores stay small), with the same masked-NaN injection as ``test_gridded_preprocessing.py``.
 
-Determinism note: the detect pipeline is independent of the input chunking (D-091);
+Determinism note: the detect pipeline is independent of the input chunking;
 the histogram counts are exact integers and the quantile interpolation is a pure
 function of the histogram, so the outputs are bit-reproducible across processes.
 """
@@ -45,7 +45,7 @@ DASK_CHUNKS = {"time": 25}
 N_GOLDEN_STEPS = 7 * 365
 
 # ``precision`` and ``max_anomaly`` are pinned EXPLICITLY, at what were their defaults
-# when these baselines were captured. Phase D auto-derives ``max_anomaly`` from the data
+# when these baselines were captured. The bin range is now derived from the data
 # when it is left unset, so pinning them here keeps the baselines a characterisation of
 # the numerics rather than of the current default, and means a later change to the
 # derivation cannot silently move them.
@@ -64,17 +64,17 @@ CONFIGS = {
 }
 
 # The golden zarr stores keep their original names. Config A has never been regenerated.
-# Config B's arrays were rewritten ONCE, 2026-09-16 (D-091): the old values encoded the input's
+# Config B's arrays were rewritten ONCE, 2026-09-16: the old values encoded the input's
 # time chunk boundaries, and detect is now chunk-invariant. Only B moved (dat_anomaly max 7.6e-4
 # at 543,528 of 585,600; extreme_events 59 of 585,600; thresholds one 0.01 bin at 9,493 of
 # 292,800), and the rewritten values are bit-identical to the PRE-fix code run on a time-whole
 # input, so the change is the chunk dependence and nothing else.
-# Config B was rewritten AGAIN 2026-10-05 (D-141, Aaron): the smoothing's rolling mean moved from bottleneck's
+# Config B was rewritten AGAIN 2026-10-05: the smoothing's rolling mean moved from bottleneck's
 # float32 running sum to xarray's numpy path on every xarray release (dat_anomaly max 7.3e-4 at 543,605 of
-# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0). Never regenerate without a ruling.
+# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0). Never regenerate without a deliberate decision.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
-# Phase D replaced the asymmetric histogram bins with symmetric ones, so the 1-D path now
+# The histogram bins were changed from asymmetric to symmetric ones, so the 1-D path now
 # accumulates its CDF over twice as many bins. Config A's float64 `thresholds` therefore
 # differ from the baseline by pure summation round-off: MEASURED at 732 of 800 cells, max
 # 1.13e-14, against a method whose own bin precision is 0.01. `extreme_events` is
@@ -136,9 +136,9 @@ class TestDetectGolden:
 
     @pytest.mark.parametrize("tag", list(CONFIGS))
     def test_legacy_bins_reproduce_the_goldens(self, tag, dask_client_gridded, monkeypatch):
-        """The isolating gate for Phase D: bins changed, code did not.
+        """The isolating gate for the symmetric bins: bins changed, code did not.
 
-        Forcing the pre-Phase-D asymmetric edges back in must reproduce the stored
+        Forcing the old asymmetric edges back in must reproduce the stored
         baselines. Everything else in the extremes stage was rewritten around a
         ``tail`` parameter -- the guard rail became sign-aware, the bounds check moved
         into a shared helper, the histogram gained a bottom clip -- and this is what

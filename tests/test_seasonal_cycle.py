@@ -1,6 +1,6 @@
 """Unit tests for the :class:`~marEx.SeasonalCycle` primitive and cadence inference.
 
-These pin the two properties Phase C's whole gate rests on:
+These pin the two properties the non-daily cadence support rests on:
 
 1. **The daily path is the identity.** ``steps_for_days`` on a daily axis returns the
    number of days it was given, ``index_of`` is ``dt.dayofyear``, and the cycle length
@@ -191,7 +191,7 @@ class TestStepsForDays:
 
 class TestAddDecimalYear:
     def _legacy(self, times):
-        """The exact pre-Phase-C arithmetic, transcribed."""
+        """The exact daily-only arithmetic, transcribed."""
         t = pd.to_datetime(times)
         start = pd.to_datetime(t.year.astype(str) + "-01-01")
         nxt = pd.to_datetime((t.year + 1).astype(str) + "-01-01")

@@ -1,12 +1,12 @@
 """Numerics tests for the approximate histogram-quantile kernels.
 
-Targets the §3 findings the gridded golden fixture does *not* exercise:
-- §3.1 the 1D CDF interpolation must land strictly between bin centres (was dead code
-       collapsing to the crossing bin centre).
-- §3.2 out-of-range-high values must be counted in the top bin, not dropped (which
-       renormalised the CDF over a truncated total and biased thresholds low).
-- §3.3 the spatial-tiling change must be value-neutral (both quantile paths).
-- §3.4 a cell that is NaN only at some timesteps must still receive a real threshold.
+Targets the cases the gridded golden fixture does *not* exercise:
+- the 1D CDF interpolation must land strictly between bin centres (was dead code
+  collapsing to the crossing bin centre).
+- out-of-range-high values must be counted in the top bin, not dropped (which
+  renormalised the CDF over a truncated total and biased thresholds low).
+- the spatial-tiling change must be value-neutral (both quantile paths).
+- a cell that is NaN only at some timesteps must still receive a real threshold.
 """
 
 from pathlib import Path
@@ -37,9 +37,9 @@ def _series(values_2d, name="dat_anomaly"):
     return da.chunk({"time": -1, "x": -1})
 
 
-# ── §3.1 interpolation is live AND accurate (edge-based) ─────────────────────
+# ── interpolation is live AND accurate (edge-based) ─────────────────────
 def test_1d_quantile_edge_interpolation_matches_true_percentile():
-    """§3.1: the fixed within-bin edge interpolation must track the true percentile to well
+    """The fixed within-bin edge interpolation must track the true percentile to well
     inside one bin. This accuracy assertion discriminates the correct edge interpolation
     from both the old bin-centre snap and the (systematically biased) centre interpolation:
     edge-based lands within ~precision/3, the others do not."""
@@ -62,9 +62,9 @@ def test_1d_quantile_edge_interpolation_matches_true_percentile():
     assert np.mean(dist < 1e-9) < 0.5, "thresholds still snap to bin centres"
 
 
-# ── §3.2 out-of-range mass is counted ────────────────────────────────────────
+# ── out-of-range mass is counted ────────────────────────────────────────
 def test_1d_quantile_counts_out_of_range_high_mass():
-    """§3.2: counting out-of-range-high mass (the fix) yields a strictly higher threshold
+    """Counting out-of-range-high mass (the fix) yields a strictly higher threshold
     than dropping it (the bug). A/B on the same data isolates the effect from the
     interpolation shape."""
     rng = np.random.default_rng(1)
@@ -73,7 +73,7 @@ def test_1d_quantile_counts_out_of_range_high_mass():
     outliers = base.copy()
     # Push the top 4% of every column far above max_anomaly (=5). Under 1 - q, so the
     # counted 95th percentile stays inside the range: a share above 5% would put it in
-    # the clipped top bin, which is a ConfigurationError (D-138).
+    # the clipped top bin, which is a ConfigurationError.
     k = int(0.04 * nt)
     for j in range(nx):
         idx = np.argsort(base[:, j])[-k:]
@@ -100,9 +100,9 @@ def test_1d_quantile_counts_out_of_range_high_mass():
     assert np.all(thr_counted > thr_dropped + PRECISION), f"OOR mass not counted: {thr_counted} vs {thr_dropped}"
 
 
-# ── §3.4 partial-NaN cell keeps a real threshold ─────────────────────────────
+# ── partial-NaN cell keeps a real threshold ─────────────────────────────
 def test_1d_quantile_partial_nan_cell_gets_finite_threshold():
-    """§3.4: a cell NaN only at t=0 (finite afterwards) must get a finite threshold, not a
+    """A cell NaN only at t=0 (finite afterwards) must get a finite threshold, not a
     permanent NaN from the old any-NaN-in-time policy."""
     rng = np.random.default_rng(2)
     data = rng.normal(0.0, 1.0, size=(3000, 3)).astype(np.float32)
@@ -110,7 +110,7 @@ def test_1d_quantile_partial_nan_cell_gets_finite_threshold():
     da = _series(data)
 
     thr = H._compute_histogram_quantile_1d(da, 0.95, dim="time", precision=PRECISION, max_anomaly=MAX_ANOMALY).compute()
-    assert np.isfinite(thr.values[1]), "partial-NaN cell got a NaN threshold (§3.4 not fixed)"
+    assert np.isfinite(thr.values[1]), "partial-NaN cell got a NaN threshold (not fixed)"
     # A fully-NaN cell must still be masked.
     data2 = data.copy()
     data2[:, 2] = np.nan
@@ -118,7 +118,7 @@ def test_1d_quantile_partial_nan_cell_gets_finite_threshold():
     assert np.isnan(thr2.values[2]), "all-NaN cell should be masked"
 
 
-# ── §3.3 tiling is value-neutral (2D per-doy path with smoothing) ────────────
+# ── tiling is value-neutral (2D per-doy path with smoothing) ────────────
 def _doy_series(nt_years=3):
     """A (time, y, x) dask array with a dayofyear coord for the 2D quantile path."""
     rng = np.random.default_rng(3)
@@ -131,7 +131,7 @@ def _doy_series(nt_years=3):
 
 
 def test_2d_quantile_tiling_value_neutral_with_smoothing():
-    """§3.3: the 2D per-doy quantile (with spatial smoothing) is identical regardless of the
+    """The 2D per-doy quantile (with spatial smoothing) is identical regardless of the
     spatial tile size chosen internally."""
     da = _doy_series()
     dims = {"time": "time", "x": "x", "y": "y"}
@@ -155,12 +155,12 @@ def test_2d_quantile_tiling_value_neutral_with_smoothing():
     big = run(50_000_000)  # one tile covering the whole field
     # A budget that tiles into several chunks while staying >= the smoothing window.
     small = run(366 * len(_bin_centers()) * 16)  # ~4x4 tiles over the 6x8 field
-    np.testing.assert_array_equal(big.values, small.values, err_msg="2D quantile changed with tiling (§3.3)")
+    np.testing.assert_array_equal(big.values, small.values, err_msg="2D quantile changed with tiling")
 
 
-# ── §9.2 the shipped tiling function is exercised multi-tile ─────────────────
+# ── the shipped tiling function is exercised multi-tile ─────────────────
 def test_1d_quantile_real_chunker_multitile_matches_single():
-    """§9.2: run the *real* _chunk_spatial_for_histogram (not a monkeypatched stub) with a
+    """Run the *real* _chunk_spatial_for_histogram (not a monkeypatched stub) with a
     small element budget so it actually tiles, and confirm it matches the single-tile run."""
     rng = np.random.default_rng(4)
     da = _series(rng.normal(0.0, 1.0, size=(2000, 60)))
@@ -180,9 +180,9 @@ def test_1d_quantile_real_chunker_multitile_matches_single():
     np.testing.assert_array_equal(big.values, small.values, err_msg="real-chunker tiling changed the quantile")
 
 
-# ── §3.9 small unstructured grid + exact global must not crash ───────────────
+# ── small unstructured grid + exact global must not crash ───────────────
 def test_global_percentile_exact_small_unstructured_no_zero_chunk():
-    """§3.9: for a small unstructured grid (< ~4445 cells) the exact-path rechunk size must
+    """For a small unstructured grid (< ~4445 cells) the exact-path rechunk size must
     be clamped to >= 1 (was 0 -> invalid zero-size chunk)."""
     rng = np.random.default_rng(5)
     ncells = 200  # < 4445, where the old formula rounded to 0
@@ -229,7 +229,7 @@ _REFERENCE_NPY = Path(__file__).parent / "data" / "histogram_quantile_1d_referen
 
 
 def _legacy_bin_edges(precision, max_anomaly, dtype=np.float64):
-    """The pre-Phase-D asymmetric edges: one bin for every negative value."""
+    """The legacy asymmetric edges: one bin for every negative value."""
     if dtype == np.float32:
         return np.concatenate(
             [[-np.inf], np.arange(-precision, max_anomaly + precision, precision, dtype=np.float32)], dtype=np.float32
@@ -241,7 +241,7 @@ def test_1d_quantile_matches_captured_reference_under_the_legacy_bins(monkeypatc
     """Bit-identity oracle for the 1D quantile ARITHMETIC. No tolerance.
 
     The reference was captured from the two-phase (persist-the-CDF) implementation before
-    that path was restructured, and with the pre-Phase-D asymmetric bins. Forcing those
+    that path was restructured, and with the legacy asymmetric bins. Forcing those
     bins back in isolates the arithmetic from the binning: any change to the quantile
     computation -- notably a cumsum that drops from float64 to float32 -- moves these
     values, and this is the gate that catches it.
@@ -259,7 +259,7 @@ def test_1d_quantile_matches_captured_reference_under_the_legacy_bins(monkeypatc
 
 
 def test_1d_quantile_symmetric_bins_move_the_reference_only_by_round_off():
-    """Phase D's symmetric bins accumulate the CDF over twice as many bins.
+    """The symmetric bins accumulate the CDF over twice as many bins.
 
     That reorders a float64 cumulative sum, so the same quantiles come back with
     last-bit differences and nothing more: MEASURED at 28 of 42 cells, max 1.33e-15,

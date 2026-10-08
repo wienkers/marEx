@@ -30,7 +30,7 @@ def _anchor(obj, label, materialiser):
     """Stage `obj` -- it has two or more consumers. Plain persist when unsupplied.
 
     The `materialiser is None` default keeps every existing caller -- including the
-    unstructured path, which Phase 4 does not touch -- on exactly the previous behaviour.
+    unstructured path -- on exactly the previous behaviour.
     """
     if materialiser is None:
         return obj.persist()
@@ -149,7 +149,7 @@ def identify_objects(
                 # true_indices already sorted, so the old-index -> compact-index map is a
                 # binary search rather than a Python dict walked once per graph edge (up to
                 # 3 x ncells iterations inside the dask task, which dominated unstructured
-                # labelling on ICON-size grids -- review finding 6.5).
+                # labelling on ICON-size grids).
                 edge_rows = neighbours_int[row_ind, col_ind]
                 # The neighbour end is True by construction of valid_mask; only the cell end
                 # needs testing, which is exactly what the dict membership check did.
@@ -222,7 +222,7 @@ def identify_objects(
         if materialiser is not None and materialiser.is_streaming:
             # Stage the whole labelled field to disk instead of pinning it in RAM. This
             # is the branch reached only when allow_merging=False and the grid is
-            # structured -- the 13th pin site the original Phase 4 profile missed.
+            # structured.
             #
             # Staging needs the wrapped DataArray, so wrap first. N_objects is then read
             # back off the STAGED store rather than from `label`'s second return value:
@@ -234,7 +234,7 @@ def identify_objects(
             N_objects = int(object_id_field.max().compute().item())
         else:
             # persist mode: pin the raw label output and its count together so the one
-            # labelling pass serves both, exactly as before Phase 4.
+            # labelling pass serves both.
             if materialiser is None:
                 results = persist(object_id_field, N_objects)
             else:
@@ -486,7 +486,7 @@ class ObjectPropsStore:
         """Vectorised membership test: equivalent to ``[i in self for i in ids]``, elementwise.
 
         Callers filter multi-million-row overlap lists with this; a Python-level ``in`` per
-        row dominated ``enforce_overlap_threshold`` at scale (review finding 5.14). The
+        row dominated ``enforce_overlap_threshold`` at scale. The
         sorted key array is cached and invalidated by :meth:`set` / :meth:`drop`.
         """
         query = np.asarray(ids).astype(np.int64)
@@ -608,7 +608,7 @@ def calculate_object_properties(
         # Per-timestep property buffer. The estimate is 4x the mean number of objects per
         # timestep, plus slack. The old floor was `max_ID`, i.e. the total object count over
         # the whole run, which made these buffers O(time x total objects) and is consistent
-        # with the recorded unstructured-tracking OOM (review finding 6.3). The floor is now
+        # with the recorded unstructured-tracking OOM. The floor is now
         # a constant, so it still gives small runs generous headroom (where max_ID <= 100 it
         # is exactly the old value) without scaling with the length of the run. Overflow is
         # not silent: the `result[0, :n_ids] = areas` fill below raises if a timestep holds
@@ -813,7 +813,7 @@ def calculate_object_properties(
                 # centroid unchanged for every other object. The bbox is tight, so
                 # "has a pixel left of edge_margin" is exactly "bbox min column < margin"
                 # -- building an `ids == ID` mask for every object in every timestep just to
-                # discover that was the cost here (review finding 6.4).
+                # discover that was the cost here.
                 nx = ids.shape[1]
                 edge_margin = min(100, nx // 4)
                 near_left = np.asarray(props_slice["bbox-1"]) < edge_margin

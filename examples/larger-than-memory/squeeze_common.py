@@ -113,7 +113,7 @@ def build_cluster(args) -> tuple:
     # that crosses `pause` can no longer spill its way back down, so it pauses permanently and
     # the cluster deadlocks; and peak memory RISES, because everything that would have spilled
     # stays resident.  On the unstructured tracker at 192 GB, the same configuration that
-    # completes in 70 min at 118.7 GB peak with spilling on (f4_stream 27255851) was killed at
+    # completes in 70 min at 118.7 GB peak with spilling on was killed at
     # 169.5 GB peak with it off.  Both modes then fail, and a leg where neither mode completes
     # proves nothing about either.
     spill_config = (
@@ -265,7 +265,7 @@ class SpillSampler(threading.Thread):
     LOWER BOUND on the true peak.
 
     `unmeasured` and `samples_ok` are the load-bearing fields.  A probe that cannot read the
-    number must never report 0, because 0 is also a legitimate answer; see D-038 and D-041.
+    number must never report 0, because 0 is also a legitimate answer.
     `samples_ok` is what distinguishes "sampled every 5 s and never saw a byte on disk" from
     "never managed to sample at all" -- without it those two are the same `max_disk = 0`.
 
@@ -342,14 +342,14 @@ class SpillSampler(threading.Thread):
         Do NOT reach for `worker.data.disk.weight_by_key`: on distributed 2025.9.1
         `worker.data.disk` is a `zict.cache.Cache` and has no such attribute, so that
         expression raises AttributeError and a broad `except` turns it into a silent 0.  That
-        is the defect that made every leg of the campaign report `spill 0.00 GB` (D-041).
+        is the defect that made every leg of the campaign report `spill 0.00 GB`.
         """
         unreadable = SpillSampler.UNREADABLE
 
         # RSS is read FIRST and unconditionally. It comes from the SystemMonitor, not from the
         # data store, so a worker handing us no store must still be able to report its process
         # memory: coupling them made an unreadable `data` silently unmeasure a quantity that was
-        # perfectly readable (falsifier, 2026-09-08, finding 6).
+        # perfectly readable.
         try:
             process = int(dask_worker.monitor.get_process_memory())
         except Exception:
@@ -374,7 +374,7 @@ class SpillSampler(threading.Thread):
         # `data.fast` is the in-memory zict.lru.LRU whose `total_weight` is this worker's
         # managed bytes (verified on distributed 2025.9.1: 4 x 10 MB arrays over two workers
         # reported 20000000 and 40000000).  A plain dict has no `.fast`, and guessing a number
-        # for it would be exactly the failure D-041 is about, so it reads UNREADABLE.
+        # for it would be exactly the silent-zero failure, so it reads UNREADABLE.
         try:
             managed = int(data.fast.total_weight)
         except Exception:
@@ -440,8 +440,8 @@ class SpillSampler(threading.Thread):
 
             # Independent again, for the same reason: RSS is thresholded by `memory.spill`,
             # managed bytes by `memory.target`, and a failure to read one says nothing about
-            # the other.  A build that reported one when it had only measured the other is the
-            # category error D-042 was amended for.
+            # the other.  A build that reported one when it had only measured the other is a
+            # category error.
             process = [v.get("process") for v in values]
             if not all(_is_count(p) for p in process):
                 self.process_unmeasured = True
@@ -492,7 +492,7 @@ def _worker_process_history(dask_worker):
     That holds only while `count <= maxlen`.  Past that the deque has wrapped and the series
     covers the tail of the run alone, so `count` and `maxlen` are both returned and the caller
     decides; inferring "whole run" from a full deque would be exactly the silent-undercount
-    failure D-041 and D-042 are about.
+    failure.
 
     Returns `{"error": ...}` rather than a partial dict if either read fails: a missing series
     must never reach a summary as a zero.
@@ -576,7 +576,7 @@ def harvest_process_history(client, n_workers: int, outdir=None, label: str = "l
         # `covers_whole_run` is `count <= maxlen`, and a worker RESTART resets `count`, so it
         # reads True over a post-restart TAIL. The span does not: it is the wall time the
         # narrowest worker's series actually covers, and a consumer compares it against
-        # `elapsed_s` (falsifier, 2026-09-08, finding 13).
+        # `elapsed_s`.
         "prochist_span_s": min(max(v["time"]) - min(v["time"]) for v in replies.values()),
         # Names where the span came from, and it is READ by report.py's licence rather than
         # left in a sibling key nothing consumes. A value derived after the fact from a
@@ -793,7 +793,7 @@ def harvest_task_prefix_counts(client) -> dict:
     completed = {k: int(v.get("memory", 0)) for k, v in by_prefix.items()}
     if not any(completed.values()):
         # Every prefix at zero means the counter never incremented; that is the broken-probe
-        # shape (D-038), not a run in which no task completed.
+        # shape, not a run in which no task completed.
         dead["taskcount_by_prefix"] = completed
         dead["taskcount_n_prefixes"] = len(completed)
         dead["taskcount_error"] = "every prefix reports 0 completions"
@@ -815,7 +815,7 @@ def harvest_task_prefix_counts(client) -> dict:
 # run, and `detect_gridded.py:fingerprint` runs three of them.  A whole-leg lazy/persist
 # ratio is therefore dominated by the consumer count: measured at the desk on four graph
 # shapes it ranged 19.7-38.2 and tracked the time chunk, where the ratio INSIDE one
-# `preprocess_data` call sat in a 2.02-2.22 band (D-046).  The cell under test
+# `preprocess_data` call sat in a 2.02-2.22 band.  The cell under test
 # (`CHUNKING_NOTES.md:222`, and `marEx/anomaly/api.py:262-263`, "two to three times") is a
 # statement about the library's own fan-out, so it must be read at the library's boundary.
 #
@@ -832,8 +832,8 @@ def harvest_task_prefix_counts(client) -> dict:
 # * **The guards travel with the number.**  The snapshot is written to its own file the
 #   moment it is taken, so a leg later killed by its deadline still yields it -- which is
 #   exactly the case in which a worker restart is most likely.  A restarted worker's re-run
-#   tasks increment the SAME counter as a mode's recompute and are indistinguishable in it
-#   (D-047), so the file carries `boundary_nanny_memory_events`, and a snapshot with that
+#   tasks increment the SAME counter as a mode's recompute and are indistinguishable in it,
+#   so the file carries `boundary_nanny_memory_events`, and a snapshot with that
 #   above zero is VOID, whatever the count says.
 _ACTIVE_INSTRUMENTS: Dict[str, Any] = {"watcher": None, "accountant": None, "boundary": None}
 
@@ -855,7 +855,7 @@ def _scheduler_pending_census(dask_scheduler):
 
 # Why `futures_in` reports beside its return value: a bare `except ... return []` cannot
 # distinguish "the walk failed" from "nothing was persisted", and a leg reading
-# `settle_futures_waited=0` is then uninterpretable (falsifier gate 7 RISKS).
+# `settle_futures_waited=0` is then uninterpretable.
 _LAST_FUTURES_IN: dict = {"collections": None, "error": None}
 
 
@@ -871,14 +871,14 @@ def futures_in(obj) -> list:
     collections: list = []
 
     # These tests are `isinstance` and NOT `hasattr`, and that is load-bearing.  MEASURED
-    # 2026-09-08 (falsifier gate 7 finding 4, reproduced at :884 of the duck-typed version):
+    # 2026-09-08 on a duck-typed version:
     # the DataArray branch recurses into `item.data`, which for a datetime64 time coord is a
     # plain numpy array -- and `hasattr(np_datetime64_array, "data")` RAISES
     # `ValueError: cannot include dtype 'M' in a buffer`, because `ndarray.data` is the buffer
     # and datetime64 cannot be exposed through the buffer protocol.  The raise escaped `walk`
     # entirely, so `futures_in` returned NOTHING for a Dataset whose data_vars were persisted,
-    # and every persist replicate of job 27325013 read `futures=0` -- the exact-wait half of
-    # D-049 silently inert on the real marEx return, leaving quiescence to the poll census
+    # and every persist replicate read `futures=0` -- the exact wait silently inert on the
+    # real marEx return, leaving quiescence to the poll census
     # alone.  An xarray DataArray backed by dask IS itself a dask collection, so the DataArray
     # test must still come BEFORE the `is_dask_collection` test: otherwise `futures_of` is
     # handed the DataArray rather than the dask array inside it.
@@ -909,9 +909,8 @@ def futures_in(obj) -> list:
         return list(futures_of(collections))
     except Exception as exc:  # noqa: BLE001 - an unwalkable collection is reported as zero futures
         # A bare `return []` here cannot be told apart from "nothing was persisted", and both
-        # print `futures=0`. Falsifier gate 7 finding 6: every persist replicate of
-        # 27325013 read `futures=0` on marEx's persist-mode return and the cause could not be
-        # discriminated from the log. Record it.
+        # print `futures=0`; a run in which every persist replicate read `futures=0` could not
+        # be diagnosed from the log. Record it.
         _LAST_FUTURES_IN["error"] = f"{type(exc).__name__}: {exc}"[:400]
         return []
 
@@ -1102,7 +1101,7 @@ def execute(args, meta: dict, work: Callable[[Any], dict]) -> dict:
     accountant = PersistAccountant(marex_root, repo_root).install()
     # Published so that `snapshot_boundary`, called from inside `work()`, can carry the same
     # guards the leg summary carries: a count without its nanny-event reading is not
-    # interpretable (D-047).
+    # interpretable.
     _ACTIVE_INSTRUMENTS["watcher"] = watcher
     _ACTIVE_INSTRUMENTS["accountant"] = accountant
     _ACTIVE_INSTRUMENTS["boundary"] = None

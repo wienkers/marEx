@@ -1,9 +1,9 @@
 """The seasonal threshold handed to the comparison must not be one cycle x whole-field block.
 
-On a lat/lon grid the input is spatially whole (D-028), so aligning the thresholds to the input's
+On a lat/lon grid the input is spatially whole, so aligning the thresholds to the input's
 spatial chunks alone left the cycle axis whole too: one block of 366 x 720 x 1440 x 4 B = 1.5 GB at
 0.25 deg. The groupby comparison indexes that block once per run of consecutive slots, every such
-task holding a copy, and the L1 full streaming run died on it (D-132). Fixture fields are far too
+task holding a copy, and a full-resolution global streaming run died on it. Fixture fields are far too
 small to reach the budget, so the budget is shrunk here instead; the block bound is then pinned at
 two field sizes, because a bound that only holds at one size says nothing about how it scales.
 """

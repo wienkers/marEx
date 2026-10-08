@@ -5,7 +5,7 @@ shape: a number reached the README that no sampler was entitled to report.
 
 1. `_probe` read `worker.data.disk.weight_by_key`, which does not exist on distributed 2025.9.1,
    and a bare `except` turned the AttributeError into `0`. Every leg of the campaign reported
-   "spill 0.00 GB" and none of them had measured anything (D-038, D-041).
+   "spill 0.00 GB" and none of them had measured anything.
 2. A sampler that never sampled -- `client.run` raising on every tick, or answering from no
    workers -- produced a summary bit-identical to one that sampled throughout and saw nothing.
    `samples_ok` was added to separate them.
@@ -21,7 +21,7 @@ shape: a number reached the README that no sampler was entitled to report.
    `memory.spill` and `memory.pause` threshold per-worker PROCESS memory (worker_memory.py:213)
    and only `memory.target` thresholds managed bytes. A leg at 44 % of target could still have
    crossed spill, so "the target path was never approached" was being read as "the leg never
-   approached spilling" (D-042, gate 4 finding 12).
+   approached spilling".
 
 The common thread is that the honesty check itself was never tested, so each fix shipped on the
 strength of the code reading right. These tests are the standing version of the adversarial
@@ -226,7 +226,7 @@ class TestPartialCoverageIsNotAMeasurement:
         ],
     )
     def test_narrow_sample_never_licenses_a_figure(self, label, replies):
-        """This is gate 3's finding 4: the defect that made a quarter of a cluster read as all of it."""
+        """The defect that made a quarter of a cluster read as all of it."""
         row = summarise(replies)
         assert not prints_spill(row), f"{label}: printed a spill figure from partial coverage"
         assert not prints_managed(row), f"{label}: printed a managed figure from partial coverage"
@@ -264,7 +264,7 @@ class TestAFullSampleOfZeroIsStillAMeasurement:
         assert prints_spill(row) and row["spill_max_disk_bytes"] == 4 * 10**9
         assert prints_managed(row) and row["managed_max_worker_bytes"] == 2 * 10**9
         # Per WORKER, not summed: the threshold `memory.spill` applies is per worker, so a
-        # cluster sum here would be the same category error D-042 was amended for.
+        # cluster sum here would be the same category error.
         assert prints_process(row) and row["process_max_worker_bytes"] == 3 * 10**9
 
 
@@ -321,7 +321,7 @@ class TestTheThreeQuantitiesFailIndependently:
 
 
 class TestProbeReadsRSSIndependentlyOfTheDataStore:
-    """`_probe` had no test, and the gap was a real coupling (falsifier 2026-09-08, finding 6)."""
+    """`_probe` had no test, and the gap was a real coupling."""
 
     UNREADABLE = squeeze_common.SpillSampler.UNREADABLE
 
@@ -483,7 +483,7 @@ class TestTheHarvestCarriesItsOwnCoverage:
         """The load-bearing case: 4 workers sampled every 5 s, then 1 of 4 answered the harvest.
 
         Reusing `spill_workers_sampled` as the witness would print a per-worker maximum taken
-        over a quarter of the cluster, which is gate 3's finding 4 one round trip later.
+        over a quarter of the cluster: the narrow-sample defect again, one round trip later.
         """
         row = dict(self.BASE, prochist_workers_sampled=1)
         assert row["spill_workers_sampled"] == 4

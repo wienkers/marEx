@@ -6,7 +6,7 @@ true lineage label; bridge squares join two blobs for a day range. The truth is 
 can ask whether the tracker fused lineages that were only ever bridged, and whether its output
 depends on the input time chunking (it must not).
 
-Ported from the Q8 minimal reproducible examples (2026-09-13); kept dependency-free so the
+Minimal reproducible examples, kept dependency-free so the
 tracker tests can build inputs without a fixture store.
 """
 
@@ -157,7 +157,7 @@ def scenarios():
         "bridges": [{"r0": lanes[i][1], "r1": lanes[i + 1][0], "c0": 4, "w": 3, "t0": t0, "t1": t1} for i, t0, t1 in win],
     }
     # S4: ONE object split by a gap on days 10..19 and rejoined from day 20. Truth: 1 event and no
-    # merge. Without consolidation the rejoin is re-partitioned and logged as a merge daily (D-087).
+    # merge. Without consolidation the rejoin is re-partitioned and logged as a merge daily.
     s["S4"] = {
         "nrow": 24,
         "ncol": 60,

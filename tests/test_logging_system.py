@@ -121,7 +121,7 @@ class TestLoggingConfiguration:
         # Note: This test might need adjustment
 
     def test_explicit_config_not_wiped_by_later_get_logger(self):
-        """Regression (§7.5): an explicit configure_logging() must set the
+        """Regression: an explicit configure_logging() must set the
         configured flag so a subsequent get_logger() does not lazily re-run
         configure_logging() with defaults and silently reset the level."""
         try:
@@ -134,7 +134,7 @@ class TestLoggingConfiguration:
             set_normal_logging()
 
     def test_lazy_autoconfig_fires_for_submodule_logger(self):
-        """Regression (§7.4): lazy auto-config must fire for a "marEx.<module>"
+        """Regression: lazy auto-config must fire for a "marEx.<module>"
         name, not only the bare "marEx" root."""
         import marEx.logging_config as lc
 
@@ -590,7 +590,7 @@ class TestProgressBars:
         assert len(progress_msgs) > 0
 
     def test_log_progress_integer_bucketing_non_round_total(self, caplog):
-        """Regression (§7.8): log_progress must fire on a non-round total.
+        """Regression: log_progress must fire on a non-round total.
 
         The old ``percentage % frequency == 0`` float test virtually never matched
         unless the total divided evenly, so progress logging silently did nothing.

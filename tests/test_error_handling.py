@@ -663,7 +663,7 @@ class TestIdentifyExtremesConfigurationErrors:
 
         Under the old asymmetric bins every negative value shared a single bin, so a
         percentile landing in it was undefined by construction and was rejected below
-        60%. Phase D's bins are symmetric about zero, so a low percentile is resolved
+        60%. The bins are now symmetric about zero, so a low percentile is resolved
         at exactly the same precision as a high one. See tests/test_low_tail.py for
         the accuracy gate; this only pins that the guard is gone.
         """
@@ -923,7 +923,7 @@ class TestTrackerDataValidationErrors:
         coordinates = {"time": "time", "x": "missing_lon", "y": "missing_lat"}
 
         # Previously this surfaced as a bare KeyError from the coordinate capture in
-        # tracker.__init__, which ran before validation. §4.4 moved the presence check
+        # tracker.__init__, which ran before validation. The presence check now runs
         # ahead of that capture, so the descriptive error is now the one raised.
         with pytest.raises(DataValidationError, match="Missing required coordinates"):
             marEx.tracker(binary_data, mask, R_fill=8, area_filter_quartile=0.5, dimensions=dimensions, coordinates=coordinates)
@@ -1304,7 +1304,7 @@ class TestQuantileThresholdWarnings:
             assert result is not None
 
     def test_high_quantile_threshold_error_global_percentile(self, dimensions_gridded):
-        """Quantiles beyond the max_anomaly bounds raise with global_percentile (D-138)."""
+        """Quantiles beyond the max_anomaly bounds raise with global_percentile."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1326,7 +1326,7 @@ class TestQuantileThresholdWarnings:
         # Add extreme values that will push quantiles high
         data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
 
-        # A threshold saturated in the top bin is an error, not a warning (D-138).
+        # A threshold saturated in the top bin is an error, not a warning.
         with pytest.raises(ConfigurationError, match="exceed expected range"):
             marEx.preprocess_data(
                 data,
@@ -1340,7 +1340,7 @@ class TestQuantileThresholdWarnings:
             )
 
     def test_high_quantile_threshold_error_seasonal_percentile(self, dimensions_gridded):
-        """Quantiles beyond the max_anomaly bounds raise with seasonal_percentile (D-138)."""
+        """Quantiles beyond the max_anomaly bounds raise with seasonal_percentile."""
         import pandas as pd
 
         # Create data with very high variance to trigger high quantile warning
@@ -1362,7 +1362,7 @@ class TestQuantileThresholdWarnings:
         # Add extreme values that will push quantiles high
         data.values[:50, 0, 0] = data.values[:50, 0, 0] + 50  # Add large positive anomalies
 
-        # A threshold saturated in the top bin is an error, not a warning (D-138).
+        # A threshold saturated in the top bin is an error, not a warning.
         with pytest.raises(ConfigurationError, match="exceed expected range"):
             marEx.preprocess_data(
                 data,
@@ -1407,7 +1407,7 @@ class TestUnstructuredGridConfigurationErrors:
 
 
 class TestCoordinateCaptureOrdering:
-    """Coordinate access must not precede validation (§4.4).
+    """Coordinate access must not precede validation.
 
     ``lat_init``/``lon_init`` were captured at construction before ``validate_inputs``
     ran, so a missing coordinate surfaced as a raw ``KeyError`` and the friendly

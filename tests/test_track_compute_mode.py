@@ -124,7 +124,7 @@ class TestTrackerComputeModeValidation:
     def test_streaming_retiles_ragged_time_chunking(self, extremes, tmp_path):
         """A genuinely ragged chunking (e.g. from open_mfdataset over uneven per-year
         files) is re-tiled once at construction to a uniform width, for both modes, so the
-        zarr region writes downstream are legal (D-077). Tracking is chunk-invariant, so the
+        zarr region writes downstream are legal. Tracking is chunk-invariant, so the
         result does not depend on it."""
         n_time = extremes.sizes["time"]
         ragged = tuple([3, 5] * ((n_time // 8) + 1))[: n_time // 8 * 2]
@@ -170,7 +170,7 @@ class TestStagingLifetime:
     def test_written_output_does_not_carry_a_dead_staging_dir(self, extremes, tmp_path, dask_client):
         """The on-disk store must not record marex_staging_dir: clear_staging deletes that
         path right after the write, so persisted attrs carrying it would point at a
-        directory that no longer exists (D-118 falsifier finding 6)."""
+        directory that no longer exists."""
         tr = marEx.tracker(
             extremes.extreme_events.chunk(CHUNK_SIZE),
             extremes.mask,
@@ -237,7 +237,7 @@ class TestCrossModeEquivalence:
         stream_events = stream_events.compute()
         stream_merges = stream_merges.compute()
 
-        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        # assert_identical, not assert_allclose: no tolerance is granted.
         xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
         xr.testing.assert_identical(stream_merges, persist_merges)
 
@@ -406,7 +406,7 @@ class TestSharedLabellingPass:
         stream_events, stream_merges = stream_tr.run(return_merges=True)
         stream_events, stream_merges = stream_events.compute(), stream_merges.compute()
 
-        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        # assert_identical, not assert_allclose: no tolerance is granted.
         xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
         xr.testing.assert_identical(stream_merges, persist_merges)
 
@@ -417,7 +417,7 @@ class TestNoMergingPath:
     Every other test in this module runs with ``allow_merging=True``, which routes
     through ``split_and_merge``. With merging off the tracker instead calls
     ``identify_objects(time_connectivity=True)``, a 13th whole-field pin site that the
-    original Phase 4 profile (job 26764480) missed and that no bit-identity gate covered.
+    original profile missed and that no bit-identity test covered.
     """
 
     def _run_both(self, data_bin, mask, tmp_path):
@@ -440,7 +440,7 @@ class TestNoMergingPath:
         data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
         persist_events, stream_events = self._run_both(data_bin, extremes.mask, tmp_path)
 
-        # assert_identical, not assert_allclose: no tolerance is granted in Phase 4.
+        # assert_identical, not assert_allclose: no tolerance is granted.
         xr.testing.assert_identical(stream_events.drop_attrs(deep=False), persist_events.drop_attrs(deep=False))
 
         # N_events_final is an ATTR, so the comparison above drops it -- and it is the one
@@ -566,7 +566,7 @@ class TestBytesPinned:
         instrument is broken, not that streaming is lazy. Run the SAME recorder against
         persist mode and confirm it sees at least as much as the streaming bound rules
         out. persist is documented to pin >= 7 whole int32 fields plus 5 bool fields
-        (measured at scale, job 26764480); on this tiny fixture the same shapes must still
+        (measured at scale); on this tiny fixture the same shapes must still
         clear 2 whole int32 fields.
         """
         data_bin = extremes.extreme_events.chunk(CHUNK_SIZE)
@@ -600,7 +600,7 @@ class TestBytesPinned:
         total = sum(pinned)
 
         # persist mode pins >= 7 whole int32 fields plus 5 bool fields (measured at
-        # scale, job 26764480). Streaming must stay far under a single field.
+        # scale). Streaming must stay far under a single field.
         assert total < 2 * field_bytes, (
             f"streaming pinned {total} bytes, more than 2x one whole int32 field "
             f"({field_bytes}). The materialiser is not reaching every site."

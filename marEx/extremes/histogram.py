@@ -89,7 +89,7 @@ def _zero_bin_edges(bin_edges: NDArray[np.floating]) -> tuple:
 def _clamp_exact_threshold(threshold: xr.DataArray, tail: Literal["upper", "lower"]) -> xr.DataArray:
     """Keep an exact threshold strictly on its own side of zero, so a constant anomaly never flags.
 
-    The exact path's counterpart of the approximate path's guard rail (D-147, Aaron ruling (a)).
+    The exact path's counterpart of the approximate path's guard rail.
     A cell whose anomaly is (near-)constant -- sea ice -- has an exact threshold EQUAL to that
     constant, and the inclusive comparison (``>=`` / ``<=``) then flags every tie: 9.8 % of all
     cell-days at L1 instead of ~3 %, almost all poleward of 60 degrees. The approximate path never
@@ -161,7 +161,7 @@ def _apply_threshold_bounds(
     outermost bins, which is right for the 1-D path (it interpolates between EDGES). The 2-D
     path interpolates between bin CENTRES, so a crossing in the outermost bin can land up to
     half a bin inside its inner edge; it passes the second and second-to-last centres, and
-    only the ``'estimated'`` check uses them (D-152 falsifier finding 3). Below that bound every
+    only the ``'estimated'`` check uses them. Below that bound every
     cumulative count the threshold reads is the same integer whatever the range.
 
     Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
@@ -207,10 +207,10 @@ def _apply_threshold_bounds(
     # A threshold inside the outermost bin is not a threshold when samples were clipped there:
     # every sample beyond the range sits in that bin, so the true quantile could be anywhere
     # past it. With a caller-pinned range, fail rather than return a saturated field that looks
-    # plausible (D-138); with an estimated range, hand back to the caller to regrow it (D-152).
+    # plausible; with an estimated range, hand back to the caller to regrow it.
     # When the range IS the data's own extreme on the tail's side, nothing on that side was
     # clipped; reaching the outermost bin then means too few samples per window resolve this
-    # percentile in the cell holding the extreme, which is worth saying but not fatal (D-138 add. 2).
+    # percentile in the cell holding the extreme, which is worth saying but not fatal.
     if range_mode == "estimated" and bool(computed[4]):
         raise _RangeSaturated(float(thr_max) if tail == "upper" else float(thr_min))
     if bool(any_range):
@@ -303,11 +303,11 @@ def _chunk_spatial_for_histogram(
         The horizontal dimension names. When given, every other non-reduced dim (depth,
         level) is chunked at 1 and the budget's root is taken over the horizontal dims
         only, so each level gets exactly its 2-D slice's tiling at any extra-dim length
-        -- the layout ``_histogram_tile_chunks`` uses (D-127). Spreading the budget over
+        -- the layout ``_histogram_tile_chunks`` uses. Spreading the budget over
         depth too shrank the horizontal side to a cube root: a depth-1 field on a
         720x1440 grid got 19x19 tiles (2888 tasks) where its 2-D slice got 85x85 (153).
         Once a whole horizontal slice fits, the leftover budget stacks levels
-        (:func:`~marEx.core.dimensions.extra_dim_chunks`, D-128). ``None``, or a
+        (:func:`~marEx.core.dimensions.extra_dim_chunks`). ``None``, or a
         mapping missing one of ``da``'s horizontal dims, keeps the old every-dim root.
 
     Returns
@@ -401,7 +401,7 @@ def _histogram_tile_chunks(
     root of the cell budget over the HORIZONTAL dims only, so each level of a 3-D
     field gets exactly the tiling its 2-D slice would, whatever the extra dim's
     length. Only once a whole horizontal slice fits the budget does the leftover
-    stack levels (:func:`~marEx.core.dimensions.extra_dim_chunks`, D-128). The
+    stack levels (:func:`~marEx.core.dimensions.extra_dim_chunks`). The
     spatial window never rolls over an extra dim, so a level needs nothing from its
     neighbours. Spreading the budget over depth as well (the
     previous rank-th root) gave (3, 5, 5) tiles on a depth-3 field and peaked at
@@ -576,7 +576,7 @@ def _rolling_histogram_quantile(
     # ``searchsorted(row, v, side="right")`` on a non-decreasing row is exactly the count
     # of entries <= v, so the whole per-slot Python loop of searchsorted calls (run
     # once per cell inside an apply_ufunc(vectorize=True)) collapses to one comparison
-    # against the broadcast quantile positions (review finding 3.13).
+    # against the broadcast quantile positions.
     idx_upper = (cumsum <= quantile_position[:, None]).sum(axis=1).astype(np.int32)
     # Days with no data keep index 0 rather than the all-zero row's full-width count.
     idx_upper[total_counts <= 0] = 0
@@ -646,10 +646,10 @@ def _histogram_quantile_block(
     """
     eps = 1e-10
     total = hist_block.sum(axis=-1, keepdims=True)
-    # Normalise-then-cumulate is load-bearing for golden A (D-018). It makes the CDF, and so a
+    # Normalise-then-cumulate is load-bearing for golden A. It makes the CDF, and so a
     # threshold, depend at float64 ULP level (~1e-15) on how the samples below it are split
-    # across bins, i.e. on the binned range: cumulating integer counts first fails golden A
-    # (D-152 falsifier finding 2), so D-152's "regrow = run over the cap" holds to ULP here.
+    # across bins, i.e. on the binned range: cumulating integer counts first fails golden A,
+    # so a regrown range reproduces a run over the cap to ULP here, not bit for bit.
     pdf = hist_block / (total + eps)
     cdf = np.cumsum(pdf, axis=-1)
 
@@ -695,7 +695,7 @@ def _slab_tile_chunks(
     So the tile is budgeted on what the task reads and writes, never on ``n_bins``, and a
     sub-daily cycle no longer shrinks it (``_histogram_tile_chunks`` divides by
     ``cycle_length x n_bins``). Extra dims and the ``window_spatial`` floor follow
-    ``_histogram_tile_chunks`` (D-127, D-128).
+    ``_histogram_tile_chunks``.
     """
     spatial_dims_present = list(spatial_dims(da, dimensions))
     horizontal_present = set(horizontal_dims(dimensions))
@@ -791,7 +791,7 @@ def _slab_seasonal_threshold(
     q_mirror: float,
     tail: Literal["upper", "lower"],
 ) -> xr.DataArray:
-    """Per-cycle-slot thresholds without the dense histogram (D-143).
+    """Per-cycle-slot thresholds without the dense histogram.
 
     Digitizes exactly as the dense engine does, moves the uint16 bin index to time-whole
     spatial tiles (the one transpose any per-cell rank statistic needs), and builds each
@@ -965,7 +965,7 @@ def _compute_histogram_quantile_2d(
 
     # The estimator pairs each bin centre with the count THROUGH that bin, so it is not
     # mirror-equivariant: run directly on the lower tail it sits one bin colder than the
-    # mirror of the upper tail and under-flags (-27 % events vs exact at 15 yr, D-136).
+    # mirror of the upper tail and under-flags (-27 % events vs exact at 15 yr).
     # Evaluate the lower tail on the reversed histogram at 1 - q and negate, which is the
     # upper-tail estimator on -x exactly. The upper tail is untouched. Needs bin centres
     # symmetric about zero; the legacy asymmetric edges cannot resolve a low tail anyway.
@@ -979,7 +979,7 @@ def _compute_histogram_quantile_2d(
     q_mirror = (100.0 - round(q * 100.0, 10)) / 100.0
 
     # Two engines, one estimator. Both hand `_rolling_histogram_quantile` the same integer
-    # (cycle x n_bins) counts per cell, so they return the same thresholds bit for bit (D-143).
+    # (cycle x n_bins) counts per cell, so they return the same thresholds bit for bit.
     # "slab" (default) holds time whole per spatial tile and builds one cell's counts at a
     # time; "dense" builds every cell's counts for a whole tile with flox, a
     # (tile x cycle x n_bins) int64 block per task (843 MB for 12x12 cells at 366 x 1000)
@@ -999,7 +999,7 @@ def _compute_histogram_quantile_2d(
                 # still digitizes out of range and is correctly dropped. The bottom clip is
                 # -inf, hence skipped, on the legacy asymmetric edges. The lower tail closes
                 # bins on the right, so a sample exactly on an edge lands in the mirror of the
-                # bin -x would (D-136); the clip keeps every value off the outermost edges.
+                # bin -x would; the clip keeps every value off the outermost edges.
                 np.digitize(
                     np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip),
                     bin_edges,
@@ -1013,7 +1013,7 @@ def _compute_histogram_quantile_2d(
             # Cast BEFORE the rechunk. np.digitize returns int64, and the rechunk below is the
             # all-to-all shuffle of the seasonal path, so casting afterwards moved 4x the bytes
             # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
-            # indices are small non-negative integers (review finding 3.5).
+            # indices are small non-negative integers.
             .astype(np.uint16).chunk(chunk_dict)
         )
 
@@ -1028,7 +1028,7 @@ def _compute_histogram_quantile_2d(
             isbin=(False, False),
             # uint32, not uint16: a (cell, slot, bin) can hold more than 65535 samples (an hourly
             # series under a monthly cycle, or a near-constant field), and a uint16 count wraps
-            # there, where the slab engine's int64 bincount does not (D-146).
+            # there, where the slab engine's int64 bincount does not.
             dtype=np.uint32,
             fill_value=0,
         )
@@ -1120,7 +1120,7 @@ def _compute_histogram_quantile_2d(
     # bounded by cycle x space, not by time. `pin_one` (a no-op in streaming) left that
     # eager compute running the whole histogram graph, and the caller's `stage` running it
     # again. Writing it to zarr here instead still crashed at 731 x 120 x 1440 on
-    # 16 x 14 GB (2/2), where persisting the same graph completed 2/2 (D-125).
+    # 16 x 14 GB (2/2), where persisting the same graph completed 2/2.
     threshold = materialiser.pin_bounded(threshold.where(~nan_mask))
 
     # Validate threshold values against the sign-aware bounds. One scheduler round-trip
@@ -1239,7 +1239,7 @@ def _compute_histogram_quantile_1d(
     )
     if f"{da.name}_bin" in threshold.coords:
         threshold = threshold.drop_vars(f"{da.name}_bin")
-    # Pin before the bounds check -- see the matching comment in the 2D path (D-125).
+    # Pin before the bounds check -- see the matching comment in the 2D path.
     threshold = materialiser.pin_bounded(threshold)
 
     # Validate threshold against the sign-aware bounds -- one fused round-trip, shared

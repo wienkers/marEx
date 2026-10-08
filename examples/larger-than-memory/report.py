@@ -38,7 +38,7 @@ def _measured(row, prefix: str, bytes_key: str, width_key: str = "spill_workers_
     Every clause is load-bearing, and each one is a defect that reached the README:
 
     * `<prefix>_unmeasured is False` -- an ABSENT key means a leg predating the 2026-09-08
-      probe fix, whose recorded 0 came from a probe that returned 0 on failure (D-038/D-041).
+      probe fix, whose recorded 0 came from a probe that returned 0 on failure.
     * the byte count is not None -- a null with `unmeasured` False otherwise renders "-",
       which reads as a formatting gap rather than as an absence of measurement.
     * `samples_ok` is a positive non-bool int -- a sampler that never sampled reports the same
@@ -112,7 +112,7 @@ def input_reads(row, prefix: str = "open_dataset-sst"):
     the whole leg. Three separate things can make that number uninterpretable, and each is
     named rather than folded into a bare count:
 
-    * a leg that did not COMPLETE. Falsifier gate 5, finding 9: a leg that raised
+    * a leg that did not COMPLETE. A leg that raised
       `ConfigurationError` after 2.2 s, having computed nothing of the science, still reported
       `taskcount_unmeasured` False with 50 completions over 8 prefixes -- those are the setup
       graph. "The harvest answered" is not "the graph ran".
@@ -124,10 +124,10 @@ def input_reads(row, prefix: str = "open_dataset-sst"):
       passed in, or nothing.
 
     A leg predating the instrument has no `taskcount_unmeasured` key at all; ABSENT reads
-    UNMEASURED, never 0, for the same reason the spill column does (D-038).
+    UNMEASURED, never 0, for the same reason the spill column does.
 
     NOTE the figure this returns is NOT yet licensed as "how many times the anomaly graph ran".
-    Falsifier gate 5, finding 10 falsified that reading of `open_dataset-sst`: dask fuses the
+    That reading of `open_dataset-sst` does not hold: dask fuses the
     prefix away in a plain `.sum()` graph and it survives only where a rechunk blocks fusion,
     so its count is not one-per-graph-execution. The column reports what was counted; it does
     not claim what the count means.
@@ -150,7 +150,7 @@ def boundary_taskcount(row, outdir) -> str:
     This column exists because the leg-end count answers a different question. A leg is one
     `preprocess_data` call plus however many consumers the harness runs, and
     `detect_gridded.py:fingerprint` runs three, so a whole-leg lazy/persist ratio measures
-    the HARNESS (D-046, D-047). The boundary reading is the library's own fan-out.
+    the HARNESS. The boundary reading is the library's own fan-out.
 
     Its voiding rules are its OWN, deliberately not the leg's:
 
@@ -161,20 +161,19 @@ def boundary_taskcount(row, outdir) -> str:
     * `boundary_nanny_memory_events > 0` DOES void it, and this is the reading that matters
       rather than the leg's total: a worker restart before the boundary makes dask re-run the
       lost tasks, and that re-execution increments the same counter as a mode's recompute
-      (D-047). Restarts AFTER the boundary cannot contaminate it.
+     . Restarts AFTER the boundary cannot contaminate it.
     * `boundary_settle_quiescent` false voids it. A count read while work is still in flight
       is not a boundary count, and the bias falls on `persist` alone, which is the mode
       `lazy` is compared against.
     * `boundary_settle_futures_error` not None voids it, on EITHER mode. A walk that raised
       reports zero futures, which is indistinguishable in the number from "nothing was
-      persisted" -- D-052, where `hasattr` on a datetime64 coord raised and silently disabled
-      D-049's exact wait for three whole replicates.
+      persisted" -- as when `hasattr` on a datetime64 coord raised and silently disabled
+      the exact wait for three whole replicates.
     * `boundary_settle_futures_waited == 0` voids a **persist** row and only a persist row.
-      The prereg's mechanism discriminator is that persist has futures to wait on and lazy has
+      The mechanism discriminator is that persist has futures to wait on and lazy has
       none; a persist leg reading zero means the exact wait was a no-op, the undercount is not
       excluded, and the ratio is INCONCLUSIVE. Lazy's zero is the expected reading, never a
-      fault. This rule lived only in the prereg's prose until 27325013 spent a whole run
-      satisfying every enforced rule while failing this one.
+      fault. Without this rule, a run can satisfy every other rule while failing this one.
 
     As everywhere else in this file, an ABSENT key reads UNMEASURED and never 0.
     """
@@ -280,8 +279,8 @@ def main() -> None:
     print("\n### Cross-mode fingerprints (equivalence legs)\n")
     print("| leg | mode | n_extreme_cells | anomaly_checksum | thresholds_checksum | id_field_sum | n_events | n_merges |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
-    # A leg that did not complete is LISTED, never dropped. Falsifier gate 9 finding 15: the
-    # old `continue` made a deadlined leg vanish from this table with no marker, so HARD
+    # A leg that did not complete is LISTED, never dropped. An
+    # earlier `continue` made a deadlined leg vanish from this table with no marker, so HARD
     # VOIDING RULE 4 (the two modes must agree on the fingerprints) silently went unchecked
     # while the boundary count from the same leg was still reported as good.
     for r in rows:
@@ -301,9 +300,8 @@ def main() -> None:
     _rule4_verdict(rows)
 
 
-# HARD VOIDING RULE 4 of prereg_q5_boundary.txt: the persist and lazy legs of one comparison
-# must agree EXACTLY on n_extreme_cells, anomaly_checksum and thresholds_checksum. The rule
-# lived only in the prereg's prose and nothing computed it (falsifier gate 9 finding 15).
+# HARD VOIDING RULE 4: the persist and lazy legs of one comparison
+# must agree EXACTLY on n_extreme_cells, anomaly_checksum and thresholds_checksum.
 RULE4_KEYS = ("n_extreme_cells", "anomaly_checksum", "thresholds_checksum")
 
 

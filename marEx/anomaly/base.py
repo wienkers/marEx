@@ -238,7 +238,7 @@ def compute_normalised_anomaly(
         )
 
     # Reduce on a canonical layout (time whole, spatial tiles) so the answer does not depend on how
-    # the caller chunked the input, then hand back the caller's layout (D-091).
+    # the caller chunked the input, then hand back the caller's layout.
     caller_chunks = dict(zip(da.dims, da.chunks))
     ds = _dispatch_anomaly(
         da.chunk(canonical_time_chunks(da, dimensions)),

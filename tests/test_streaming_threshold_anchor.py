@@ -3,8 +3,8 @@
 ``_apply_threshold_bounds`` makes one eager ``dask.compute`` over the threshold. ``pin_one`` is a
 no-op in streaming mode, so that compute ran the whole histogram graph on its own and the later
 ``stage`` of the thresholds ran it a second time. Staging it to zarr instead removed the second
-pass but still crashed at the L1 smoke scale (731 x 120 x 1440, 16 x 14 GB; 27619732, 27619736),
-where persisting the same graph completed with 0 restarts (27619742, 27619762); D-125.
+pass but still crashed at 731 x 120 x 1440 on 16 x 14 GB workers, where persisting the same
+graph completed with 0 restarts.
 
 What is pinned here is graph STRUCTURE, which bit-identity tests are blind to: the array the
 bounds check receives must hold materialised blocks, carrying none of the histogram graph.

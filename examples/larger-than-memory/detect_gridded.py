@@ -104,7 +104,7 @@ def main() -> None:
         )
         # Read the task counts HERE, at the library's boundary, not at the leg's: the three
         # `.compute()` calls in `fingerprint` below would otherwise dominate the number and
-        # a lazy/persist ratio would be measuring this harness rather than marEx (D-046).
+        # a lazy/persist ratio would be measuring this harness rather than marEx.
         boundary = snapshot_boundary(client, args, collections=ds, phase="preprocess_data")
         result = fingerprint(ds)
         result.update(boundary)

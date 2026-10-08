@@ -244,7 +244,7 @@ def _validate_data_values(da: xr.DataArray, dimensions: Dict[str, str]) -> None:
     invalid_in_valid_locations = invalid_per_location.where(spatial_mask, 0)
 
     # One round-trip for both scans rather than two: they read the same input, so fusing
-    # them lets dask share that read instead of walking the array twice (finding 2.12).
+    # them lets dask share that read instead of walking the array twice.
     has_valid_data, max_invalid = dask.compute(spatial_mask.any(), invalid_in_valid_locations.max())
 
     # Check if there's any valid data at all

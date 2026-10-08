@@ -1,4 +1,4 @@
-"""End-to-end coverage for non-daily time axes (Phase C).
+"""End-to-end coverage for non-daily time axes.
 
 marEx was written for daily data, and every within-year reduction was resolved on a
 hardcoded 366-slot day-of-year axis. :class:`~marEx.SeasonalCycle` states that axis
@@ -9,13 +9,13 @@ What these tests are for, in order of how much they are worth:
 1. **The cycle dimension of the output is the right one and the right length.** A
    monthly run must produce ``thresholds`` on a ``month`` axis of length 12, not a
    ``dayofyear`` axis of length 366 with 354 empty slots. This is the assertion that
-   fails on pre-Phase-C code.
+   fails on daily-only code.
 2. **The durations stay physical.** ``window_days`` and ``smooth_days`` are days, so a
    monthly axis clamps them to one step and says so; a 6-hourly axis expands them.
 3. **``detrend_harmonic`` refuses sub-daily input** rather than silently leaving the
    diurnal cycle in the anomaly.
 
-The fixtures are derived at test time, never committed -- Phase B's precedent. A
+The fixtures are derived at test time, never committed. A
 monthly resample of the shipped gridded fixture is ~50 KB of derived data and costs
 milliseconds.
 """
@@ -84,7 +84,7 @@ class TestMonthly:
     def test_thresholds_land_on_a_twelve_slot_month_axis(self, monthly_sst):
         """The headline assertion: a monthly run resolves on ``month``, not ``dayofyear``.
 
-        On pre-Phase-C code this produces a 366-long ``dayofyear`` axis whose 354
+        On daily-only code this produces a 366-long ``dayofyear`` axis whose 354
         unpopulated slots are NaN, so the tripwire is the dimension NAME, not just a
         tolerance on the values.
         """
@@ -295,7 +295,7 @@ class TestSubDaily:
         CLAUDE.md records that 440 tests, a window harness and the coverage tripwires
         were all green while an all-to-all rechunk was live, so a value-only check is
         not evidence here. What matters is the number ``rolling_climatology`` hands to
-        its tiling budget: ``n_target_years * cycle.length``. On pre-Phase-C code that
+        its tiling budget: ``n_target_years * cycle.length``. On daily-only code that
         was ``n_target_years * 366`` from a hardcoded ``_CYCLE_LENGTH``, so on a
         6-hourly axis the tile was sized for a quarter of the output it produces.
 
@@ -326,7 +326,7 @@ class TestSubDaily:
 
         # Exact equality, not a divisibility check: `n_years * 366` happens to be a
         # multiple of 1464 whenever `n_years` is a multiple of 4, so a modulo test would
-        # pass on pre-Phase-C code for some series lengths.
+        # pass on daily-only code for some series lengths.
         n_years = len(np.unique(sixhourly_sst.time.dt.year.values))
         assert per_cell == n_years * 366 * 4, (
             f"the climatology budgeted {per_cell} output elements per cell; the 6-hourly cycle "
@@ -338,7 +338,7 @@ class TestSubDaily:
         """...and the budget it computes is really applied to the array.
 
         ``TASK_ELEMENTS`` is read at call time precisely so it can be turned down like
-        this (NEXT.md's Phase B notes make that explicit). With it small enough, the cap
+        this. With it small enough, the cap
         must bind and produce spatial chunks strictly smaller than the whole field.
         """
         import marEx.core.dimensions as D
@@ -422,8 +422,7 @@ class TestIrregularAxesOnlyFailWhereACycleIsNeeded:
     that actually need a within-year cycle.
 
     Resolving eagerly at the entry points made `global_percentile` -- which has no
-    cycle at all -- fail on axes it had always processed. Same shape as the Phase B
-    `validate_rank` finding: a guard naming a problem the caller does not have.
+    cycle at all -- fail on axes it had always processed: a guard naming a problem the caller does not have.
     """
 
     @staticmethod
@@ -537,8 +536,7 @@ class TestCadenceIndexName:
 
     It exists to word an output attribute. `infer_cycle` raises on a mixed-cadence axis
     and `global_percentile` needs no cycle at all, so resolving a real cycle for the
-    wording would fail runs that otherwise succeed -- the same shape as the Phase C
-    eager-resolution finding. Every case below is one `infer_cycle` would reject or
+    wording would fail runs that otherwise succeed. Every case below is one `infer_cycle` would reject or
     answer differently.
     """
 
@@ -566,7 +564,7 @@ class TestCadenceIndexName:
         assert cadence_index_name(da, "time") in {"month", "dayofyear", "hourofyear"}
 
     def test_an_unmeasurable_axis_reports_daily(self):
-        """One step gives no diff at all. Daily is what every pre-Phase-C run recorded."""
+        """One step gives no diff at all. Daily is what every daily-only run recorded."""
         time = pd.date_range("2000-01-01", periods=1, freq="D")
         da = xr.DataArray(np.zeros(1, np.float32), dims=["time"], coords={"time": time})
         assert cadence_index_name(da, "time") == "dayofyear"
