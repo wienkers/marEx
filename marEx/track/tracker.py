@@ -193,6 +193,8 @@ class tracker:
     area_filter_absolute : int, optional
         The minimum area (in grid cells) for an object to be retained. Mutually exclusive with area_filter_quartile.
         Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
+        Applied after the morphological closing, so it cannot stop small specks from
+        bridging objects during the closing; see ``prefilter_min_cells`` for that.
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     compute_mode : {'persist', 'streaming'}, default='persist'
@@ -227,6 +229,14 @@ class tracker:
           normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
           wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
           §3.1/§5.2 for the full contract and measurements.
+    prefilter_min_cells : int, optional
+        Keyword-only. Drop connected components smaller than this many cells from each
+        time slice *before* the morphological closing. On a fine grid, specks below the
+        scale of interest act as stepping stones under dilation and join objects that
+        would otherwise stay separate. ``area_filter_absolute`` runs after the closing and
+        cannot undo that. Connectivity is the tracker's own (8-connected with the
+        longitude seam joined on a global grid, edge neighbours on an unstructured mesh).
+        Default ``None`` disables it.
     T_fill : int, default=2
         The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
     allow_merging : bool, default=True
@@ -476,6 +486,7 @@ class tracker:
         coordinate_units: Optional[Literal["degrees", "radians"]] = None,
         *,
         compute_mode: Literal["persist", "streaming"] = "persist",
+        prefilter_min_cells: Optional[int] = None,
     ) -> None:
         """Initialise the tracker with parameters and data."""
         # Both checks come FIRST, ahead of logging and every coordinate read. `mask` is
@@ -513,7 +524,8 @@ class tracker:
         logger.info(f"Grid type: {'unstructured' if unstructured_grid else 'structured'}")
         logger.info(
             f"Parameters: R_fill={R_fill}, T_fill={T_fill}, "
-            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}"
+            f"area_filter_quartile={area_filter_quartile}, area_filter_absolute={area_filter_absolute}, "
+            f"prefilter_min_cells={prefilter_min_cells}"
         )
         logger.debug(
             f"Tracking options: allow_merging={allow_merging}, nn_partitioning={nn_partitioning}, "
@@ -580,6 +592,16 @@ class tracker:
         self.mask = mask
         self.R_fill = int(R_fill)
         self.T_fill = T_fill
+        if prefilter_min_cells is not None and (
+            isinstance(prefilter_min_cells, bool)
+            or not isinstance(prefilter_min_cells, (int, np.integer))
+            or prefilter_min_cells < 1
+        ):
+            raise ConfigurationError(
+                f"prefilter_min_cells must be a positive integer or None, got {prefilter_min_cells!r}",
+                suggestions=["Pass e.g. prefilter_min_cells=23, or None to disable the pre-filter"],
+            )
+        self.prefilter_min_cells = None if prefilter_min_cells is None else int(prefilter_min_cells)
 
         # Resolve area filtering parameters
         (
@@ -1057,6 +1079,20 @@ class tracker:
         raw_area = self.compute_area(self.data_bin)
         logger.debug(f"Initial raw area: {raw_area}")
 
+        # Drop specks before the closing, so they cannot bridge separate objects. Lazy: it
+        # fuses into the hole-filling graph and is materialised with it.
+        if self.prefilter_min_cells is not None:
+            logger.info(f"Dropping components smaller than {self.prefilter_min_cells} cells before hole filling")
+            self.data_bin = _morphology.drop_small_components(
+                self.data_bin,
+                self.prefilter_min_cells,
+                self.unstructured_grid,
+                self.xdim,
+                self.ydim,
+                self.regional_mode,
+                getattr(self, "neighbours_int", None),
+            )
+
         # Fill small holes & gaps between objects
         logger.info(f"Filling spatial holes with radius R_fill={self.R_fill}")
         with log_timing(logger, "Spatial hole filling"):
@@ -1241,6 +1277,8 @@ class tracker:
         events_ds.attrs["R_fill"] = self.R_fill
         events_ds.attrs["T_fill"] = self.T_fill
         events_ds.attrs["area_filter_quartile"] = self.area_filter_quartile
+        if self.prefilter_min_cells is not None:
+            events_ds.attrs["prefilter_min_cells"] = self.prefilter_min_cells
         events_ds.attrs["area_threshold (cells)"] = area_threshold
         events_ds.attrs["accepted_area_fraction"] = accepted_area_fraction
         events_ds.attrs["preprocessed_area_fraction"] = preprocessed_area_fraction

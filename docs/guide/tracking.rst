@@ -207,6 +207,14 @@ Required Parameters
   For example, 25 keeps only events with 25 or more grid cells.
   Mutually exclusive with area_filter_quartile.
 
+**prefilter_min_cells** : int, optional (keyword-only)
+  Drops connected components smaller than this many cells from each day *before* the
+  morphological closing. On a fine grid, specks below the scale of interest act as stepping
+  stones under the closing and join objects that would otherwise stay separate. The area
+  filters above run after the closing and cannot undo that. Connectivity is the tracker's
+  own. Default ``None`` (off). The unstructured example uses 23 cells, about one 0.25° cell
+  on the ICON R02B09 mesh.
+
 Core Tracking Parameters
 -------------------------
 

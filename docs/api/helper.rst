@@ -15,6 +15,7 @@ datasets. For deployment guidance and examples, see :doc:`../guide/performance`.
    start_local_cluster
    configure_dask
    get_cluster_info
+   ResourceMonitor
 
 Detailed reference
 ==================
@@ -26,3 +27,6 @@ Detailed reference
 .. autofunction:: configure_dask
 
 .. autofunction:: get_cluster_info
+
+.. autoclass:: ResourceMonitor
+   :members: stage, summary

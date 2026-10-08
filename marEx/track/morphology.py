@@ -20,6 +20,8 @@ from dask_image.ndmorph import binary_closing as binary_closing_dask
 from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import label as scipy_label
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from ..core.encoding import write_zarr
 from ..exceptions import TrackingError
@@ -354,6 +356,96 @@ def refresh_dask_graph(data_bin: xr.DataArray, zarr_path: str) -> xr.DataArray:
 
     data_new = xr.open_zarr(zarr_path, chunks={}).temp
     return data_new
+
+
+def drop_small_components(
+    data_bin: xr.DataArray,
+    min_cells: int,
+    unstructured_grid: bool,
+    xdim: str,
+    ydim: Optional[str],
+    regional_mode: bool,
+    neighbours_int: Optional[xr.DataArray] = None,
+) -> xr.DataArray:
+    """
+    Drop connected components smaller than ``min_cells`` from each time slice.
+
+    Runs before the morphological closing, so isolated specks cannot act as stepping stones
+    that bridge separate objects once they are dilated. ``filter_small_objects`` cannot do
+    this: it runs after the closing, when the bridges have already formed.
+
+    Connectivity matches the tracker's own per-slice labelling: 8-connected with the
+    longitude seam joined (structured, global), 8-connected without the seam (regional), and
+    edge-sharing neighbours (unstructured). The result is lazy and keeps the input chunks.
+
+    Parameters
+    ----------
+    data_bin : xarray.DataArray
+        Binary field, spatially unchunked.
+    min_cells : int
+        Components with fewer cells than this are set to False. Components of exactly
+        ``min_cells`` are kept.
+
+    Returns
+    -------
+    xarray.DataArray
+        Boolean field of the same shape and chunking.
+    """
+    if unstructured_grid:
+
+        def keep_large(arr: NDArray[np.bool_], nb: NDArray[np.int32]) -> NDArray[np.bool_]:
+            out = np.zeros(arr.shape, dtype=bool)
+            flat = arr.reshape(-1, arr.shape[-1])
+            out_flat = out.reshape(-1, arr.shape[-1])
+            for i in range(flat.shape[0]):
+                x = flat[i]
+                idx = np.flatnonzero(x)
+                if idx.size == 0:
+                    continue
+                cols = nb[:, idx]  # (3, k) neighbour of each True cell, -1 where absent
+                rows = np.broadcast_to(np.arange(idx.size), cols.shape)
+                ok = cols >= 0
+                ok[ok] = x[cols[ok]]
+                graph = csr_matrix(
+                    (
+                        np.ones(int(ok.sum()), dtype=np.int8),
+                        (rows[ok], np.searchsorted(idx, cols[ok])),
+                    ),
+                    shape=(idx.size, idx.size),
+                )
+                _, labels = connected_components(graph, directed=False)
+                keep = np.bincount(labels) >= min_cells
+                out_flat[i, idx[keep[labels]]] = True
+            return out
+
+        nb = neighbours_int.chunk({d: -1 for d in neighbours_int.dims})
+        return xr.apply_ufunc(
+            keep_large,
+            data_bin,
+            nb,
+            input_core_dims=[[xdim], ["nv", xdim]],
+            output_core_dims=[[xdim]],
+            output_dtypes=[np.bool_],
+            dask="parallelized",
+        )
+
+    def keep_large_slice(bitmap: NDArray[np.bool_]) -> NDArray[np.bool_]:
+        labels, n_labels = scipy_label(bitmap, structure=_EIGHT_CONNECTIVITY)
+        if not regional_mode:
+            labels = _merge_lon_seam(labels, n_labels)
+        keep = np.bincount(labels.ravel()) >= min_cells
+        keep[0] = False
+        return keep[labels]
+
+    return xr.apply_ufunc(
+        keep_large_slice,
+        data_bin,
+        input_core_dims=[[ydim, xdim]],
+        output_core_dims=[[ydim, xdim]],
+        output_dtypes=[np.bool_],
+        vectorize=True,
+        dask="parallelized",
+    )
 
 
 def filter_small_objects(
