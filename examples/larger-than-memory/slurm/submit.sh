@@ -34,9 +34,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="$(dirname "$HERE")"
-OUT="${SQUEEZE_OUT:-/work/bk1377/b382615/marex_fable/measurements/lm}"
+OUT="${SQUEEZE_OUT:-/work/bk1377/b382615/marEx/measurements/lm}"
 SCRATCH="${SQUEEZE_SCRATCH:-/scratch/b/b382615/marEx/lm}"
-LOGS="${SQUEEZE_LOGS:-/work/bk1377/b382615/marex_fable/lm_logs}"
+LOGS="${SQUEEZE_LOGS:-/work/bk1377/b382615/marEx/lm_logs}"
 JOBS="${SQUEEZE_JOBS:-/home/b/b382615/opt/marEx/.claude/jobs.ndjson}"
 mkdir -p "$OUT" "$SCRATCH" "$LOGS"
 
