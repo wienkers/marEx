@@ -201,11 +201,12 @@ class tracker:
         Materialisation policy for whole-field intermediates during tracking.
 
         * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
-          whenever the run fits (measured peak ~57 GB at n_time=3804, 0.25 deg global).
+          whenever the run fits (in one measured gridded run, 0.25 deg global, n_time=3804: peak ~57 GB).
         * 'streaming': stages the ID field, the filled/filtered fields, the merge loop's
           output accumulator and the merge ledger to zarr under ``temp_dir`` instead of
           pinning them, so memory scales with cluster size rather than series length
-          (measured peak 19.1 GB on the same run, bytes pinned 337 -> 0.34 GB). Requires
+          (on the same run: peak 19.1 GB, bytes pinned 337 -> 0.34 GB; single measurements,
+          gridded tracker only). Requires
           ``temp_dir``. Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields,
           ~14 bytes per cell-timestep uncompressed (~55 GB uncompressed at that same
           n_time=3804 x 720 x 1440 run; less on disk, since the ID fields are mostly
@@ -227,8 +228,7 @@ class tracker:
           ``clear_staging`` runs that directory is gone, so an attrs-recorded path would
           be a dead reference baked into your output). An ``atexit`` hook cleans up on
           normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
-          wall-clock kill), so sweep ``temp_dir`` periodically. See CHUNKING_NOTES.md
-          §3.1/§5.2 for the full contract and measurements.
+          wall-clock kill), so sweep ``temp_dir`` periodically.
     prefilter_min_cells : int, optional
         Keyword-only. Drop connected components smaller than this many cells from each
         time slice *before* the morphological closing. On a fine grid, specks below the
@@ -238,7 +238,9 @@ class tracker:
         longitude seam joined on a global grid, edge neighbours on an unstructured mesh).
         Default ``None`` disables it.
     T_fill : int, default=2
-        The permissible temporal gap (in days) between objects for tracking continuity to be maintained (must be even)
+        The permissible temporal gap, in timesteps, between objects for tracking continuity to be maintained
+        (must be even). The temporal closing kernel spans ``T_fill + 1`` timesteps, so on daily data
+        the unit is days. ``0`` skips the temporal closing.
     allow_merging : bool, default=True
         Allow objects to split and merge across time.
         Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
@@ -339,7 +341,7 @@ class tracker:
     ...     extreme_events,
     ...     mask,
     ...     R_fill=12,               # Larger spatial gap filling
-    ...     T_fill=4,                # Fill up to 4-day temporal gaps
+    ...     T_fill=4,                # Fill temporal gaps of up to 4 timesteps
     ...     area_filter_quartile=0.25,  # More aggressive size filtering
     ...     allow_merging=True,      # Enable split/merge detection
     ...     overlap_threshold=0.3    # Lower threshold for object linking
@@ -348,8 +350,6 @@ class tracker:
     >>> events_advanced, merges_log = advanced_tracker.run(return_merges=True)
     >>> print(events_advanced.data_vars)
     Data variables:
-        event           (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
-        event_centroid  (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
         ID_field        (time, lat, lon)        int32           dask.array<chunksize=(25, 180, 360)>
         global_ID       (time, ID)              int32           dask.array<chunksize=(25, 1247)>
         area            (time, ID)              float32         dask.array<chunksize=(25, 1247)>
@@ -1577,11 +1577,12 @@ class tracker:
         Returns
         -------
         overlap_objects_list_unique_filtered : (N x 3) numpy.ndarray
-            Array of object ID pairs that overlap across time, with overlap area
+            Array of object ID pairs that overlap across time, with overlap area.
             The object in the first column precedes the second column in time.
             The third column contains:
-                * For structured grid: number of overlapping pixels (int32)
-                * For unstructured grid: total overlapping area in m^2 (float32)
+
+            * For structured grid: number of overlapping pixels (int32)
+            * For unstructured grid: total overlapping area in m^2 (float32)
         """
         return _overlap.find_overlapping_objects(
             object_id_field,

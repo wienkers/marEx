@@ -292,7 +292,7 @@ class TestSubDaily:
     def test_the_climatology_tile_is_budgeted_against_the_subdaily_cycle(self, sixhourly_sst, monkeypatch):
         """Assert the chunk STRUCTURE, not the values -- and assert it at the call site.
 
-        CLAUDE.md records that 440 tests, a window harness and the coverage tripwires
+        The project notes record that 440 tests, a window harness and the coverage tripwires
         were all green while an all-to-all rechunk was live, so a value-only check is
         not evidence here. What matters is the number ``rolling_climatology`` hands to
         its tiling budget: ``n_target_years * cycle.length``. On daily-only code that

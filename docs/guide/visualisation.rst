@@ -2,549 +2,348 @@
 Visualisation (plotX)
 =====================
 
-See :doc:`../api/plotx` for the full :class:`marEx.PlotConfig` and accessor reference.
+``plotX`` draws maps of marEx output (anomalies, extreme-event masks, tracked event IDs) from an
+xarray accessor, on regular latitude/longitude grids and on unstructured meshes. See
+:doc:`../api/plotx` for the :class:`marEx.PlotConfig` and :func:`marEx.specify_grid` reference.
+
+.. contents::
+   :local:
+   :depth: 2
 
 Overview
 ========
 
-The plotting module implements an xarray accessor that seamlessly integrates with
-xarray DataArrays to provide specialised plotting capabilities. The system automatically
-detects whether data is on a structured (regular lat/lon) or unstructured (irregular mesh)
-grid and applies the appropriate plotting method.
+Importing ``marEx`` registers a ``.plotX`` accessor on every :class:`xarray.DataArray`. Calling
+one of its methods builds a plotter for the data, and the plotter draws a Cartopy map. Three
+methods cover the use cases:
 
-**Key Features:**
+``single_plot(config, ax=None)``
+   One map for one timestep. Returns ``(fig, ax, im)``.
 
-* **Automatic Grid Detection**: Detects structured vs. unstructured grids automatically
-* **xarray Integration**: Access via `.plotX` accessor on DataArrays
-* **Flexible Configuration**: Comprehensive plotting options via `PlotConfig`
-* **Animation Support**: Built-in animation capabilities for time series data
-* **Memory Efficient**: Global caching for triangulation and spatial indexing
+``multi_plot(config, col="time", col_wrap=3)``
+   A wrapped grid of maps, one per entry along ``col``, with a shared colour scale and one
+   colourbar. Returns ``(fig, axes)``.
 
-Grid detection
-==============
+``animate(config, plot_dir="./", file_name=None, centroids=None, object_ids=None)``
+   An MP4 movie with one frame per timestep. Returns the file path, or ``None`` if ``ffmpeg``
+   cannot be found.
 
-The plotting system automatically detects the grid type from the coordinate
-structure:
+All appearance options live in a :class:`marEx.PlotConfig`. Plotting is **two-dimensional**: a
+field has one horizontal slice per timestep, and a field with a further dimension (depth,
+level, member) is rejected with ``VisualisationError``. Select one level first, for example
+``temperature.isel(depth=0)``.
 
-* **Structured grids**: have separate latitude and longitude dimensions
-  (e.g. ``lat``, ``lon``).
-* **Unstructured grids**: have a single spatial dimension (e.g. ``ncells``) with
-  latitude/longitude provided as coordinates.
+Plotting needs ``matplotlib`` and ``cartopy``, which are installed with marEx. Movies also need
+``pillow`` and an ``ffmpeg`` executable on the ``PATH`` (the ``plotting`` extra provides them,
+or ``conda install -c conda-forge ffmpeg``).
 
-For unstructured grids, supply the grid topology once via
-:func:`marEx.specify_grid` (see :doc:`../api/plotx`); the ``.plotX`` accessor
-then selects the appropriate backend automatically.
-
-Basic Usage
+Quick Start
 ===========
-
-Simple Plotting
----------------
 
 .. code-block:: python
 
+   import numpy as np
    import xarray as xr
    import marEx
 
-   # Load data
-   data = xr.open_dataset('example.nc').temperature
-
-   # Basic plot - automatic grid detection
-   fig, ax, im = data.plotX.single_plot(marEx.PlotConfig())
-
-Advanced Configuration
-----------------------
-
-.. code-block:: python
-
-   # Custom plot configuration
-   config = marEx.PlotConfig(
-       title='Sea Surface Temperature',
-       var_units='°C',
-       cmap='RdBu_r',
-       issym=True,
-       show_colorbar=True,
-       grid_lines=True,
-       grid_labels=True
+   lat = np.arange(-89.5, 90, 1.0)
+   lon = np.arange(0.5, 360, 1.0)
+   snapshot = xr.DataArray(
+       np.random.default_rng(0).normal(size=(lat.size, lon.size)),
+       dims=("lat", "lon"),
+       coords={"lat": lat, "lon": lon},
+       name="anomaly",
    )
 
-   # Create plot
-   fig, ax, im = data.plotX.single_plot(config)
+   config = marEx.PlotConfig(title="Anomaly", var_units="K", issym=True)
+   fig, ax, im = snapshot.plotX.single_plot(config)
+   fig.savefig("anomaly.png", dpi=150)
 
-Multi-Panel Plotting
---------------------
+``single_plot`` needs a single timestep. Pass ``data.isel(time=0)``, or a field whose time
+dimension has length 1.
 
-.. code-block:: python
-
-   # Plot multiple time steps
-   config = marEx.PlotConfig(
-       title='Temperature Evolution',
-       var_units='°C',
-       cmap='viridis'
-   )
-
-   # Create wrapped subplots
-   fig, axes = data.plotX.multi_plot(config, col='time', col_wrap=3)
-
-Animation
----------
-
-.. code-block:: python
-
-   # Create animation
-   config = marEx.PlotConfig(
-       title='Temperature Animation',
-       var_units='°C',
-       cmap='RdBu_r'
-   )
-
-   # Generate animation
-   movie_path = data.plotX.animate(
-       config,
-       plot_dir='./animations',
-       file_name='temperature_evolution'
-   )
-
-Structured Grid Usage
-=====================
-
-Regular Lat/Lon Grids
----------------------
-
-For structured grids (typical climate model output):
-
-.. code-block:: python
-
-   # Load gridded data
-   sst = xr.open_dataset('sst_regular.nc').sst
-
-   # Configure for geographic plotting
-   config = marEx.PlotConfig(
-       title='Global Sea Surface Temperature',
-       var_units='°C',
-       cmap='coolwarm',
-       show_colorbar=True,
-       grid_lines=True,
-       grid_labels=True
-   )
-
-   # Plot will automatically use GriddedPlotter
-   fig, ax, im = sst.plotX.single_plot(config)
-
-Custom Dimension Names
-----------------------
-
-.. code-block:: python
-
-   # For data with non-standard coordinate names
-   config = marEx.PlotConfig(
-       title='Temperature',
-       var_units='°C',
-       # Specify custom dimension mapping
-       dimensions={'time': 'time', 'y': 'latitude', 'x': 'longitude'},
-       coordinates={'time': 'time', 'y': 'latitude', 'x': 'longitude'}
-   )
-
-   fig, ax, im = data.plotX.single_plot(config)
-
-Unstructured Grid Usage
-=======================
-
-Ocean Model Grids
-------------------
-
-For unstructured grids (e.g., FESOM, ICON-O):
-
-.. code-block:: python
-
-   # First specify grid information globally
-   marEx.specify_grid(
-       grid_type='unstructured',
-       fpath_tgrid='grid_info.nc',
-       fpath_ckdtree='./ckdtree_indices/'
-   )
-
-   # Load unstructured data
-   sst = xr.open_dataset('sst_unstructured.nc').sst
-
-   # Configure plot
-   config = marEx.PlotConfig(
-       title='Ocean Model SST',
-       var_units='°C',
-       cmap='thermal',
-       show_colorbar=True
-   )
-
-   # Plot will automatically use UnstructuredPlotter
-   fig, ax, im = sst.plotX.single_plot(config)
-
-Triangulation-Based Plotting
------------------------------
-
-.. code-block:: python
-
-   # Use triangulation file for native mesh plotting
-   marEx.specify_grid(
-       grid_type='unstructured',
-       fpath_tgrid='triangulation.nc'
-   )
-
-   config = marEx.PlotConfig(
-       title='Native Mesh Visualization',
-       var_units='Temperature (°C)',
-       cmap='plasma'
-   )
-
-   fig, ax, im = data.plotX.single_plot(config)
-
-Event ID Plotting
-==================
-
-Special Configuration for Event IDs
-------------------------------------
-
-.. code-block:: python
-
-   # For plotting tracked event IDs
-   config = marEx.PlotConfig(
-       title='Extreme Events',
-       plot_IDs=True,  # Special handling for event IDs
-       cmap='tab20'    # Discrete colormap for IDs
-   )
-
-   fig, ax, im = event_ids.plotX.single_plot(config)
-
-Color Scaling Options
-=====================
-
-Percentile-Based Scaling
-------------------------
-
-.. code-block:: python
-
-   config = marEx.PlotConfig(
-       title='Temperature Anomalies',
-       var_units='°C',
-       cmap='RdBu_r',
-       cperc=[5, 95],  # Use 5th and 95th percentiles
-       extend='both'
-   )
-
-Symmetric Scaling
------------------
-
-.. code-block:: python
-
-   config = marEx.PlotConfig(
-       title='Temperature Anomalies',
-       var_units='°C',
-       cmap='RdBu_r',
-       issym=True,     # Symmetric around zero
-       extend='both'
-   )
-
-Manual Color Limits
--------------------
-
-.. code-block:: python
-
-   config = marEx.PlotConfig(
-       title='Temperature',
-       var_units='°C',
-       cmap='viridis',
-       clim=(-2, 5),   # Manual color limits
-       extend='both'
-   )
-
-Error Handling
+Grid Detection
 ==============
 
-The plotting system provides comprehensive error handling:
+The accessor decides between the two backends from the dimensions of the data. A field is
+**gridded** if the dimension named by ``dimensions["y"]`` (default ``lat``) is present, and
+**unstructured** otherwise. For an unstructured field the cell dimension is the one that the
+``x`` coordinate (default ``lon``) is defined on. A field with several non-time dimensions
+where that cannot be decided (for example ``(time, depth, ncells)`` without a ``lon``
+coordinate on ``ncells``) raises ``VisualisationError`` and asks for the dimensions
+explicitly.
+
+:func:`marEx.specify_grid` with ``grid_type="gridded"`` or ``"unstructured"`` overrides the
+detection and logs a warning when it disagrees with the data.
+
+Custom Dimension and Coordinate Names
+-------------------------------------
+
+Names other than ``time``, ``lat`` and ``lon`` are passed to the accessor call, not to
+``PlotConfig``:
+
+.. code-block:: python
+
+   plotter = temperature.plotX(
+       dimensions={"time": "time", "y": "latitude", "x": "longitude"},
+       coordinates={"time": "time", "y": "latitude", "x": "longitude"},
+   )
+   fig, ax, im = plotter.single_plot(marEx.PlotConfig(title="Temperature"))
+
+The accessor call returns a ``GriddedPlotter`` or an ``UnstructuredPlotter``, and all three
+methods are available on it. The ``dimensions`` and ``coordinates`` fields of ``PlotConfig``
+only select the title text in ``multi_plot``. The shortcuts ``da.plotX.single_plot(config)``
+use the default names.
+
+The PlotConfig
+==============
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 22 56
+
+   * - Field
+     - Default
+     - Meaning
+   * - ``title``
+     - ``None``
+     - Axes title (``single_plot`` and ``animate`` frames).
+   * - ``var_units``
+     - ``""``
+     - Colourbar label.
+   * - ``cmap``
+     - ``None``
+     - Colormap name or object. ``None`` gives ``viridis``, or ``RdBu_r`` with ``issym=True``.
+   * - ``issym``
+     - ``False``
+     - Make the colour limits symmetric about zero.
+   * - ``cperc``
+     - ``[4, 96]``
+     - Percentiles that set the colour limits when ``clim`` and ``norm`` are not given.
+   * - ``clim``
+     - ``None``
+     - Explicit ``(vmin, vmax)``. Overrides ``cperc``.
+   * - ``norm``
+     - ``None``
+     - A matplotlib ``Normalize`` or ``BoundaryNorm``. Overrides both.
+   * - ``extend``
+     - ``"both"``
+     - Colourbar extension: ``"neither"``, ``"both"``, ``"min"`` or ``"max"``.
+   * - ``show_colorbar``
+     - ``True``
+     - Draw the colourbar.
+   * - ``grid_lines``, ``grid_labels``
+     - ``True``, ``False``
+     - Dashed graticule, and whether it has labels.
+   * - ``plot_IDs``
+     - ``False``
+     - Plot integer event IDs (see `Plotting Event IDs`_). Forces ``show_colorbar=False``.
+   * - ``projection``
+     - Robinson
+     - Any Cartopy projection. Data are always interpreted as PlateCarree (lat/lon).
+   * - ``framerate``
+     - ``10``
+     - Frames per second for ``animate``.
+   * - ``ckdtree_res``
+     - ``0.3``
+     - Resolution (degrees) of the interpolation file used for unstructured movies.
+   * - ``dimensions``, ``coordinates``
+     - ``time``/``lat``/``lon``
+     - Used for titles in ``multi_plot`` and as the animation's name mapping.
+   * - ``verbose``, ``quiet``
+     - ``None``
+     - Logging controls.
+
+Colour Scaling
+--------------
+
+Unless ``clim`` or ``norm`` is given, the limits are the ``cperc`` percentiles of the data. For
+speed, every tenth timestep is sampled, and a very large field is also strided in space, so
+the limits are approximate for a long record. Set ``clim`` for figures that must be
+comparable between plots.
+
+.. code-block:: python
+
+   marEx.PlotConfig(cmap="RdBu_r", issym=True, cperc=[2, 98])     # symmetric about zero
+   marEx.PlotConfig(cmap="viridis", clim=(-2, 5), extend="both")  # fixed limits
+
+   from matplotlib.colors import BoundaryNorm
+   norm = BoundaryNorm([-2, -1, 0, 1, 2], ncolors=256)
+   marEx.PlotConfig(norm=norm, extend="both")                     # discrete levels
+
+Single Plots and Existing Axes
+==============================
+
+``single_plot`` accepts an existing Cartopy axes, so a map can sit inside your own figure
+layout. The axes need a projection:
+
+.. code-block:: python
+
+   import cartopy.crs as ccrs
+   import matplotlib.pyplot as plt
+
+   # `anomaly` is a (time, lat, lon) DataArray, for example from marEx.anomaly.compute
+   fig = plt.figure(figsize=(12, 5))
+   ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.Robinson())
+   ax2 = fig.add_subplot(1, 2, 2, projection=ccrs.Robinson())
+
+   config = marEx.PlotConfig(title="Day 1", clim=(-3, 3), issym=True)
+   anomaly.isel(time=0).plotX.single_plot(config, ax=ax1)
+   anomaly.isel(time=1).plotX.single_plot(config, ax=ax2)
+
+Multi-Panel Plots
+=================
+
+``multi_plot`` places one map per entry along ``col`` (default ``"time"``), wrapped into
+``col_wrap`` columns, with a single shared colourbar. The panel titles are the dates for a time
+column, and ``name=value`` for any other dimension.
+
+.. code-block:: python
+
+   config = marEx.PlotConfig(title="Anomaly", var_units="K", issym=True)
+   fig, axes = anomaly.isel(time=slice(0, 6)).plotX.multi_plot(config, col="time", col_wrap=3)
+
+Select the panels before calling it: one map is rendered per entry, so slicing a decade of
+daily data draws thousands.
+
+Plotting Event IDs
+==================
+
+``plot_IDs=True`` is for the ``ID_field`` of the tracker (see :doc:`tracking`). IDs of 0 (the
+background) are masked, every ID gets its own colour from a fixed random seed, and the
+colourbar is switched off. Pass a ``cmap`` to use your own colours.
+
+.. code-block:: python
+
+   events = xr.open_zarr("tracked_events.zarr")
+   config = marEx.PlotConfig(title="Tracked Events", plot_IDs=True)
+   fig, ax, im = events.ID_field.isel(time=100).plotX.single_plot(config)
+
+Animations
+==========
+
+``animate`` renders each timestep as a frame on the Dask scheduler and encodes the frames
+with ``ffmpeg`` (H.264, ``yuv420p``, constant frame size). Frames are
+rendered in batches, so a long record is not held in memory at once. If a Dask client is
+running, the frames use its workers.
+
+.. code-block:: python
+
+   config = marEx.PlotConfig(
+       title="Sea Surface Temperature Anomaly",
+       var_units="K",
+       issym=True,
+       framerate=12,
+   )
+   movie_path = anomaly.plotX.animate(
+       config, plot_dir="./animations", file_name="sst_anomaly"
+   )
+
+The file name gets ``.mp4`` appended when it is missing, and defaults to
+``movie_<variable name>.mp4``. Colour limits are set once, from a sample of the record or from
+``clim``, so the scale does not change between frames.
+
+Overlaying Tracked Events
+-------------------------
+
+A movie of the extreme-event mask or the anomaly can show the tracker output as outlines and
+centroid markers. ``object_ids`` takes an ID field (cells with ID > 0 are contoured as one
+outline) and ``centroids`` the ``centroid`` array of the tracker, with dimensions
+``(component, time, ID)`` in which ``component=0`` is latitude and ``1`` longitude:
+
+.. code-block:: python
+
+   movie_path = anomaly.plotX.animate(
+       marEx.PlotConfig(title="Anomaly and Tracked Events", issym=True),
+       plot_dir="./animations",
+       file_name="events_on_anomaly",
+       centroids=events.centroid,
+       object_ids=events.ID_field,
+   )
+
+Unstructured Meshes
+===================
+
+An unstructured field has one cell dimension, with ``lat`` and ``lon`` as coordinates on it.
+The accessor needs the mesh to draw it, supplied once with :func:`marEx.specify_grid`. There
+are two rendering routes:
+
+**Interpolation (``fpath_ckdtree``).** Cell values are mapped onto a regular lat/lon grid with
+precomputed nearest-cell indices, and drawn with ``pcolormesh``. This is the fast route for
+global maps and movies. If both paths are given, this route is used.
+
+**Triangulation (``fpath_tgrid``).** The native triangles are drawn with ``tripcolor``. This
+shows the true cell geometry and is slower on a large mesh.
+
+.. code-block:: python
+
+   marEx.specify_grid(
+       grid_type="unstructured",
+       fpath_tgrid="icon_grid.nc",          # triangulation
+       fpath_ckdtree="./ckdtree_indices/",  # interpolation indices
+   )
+
+   sst = xr.open_zarr("icon_sst.zarr").sst   # dims (time, ncells), coords lon/lat on ncells
+   fig, ax, im = sst.isel(time=0).plotX.single_plot(marEx.PlotConfig(title="ICON SST"))
+
+Without either path, plotting raises ``VisualisationError`` that names the missing option.
+``specify_grid`` is global to the process. To set the paths on one plotter only, use
+``sst.plotX().specify_grid(fpath_tgrid=..., fpath_ckdtree=...)``.
+
+The mesh files are read once and cached (``marEx.plotX.unstructured.clear_cache()`` empties the
+cache).
+
+File Formats
+------------
+
+Triangulation file (NetCDF)
+   Variables ``vertex_of_cell`` (``(nvertices, ncells)`` as in ICON grid files, 1-based
+   vertex indices), and ``clon`` and ``clat`` (longitude and latitude, in degrees). They are used as stored, with no unit conversion.
+
+Interpolation directory
+   One file per resolution named ``res<value>.nc`` (for example ``res0.30.nc``, with two
+   decimals), each holding ``ickdtree_c`` (``(nlat, nlon)`` nearest-cell indices), ``lon`` and
+   ``lat`` of the target regular grid. The resolution that is read is ``ckdtree_res``. For a
+   movie it is ``PlotConfig.ckdtree_res``. For ``single_plot`` and ``multi_plot`` it is the
+   ``ckdtree_res`` attribute of the plotter, which defaults to 0.3:
+
+   .. code-block:: python
+
+      plotter = sst.isel(time=0).plotX()
+      plotter.ckdtree_res = 0.1            # reads ckdtree_indices/res0.10.nc
+      fig, ax, im = plotter.single_plot(marEx.PlotConfig())
+
+Regular Grids: Projections and Longitude Wrapping
+=================================================
+
+.. _plotx-grid-details:
+
+The default display projection is Robinson, and any Cartopy projection can be passed as
+``PlotConfig(projection=...)``. The data are always interpreted as PlateCarree
+(regular latitude and longitude), so a field that is regular in lat/lon draws correctly on any
+projection.
+
+Global fields that span the full 360 degrees with the seam between the last and first column
+get one extra column at ``lon + 360``, so the map has no gap at the date line. This applies when
+``abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing``. Regional fields, for example
+``-180`` to ``-120`` or ``0`` to ``90``, are not wrapped.
+
+Errors
+======
+
+Failures raise ``marEx.VisualisationError`` (or ``marEx.DependencyError`` when a plotting
+dependency is missing). Both hold the cause and suggested fixes:
 
 .. code-block:: python
 
    try:
-       fig, ax, im = data.plotX.single_plot(config)
+       fig, ax, im = field.plotX.single_plot(config)
    except marEx.VisualisationError as e:
-       print(f"Plotting error: {e}")
-       print(f"Suggestions: {e.suggestions}")
+       print(e)
+       print(e.suggestions)
    except marEx.DependencyError as e:
        print(f"Missing dependency: {e}")
 
-Integration with Matplotlib
-===========================
-
-Direct Matplotlib Integration
------------------------------
-
-.. code-block:: python
-
-   import matplotlib.pyplot as plt
-
-   # Create custom figure
-   fig, ax = plt.subplots(figsize=(12, 8))
-
-   # Use existing axes
-   config = marEx.PlotConfig(title='Custom Plot')
-   fig, ax, im = data.plotX.single_plot(config, ax=ax)
-
-   # Add custom elements
-   ax.set_title('Custom Title', fontsize=14)
-   plt.tight_layout()
-
-
-.. _plotx-grid-details:
-
-
-Structured grids: projections & longitude wrapping
-==================================================
-
-
-Geographic Projections
-----------------------
-
-The GriddedPlotter uses Cartopy for geographic projections. The default projection is Robinson, but data is always transformed from PlateCarree:
-
-.. code-block:: python
-
-   # Default projection handling:
-   # - Data coordinates assumed to be in PlateCarree (regular lat/lon)
-   # - Display projection defaults to Robinson
-   # - Coordinate transformation handled automatically
-
-   # The plot method internally uses:
-   plot_kwargs = {
-       'transform': ccrs.PlateCarree(),  # Input data coordinate system
-       'cmap': cmap,
-       'shading': 'auto'
-   }
-
-   # And the axes are created with:
-   ax = plt.axes(projection=ccrs.Robinson())  # Display projection
-
-Global vs Regional Data
------------------------
-
-Longitude Wrapping Logic
--------------------------
-
-The `wrap_lon` method automatically detects if longitude wrapping is needed:
-
-.. code-block:: python
-
-   # Wrapping is applied when:
-   # - Data spans approximately 360 degrees
-   # - abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing
-
-   # Example: longitude from 0 to 359.5 with 0.5 degree spacing
-   # - Total span: 359.5 degrees
-   # - Spacing: 0.5 degrees
-   # - 360 - 359.5 = 0.5 < 2 * 0.5 = 1.0 → wrapping applied
-
-   # No wrapping for regional data:
-   # - longitude from -180 to -120 (60 degree span)
-   # - longitude from 0 to 90 (90 degree span)
-
-
-Unstructured grids: triangulation, KDTree & file formats
-========================================================
-
-
-Methods
--------
-
-Grid Specification
-------------------
-
-Set grid file paths for unstructured plotting:
-
-.. code-block:: python
-
-   # Method 1: Global specification (recommended)
-   marEx.specify_grid(
-       grid_type='unstructured',
-       fpath_tgrid='triangulation.nc',
-       fpath_ckdtree='./ckdtree_data/'
-   )
-
-   # Method 2: Per-plotter specification
-   plotter = UnstructuredPlotter(data)
-   plotter.specify_grid(
-       fpath_tgrid='triangulation.nc',
-       fpath_ckdtree='./ckdtree_data/'
-   )
-
-Plot Method
------------
-
-The core plotting method supports two rendering modes:
-
-1. **KDTree Interpolation** (if `fpath_ckdtree` provided): Fast interpolation to regular grid
-2. **Triangulation** (if `fpath_tgrid` provided): Native triangular mesh rendering
-
-Helper Functions
-----------------
-
-Triangulation Loading
----------------------
-
-Loads and caches triangulation data:
-
-.. code-block:: python
-
-   # Triangulation files must contain:
-   # - 'vertex_of_cell': connectivity array (1-based indexing)
-   # - 'clon': cell longitude coordinates
-   # - 'clat': cell latitude coordinates
-
-   # File format example:
-   # vertex_of_cell(ncells, nvertices_per_cell) = [[1, 2, 3], [2, 3, 4], ...]
-   # clon(ncells) = [longitude values]
-   # clat(ncells) = [latitude values]
-
-KDTree Loading
---------------
-
-Loads and caches KDTree interpolation data:
-
-.. code-block:: python
-
-   # KDTree directory structure:
-   # ckdtree_path/
-   #   ├── res0.10.nc
-   #   ├── res0.25.nc
-   #   ├── res0.50.nc
-   #   └── res1.00.nc
-
-   # Each resolution file contains:
-   # - 'ickdtree_c': indices for interpolation
-   # - 'lon': regular grid longitude coordinates
-   # - 'lat': regular grid latitude coordinates
-
-File Format Requirements
-------------------------
-
-Triangulation Files
--------------------
-
-Triangulation files must contain specific variables:
-
-.. code-block:: python
-
-   # Required variables in triangulation NetCDF file:
-   # - vertex_of_cell(ncells, nvertices_per_cell): connectivity array
-   # - clon(ncells): cell longitude coordinates
-   # - clat(ncells): cell latitude coordinates
-
-   # Example file creation:
-   import xarray as xr
-   import numpy as np
-
-   # Create triangulation file
-   triangulation_ds = xr.Dataset({
-       'vertex_of_cell': (['ncells', 'nvertices'], connectivity_array),
-       'clon': (['ncells'], lon_coords),
-       'clat': (['ncells'], lat_coords)
-   })
-   triangulation_ds.to_netcdf('triangulation.nc')
-
-KDTree Index Files
-------------------
-
-KDTree directories contain resolution-specific files:
-
-.. code-block:: python
-
-   # Directory structure:
-   # ckdtree_indices/
-   #   ├── res0.10.nc  # High resolution
-   #   ├── res0.25.nc  # Medium resolution
-   #   ├── res0.50.nc  # Low resolution
-   #   └── res1.00.nc  # Very low resolution
-
-   # Each file contains:
-   # - ickdtree_c(nlat, nlon): indices for interpolation
-   # - lon(nlon): regular grid longitude coordinates
-   # - lat(nlat): regular grid latitude coordinates
-
-   # Example file creation:
-   ckdtree_ds = xr.Dataset({
-       'ickdtree_c': (['nlat', 'nlon'], index_array),
-       'lon': (['nlon'], regular_lon),
-       'lat': (['nlat'], regular_lat)
-   })
-   ckdtree_ds.to_netcdf('res0.25.nc')
-
-
-Advanced customisation
-======================
-
-
-Customisation Examples
-----------------------
-
-Custom Colormap
----------------
-
-.. code-block:: python
-
-   import matplotlib.pyplot as plt
-   from matplotlib.colors import ListedColormap
-
-   # Create custom colormap
-   custom_cmap = ListedColormap(['blue', 'white', 'red'])
-
-   config = PlotConfig(
-       title='Custom Colors',
-       cmap=custom_cmap,
-       issym=True
-   )
-
-Custom Normalisation
---------------------
-
-.. code-block:: python
-
-   from matplotlib.colors import BoundaryNorm
-
-   # Create custom normalisation
-   levels = [-2, -1, 0, 1, 2]
-   norm = BoundaryNorm(levels, ncolors=256)
-
-   config = PlotConfig(
-       title='Custom Normalisation',
-       norm=norm,
-       extend='both'
-   )
-
-Implementation Details
-----------------------
-
-Color Scaling
--------------
-
-The base class provides robust color scaling methods:
-
-.. code-block:: python
-
-   # Automatic percentile-based scaling
-   config = PlotConfig(cperc=[10, 90])
-
-   # Symmetric scaling around zero
-   config = PlotConfig(issym=True)
-
-   # Manual color limits
-   config = PlotConfig(clim=(-2, 5))
-
-Map Features
-------------
-
-Common map features are automatically added:
-
-.. code-block:: python
-
-   # Default map features include:
-   # - Land areas (dark grey)
-   # - Coastlines (black, 0.5 linewidth)
-   # - Grid lines (optional, grey dashed)
-   # - Grid labels (optional)
+Common causes: an extra dimension on the field (select a level), dimension or coordinate
+names that differ from the defaults (pass ``dimensions`` and ``coordinates`` to the accessor
+call), and an unstructured field without a mesh path (call ``specify_grid``).

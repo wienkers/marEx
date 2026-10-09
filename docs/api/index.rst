@@ -19,6 +19,7 @@ linked below):
    anomaly.compute
    extremes.identify
    preprocess_data
+   clear_staging
    tracker
    regional_tracker
    specify_grid
@@ -42,10 +43,10 @@ Time resolution
 ===============
 
 The within-year cycle a climatology or seasonal threshold is resolved on. Inferred
-from the median spacing of the time coordinate -- ``dayofyear`` for daily data,
-``month`` for monthly, ``hourofyear`` for sub-daily -- and overridable via the
+from the median spacing of the time coordinate (``dayofyear`` for daily data,
+``month`` for monthly, ``hourofyear`` for sub-daily) and overridable via the
 ``cycle=`` parameter on :func:`preprocess_data`, :func:`marEx.anomaly.compute` and
-:func:`marEx.extremes.identify`. See :doc:`../guide/detection` for the durations table
+:func:`marEx.extremes.identify`. See :doc:`../guide/dimensions_and_time` for the durations table
 and the sub-daily caveats.
 
 .. autoclass:: SeasonalCycle

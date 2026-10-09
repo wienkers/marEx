@@ -84,7 +84,7 @@ def test_every_to_zarr_goes_through_write_zarr():
             continue
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             code = line.split("#", 1)[0]
-            if ">>>" in code:
+            if ">>>" in code or code.lstrip().startswith("... "):
                 continue
             if re.search(r"\.to_zarr\(", code):
                 offenders.append(f"{path.relative_to(PACKAGE_DIR)}:{lineno}: {line.strip()}")

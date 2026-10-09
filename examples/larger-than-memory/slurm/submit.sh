@@ -37,7 +37,7 @@ DIR="$(dirname "$HERE")"
 OUT="${SQUEEZE_OUT:-/work/bk1377/b382615/marEx/measurements/lm}"
 SCRATCH="${SQUEEZE_SCRATCH:-/scratch/b/b382615/marEx/lm}"
 LOGS="${SQUEEZE_LOGS:-/work/bk1377/b382615/marEx/lm_logs}"
-JOBS="${SQUEEZE_JOBS:-/home/b/b382615/opt/marEx/.claude/jobs.ndjson}"
+JOBS="${SQUEEZE_JOBS:-$LOGS/jobs.ndjson}"
 mkdir -p "$OUT" "$SCRATCH" "$LOGS"
 
 BASE="--outdir $OUT --scratch $SCRATCH"

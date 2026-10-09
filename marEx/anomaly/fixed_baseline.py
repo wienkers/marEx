@@ -209,7 +209,7 @@ def _compute_anomaly_fixed_baseline(
         # Spatial data - create 2D/3D mask.
         # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
         # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
-        # under global_extreme). Drop both.
+        # under global_percentile). Drop both.
         # Extra (non-horizontal) spatial dims such as depth are made whole alongside
         # the horizontal ones, so the mask keeps the field's full spatial shape.
         chunk_dict_mask = {dim: -1 for dim in mask_dims}

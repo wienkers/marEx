@@ -2,38 +2,48 @@
 Tutorials
 =========
 
-End-to-end Jupyter notebooks demonstrating the full marEx workflow —
-**preprocess → track → visualise** — for each supported grid type. The same
-high-level API is used throughout; only the input data differs.
+End-to-end Jupyter notebooks, each running the full **detect → track → visualise**
+workflow on real data. The calls are the same throughout, and only the input and
+a few grid-specific arguments change.
 
 .. note::
 
-   These notebooks are rendered from their committed outputs. They read datasets
-   stored on HPC scratch storage that are not bundled with the documentation, so
-   they are **not** re-executed during the docs build. Each page links back to
-   the original notebook on GitHub, where you can download and adapt it.
+   These pages are rendered from the notebooks' committed outputs. The notebooks
+   read datasets on HPC storage that are not bundled with the documentation, so
+   they are not re-executed during the docs build. Each page links to the original
+   notebook on GitHub, and each notebook reports the wall time and memory of every
+   stage on the cluster it ran on.
 
-.. grid:: 1 1 3 3
+.. grid:: 1 1 2 2
    :gutter: 3
 
    .. grid-item-card:: Gridded data
       :link: gridded
       :link-type: doc
 
-      Regular lat/lon grids — satellite products (e.g. NOAA OISST) and climate
-      models (e.g. CMIP6).
+      Global daily sea surface temperature (OSTIA, 1982-2022) on a regular
+      lat/lon grid: marine heatwaves detected two ways, then tracked.
 
    .. grid-item-card:: Regional data
       :link: regional
       :link-type: doc
 
-      Spatially bounded, higher-resolution domains with boundary handling.
+      The same workflow on a bounded European domain at 0.05°, with
+      :func:`marEx.regional_tracker` handling the non-periodic edges.
 
    .. grid-item-card:: Unstructured data
       :link: unstructured
       :link-type: doc
 
-      Irregular meshes from ocean models (FESOM, ICON-O, MPAS-Ocean).
+      ICON-O ocean model output on its native R02B09 mesh (14.9 million cells),
+      detected and tracked without regridding.
+
+   .. grid-item-card:: European wind droughts
+      :link: wind_drought
+      :link-type: doc
+
+      ERA5 wind over Europe, 1980-2024: lower-tail extremes of hub-height
+      capacity factor tracked into a catalogue of low-wind spells.
 
 .. toctree::
    :hidden:
@@ -41,3 +51,4 @@ high-level API is used throughout; only the input data differs.
    gridded
    regional
    unstructured
+   wind_drought

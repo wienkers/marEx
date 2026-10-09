@@ -1,164 +1,106 @@
-======================
-Tracking & Merge/Split
-======================
+=======================
+Tracking Extreme Events
+=======================
 
-See :doc:`../api/track` for the full ``tracker`` class and ``regional_tracker`` reference.
+The tracker turns the boolean ``extreme_events`` field from the detect stage into **events**:
+labelled objects that keep one identity through time, with their area, centroid, lifetime and
+merge history. It accepts any boolean field on a latitude/longitude grid or an unstructured
+mesh, so it also runs on masks that did not come from marEx. See :doc:`../api/track` for the
+signatures of :class:`marEx.tracker` and :func:`marEx.regional_tracker`.
 
-Overview
-========
+.. contents::
+   :local:
+   :depth: 2
 
-The tracking module implements a comprehensive workflow for converting binary extreme event
-masks into tracked event objects with unique identifiers, statistical properties, and
-temporal evolution information. It includes advanced algorithms for handling event lifecycles,
-including merging and splitting events whilst maintaining unique identities.
+Why Overlap-Based Tracking
+==========================
 
-**Key Features:**
+Labelling the field as a 3-D array (time as a third spatial axis) joins any two objects that
+touch in space-time. Events that brush against each other for one day become permanently
+linked, and a few weeks later a single "event" spans the basin. Its duration, area and
+intensity describe no physical phenomenon.
 
-* **Binary Object Tracking**: Advanced connected component analysis with dask parallelisation
-* **Merge/Split Handling**: Algorithms for event lifecycle management
-* **Morphological Operations**: Image processing for event preprocessing and hole filling
-* **Statistical Analysis**: Comprehensive event property calculation
-* **Memory Efficient**: Optimised for large datasets with intelligent chunking
-* **Grid Agnostic**: Works with both structured and unstructured grids
+The tracker instead labels each timestep separately and links objects between consecutive
+timesteps only when they overlap by at least ``overlap_threshold`` of the smaller object's
+area. Where several objects merge, the merged child is partitioned back to its parents, and
+each merge is written to ``merge_ledger``. The video shows both approaches on the same data.
 
-Tracking Algorithm Comparison
-==============================
+.. video:: /_static/videos/tracking_comparison.mp4
+   :width: 700
+   :autoplay:
+   :loop:
 
-The video below demonstrates the critical difference between basic connectivity-based tracking and marEx's advanced merge/split algorithm:
+Left: chain-reaction merging, where A touches B, the result touches C, and all three become
+one event. Right: overlap-thresholded merging with genealogy, where the three events keep
+their identities.
 
-.. note::
+Quick Start
+===========
 
-   See :doc:`/why_marex` for a side-by-side video comparison of naive 3D connected-component tracking versus marEx's merge/split algorithm.
-
-**Left (Basic Method — 3D Connected Components):** Uses simple 3D connected component labeling where ANY objects that touch at any point in space-time are permanently merged into the same event. This creates a chain reaction: Event A touches Event B → merged. The merged AB touches Event C → all become one event. Over time, this produces unrealistic basin-spanning "mega-events" that spuriously link dozens of independent physical phenomena. These mega-events are **algorithmically-induced artifacts** with no coherent physical origin, making their statistics (size, duration, intensity) meaningless for mechanistic analysis.
-
-**Right (marEx Advanced Method — Genealogy Tracking):** Prevents mega-events using ``overlap_threshold`` (requires significant overlap, not just touching) and maintains individual event identities through merge/split events using nearest-neighbor partitioning. Records complete parent/child genealogy in ``merge_ledger``, enabling reconstruction of physically realistic event evolution. Tracked events correspond to actual coherent phenomena, providing mechanistically relevant statistics for scientific analysis.
-
-Basic Usage Examples
-====================
-
-Simple Event Tracking
-----------------------
+The tracker needs an active ``dask.distributed`` client. Without one, ``run()`` fails with
+"No clients found". Pass ``memory_limit`` explicitly: Dask reads the memory of the whole node,
+not the cgroup limit of a batch allocation, so without it a memory constraint never binds.
 
 .. code-block:: python
 
    import xarray as xr
    import marEx
 
-   # Load preprocessed extreme events data
-   extremes_ds = xr.open_dataset('extreme_events.nc')
-
-   # Basic tracking with default parameters
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,  # Binary extreme events field
-       extremes_ds.mask,            # Land-sea mask
-       R_fill=8,                    # Fill holes with radius < 8 cells
-       area_filter_absolute=100     # Remove objects smaller than 100 grid cells
+   client = marEx.helper.start_local_cluster(
+       n_workers=4, threads_per_worker=1, memory_limit="8GB"
    )
 
-   # Run tracking algorithm
-   tracked_events = event_tracker.run()
-
-Fields With No Mask
--------------------
-
-``mask`` marks which cells are valid, and for SST that is the land-sea mask. An
-atmospheric field has no equivalent -- every cell carries data -- so ``mask`` is
-optional. Omit it and every cell is treated as valid:
-
-.. code-block:: python
-
-   # Atmospheric heatwaves: no land-sea mask to apply
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       R_fill=8,
-       area_filter_absolute=100
-   )
-
-This is exactly equivalent to passing an all-``True`` mask by hand; the tracking
-result is identical either way.
-
-.. note::
-
-   ``mask`` is the second *positional* parameter and ``R_fill`` the third, so
-   ``marEx.tracker(events, 8)`` binds ``8`` to ``mask``. Pass ``R_fill`` by
-   keyword whenever you leave the mask out.
-
-Advanced Tracking Configuration
--------------------------------
-
-.. code-block:: python
-
-   # Advanced tracking with merge/split handling
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       extremes_ds.mask,
-       R_fill=8,                    # Fill holes with radius < 8 cells
-       area_filter_quartile=0.5,    # Remove smallest 50% of events (alternative to area_filter_absolute)
-       T_fill=2,                    # Allow 2-day gaps in tracking
-       allow_merging=True,          # Enable merge/split tracking
-       overlap_threshold=0.5,       # 50% overlap required for continuity
-       nn_partitioning=True,        # Use nearest-neighbor partitioning
-       cell_areas=grid_areas        # Optional: physical cell areas (m²)
-   )
-
-   # Run tracking and get merge information
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
-
-Unstructured Grid Tracking
----------------------------
-
-.. code-block:: python
-
-   # For unstructured grids, specify dimensions
-   dimensions = {'time': 'time', 'x': 'ncells'}
-   coordinates = {'time': 'time', 'x': 'lon', 'y': 'lat'}
+   # Output of marEx.preprocess_data (or any boolean field), chunked in time only
+   ds = xr.open_zarr("extremes.zarr")
+   extreme_events = ds.extreme_events.chunk({"time": 25, "lat": -1, "lon": -1})
 
    event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       extremes_ds.mask,
-       R_fill=5,                    # Adjusted for unstructured grid
-       area_filter_quartile=0.4,
-       dimensions=dimensions,
-       coordinates=coordinates
+       extreme_events,
+       ds.mask,
+       R_fill=8,                    # radius, in grid cells, of the spatial closing/opening
+       area_filter_quartile=0.5,    # drop the smallest 50 % of objects
+       T_fill=2,                    # close temporal gaps of up to 2 timesteps
+       allow_merging=True,
+       overlap_threshold=0.5,
+       nn_partitioning=True,
+       grid_resolution=0.25,        # areas in km^2 on a regular 0.25 degree grid
    )
+   events = event_tracker.run()
 
-   tracked_events = event_tracker.run()
+   events.to_zarr("tracked_events.zarr", mode="w")
 
-Parameter Reference
-===================
+``R_fill`` has no default and ``mask`` is the second positional parameter, so
+``marEx.tracker(events, 8)`` binds ``8`` to ``mask``. Always pass ``R_fill`` by keyword.
+``data_bin`` must be Dask-backed and of boolean dtype. A tracker instance is single use: a
+second ``run()`` raises ``TrackingError``.
 
-Required Parameters
--------------------
+How the Tracker Works
+=====================
 
-**data_bin** : xarray.DataArray
-  Binary data to identify and track objects in (True = event, False = background).
-  Must be Dask-backed and boolean type.
+``run()`` applies the following steps in order.
 
-**mask** : xarray.DataArray
-  Binary mask indicating valid regions (True = valid, False = invalid).
-  Must be boolean type.
+1. **Prefilter** (optional, ``prefilter_min_cells``). Connected components smaller than the
+   given number of cells are dropped at each timestep, before any morphology.
+2. **Spatial closing and opening** (``R_fill``). A closing (dilation then erosion) fills holes
+   and bridges narrow gaps within an object. An opening (erosion then dilation) removes
+   isolated specks. Both use a disk of radius ``R_fill``.
+3. **Temporal gap filling** (``T_fill``). A closing along the time axis with a kernel of
+   ``T_fill + 1`` timesteps joins an object to its later self across a short absence. Holes
+   this opens up in space are refilled with a radius of ``R_fill // 2``.
+4. **Area filter** (``area_filter_quartile`` or ``area_filter_absolute``). Each timestep is
+   labelled into connected components, and objects below the area threshold are removed.
+5. **Identification across time.** Objects at consecutive timesteps are linked when
+   ``overlap_area / min(area_parent, area_child) >= overlap_threshold``.
+6. **Merge and split handling** (``allow_merging=True``). A child with several accepted
+   parents is a merge, a parent with several accepted children is a split. Events are the
+   connected groups of linked objects, and the properties of each are recomputed.
 
-**R_fill** : int
-  Radius for filling holes/gaps in spatial domain (in grid cells).
-  Controls morphological operations to fill small gaps in binary objects.
+The Morphological Step
+----------------------
 
-  **How R_fill Works**:
-
-  The `R_fill` parameter controls a two-step morphological cleaning operation: **closing** followed by **opening**.
-  This process makes identified events spatially coherent and removes small, isolated noise.
-
-  **Physical Rationale**:
-
-  1. **Closing (Fill Holes)**: Extreme events are generally coherent spatial phenomena. Small "holes"
-     within a larger event are often artefacts of data gridding or minor fluctuations below the threshold.
-     Closing (dilation → erosion) fills these internal gaps, making the event representation physically realistic.
-
-  2. **Opening (Remove Noise)**: Very small, isolated pixels flagged as events are often statistical noise
-     or sensor errors rather than genuine events. Opening (erosion → dilation) removes these
-     spurious objects, ensuring only spatially significant events are tracked.
-
-  **Visual Process** (using ``R_fill=1`` as example)::
+Extreme events are spatially coherent, so small holes inside one are usually artefacts of a
+threshold crossing at neighbouring cells, and isolated flagged cells are usually noise. The
+closing handles the first, the opening the second. With ``R_fill=1``::
 
         Initial State                  After Closing                  After Opening
     ┌──────────────────────┐       ┌──────────────────────┐       ┌──────────────────────┐
@@ -171,767 +113,501 @@ Required Parameters
     │    █████             │       │    █████             │       │    █████             │
     │           █          │       │           █          │       │                      │
     └──────────────────────┘       └──────────────────────┘       └──────────────────────┘
-    │                              │                              │
-    └─ Main event with             └─ Closing fills internal      └─ Opening removes
-       2 small holes inside           holes, making event            isolated noise pixels,
-       + 2 isolated noise pixels      more coherent                  leaving clean event
 
-  **Structuring Element (Kernel)**:
+The kernel is a disk of diameter ``2 * R_fill + 1`` cells. On a gridded field ``R_fill`` counts
+grid cells. On an unstructured mesh it counts neighbour hops, so the same value spans a
+different physical distance on each mesh and needs to be chosen per resolution.
 
-  Operations use a disk-shaped kernel with diameter = ``2 * R_fill + 1``.
-  For ``R_fill=2``, the kernel diameter is 5 pixels::
+Two properties of the closing matter in practice. It can bridge two objects that are separated
+by less than the kernel, and a speck between them acts as a stepping stone. The area filter
+runs after the closing, so it cannot undo such a bridge. ``prefilter_min_cells`` removes the
+specks first.
 
-       ┌──────────────┐
-       │      ██      │     Any hole or isolated object smaller
-       │   ██ ██ ██   │     than this disk will be filled or removed
-       │██ ██ ██ ██ ██│
-       │   ██ ██ ██   │
-       │      ██      │
-       └──────────────┘
-
-  **Example**: ``R_fill=8`` uses a (circular) disk kernel with diameter 17 pixels, filling holes and
-  removing objects up to ~8 grid cells in radius.
-
-  **When to Adjust**:
-
-  * **Smaller R_fill** (e.g., 3-5): Preserves small-scale features; use for coarse data or fine structures
-  * **Larger R_fill** (e.g., 10-15): Creates more coherent objects; use for noisy data or large-scale events
-
-**area_filter_quartile** : float
-  Quantile (0-1) for filtering smallest objects.
-  For example, 0.25 removes smallest 25% of objects, 0.5 removes smallest 50%.
-  Mutually exclusive with area_filter_absolute.
-
-**area_filter_absolute** : int
-  Minimum area (in grid cells) for an object to be retained.
-  For example, 25 keeps only events with 25 or more grid cells.
-  Mutually exclusive with area_filter_quartile.
-
-**prefilter_min_cells** : int, optional (keyword-only)
-  Drops connected components smaller than this many cells from each day *before* the
-  morphological closing. On a fine grid, specks below the scale of interest act as stepping
-  stones under the closing and join objects that would otherwise stay separate. The area
-  filters above run after the closing and cannot undo that. Connectivity is the tracker's
-  own. Default ``None`` (off). The unstructured example uses 23 cells, about one 0.25° cell
-  on the ICON R02B09 mesh.
-
-Core Tracking Parameters
--------------------------
-
-**T_fill** : int, default=2
-  Number of timesteps for filling temporal gaps (must be even).
-  Allows events to be tracked across short temporal interruptions.
-
-  **How T_fill Works**::
-
-     T_fill = Maximum temporal gap (in days) for event continuity
-
-     Timeline with T_fill=2:
-
-     Day 0: ████████  ← Event detected
-     Day 1:            ← Gap (no detection)
-     Day 2:            ← Gap (no detection)  } T_fill=2 days
-     Day 3: ████████  ← Event detected again
-            │        │
-            └────────┴─ SAME event ID (gap ≤ T_fill)
-
-     Timeline with T_fill=0 (no gap filling):
-
-     Day 0: ████████  ← Event ID: 1
-     Day 1:            ← Gap
-     Day 2: ████████  ← NEW event ID: 2 (no gap tolerance)
-
-  **Example**: ``T_fill=2`` allows 2-day gaps while maintaining the same event ID.
-
-  **When to Adjust**:
-
-  * **T_fill=0**: No gap filling, strict continuity requirement, or for weekly/monthly sampling
-  * **T_fill=2-4**: Standard gap filling for daily data (recommended)
-  * **T_fill=6-10**: More permissive for noisy data
-
-**allow_merging** : bool, default=True
-  Allow objects to split and merge across time.
-
-  * ``True``: Apply splitting & merging criteria, track merge events, and maintain original identities
-  * ``False``: Classical connected component labeling with simple time connectivity
-
-**nn_partitioning** : bool, default=True
-  Use nearest-neighbor cell-based partitioning for merging events (improved algorithm).
-
-  * ``True``: Partition merged child objects based on closest parent **cell** (recommended)
-  * ``False``: Use parent **centroids** for partitioning (legacy method with known issues)
-
-  **Why This Matters**: When objects merge, their new area must be partitioned and assigned back to
-  the original parent identities. The choice of algorithm for this partitioning is critical.
-
-  The ``centroid`` method partitions based on proximity to parent centroids. This can be problematic
-  for non-convex or L-shaped features, where the centroid may lie far from the feature's cells,
-  leading to physically unrealistic partitions.
-
-  In contrast, the ``nn`` (nearest-neighbor) method assigns each cell to the parent of the *closest*
-  cell from the previous timestep. This results in a more intuitive and physically-based partition
-  that respects the geometry of the parent features.
-
-  **Visual Comparison**:
-
-  **Scenario:** A large C-shaped feature (A) and a small nearby feature (B)
-  merge into a single large object. We compare how centroid-based vs nearest-neighbor methods
-  partition the merged child back to parent lineages.
-
-  **1. Initial State (Time t)**
-
-  Two distinct parent features with centroids marked by ●.
-
-  ::
-
-       ┌───┬───┬───┬───┬───┐
-     5 │ A │ A │ A │ A │ A │
-       ├───┼───┼───┼───┼───┤
-     4 │ A │ A │   │   │   │
-       ├───┼───┼───┼───┼───┤
-     3 │ A │ ● │   │ B ● B │  ← Centroid A at (3, 2), Centroid B at (3, 4.5)
-       ├───┼───┼───┼───┼───┤
-     2 │ A │ A │   │   │   │
-       ├───┼───┼───┼───┼───┤
-     1 │ A │ A │ A │ A │ A │
-       └───┴───┴───┴───┴───┘
-         1   2   3   4   5
-
-  **2. Merged State (Time t+1)**
-
-  The features grow and merge into a single large object marked with '#'.
-  Question: how should these 20 cells be attributed to lineages A and B ?
-
-  ::
-
-       ┌───┬───┬───┬───┬───┐
-     5 │   │ # │ # │ # │ # │
-       ├───┼───┼───┼───┼───┤
-     4 │ # │ # │ # │   │   │
-       ├───┼───┼───┼───┼───┤
-     3 │ # │ # │ # │ # │ # │
-       ├───┼───┼───┼───┼───┤
-     2 │ # │ # │ # │   │   │
-       ├───┼───┼───┼───┼───┤
-     1 │   │ # │ # │ # │ # │
-       └───┴───┴───┴───┴───┘
-         1   2   3   4   5
-
-  **3. Centroid Partition (nn_partitioning=False) - ❌ PROBLEMATIC**
-
-  Each cell assigned to nearest parent *centroid*. The partition line ║ creates a geometric
-  boundary that ignores actual cell topology. Result: B is an odd disjoint object now !
-
-  ::
-
-       ┌───┬───┬──╦┬───┬───┐
-     5 │   │ A │ A║│ B │ B │
-       ├───┼───┼──╫┼───┼───┤
-     4 │ A │ A │ A║│   │   │
-       ├───┼───┼──╫┼───┼───┤
-     3 │ A │ A │ A║│ B │ B │
-       ├───┼───┼──╫┼───┼───┤
-     2 │ A │ A │ A║│   │   │
-       ├───┼───┼──╫┼───┼───┤
-     1 │   │ A │ A║│ B │ B │
-       └───┴───┴──╩┴───┴───┘
-         1   2   3   4   5
-
-  **Problem:** B is an odd disjoint object with portions unrelated to the original parent.
-  The original C-shaped object means that the centroid misrepresents A's main body, thus
-  creating unrealistic/nonrepresentative partitions.
-
-  **4. Nearest-Neighbour Partition (nn_partitioning=True)**
-
-  Each cell assigned to parent of nearest parent *cell*. Natural boundaries respect actual
-  spatial connectivity. Result: B remains contiguous (realistic growth pattern).
-
-  ::
-
-       ┌───┬───┬───┬───┬───┐
-     5 │   │ A │ A │ A │ A │
-       ├───┼───┼───┼───┼───┤
-     4 │ A │ A │ A │   │   │
-       ├───┼───┼───┼───┼───┤
-     3 │ A │ A │ B │ B │ B │
-       ├───┼───┼───┼───┼───┤
-     2 │ A │ A │ A │   │   │
-       ├───┼───┼───┼───┼───┤
-     1 │   │ A │ A │ A │ A │
-       └───┴───┴───┴───┴───┘
-         1   2   3   4   5
-
-  **Solution:** Growth of the resulting merged object is correctly attributed to A's
-  lineage based on cell-level proximity, not abstract geometric centroids.
-
-  **Example: Small Object Problem**:
-
-  .. code-block:: python
-
-     # Centroid method (old, has issues)
-     tracker_centroid = marEx.tracker(
-         extremes, mask,
-         R_fill=8,
-         allow_merging=True,
-         nn_partitioning=False  # Small objects get unrealistic portions
-     )
-
-     # Nearest-neighbor method (new, recommended)
-     tracker_nn = marEx.tracker(
-         extremes, mask,
-         R_fill=8,
-         allow_merging=True,
-         nn_partitioning=True   # Realistic partitioning
-     )
-
-  **When to Use**:
-
-  * **Always use ``nn_partitioning=True``** (default) for accurate merging/splitting
-  * Only use ``nn_partitioning=False`` for comparison with legacy results or Sun et al. (2023) methodology
-
-
-**overlap_threshold** : float, default=0.5
-  Minimum fraction of overlap between objects to consider them the same event.
-  Fraction of the smaller object's area that must overlap with the larger object's area.
-
-  **How overlap_threshold Works - Two-Stage Process**::
-
-     ═══════════════════════════════════════════════════════════════════════════════
-     STAGE 1: OVERLAP CHECKING (Determines IF objects are related)
-     ═══════════════════════════════════════════════════════════════════════════════
-
-     Formula: overlap_fraction = overlap_area / min(area_parent, area_child)
-     Decision: IF overlap_fraction >= overlap_threshold → Objects are LINKED
-
-     This stage applies to ALL transitions (1→1, 1→many, many→1, many→many)
-     This stage is INDEPENDENT of nn_partitioning choice
-
-     ───────────────────────────────────────────────────────────────────────────────
-     Example 1: Threshold MET (overlap_threshold = 0.5)
-     ───────────────────────────────────────────────────────────────────────────────
-
-     Time t=0:          Time t=1:          Overlap Check:
-
-     ┌──────────┐       ┌─────────┐        overlap_area = 60 cells
-     │  Object  │       │ Object  │        min(100, 80) = 80
-     │    A     │   →   │    C    │
-     │   100    │       │   80    │        overlap_fraction = 60/80 = 0.75
-     │  cells   │       │  cells  │
-     └──────────┘       └─────────┘        0.75 >= 0.5 ✓ → LINKED (same event)
-
-     ───────────────────────────────────────────────────────────────────────────────
-     Example 2: Threshold NOT MET (overlap_threshold = 0.5)
-     ───────────────────────────────────────────────────────────────────────────────
-
-     Time t=0:          Time t=1:          Overlap Check:
-
-     ┌──────────┐       ┌─────────┐        overlap_area = 30 cells
-     │  Object  │       │ Object  │        min(100, 80) = 80
-     │    A     │   ╳   │    C    │
-     │   100    │       │   80    │        overlap_fraction = 30/80 = 0.375
-     │  cells   │       │  cells  │
-     └──────────┘       └─────────┘        0.375 < 0.5 ✗ → NOT LINKED
-
-                                           Result: A terminates, C starts as NEW event
-
-     ═══════════════════════════════════════════════════════════════════════════════
-     STAGE 2: PARTITIONING (Determines HOW to divide merged areas)
-     ═══════════════════════════════════════════════════════════════════════════════
-
-     This stage ONLY applies when a MERGE is detected (many parents → one child),
-     which also requires the overlap criterion (Stage 1) to be met for each parent.
-     This stage does NOT apply to splits (one parent → many children)
-     Choice of nn_partitioning (True/False) affects ONLY this stage
-
-     ───────────────────────────────────────────────────────────────────────────────
-     Example 3: MERGE Scenario - Partitioning Applies
-     ───────────────────────────────────────────────────────────────────────────────
-
-     Time t=0:                Time t=1:
-
-     ┌─────────┐              ┌──────────────┐
-     │ Object A│              │   Object C   │
-     │   100   │──┐           │     120      │
-     │  cells  │  │           │    cells     │
-     └─────────┘  │           └──────────────┘
-                  │  MERGE
-     ┌─────────┐  │
-     │ Object B│──┘           STAGE 1 - Overlap Checking:
-     │   40    │              ────────────────────────────
-     │  cells  │              A→C: 80/min(100,120) = 80/100 = 0.8 >= 0.5 ✓ LINKED
-     └─────────┘              B→C: 35/min(40,120)  = 35/40  = 0.875 >= 0.5 ✓ LINKED
-
-                              Both A and B linked to C → MERGE DETECTED!
-
-                              STAGE 2 - Partitioning (triggered by merge):
-                              ─────────────────────────────────────────────
-                              Question: How to divide C's 120 cells between A and B lineages?
-
-                              if nn_partitioning=True:  Use nearest parent CELL
-                              if nn_partitioning=False: Use nearest parent CENTROID
-
-                              (See nn_partitioning documentation for partition methods)
-
-     ───────────────────────────────────────────────────────────────────────────────
-     Example 4: SPLIT Scenario - No Partitioning Occurs
-     ───────────────────────────────────────────────────────────────────────────────
-
-     Time t=0:          Time t=1:
-
-     ┌─────────┐        ┌─────────┐
-     │ Object A│───┬───→│ Object B│
-     │   100   │   │    │   60    │
-     │  cells  │   │    │  cells  │
-     └─────────┘   │    └─────────┘
-                   │
-                   │    ┌─────────┐
-                   └───→│ Object C│
-                        │   50    │
-                        │  cells  │
-                        └─────────┘
-
-     STAGE 1 - Overlap Checking:
-     ────────────────────────────
-     A→B: 55/min(100,60) = 55/60 = 0.917 >= 0.5 ✓ LINKED
-     A→C: 45/min(100,50) = 45/50 = 0.9   >= 0.5 ✓ LINKED
-
-     One parent linked to two children → SPLIT DETECTED!
-
-     STAGE 2 - Partitioning:
-     ────────────────────────
-     N.B.: NO PARTITIONING occurs for splits!
-     All objects (A, B, C) grouped into same event with same ID
-     Object B & C continue to evolve disjoint, yet will ultimately be labelled with the same event ID
-
-  **Key Principles**:
-
-  * **Overlap checking happens FIRST** for all object pairs between consecutive timesteps
-  * **Partitioning happens SECOND** and ONLY when merges are detected (many→one)
-  * **nn_partitioning choice does NOT affect** which objects are linked in Stage 1
-  * **Splits (one→many) do NOT trigger** partitioning - all objects share the same event ID
-
-  **When to Adjust**:
-
-  * **Lower threshold** (e.g., 0.3): More continuous tracking, may link distant objects
-  * **Higher threshold** (e.g., 0.7): More conservative, stricter continuity requirement
-  * **Default** (0.5): Balanced approach for most applications
-
-Memory Parameters
+Merges and Splits
 -----------------
 
-**compute_mode** : {'persist', 'streaming'}, default='persist'
-  Materialisation policy for whole-field intermediates. ``'persist'`` pins them in cluster
-  RAM and is the fastest option whenever the run fits. ``'streaming'`` stages them to Zarr
-  under ``temp_dir``, so memory scales with cluster size rather than series length; it
-  requires ``temp_dir`` and uniformly time-chunked input. Outputs are bit-identical between
-  the two modes. See :ref:`Larger-Than-Memory Tracking <larger-than-memory-tracking>` below.
+Linking depends on ``overlap_threshold`` alone. With the default of 0.5, a 100-cell object at
+time *t* and an 80-cell object at *t+1* are linked when at least 40 cells overlap (the smaller
+area is the denominator).
 
-**temp_dir** : str, optional
-  Scratch directory for ``compute_mode='streaming'``. Required in that mode. The staging
-  directory deliberately outlives ``run()`` because the returned dataset reads from it
-  lazily; release it with :func:`marEx.clear_staging` once your output is written.
+* **Split** (one parent, several linked children): the children continue under the parent's
+  event ID. No partitioning is needed.
+* **Merge** (several parents, one child): the cells of the child are partitioned back to the
+  parents, so each lineage keeps its own identity and area history. The parents are recorded in
+  ``merge_ledger``.
 
-Grid Configuration Parameters
------------------------------
+``nn_partitioning`` selects how the child is partitioned. The default ``False`` assigns each
+cell to the nearest parent **centroid**. ``True`` assigns it to the parent that owns the
+nearest parent **cell**. Centroid partitioning goes wrong for non-convex parents. Take a
+C-shaped object A and a small nearby object B that merge into one 20-cell child::
 
-**dimensions** : dict, default={'time': 'time', 'x': 'lon', 'y': 'lat'}
-  Mapping of conceptual dimensions to actual dimension names.
-  For unstructured grids, use: ``{'time': 'time', 'x': 'ncells'}``
+   Merged child (#)                  Centroid partition            Nearest-cell partition
+   ┌───┬───┬───┬───┬───┐            ┌───┬───┬──╦┬───┬───┐         ┌───┬───┬───┬───┬───┐
+ 5 │   │ # │ # │ # │ # │          5 │   │ A │ A║│ B │ B │       5 │   │ A │ A │ A │ A │
+   ├───┼───┼───┼───┼───┤            ├───┼───┼──╫┼───┼───┤         ├───┼───┼───┼───┼───┤
+ 4 │ # │ # │ # │   │   │          4 │ A │ A │ A║│   │   │       4 │ A │ A │ A │   │   │
+   ├───┼───┼───┼───┼───┤            ├───┼───┼──╫┼───┼───┤         ├───┼───┼───┼───┼───┤
+ 3 │ # │ # │ # │ # │ # │          3 │ A │ A │ A║│ B │ B │       3 │ A │ A │ B │ B │ B │
+   ├───┼───┼───┼───┼───┤            ├───┼───┼──╫┼───┼───┤         ├───┼───┼───┼───┼───┤
+ 2 │ # │ # │ # │   │   │          2 │ A │ A │ A║│   │   │       2 │ A │ A │ A │   │   │
+   ├───┼───┼───┼───┼───┤            ├───┼───┼──╫┼───┼───┤         ├───┼───┼───┼───┼───┤
+ 1 │   │ # │ # │ # │ # │          1 │   │ A │ A║│ B │ B │       1 │   │ A │ A │ A │ A │
+   └───┴───┴───┴───┴───┘            └───┴───┴──╩┴───┴───┘         └───┴───┴───┴───┴───┘
+     1   2   3   4   5                1   2   3   4   5               1   2   3   4   5
 
-**coordinates** : dict, default={'time': 'time', 'x': 'lon', 'y': 'lat'}
-  Mapping of conceptual coordinates to actual coordinate names.
-  For unstructured grids, use: ``{'time': 'time', 'x': 'lon', 'y': 'lat'}``
+The centroid of A lies in the hollow of the C, away from A's cells, so the dividing line cuts
+the child into a B that is spatially disjoint. The nearest-cell partition keeps B contiguous.
+Use ``nn_partitioning=True`` unless you need to reproduce a centroid-based method (Sun and
+Zhang, 2023). The choice affects only how merged children are partitioned. It does not change
+which objects are linked.
 
-**grid_resolution** : float, optional
-  Grid resolution in degrees for structured grids (ignored for unstructured grids).
-  When provided, automatically calculates physical cell areas using spherical geometry.
-  **Overrides** any provided ``cell_areas`` parameter for structured grids.
+The number of parents of one child, and the number of merges in one timestep, are held in
+fixed-width arrays of 64 entries. These are implementation widths, not physical limits, and
+an event that exceeds them raises ``TrackingError``. Raising ``overlap_threshold`` reduces the
+number of accepted parents.
 
-  .. code-block:: python
+Parameters
+==========
 
-     # Automatic from grid resolution
-     tracker = marEx.tracker(
-         extremes, mask,
-         R_fill=8,
-         grid_resolution=0.25  # Automatically calculates spherical areas for 0.25° grid
-     )
+Required
+--------
 
-     # This is equivalent to manually provide 2D data array of cell areas
-     tracker = marEx.tracker(
-         extremes, mask,
-         R_fill=8,
-         cell_areas=my_calculated_areas  # Manual calculation required
-     )
+``data_bin`` : :class:`xarray.DataArray`
+   Boolean, Dask-backed, with dimensions ``(time, lat, lon)`` or ``(time, cells)``. Extra
+   dimensions such as depth are rejected with ``TrackingError``: select one level with
+   ``isel`` first, or loop over levels.
 
-  The calculation accounts for latitude-dependent cell areas using spherical geometry,
-  providing accurate physical areas (in km²) for object/event size calculations.
+``R_fill`` : int
+   See `The Morphological Step`_. It is required and has no default. Guidance: small values (3 to
+   5) preserve narrow features and suit coarse grids, larger values (10 to 15) produce more
+   coherent objects from noisy fields. Choose it against the physical scale you want to
+   bridge, in cells.
 
-**cell_areas** : xr.DataArray, optional
-  Physical cell areas for area calculations.
+Optional Inputs
+---------------
 
-  * **For structured grids**: Optional. If not provided, defaults to 1.0 for each cell (i.e. cell counts).
-    N.B.: If neither ``cell_areas`` nor ``grid_resolution`` is provided, areas are in units of cells/pixels.
-    Note: Overridden by ``grid_resolution`` if provided.
-  * **For unstructured grids**: Required for physical area calculations.
+``mask`` : :class:`xarray.DataArray`, optional
+   Boolean validity mask (``True`` = valid), as returned by ``preprocess_data``. Omit it for
+   a field with no invalid region, such as an atmospheric variable. Omitting it is equivalent
+   to passing an all-``True`` mask. An all-``False`` mask raises an error.
 
-Output Data Structure
-=====================
+``prefilter_min_cells`` : int, optional (keyword-only)
+   Drop connected components smaller than this many cells at each timestep, before the
+   closing. Default ``None`` (off). On a fine grid it stops specks from bridging objects. The
+   unstructured example in the repository uses 23 cells, roughly one 0.25 degree cell on the
+   ICON R02B09 mesh. The attribute ``prefilter_min_cells`` is written to the output only when
+   the option is set.
 
-The tracking algorithm returns an xarray Dataset with the following structure:
+``area_filter_quartile`` : float in (0, 1)
+   Fraction of the smallest objects to remove. Default 0.5 when neither area filter is given.
+   Adaptive: the cut-off adapts to the object-size distribution of each dataset.
+   On an unstructured mesh the quantile is evaluated over objects above a small size cut-off
+   (50 cells), not over every speck, so the same value removes a different fraction there
+   than on a regular grid.
 
-Main Tracking Dataset
----------------------
+``area_filter_absolute`` : int
+   Minimum object area (in cells) to keep. Reproducible across datasets. Mutually exclusive
+   with ``area_filter_quartile``. The cut-off that was applied is recorded as the attribute
+   ``area_threshold (cells)``.
 
-.. code-block:: python
+``T_fill`` : int, default 2
+   Temporal closing. Must be even. The kernel is ``T_fill + 1`` **timesteps**, so on daily data
+   ``T_fill=2`` bridges absences of up to two days, and on a weekly or monthly cadence the unit
+   is weeks or months. ``T_fill=0`` skips the step and is the usual choice for coarse
+   cadences. For daily data 2 to 4 is typical, and larger values link more intermittent
+   events at the cost of joining distinct ones.
 
-   # tracked_events Dataset structure:
-   xarray.Dataset
-   Dimensions: (lat, lon, time, ID, component, sibling_ID)
-   Coordinates:
-       lat         (lat)
-       lon         (lon)
-       time        (time)
-       ID          (ID)
-   Data variables:
-       ID_field              (time, lat, lon)        int32       # Event ID field
-       global_ID             (time, ID)              int32       # Global ID mapping
-       area                  (time, ID)              float32     # Event areas
-       centroid              (component, time, ID)   float32     # Event centroids
-       presence              (time, ID)              bool        # Event presence
-       time_start            (ID)                    datetime64  # Start times
-       time_end              (ID)                    datetime64  # End times
-       merge_ledger          (time, ID, sibling_ID)  int32       # Merge information
+``allow_merging`` : bool, default ``True``
+   ``False`` runs classical connected-component labelling with time connectivity. The output
+   then holds ``ID_field`` only. The unstructured tracker always uses the merge path.
 
-**Key Variables:**
+``overlap_threshold`` : float, default 0.5
+   Fraction of the smaller object's area that must overlap for two objects to be linked.
+   Lower values (0.3) give more continuous tracks and link more marginal pairs. Higher values
+   (0.7) are stricter.
 
-* **ID_field**: Binary field with tracked event IDs
-* **global_ID**: Unique ID mapping for each event at each time
-* **area**: Spatial area of each event through time (in units of cell counts, or physical units if cell_areas/grid_resolution provided)
-* **centroid**: (x,y) centroid coordinates of each event
-* **presence**: Boolean indicating event presence at each time
-* **time_start/time_end**: Temporal bounds of each event
-* **merge_ledger**: Sibling IDs for merging events (-1 = no merge)
+``nn_partitioning`` : bool, default ``False``
+   See `Merges and Splits`_.
 
-Merge Information Dataset
--------------------------
+``max_iteration`` : int, default 40
+   Iteration limit of the unstructured merge loop. Unused on regular grids.
 
-.. code-block:: python
+``checkpoint`` : ``'save'`` | ``'load'`` | ``None``
+   Writes or reads the preprocessed binary field and its statistics in ``temp_dir``, so a
+   rerun with different linking parameters skips the morphology. Requires ``temp_dir``.
 
-   # merges_ds Dataset structure (when return_merges=True):
-   xarray.Dataset
-   Dimensions: (merge_ID, parent_idx, child_idx)
-   Data variables:
-       parent_IDs      (merge_ID, parent_idx)  int32       # Parent event IDs
-       child_IDs       (merge_ID, child_idx)   int32       # Child event IDs
-       overlap_areas   (merge_ID, parent_idx)  int32       # Overlap areas
-       merge_time      (merge_ID)              datetime64  # Merge timestamps
-       n_parents       (merge_ID)              int8        # Number of parents
-       n_children      (merge_ID)              int8        # Number of children
+``debug`` : int (0 to 2), ``verbose``, ``quiet``
+   Logging controls. ``run()`` also prints a "Tracking Statistics" block to standard output,
+   independent of the logging level.
 
-**Key Variables:**
+Grid and Areas
+--------------
 
-* **parent_IDs/child_IDs**: Original parent and child IDs in merge events
-* **overlap_areas**: Spatial overlap between parent and child objects
-* **merge_time**: Timestamp of each merge event
-* **n_parents/n_children**: Number of objects involved in each merge
+``dimensions``, ``coordinates`` : dict
+   Defaults ``{"time": "time", "x": "lon", "y": "lat"}``. Required for other names. For an
+   unstructured mesh ``dimensions`` carries only the cell dimension under ``"x"``.
 
-Advanced Usage Examples
-========================
+``grid_resolution`` : float, optional
+   Degrees, for regular grids. Computes spherical cell areas in km\ :sup:`2` (Earth radius
+   6378 km) and **overrides** ``cell_areas``. Not accepted for unstructured meshes.
 
-Analysing Event Properties
---------------------------
+``cell_areas`` : :class:`xarray.DataArray`, optional
+   Physical cell areas, in whatever unit you supply. Without ``grid_resolution`` or
+   ``cell_areas`` on a regular grid, every cell has unit area and ``area`` is a cell count.
+   Required on unstructured meshes.
 
-.. code-block:: python
+``unstructured_grid``, ``neighbours``, ``temp_dir`` : see `Unstructured Meshes`_.
 
-   # Run tracking
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
+``regional_mode``, ``coordinate_units`` : see `Regional Domains`_.
 
-   # Analyse event durations
-   event_durations = (tracked_events.time_end - tracked_events.time_start).dt.days
-   long_events = tracked_events.ID.where(event_durations > 10, drop=True)
+``compute_mode``, ``temp_dir`` : see `Compute Modes and Larger-Than-Memory Tracking`_.
 
-   # Find events present at specific time
-   time_slice = tracked_events.sel(time='2020-07-15')
-   active_events = time_slice.ID.where(time_slice.presence, drop=True)
+Grid Types
+==========
 
-   # Calculate maximum event areas
-   max_areas = tracked_events.area.max(dim='time')
-   large_events = tracked_events.ID.where(max_areas > threshold, drop=True)
+Regular Latitude/Longitude Grids
+--------------------------------
 
-Merge Event Analysis
----------------------
+Coordinates are converted to degrees internally. The tracker decides the units, and whether
+the domain wraps in longitude, from a coordinate range of about 360 degrees (or 2π). A field
+that does not span the globe raises ``CoordinateError``: use the regional tracker.
 
-.. code-block:: python
+Unstructured Meshes
+-------------------
 
-   # Analyse merge events
-   if merges_ds is not None:
-       # Find complex merge events (multiple parents/children)
-       complex_merges = merges_ds.where(
-           (merges_ds.n_parents > 1) | (merges_ds.n_children > 1),
-           drop=True
-       )
-
-       # Analyse merge timing
-       merge_times = merges_ds.merge_time.values
-       seasonal_merges = merges_ds.groupby(merges_ds.merge_time.dt.season).count()
-
-       # Find parent-child relationships
-       for merge_id in complex_merges.merge_ID:
-           parents = merges_ds.parent_IDs.sel(merge_ID=merge_id).values
-           children = merges_ds.child_IDs.sel(merge_ID=merge_id).values
-           print(f"Merge {merge_id}: {parents} → {children}")
-
-Visualisation Integration
--------------------------
+An unstructured mesh needs the connectivity of its cells, their areas, and a scratch
+directory, all passed explicitly:
 
 .. code-block:: python
 
-   # Plot tracked events
-   config = marEx.PlotConfig(
-       title='Tracked Extreme Events',
-       plot_IDs=True,          # Special handling for event IDs
-       cmap='tab20'            # Discrete colormap
-   )
+   import marEx
 
-   # Plot single timestep
-   fig, ax, im = tracked_events.ID_field.isel(time=0).plotX.single_plot(config)
+   ds = xr.open_zarr("icon_extremes.zarr")  # from marEx.preprocess_data(..., neighbours=..., cell_areas=...)
 
-   # Create animation
-   movie_path = tracked_events.ID_field.plotX.animate(
-       config,
-       plot_dir='./animations',
-       file_name='tracked_events'
-   )
-
-Performance Optimisation
-========================
-
-Chunking Strategy
------------------
-
-.. code-block:: python
-
-   # Optimal chunking for tracking
-   chunk_size = {'time': 25, 'lat': -1, 'lon': -1}  # Keep spatial dims together
-   extremes_ds = xr.open_dataset('extremes.nc', chunks=chunk_size)
-
-   # For very large datasets
    event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       extremes_ds.mask,
+       ds.extreme_events.chunk({"time": 5, "ncells": -1}),
+       ds.mask,
+       R_fill=80,                           # neighbour hops, not cells of a regular grid
+       area_filter_absolute=13549,
+       T_fill=4,
+       overlap_threshold=0.25,
+       allow_merging=True,
+       nn_partitioning=True,
+       prefilter_min_cells=23,
+       unstructured_grid=True,
+       dimensions={"time": "time", "x": "ncells"},
+       coordinates={"time": "time", "x": "lon", "y": "lat"},
+       neighbours=ds.neighbours,            # shape (3, ncells), dims ("nv", "ncells")
+       cell_areas=ds.cell_areas,
+       temp_dir="/path/to/scratch/marex_tracking",
+   )
+   events = event_tracker.run()
+
+These settings are the ones used for the ICON R02B09 tracking video (14.9 million cells).
+They are a starting point for a comparable mesh, not defaults to reuse at another
+resolution.
+
+The unstructured tracker's events are independent of the time chunking and of the worker
+layout, except where a cell is equidistant from two parents: the nearest-cell partition then breaks the tie
+by cell order, and a different chunking can break it differently. In the full-mesh
+comparisons this affected a very small number of cells.
+
+Regional Domains
+----------------
+
+A limited-area field has no 360 degree range to detect. Use ``regional_tracker``, which takes
+the same arguments plus ``coordinate_units``:
+
+.. code-block:: python
+
+   regional = marEx.regional_tracker(
+       region_events,                  # boolean, dims (time, lat, lon)
+       region_mask,
+       coordinate_units="degrees",     # "degrees" or "radians"
        R_fill=8,
        area_filter_quartile=0.5,
-       # Performance optimizations
-       dask_chunks=chunk_size
-   )
+   ).run()
 
-Memory Management
------------------
+``regional_tracker`` without ``coordinate_units`` raises ``ConfigurationError``, and regional
+mode is not available on unstructured meshes.
 
-.. code-block:: python
+Output
+======
 
-   # For memory-constrained environments
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       extremes_ds.mask,
-       R_fill=6,                    # Smaller fill radius
-       area_filter_quartile=0.75,   # Remove more small events
-       T_fill=1,                    # Reduce temporal gap filling
-       allow_merging=False          # Disable merge tracking for speed
-   )
-
-.. _larger-than-memory-tracking:
-
-Larger-Than-Memory Tracking (``compute_mode``)
------------------------------------------------
-
-By default the tracker pins its whole-field intermediates in cluster RAM, so the longest
-series you can track is bounded by cluster size. ``compute_mode='streaming'`` stages those
-intermediates to Zarr under ``temp_dir`` instead, so memory scales with **cluster size**
-rather than **series length**. Both structured and unstructured grids are supported.
-
-.. code-block:: python
-
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events.chunk({'time': 25, 'lat': -1, 'lon': -1}),
-       extremes_ds.mask,
-       R_fill=8,
-       area_filter_quartile=0.5,
-       compute_mode='streaming',
-       temp_dir='/scratch/your_user/marex_staging',
-   )
-   events_ds = event_tracker.run()
-
-   # The returned dataset reads LAZILY from the staged store, so write your
-   # output BEFORE releasing the staging directory.
-   events_ds.to_zarr('tracked_events.zarr')
-   marEx.clear_staging(events_ds)
-
-Measured on a 0.25° global run of 3804 timesteps (~10.5 years), against the default mode:
+``run()`` returns a Dataset with dimensions ``time, lat, lon, ID, component, sibling_ID`` (or
+``cells`` in place of ``lat, lon``):
 
 .. list-table::
    :header-rows: 1
+   :widths: 18 24 58
 
-   * - Mode
-     - Peak cluster memory
-     - Bytes pinned
-   * - ``'persist'`` (default)
-     - 56.7 GB
-     - 337 GB
-   * - ``'streaming'``
-     - 19.1 GB
-     - 0.34 GB
+   * - Variable
+     - Dimensions
+     - Content
+   * - ``ID_field``
+     - ``(time, lat, lon)``, int32
+     - Event ID at each cell. 0 is background. The values index the ``ID`` dimension.
+   * - ``global_ID``
+     - ``(time, ID)``, int32
+     - The per-timestep object ID (before events are formed) that belongs to each event.
+   * - ``area``
+     - ``(time, ID)``, float32
+     - Event area at each time, in the units of ``cell_areas`` (km\ :sup:`2` with
+       ``grid_resolution``, otherwise cells).
+   * - ``centroid``
+     - ``(component, time, ID)``, float32
+     - Latitude (``component=0``) and longitude (``component=1``) of the centroid, in the
+       input's coordinate units.
+   * - ``presence``
+     - ``(time, ID)``, bool
+     - True while the event exists.
+   * - ``time_start``, ``time_end``
+     - ``(ID)``, datetime64
+     - First and last time of presence.
+   * - ``merge_ledger``
+     - ``(time, ID, sibling_ID)``, int32
+     - Parent event IDs at merge times, ``-1`` where unused.
 
-Every integer and label output — ``ID_field`` and all event properties — is bit-identical
-between the two modes. Wall-clock time is unchanged within run-to-run noise, so the trade is
-disk for memory, not speed for memory.
+The ``ID`` coordinate runs from 1 to ``N_events_final``. The dataset attributes record how
+the run was configured and what the filters did: ``N_objects_prefiltered`` and
+``N_objects_filtered`` (object counts before and after the area filter),
+``N_events_final``, ``R_fill``, ``T_fill``, ``area_threshold (cells)``,
+``accepted_area_fraction``, ``preprocessed_area_fraction``, and, with merging,
+``overlap_threshold``, ``nn_partitioning``, ``total_merges`` and ``multi_parent_merges``.
 
-Three things to know before using it:
+``preprocessed_area_fraction`` is the area of the input field divided by the area after the
+closing, opening and filtering. It is measured against the input **before** any
+``prefilter_min_cells`` step, so enabling the prefilter changes it. Compare it with 1 to see
+how much area the morphology added or removed.
+``accepted_area_fraction`` is the share of object area that survives the area filter.
 
-* **Disk cost.** Roughly 5 whole-field stores (2 boolean + 3 int32), about 14 bytes per
-  cell-timestep uncompressed — around 55 GB for the run above, less once written, since the
-  ID fields are mostly zeros. Size ``temp_dir`` accordingly.
-* **The staging directory outlives** ``run()``, by design, because the returned dataset is
-  lazy. Call :func:`marEx.clear_staging` once your output is written; the path is also on
-  ``events_ds.encoding['marex_staging_dir']`` (deliberately not ``attrs``, which would be
-  copied into your written output and left pointing at a directory ``clear_staging`` has
-  just deleted). Cleanup runs automatically on normal interpreter exit but **cannot** run
-  after a ``SIGKILL`` (a wall-clock kill on a batch system is the usual case), so sweep
-  ``temp_dir`` periodically.
-* **Input time chunking must be uniform.** ``.chunk({'time': k})`` always satisfies this (a
-  smaller final chunk is fine). Genuinely ragged chunking — from a store with irregular
-  on-disk chunks, or from a ``concat`` — is rejected at construction with a
-  ``ConfigurationError`` rather than failing deep inside the Zarr write.
-
-``compute_mode='lazy'`` is deliberately not offered: the merge loop is sequential in time, so
-accepting recomputation would buy nothing.
-
-Algorithm Details
-=================
-
-Tracking Workflow
------------------
-
-The tracking algorithm follows these key steps:
-
-1. **Binary Object Identification**
-   * Connected component labeling on each time slice
-   * Morphological operations (opening/closing) for noise reduction
-   * Size filtering based on area quartiles
-
-2. **Temporal Matching**
-   * Overlap-based matching between consecutive time steps
-   * Handles one-to-one, one-to-many, and many-to-one relationships
-   * Gap filling for short-duration interruptions
-
-3. **Event Lifecycle Management**
-   * Track initialisation, continuation, merging, and splitting
-   * Unique ID assignment and genealogy tracking
-   * Statistical property calculation
-
-4. **Post-processing**
-   * Merge event documentation
-   * Output dataset construction
-
-Merge/Split Algorithm
----------------------
-
-The advanced merge/split tracking implements:
+With ``run(return_merges=True)`` the tracker also returns a second Dataset with one entry per
+merge: ``parent_IDs``, ``child_IDs``, ``overlap_areas``, ``merge_time``, ``n_parents`` and
+``n_children``. Its IDs are the object IDs of the identification stage. ``merge_ledger`` in the
+main dataset is in final event IDs, and is the one to use for event-level questions.
 
 .. code-block:: python
 
-   # Improved merge partitioning logic:
-   # - Partition child objects based on nearest parent cell
-   # - Maintain original event identities across merges
-   # - Track genealogy of splitting and merging events
-   # - Use overlap threshold to determine event continuity
+   events, merges = event_tracker.run(return_merges=True)
 
-Error Handling
-==============
+Event Statistics
+================
 
-Common Issues and Solutions
----------------------------
-
-**Memory Errors**:
+All per-event variables other than ``ID_field`` are small, so compute them once and work in
+memory. ``ID_field`` stays lazy.
 
 .. code-block:: python
 
-   # Solution: Reduce chunk sizes and increase filtering
+   stats = events[["area", "centroid", "presence", "time_start", "time_end", "merge_ledger"]].compute()
+
+   # Duration of every event, in days (timesteps are daily here)
+   duration = (stats.time_end - stats.time_start).dt.days + 1
+
+   # Peak and mean area over each event's lifetime
+   area = stats.area.where(stats.presence)
+   max_area = area.max("time")
+   mean_area = area.mean("time")
+
+   # Centroid track of event 17: latitude and longitude against time
+   track = stats.centroid.sel(ID=17).where(stats.presence.sel(ID=17))
+   lat_track, lon_track = track.sel(component=0), track.sel(component=1)
+
+   # Number of recorded parents at each merge of every event
+   n_parents = (stats.merge_ledger >= 0).sum("sibling_ID")
+
+   # Footprint of event 17: every cell it ever covered (computes over time)
+   footprint = (events.ID_field == 17).any("time")
+
+   # Events longer than 10 days that reached 100,000 km^2 (with grid_resolution set)
+   keep = (duration > 10) & (max_area > 1e5)
+   long_large_events = stats.ID.where(keep, drop=True)
+
+``duration`` counts calendar days only on a daily cadence. On other cadences count timesteps
+with ``stats.presence.sum("time")``.
+
+These variables are the inputs to event catalogues: duration, area and the footprint give
+the frequency and severity of events for exposure studies. See :doc:`../applications/index`
+for worked cases.
+
+Visualising Tracks
+==================
+
+``ID_field`` plots directly with ``plot_IDs=True`` (see :doc:`visualisation`). Movies can
+overlay event outlines and centroids through the ``object_ids`` and ``centroids`` arguments
+of ``animate``:
+
+.. code-block:: python
+
+   config = marEx.PlotConfig(title="Tracked Events", plot_IDs=True)
+   fig, ax, im = events.ID_field.isel(time=0).plotX.single_plot(config)
+
+.. _larger-than-memory-tracking:
+
+Compute Modes and Larger-Than-Memory Tracking
+=============================================
+
+``compute_mode`` controls what happens to the whole-field intermediates (the filled and
+filtered fields, the ID field and the merge ledger accumulator).
+
+``'persist'`` (default)
+   Pins them in cluster memory. Fastest, and the right choice whenever the run fits.
+
+``'streaming'``
+   Stages them to Zarr under ``temp_dir`` and reads them back, so the bytes held in worker
+   memory depend on the cluster and the time chunk and not on the length of the series.
+   Requires ``temp_dir``. Supports both grid types.
+
+``'lazy'`` is rejected: the merge loop is sequential in time, so recomputing buys nothing.
+
+.. code-block:: python
+
    event_tracker = marEx.tracker(
-       data_bin, mask,
-       R_fill=6,                  # Smaller fill radius
-       area_filter_quartile=0.8,  # Remove more small events
-       T_fill=1,                  # Reduce temporal gap filling
-       dask_chunks={'time': 15}   # Smaller time chunks
-   )
-
-**Performance Issues**:
-
-.. code-block:: python
-
-   # Solution: Optimise parameters for your data
-   event_tracker = marEx.tracker(
-       data_bin, mask,
-       R_fill=4,                  # Reduce morphological operations
-       area_filter_quartile=0.75, # Remove more small events
-       allow_merging=False        # Disable merge tracking
-   )
-
-**Tracking Quality Issues**:
-
-.. code-block:: python
-
-   # Solution: Tune overlap and temporal parameters
-   event_tracker = marEx.tracker(
-       data_bin, mask,
+       extreme_events,
+       ds.mask,
        R_fill=8,
        area_filter_quartile=0.5,
-       overlap_threshold=0.3,     # Lower overlap requirement
-       T_fill=4,                  # Allow longer temporal gaps
-       allow_merging=True         # Enable merge tracking
+       compute_mode="streaming",
+       temp_dir="/path/to/scratch/marex_staging",
    )
+   events = event_tracker.run()
 
-Integration with Preprocessing
-==============================
+   # The result reads lazily from the staging store: write it, then release the store.
+   events.to_zarr("tracked_events.zarr", mode="w")
+   marEx.clear_staging(events)
 
-Complete Workflow Example
---------------------------
+What streaming changes
+----------------------
+
+Streaming cuts the **pinned** (resident) bytes. It does not by itself lower peak memory in
+every configuration, and the measurements below say which cases move.
+
+Measured on DKRZ Levante, single runs unless stated:
+
+* Gridded tracker, 0.25 degree global field, 3804 days (a 15.8 GB int32 ID field), at a
+  96 GB dask budget: pinned bytes fell from 337 GB (persist) to 0.34 GB (streaming), and peak
+  cluster memory from 56.7 GB to 19.1 GB. Wall time was within 1 % (1104 s and 1100 s).
+* The same tracker in a 24 GiB SLURM allocation with a 16 GB dask budget (4 workers x 4 GB):
+  ``persist`` was OOM-killed in 5 of 5 runs, while ``streaming`` completed in 7 of 7 runs in
+  the same allocation, with peak memory of 6.65 to 7.30 GB. This is the larger-than-memory
+  result. The ID field alone is 15.8 GB against the 24 GiB allocation, so the margin is
+  modest, and no allocation threshold for ``persist`` is claimed.
+* ICON R02B09 (14.9 million cells), 1096 days, 16 x 12 GB: pinned bytes fell from 751 GB to
+  148 GB, but peak memory fell only 6.5 %, and ``persist`` completes at this budget (about
+  72 minutes). With 4 x 8 GB, ``persist`` did not finish within the 5 hour limit in two runs,
+  and ``streaming`` completed in 3 h 50 min. That is a wall-clock statement, not a
+  memory-failure one.
+
+The gridded peak reduction therefore does not transfer to the unstructured tracker. Plan
+around pinned bytes, and size the cluster with a margin: ``P2PConsistencyError``,
+``KilledWorker`` and a timeout are symptoms, and the cause is usually a worker over 95 % of
+its memory limit.
+
+Staging, disk and chunking requirements
+---------------------------------------
+
+* **Disk.** About 14 bytes per cell-timestep before compression (roughly 55 GB for the
+  gridded run above, less on disk since the ID fields are mostly zero). The ICON run needs
+  about 230 GB at 1096 steps. Size ``temp_dir`` for it.
+* **The staging directory outlives** ``run()`` by design. Write your output, then call
+  :func:`marEx.clear_staging`. The path is on ``events.encoding["marex_staging_dir"]``, not
+  in ``attrs``. ``xr.merge`` and ``xr.concat`` drop that encoding, after which
+  ``clear_staging`` can only warn. Cleanup also runs at interpreter exit, but not after a
+  ``SIGKILL`` such as a wall-clock kill, so sweep ``temp_dir`` periodically.
+* **Uniform time chunks.** Every chunk except a shorter last one. ``.chunk({"time": k})``
+  satisfies this. Ragged input is re-chunked with a warning.
+* **Equivalence.** On gridded data ``ID_field`` and the event properties are bit-identical
+  across the two modes and across time chunkings in the tests, and a full global tracking
+  comparison (3438 days, 3116 events) matched in every compared output. The unstructured
+  tracker matches except for the equidistant tie-breaks described above.
+
+Chunking
+========
+
+The tracker needs the **spatial dimensions whole** and chunks **time**. Connected-component
+labelling and the dilation are global in space, so a spatially split field is rebuilt into
+one chunk per timestep, and the transposition is the expensive part. This is the opposite of
+advice for ``preprocess_data`` on a large unstructured mesh, which chunks the cell dimension.
+
+.. code-block:: python
+
+   # regular grid: space whole, time in blocks
+   data_bin = data_bin.chunk({"time": 25, "lat": -1, "lon": -1})
+
+   # unstructured: cells whole, small time blocks
+   data_bin = data_bin.chunk({"time": 5, "ncells": -1})
+
+* A time chunk of 25 is what the gridded examples use (about 26 MB per chunk for a 0.25
+  degree global boolean field). Keep the chunk at least ``T_fill + 1`` timesteps long, so the
+  temporal closing does not have to rebalance chunk boundaries.
+* On the full ICON R02B09 mesh the time chunk is a few timesteps, because a chunk is already
+  tens of megabytes. Every chunk must be at least 2 timesteps, and the last one must not be a
+  single step. A time chunk of 4 over 365 days leaves a one-step tail and fails, whereas 5
+  works. After a ``.sel`` along time, re-chunk.
+* ``neighbours`` and ``cell_areas`` do not constrain the chunking of the input.
+
+Troubleshooting
+===============
+
+``No clients found``
+   Start a ``dask.distributed`` client before ``run()``.
+
+``DataValidationError``: not binary
+   ``data_bin`` must be boolean. Compare to a threshold, or ``.astype(bool)``.
+
+``TrackingError``: extra dimension
+   The tracker is 2-D in space. Select a level (``isel(depth=0)``) or loop over levels.
+
+``CoordinateError`` on a regional domain
+   The longitude range is not about 360 degrees. Use ``regional_tracker`` with
+   ``coordinate_units``.
+
+Workers killed, or ``P2PConsistencyError``
+   Look for a worker memory warning above the traceback. Try ``compute_mode="streaming"``,
+   smaller time chunks, or more memory per worker. For ICON-scale unstructured tracking,
+   12 GB per worker is a stable setting, whereas 9 GB per worker was bistable.
+
+One enormous event
+   ``overlap_threshold`` is too low, ``T_fill`` or ``R_fill`` too large, or the specks that
+   chain objects together need ``prefilter_min_cells``.
+
+Many tiny events
+   Increase the area filter, or raise ``R_fill`` so the opening removes them.
+
+Complete Workflow
+=================
 
 .. code-block:: python
 
    import xarray as xr
    import marEx
 
-   # Step 1: Preprocess data
-   sst = xr.open_dataset('sst_daily.nc', chunks={'time': 365}).sst
+   client = marEx.helper.start_local_cluster(
+       n_workers=4, threads_per_worker=1, memory_limit="8GB"
+   )
 
-   extremes_ds = marEx.preprocess_data(
+   sst = xr.open_zarr("sst_daily.zarr").sst.chunk({"time": 365})
+
+   extremes = marEx.preprocess_data(
        sst,
-       method_anomaly='shifting_baseline',
-       method_extreme='seasonal_percentile',
+       method_anomaly="shifting_baseline",
+       method_extreme="seasonal_percentile",
        threshold_percentile=95,
        window_years=15,
        smooth_days=21,
        window_days=11,
-       dask_chunks={'time': 25}
+       dask_chunks={"time": 25},
    )
 
-   # Step 2: Track events
-   event_tracker = marEx.tracker(
-       extremes_ds.extreme_events,
-       extremes_ds.mask,
+   events = marEx.tracker(
+       extremes.extreme_events,
+       extremes.mask,
        R_fill=8,
        area_filter_quartile=0.5,
        T_fill=2,
        allow_merging=True,
        overlap_threshold=0.5,
-       nn_partitioning=True
-   )
+       nn_partitioning=True,
+       grid_resolution=0.25,
+   ).run()
 
-   # Step 3: Run tracking
-   tracked_events, merges_ds = event_tracker.run(return_merges=True)
-
-   # Step 4: Save results
-   tracked_events.to_netcdf('tracked_events.nc')
-   if merges_ds is not None:
-       merges_ds.to_netcdf('merge_events.nc')
+   events.to_zarr("events.zarr", mode="w")

@@ -1,6 +1,6 @@
 """Two bugs that survived because their code paths had never been executed.
 
-Both were found by executing `examples/unstructured data/02_id_track_events.ipynb`, which had
+Both were found by executing `examples/unstructured/02_id_track_events.ipynb`, which had
 never been run: the notebook is committed with `execution_count: null` on every cell. Neither
 is a recent regression.
 

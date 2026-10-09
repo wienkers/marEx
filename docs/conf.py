@@ -17,36 +17,34 @@ DOCS_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = DOCS_DIR.parent
 
 # -- Inline example notebooks ------------------------------------------------
-# The canonical Jupyter notebooks live in ``examples/<grid> data/`` (referenced
-# by the README and batch-job scripts). nbsphinx can only render notebooks that
-# live inside the Sphinx source tree, so we copy them into ``docs/tutorials/``
-# with space-free paths at build time. The copied directories are git-ignored
-# and regenerated on every build (including on Read the Docs).
+# The canonical Jupyter notebooks live in ``examples/<folder>/``. nbsphinx can
+# only render notebooks inside the Sphinx source tree, so they are copied into
+# ``docs/tutorials/<folder>/`` at build time. The copies are git-ignored and
+# regenerated on every build (including on Read the Docs). This map is the single
+# source of truth for both the copy and the GitHub links in ``nbsphinx_prolog``.
 
-# Maps canonical example folder -> clean tutorials sub-directory / URL segment.
-TUTORIAL_GRID_DIRS = {
-    "gridded data": "gridded",
-    "regional data": "regional",
-    "unstructured data": "unstructured",
+# Maps tutorials sub-directory (URL segment) -> canonical example folder.
+TUTORIAL_DIRS = {
+    "gridded": "gridded",
+    "regional": "regional",
+    "unstructured": "unstructured",
+    "applications": "applications",
 }
 
 
 def _sync_tutorial_notebooks() -> None:
-    """Copy example notebooks into ``docs/tutorials/<grid>/`` before the build."""
+    """Copy example notebooks into ``docs/tutorials/<dir>/`` before the build."""
     examples_dir = REPO_ROOT / "examples"
     tutorials_dir = DOCS_DIR / "tutorials"
-    for src_name, dest_name in TUTORIAL_GRID_DIRS.items():
+    for dest_name, src_name in TUTORIAL_DIRS.items():
         src = examples_dir / src_name
         dest = tutorials_dir / dest_name
         if dest.exists():
             shutil.rmtree(dest)
-        if not src.is_dir():
-            print(f"[conf.py] WARNING: example folder not found: {src}")
-            continue
-        dest.mkdir(parents=True, exist_ok=True)
-        notebooks = sorted(src.glob("*.ipynb"))
+        notebooks = sorted(src.glob("*.ipynb")) if src.is_dir() else []
         if not notebooks:
-            print(f"[conf.py] WARNING: no notebooks found in {src}")
+            raise FileNotFoundError(f"[conf.py] no example notebooks in {src}: update TUTORIAL_DIRS")
+        dest.mkdir(parents=True, exist_ok=True)
         for nb in notebooks:
             shutil.copy2(nb, dest / nb.name)
         print(f"[conf.py] synced {len(notebooks)} notebook(s): {src} -> {dest}")
@@ -110,7 +108,9 @@ redirects = {
     "user_guide": "guide/index.html",
     "examples": "tutorials/index.html",
     "api": "api/index.html",
-    "modules/detect": "../api/detect.html",
+    "guide/detection": "anomalies.html",
+    "modules/detect": "../api/anomaly.html",
+    "api/detect": "anomaly.html",
     "modules/track": "../api/track.html",
     "modules/plotx": "../api/plotx.html",
     "modules/helper": "../api/helper.html",
@@ -198,7 +198,7 @@ intersphinx_mapping = {
     "xarray": ("https://docs.xarray.dev/en/stable/", None),
     "dask": ("https://docs.dask.org/en/stable/", None),
     "matplotlib": ("https://matplotlib.org/stable/", None),
-    "cartopy": ("https://scitools.org.uk/cartopy/docs/latest/", None),
+    "cartopy": ("https://cartopy.readthedocs.io/stable/", None),
     "scikit-image": ("https://scikit-image.org/docs/stable/", None),
 }
 
@@ -212,10 +212,13 @@ nbsphinx_execute = "never"
 nbsphinx_kernel_name = "python3"
 nbsphinx_allow_errors = True
 
-nbsphinx_prolog = r"""
+nbsphinx_prolog = (
+    r"""
 {% set parts = env.docname.split('/') %}
 {% if parts[0] == 'tutorials' and parts|length == 3 %}
-{% set foldermap = {'gridded': 'gridded data', 'regional': 'regional data', 'unstructured': 'unstructured data'} %}
+{% set foldermap = """
+    + repr(TUTORIAL_DIRS)
+    + r""" %}
 {% set gh_path = 'examples/' + foldermap[parts[1]] + '/' + parts[2] + '.ipynb' %}
 {% set gh_url = ('https://github.com/wienkers/marEx/blob/main/' + gh_path)|replace(' ', '%20') %}
 {% set raw_url = ('https://github.com/wienkers/marEx/raw/main/' + gh_path)|replace(' ', '%20') %}
@@ -229,6 +232,7 @@ nbsphinx_prolog = r"""
     rendered here from its committed outputs rather than re-executed).
 {% endif %}
 """
+)
 
 # -- LaTeX / others (HTML is the only built format) --------------------------
 

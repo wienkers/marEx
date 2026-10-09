@@ -436,7 +436,7 @@ def identify_extremes(
     >>> anomalies = xr.open_dataset('anomalies.nc', chunks={}).dat_anomaly
     >>>
     >>> # Identify extreme events using global-in-time 95th percentile
-    >>> extremes, thresholds = marEx.identify_extremes(
+    >>> extremes, thresholds = marEx.extremes.identify_extremes(
     ...     anomalies,
     ...     method_extreme="global_percentile",
     ...     threshold_percentile=95
@@ -453,7 +453,7 @@ def identify_extremes(
     Using day-of-year specific thresholds (cf. Hobday et al. 2016 method):
 
     >>> # More sophisticated threshold calculation
-    >>> extremes_seasonal, thresholds_seasonal = marEx.identify_extremes(
+    >>> extremes_seasonal, thresholds_seasonal = marEx.extremes.identify_extremes(
     ...     anomalies,
     ...     method_extreme="seasonal_percentile",
     ...     threshold_percentile=95,
@@ -471,12 +471,12 @@ def identify_extremes(
     Comparison of exact vs approximate percentile methods:
 
     >>> # Approximate method (faster, default)
-    >>> extremes_approx, thresh_approx = marEx.identify_extremes(
+    >>> extremes_approx, thresh_approx = marEx.extremes.identify_extremes(
     ...     anomalies, method_percentile="approximate"
     ... )
     >>>
     >>> # Exact method (slower & memory intensive)
-    >>> extremes_exact, thresh_exact = marEx.identify_extremes(
+    >>> extremes_exact, thresh_exact = marEx.extremes.identify_extremes(
     ...     anomalies, method_percentile="exact"
     ... )
     >>>
@@ -487,12 +487,12 @@ def identify_extremes(
     Different percentile thresholds for varying event rarity:
 
     >>> # Conservative threshold - very extreme events only
-    >>> extremes_98, _ = marEx.identify_extremes(
+    >>> extremes_98, _ = marEx.extremes.identify_extremes(
     ...     anomalies, threshold_percentile=98
     ... )
     >>>
     >>> # Moderate threshold - more frequent events
-    >>> extremes_90, _ = marEx.identify_extremes(
+    >>> extremes_90, _ = marEx.extremes.identify_extremes(
     ...     anomalies, threshold_percentile=90
     ... )
     >>>
@@ -504,7 +504,7 @@ def identify_extremes(
 
     >>> # ICON ocean model data
     >>> icon_anomalies = xr.open_dataset('icon_anomalies.nc', chunks={}).dat_anomaly
-    >>> extremes_unstructured, thresholds_unstructured = marEx.identify_extremes(
+    >>> extremes_unstructured, thresholds_unstructured = marEx.extremes.identify_extremes(
     ...     icon_anomalies,
     ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
@@ -515,7 +515,7 @@ def identify_extremes(
     Advanced seasonal method with custom temporal window:
 
     >>> # Longer temporal window for smoother thresholds
-    >>> extremes_smooth, thresholds_smooth = marEx.identify_extremes(
+    >>> extremes_smooth, thresholds_smooth = marEx.extremes.identify_extremes(
     ...     anomalies,
     ...     method_extreme="seasonal_percentile",
     ...     window_days=31,  # Longer smoothing window

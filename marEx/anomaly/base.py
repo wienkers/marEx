@@ -53,11 +53,13 @@ def compute_normalised_anomaly(
         Input data with dimensions matching the 'dimensions' parameter
     method_anomaly : str, default='shifting_baseline'
         Anomaly computation method. Options:
-        - 'detrend_harmonic': Detrending with harmonics and polynomials (efficient, biased)
-        - 'shifting_baseline': Rolling climatology (accurate, shortens time series)
-        - 'fixed_baseline': Daily climatology using full time series (keeps long-term trends in the anomaly)
-        - 'detrend_fixed_baseline': Polynomial detrending + fixed climatology (does not shorten time series,
+
+        * 'detrend_harmonic': Detrending with harmonics and polynomials (efficient, biased)
+        * 'shifting_baseline': Rolling climatology (accurate, shortens time series)
+        * 'fixed_baseline': Daily climatology using full time series (keeps long-term trends in the anomaly)
+        * 'detrend_fixed_baseline': Polynomial detrending + fixed climatology (does not shorten time series,
           keeps trends in seasonal timing in the anomaly)
+
     dimensions : dict, optional
         Mapping of conceptual dimensions to actual dimension names in the data
     coordinates : dict, optional
@@ -94,7 +96,7 @@ def compute_normalised_anomaly(
     >>> sst = xr.open_dataset('sst_data.nc', chunks={}).sst.chunk({'time': 30})
     >>>
     >>> # Compute anomalies using shifting baseline (default)
-    >>> result = marEx.compute_normalised_anomaly(sst)
+    >>> result = marEx.anomaly.compute_normalised_anomaly(sst)
     >>> print(result.data_vars)
     Data variables:
         dat_anomaly  (time, lat, lon) float32 dask.array<chunksize=(30, 180, 360)>
@@ -107,7 +109,7 @@ def compute_normalised_anomaly(
     Previous configuration (marEx v2.0 default) of detrended baseline with higher-order polynomials and standardisation.
     Note: marEx v3.0+ uses shifting_baseline as the default method:
 
-    >>> result_advanced = marEx.compute_normalised_anomaly(
+    >>> result_advanced = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="detrend_harmonic",
     ...     detrend_orders=[1, 2, 3],  # Linear, quadratic, cubic trends
@@ -126,7 +128,7 @@ def compute_normalised_anomaly(
 
     Accurate shifting baseline method for climate-aware anomalies:
 
-    >>> result_shifting = marEx.compute_normalised_anomaly(
+    >>> result_shifting = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="shifting_baseline",
     ...     window_years=10,   # Use 10-year rolling climatology
@@ -138,7 +140,7 @@ def compute_normalised_anomaly(
 
     >>> # ICON ocean model with ncells dimension
     >>> icon_data = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
-    >>> result_unstructured = marEx.compute_normalised_anomaly(
+    >>> result_unstructured = marEx.anomaly.compute_normalised_anomaly(
     ...     icon_data,
     ...     dimensions={"time": "time", "x": "ncells"}
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
@@ -149,12 +151,12 @@ def compute_normalised_anomaly(
     Comparison of methods - detrended vs shifting baseline:
 
     >>> # Detrended baseline - faster, slight bias
-    >>> detrended = marEx.compute_normalised_anomaly(
+    >>> detrended = marEx.anomaly.compute_normalised_anomaly(
     ...     sst, method_anomaly="detrend_harmonic"
     ... )
     >>>
     >>> # Shifting baseline - slower, more accurate
-    >>> shifting = marEx.compute_normalised_anomaly(
+    >>> shifting = marEx.anomaly.compute_normalised_anomaly(
     ...     sst, method_anomaly="shifting_baseline",
     ...     window_years=15
     ... )
@@ -166,7 +168,7 @@ def compute_normalised_anomaly(
     Fixed baseline climatology:
 
     >>> # Use full time series for daily climatology
-    >>> result_fixed = marEx.compute_normalised_anomaly(
+    >>> result_fixed = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="fixed_baseline"
     ... )
@@ -175,7 +177,7 @@ def compute_normalised_anomaly(
     Fixed baseline with a restricted reference period:
 
     >>> # Compute climatology from 1990-2020 only, but output anomalies for all years
-    >>> result_ref = marEx.compute_normalised_anomaly(
+    >>> result_ref = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="fixed_baseline",
     ...     reference_period=(1990, 2020)
@@ -184,7 +186,7 @@ def compute_normalised_anomaly(
     Fixed detrended baseline:
 
     >>> # Remove long-term trends then compute fixed climatology
-    >>> result_fixed_detrended = marEx.compute_normalised_anomaly(
+    >>> result_fixed_detrended = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
     ...     method_anomaly="detrend_fixed_baseline",
     ...     detrend_orders=[1],  # Remove linear trend

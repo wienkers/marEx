@@ -2,263 +2,216 @@
 Core Concepts
 =============
 
-This guide provides a foundational understanding of marEx's design philosophy and core concepts.
+marEx turns a gridded or unstructured time series into a catalogue of tracked extreme
+events. The work is split into three stages, each usable on its own, and every stage runs
+on Dask so the data never has to fit in memory at once. This page defines the vocabulary
+the rest of the guide uses and shows how the entry points fit together.
 
-Why marEx? The Challenge of Tracking Ocean Extremes
-====================================================
+The Pipeline
+============
 
-Modern weather and climate science generates massive datasets from satellites, models, and observational networks. Within these datasets, extreme events -- heatwaves in the ocean or the atmosphere, droughts, and their biogeochemical counterparts -- represent critical phenomena affecting ecosystems, infrastructure, and the climate system. However, identifying and tracking these events presents significant challenges:
+.. code-block:: text
 
-* **Scale**: Datasets often exceed hundreds of gigabytes or terabytes
-* **Complexity**: Events move, grow, shrink, merge, and split over time
-* **Variability**: Different scientific or industrial questions require different detection methods
-* **Diversity**: Data comes in varied formats (regular grids, irregular meshes, different resolutions)
+   field ──> anomaly ──> extremes ──> track ──> events
+              stage       stage       stage
 
-The Goal of marEx
------------------
+   marEx.anomaly.compute   marEx.extremes.identify   marEx.tracker
+   └────────── marEx.preprocess_data ───────────┘
 
-**marEx** provides a scalable, flexible, and scientifically rigorous toolkit to automate the computation of anomalies and the detection and tracking of extreme events. It handles the computational complexity so researchers can focus on scientific questions rather than implementation details.
+1. **Anomaly stage.** Subtract a climatology from the raw field. Output: ``dat_anomaly``
+   and a ``mask``. See :doc:`anomalies`.
+2. **Extremes stage.** Compare the anomaly with a percentile threshold. Output:
+   ``thresholds`` and a boolean ``extreme_events`` field. See :doc:`extremes`.
+3. **Tracking stage.** Label connected extreme regions, follow them through time, and
+   handle merges and splits. Output: ``ID_field`` plus per-event statistics. See
+   :doc:`tracking`.
 
-What is an Extreme Event?
-================================
+:func:`marEx.preprocess_data` chains stages 1 and 2. Stage 3 takes the boolean
+``extreme_events`` field (and, optionally, the ``mask``) from any source, so a threshold
+you computed elsewhere can be tracked without running marEx's own stages 1 and 2.
 
-Understanding extreme-event detection requires four foundational concepts:
+Vocabulary
+==========
 
 Climatology
------------
-
-The **climatology** represents the long-term "normal" state of the ocean for a given location and time of year. For example, the average sea surface temperature in the North Atlantic during July, based on 30 years of data.
-
-Think of climatology as the baseline we use to define what "typical" conditions look like.
+  The typical value of the field for a location and a position in the seasonal cycle,
+  estimated from the data. A day-of-year mean of sea surface temperature is the usual
+  example, but any variable with a seasonal cycle works.
 
 Anomaly
--------
-
-An **anomaly** is the deviation from the climatological baseline:
-
-.. code-block:: text
-
-   Anomaly = Observed Value - Climatology
-
-For example, if the climatology for a location in July is 20°C, and the observed temperature is 23°C, the anomaly is +3°C.
-
-marEx provides multiple methods for calculating anomalies, each with different assumptions about trends and climate change (see :doc:`detection` for details).
-
-Extreme Event
--------------
-
-An **extreme event** is an anomaly that exceeds a statistical threshold, typically defined as a percentile of the anomaly distribution. For temperature extremes, a common definition uses the 95th percentile (Hobday et al. 2016):
-
-.. code-block:: text
-
-   Extreme Event = Anomaly > 95th percentile threshold
-
-This creates a binary classification: at each location and time, conditions are either "extreme" or "not extreme."
-
-Tracked Object
---------------
-
-A **tracked object** is a coherent extreme event that has been identified as a spatially connected region and followed through time. Tracking assigns each object a unique ID and records its evolution: position, area, lifetime, and relationships with other events (merges/splits).
-
-The marEx Workflow: A Three-Step Process
-=========================================
-
-marEx follows a clear three-stage pipeline that maps directly to its code architecture:
-
-.. code-block:: text
-
-   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-   │  1. Detect      │  →   │  2. Track       │  →   │  3. Visualise   │
-   │    Extremes     │      │    Events       │      │     & Analyse   │
-   └─────────────────┘      └─────────────────┘      └─────────────────┘
-           ↓                        ↓                        ↓
-    preprocess_data()           tracker()                  plotX()
-           ↓                        ↓                        ↓
-    Binary extreme map        Tracked objects          Maps, animations,
-                              with unique IDs           & statistics
-
-Step 1: Detect Extremes
------------------------
-
-**Function**: ``marEx.preprocess_data()``
-
-**Purpose**: Transform raw oceanographic data (e.g., sea surface temperature) into a binary map showing where and when extreme conditions exist.
-
-**Process**:
-
-1. Calculate anomalies relative to a baseline climatology
-2. Apply percentile thresholds to identify extreme values
-3. Generate a binary field: True where extremes occur, False elsewhere
-
-**Output**: An xarray Dataset containing anomalies, binary extreme events, thresholds, and a data mask.
-
-**See**: :doc:`../api/anomaly` and :doc:`../api/extremes` for detailed algorithm descriptions and :doc:`detection` for method selection guidance.
-
-Step 2: Track Events
---------------------
-
-**Function**: ``marEx.tracker()``
-
-**Purpose**: Group spatially connected extreme points into objects and follow these objects through time, handling merges and splits.
-
-**Process**:
-
-1. Identify spatially connected regions (objects) in each time step
-2. Track objects across time by computing overlap between consecutive frames
-3. Handle merging (two events become one) and splitting (one event becomes two)
-4. Assign unique IDs to each tracked event
-5. Record event characteristics (area, centroid, lifetime)
-
-**Output**: An xarray Dataset containing tracked event IDs, object statistics, and merge history.
-
-**See**: :doc:`../api/track` for tracking algorithms and :doc:`tracking` for parameter tuning.
-
-Step 3: Analyse & Visualise
----------------------------
-
-**Function**: ``.plotX`` accessor
-
-**Purpose**: Create publication-quality visualisations and perform statistical analysis of tracked events.
-
-**Capabilities**:
-
-* Single-panel maps with customisable projections
-* Multi-panel comparisons (seasonal, regional)
-* Animated time series showing event evolution
-* Automatic grid detection (works with both structured and unstructured grids)
-* Statistical summaries (event frequency, duration, intensity)
-
-**Output**: Matplotlib figures, saved images, MP4 animations.
-
-**See**: :doc:`../api/plotx` for visualisation options and :doc:`../tutorials/index` for real-world applications.
-
-Key Feature: Handling All Ocean Data
-=====================================
-
-A major strength of marEx is its ability to work seamlessly with different types of ocean data grids.
-
-Structured Grids
-----------------
-
-**Description**: Regular rectangular grids with dimensions ``(time, lat, lon)``
-
-**Examples**:
-
-* Satellite-derived sea surface temperature (e.g., NOAA OISST)
-* Climate model output (e.g., CMIP6 models)
-* Reanalysis products (e.g., ERA5 ocean component)
-
-**Characteristics**: Familiar latitude/longitude coordinates on a regular grid. Data at each grid point represents a rectangular area.
-
-.. code-block:: python
-
-   # Structured grid example
-   sst.dims        # ('time', 'lat', 'lon')
-   sst.coords      # time, lat, lon as coordinate arrays
-
-Unstructured Grids
-------------------
-
-**Description**: Irregular meshes with dimensions ``(time, ncells)`` and separate coordinate arrays for lat/lon
-
-**Examples**:
-
-* FESOM (Finite Element Sea ice-Ocean Model)
-* ICON-O (Icosahedral Nonhydrostatic Ocean model)
-* MPAS-Ocean (Model for Prediction Across Scales)
-
-**Characteristics**: Irregular polygonal cells that allow variable resolution (e.g., higher resolution near coastlines). Requires connectivity information for spatial operations.
-
-.. code-block:: python
-
-   # Unstructured grid example
-   sst.dims        # ('time', 'ncells')
-   sst.coords      # time, lat, lon (lat/lon are coordinate arrays, not dimensions)
-
-Transparent Grid Handling
--------------------------
-
-marEx automatically detects the grid type based on the coordinate structure and applies appropriate algorithms. **You write the same code for both grid types**:
-
-.. code-block:: python
-
-   # Works identically for structured and unstructured grids
-   extremes = marEx.preprocess_data(sst, threshold_percentile=95)
-   tracked = marEx.tracker(extremes.extreme_events, extremes.mask).run()
-   fig, ax, im = tracked.ID_field.isel(time=0).plotX.single_plot(config)
-
-For unstructured grids, specify grid metadata using ``marEx.specify_grid()`` to enable advanced features like spatial windowing (see :doc:`tracking`).
-
-Key Feature: Built for Scale with Dask
-=======================================
-
-The Challenge of Big Data
---------------------------
-
-Modern ocean datasets routinely exceed available computer memory:
-
-* Global 0.25° daily SST for 30 years: ~100 GB
-* High-resolution regional models: 200+ GB
-* Coupled climate model ensembles: 10+ TB
-
-Traditional analysis tools that load entire datasets into memory fail with these data sizes.
-
-The Dask Solution
------------------
-
-marEx uses **Dask** as its computational backend. Dask is a parallel computing library that:
-
-1. **Breaks data into chunks**: Divides large arrays into manageable pieces
-2. **Processes chunks in parallel**: Utilises multiple CPU cores simultaneously
-3. **Manages memory automatically**: Only loads necessary chunks, discarding when done
-4. **Scales from laptops to supercomputers**: Same code works on 4-core laptop or 1000-core HPC cluster
-
-How Dask Integration Works
----------------------------
-
-**For users**: marEx requires input data to be Dask-backed xarray objects (use ``chunks={}`` when loading):
+  The field minus its climatology, ``anomaly = observed - climatology``. marEx has four
+  ways to build the climatology, which differ in how they treat trends
+  (:doc:`anomalies`).
+
+Threshold
+  The percentile of the anomaly distribution that separates ordinary from extreme values,
+  one number per cell, and per position in the seasonal cycle for ``seasonal_percentile``.
+  ``threshold_percentile=95`` with ``tail="upper"`` gives the value exceeded 5 % of the
+  time (Hobday et al. 2016).
+
+Extreme
+  A cell and time at which the anomaly passes the threshold on the chosen side (``>=`` for
+  ``tail="upper"``, ``<=`` for ``tail="lower"``). The result is a boolean field with the
+  same shape as the anomaly.
+
+Event
+  A connected region of extremes followed through time. The tracker assigns each event an
+  integer ID and records its area, centroid, lifetime and its merge and split history.
+
+Mask
+  A boolean field marking the valid cells, computed once as ``isfinite`` of the first
+  timestep. Land, or any cell that is NaN at the first timestep, is excluded for the whole
+  run. See :doc:`dimensions_and_time`.
+
+Three Entry Points
+==================
+
+The anomaly and extremes stages are available as standalone functions as well as through
+the chainer. The chainer is the shortest way to a result.
 
 .. code-block:: python
 
    import xarray as xr
+   import marEx
 
-   # Load data with Dask chunking
-   sst = xr.open_dataset('sst_data.nc', chunks={'time': 365}).sst
+   sst = xr.open_zarr("sst_daily.zarr").sst      # Dask-backed
 
-   # marEx handles all Dask operations internally
-   extremes = marEx.preprocess_data(sst, threshold_percentile=95)
+   ds = marEx.preprocess_data(
+       sst,
+       method_anomaly="shifting_baseline",
+       method_extreme="seasonal_percentile",
+       threshold_percentile=95,
+   )
 
-   # Computation happens when you request results
-   result = extremes.extreme_events.compute()  # Triggers parallel computation
+The same two stages, run separately:
 
-**Performance benefits**:
+.. code-block:: python
 
-* Process datasets 100-1000× larger than available RAM
-* Utilise all CPU cores for faster computation
-* Seamless scaling to HPC clusters with SLURM integration (see ``marEx.helper``)
+   anomalies = marEx.anomaly.compute(sst, method="shifting_baseline", window_years=15)
+   ds = marEx.extremes.identify(
+       anomalies, method="seasonal_percentile", threshold_percentile=95
+   )
 
-**See**: :doc:`performance` for chunking strategies and performance optimisation, :doc:`../api/helper` for HPC cluster setup.
+:func:`marEx.extremes.identify` accepts a DataArray of anomalies from any source, or a
+Dataset carrying ``dat_anomaly``. :func:`marEx.anomaly.compute` has no threshold parameter
+anywhere, so it can be used for climatologies and anomalies alone
+(:doc:`../applications/climatologies_only`).
 
-Next steps
+The choice of method is spelled differently at each entry point:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 22 22 22
+
+   * - Meaning
+     - ``preprocess_data``
+     - ``anomaly.compute``
+     - ``extremes.identify``
+   * - Anomaly method
+     - ``method_anomaly``
+     - ``method``
+     - not applicable
+   * - Threshold method
+     - ``method_extreme``
+     - not applicable
+     - ``method``
+   * - Everything else (``window_years``, ``smooth_days``, ``window_days``, ``tail``, ...)
+     - keyword
+     - keyword-only
+     - keyword-only
+
+``method`` is the second positional argument of ``compute`` and ``identify``. Every other
+parameter is keyword-only there. Parameters of the same name mean the same thing at every
+entry point. Some combinations are rejected outright, for example ``standardise=True``
+with any method but ``detrend_harmonic``, or ``reference_period`` with a method that has
+no fixed reference. Each is listed on the page for its stage.
+
+Outputs
+=======
+
+``preprocess_data`` returns one Dataset (daily gridded data, default methods):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 28 48
+
+   * - Variable
+     - Dimensions
+     - Meaning
+   * - ``dat_anomaly``
+     - ``(time, lat, lon)``
+     - Anomaly field, float32
+   * - ``mask``
+     - ``(lat, lon)``
+     - Valid cells
+   * - ``extreme_events``
+     - ``(time, lat, lon)``
+     - Boolean extreme flag
+   * - ``thresholds``
+     - ``(lat, lon, dayofyear)``
+     - Threshold per cell and cycle slot
+
+With ``standardise=True`` the Dataset also carries ``dat_stn``, ``STD``,
+``extreme_events_stn`` and ``thresholds_stn``. ``anomaly.compute`` returns the anomaly
+variables and ``mask``. ``extremes.identify`` returns its input variables plus
+``extreme_events`` and ``thresholds``. The attributes of the Dataset record the resolved
+method names, window lengths, percentile, tail and the histogram bin width that was
+actually used, so a saved file documents how it was made.
+
+Any dimension besides time and the horizontal ones is carried through as an extra
+dimension (depth, pressure level, ensemble member), and ``mask`` and ``thresholds`` gain it
+too.
+
+Grids
+=====
+
+A field has dimensions ``(time, *extra, *horizontal)``. A **gridded** field has two
+horizontal dimensions, for example ``(time, lat, lon)``. An **unstructured** field has one,
+for example ``(time, ncells)``, with latitude and longitude as coordinates. The same
+functions handle both, with the dimension names passed through ``dimensions`` and
+``coordinates``. Details, including what each grid type additionally requires for tracking,
+are in :doc:`dimensions_and_time`.
+
+Scale and Compute Modes
+=======================
+
+marEx requires Dask-backed input and builds lazy graphs, so the data is read and reduced
+in pieces. ``compute_mode`` sets what happens to intermediates that more than one later step
+needs:
+
+* ``persist`` (default) pins them in cluster memory.
+* ``streaming`` writes them to Zarr under ``scratch_dir`` and reads them back. It reduces the
+  bytes pinned in memory, not the peak memory of a run.
+* ``lazy`` keeps nothing and recomputes.
+
+Two measurements, both single runs on one DKRZ Levante compute node:
+
+* 40 years of daily 0.25° global SST (output 9282 × 720 × 1440 after the 15-year baseline
+  is trimmed), anomalies and approximate percentiles, 4 workers × 22 GB with 16 threads
+  each: 3954 s with ``persist`` and 3663 s with ``streaming``, with identical results.
+* Gridded tracking of 3804 days of 0.25° data: ``persist`` was OOM-killed in a 24 GiB
+  allocation while ``streaming`` completed in the same allocation.
+
+Chunking, sizing and cluster set-up are in :doc:`performance`. How correctness is tested is
+in :doc:`validation`.
+
+Where to Go Next
+================
+
+* :doc:`../getting_started/quickstart` runs the full pipeline end to end.
+* :doc:`anomalies` and :doc:`extremes` explain how to choose methods and settings.
+* :doc:`dimensions_and_time` covers extra dimensions, grids and cadences.
+* :doc:`tracking` and :doc:`visualisation` cover the later stages.
+* :doc:`performance` covers chunking, memory sizing and clusters.
+
+References
 ==========
 
-Now that you understand marEx's foundational concepts, here is where to go next:
-
-* :doc:`../getting_started/quickstart` - Run a complete detection-to-visualisation example end to end.
-* :doc:`detection` - Choose anomaly and extreme-detection methods for your scientific question.
-* :doc:`tracking` - Tune object identification, merge/split handling, and tracking parameters.
-* :doc:`visualisation` - Build maps, multi-panel comparisons, and animations of tracked events.
-* :doc:`performance` - Chunking strategies and scaling from a laptop to an HPC cluster.
-
-Key References
-==============
-
-The scientific methods in marEx are based on established literature:
-
-* **Hobday et al. (2016)**: "A hierarchical approach to defining marine heatwaves" *Progress in Oceanography* 141, 227-238. `doi:10.1016/j.pocean.2015.12.014 <https://doi.org/10.1016/j.pocean.2015.12.014>`_
-
-  * Defines the day-of-year specific percentile threshold methodology that marEx generalises beyond the ocean
-
-* **Sun et al. (2023)**: "Marine heatwaves in the Arctic Region: Variation in Different Ice Covers" *Progress in Oceanography* 203, 102947. `doi:10.1016/j.pocean.2022.102947 <https://doi.org/10.1016/j.pocean.2022.102947>`_
-
-  * Provides tracking methodology that marEx extends with improved merge/split partitioning
+* Hobday et al. (2016), "A hierarchical approach to defining marine heatwaves", *Progress
+  in Oceanography* 141, 227-238.
+  `doi:10.1016/j.pocean.2015.12.014 <https://doi.org/10.1016/j.pocean.2015.12.014>`_.
+  Defines the day-of-year percentile threshold that ``seasonal_percentile`` generalises.
+* Sun et al. (2023), "Marine heatwaves in the Arctic Region: Variation in Different Ice
+  Covers", *Progress in Oceanography* 203, 102947.
+  `doi:10.1016/j.pocean.2022.102947 <https://doi.org/10.1016/j.pocean.2022.102947>`_.
+  The tracking approach that marEx extends with improved merge and split partitioning.

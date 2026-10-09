@@ -2,8 +2,7 @@
 Getting Started
 ===============
 
-New to marEx? Install it, then follow the five-minute quickstart to run a
-complete detect → track → visualise workflow.
+Install marEx, then run the quickstart: anomalies, extremes and a tracked event on a small synthetic dataset, in three steps that each work on their own.
 
 .. toctree::
    :maxdepth: 2
@@ -11,9 +10,10 @@ complete detect → track → visualise workflow.
    /installation
    quickstart
 
-Next steps
+Next Steps
 ==========
 
-* Work through the :doc:`../tutorials/index` for complete, runnable notebooks.
-* Read the :doc:`../guide/index` for concepts, method selection, and tuning.
+* Work through the :doc:`../tutorials/index` for runnable notebooks on real data.
+* Read the :doc:`../guide/index` for concepts, method choice and tuning.
+* Migrating from 4.x: :doc:`../whats_new`.
 * Browse the :doc:`../api/index` for the full reference.

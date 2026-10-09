@@ -202,9 +202,8 @@ def specify_grid(
     Set the global grid specification that will be used by all plotters.
 
     Args:
-        grid_type: str, either 'gridded' or 'unstructured'.
-                  If specified, this will be used as the primary method
-                  to determine grid type.
+        grid_type: str, either 'gridded' or 'unstructured'. If specified, this will be used as the primary method
+            to determine grid type.
         fpath_tgrid: Path to the triangulation grid file
         fpath_ckdtree: Path to the pre-computed KDTree indices directory
 
