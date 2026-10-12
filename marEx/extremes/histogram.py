@@ -36,6 +36,12 @@ logger = get_logger(__name__)
 # histogram-quantile path to run at full resolution without exhausting worker memory.
 _HISTOGRAM_TASK_ELEMENTS = 50_000_000
 
+# Most cells one slab-engine task holds. The slab kernel works one cell at a time (~1 ms per
+# cell-year on a daily record), so the element budget alone made tasks of 100k+ cells: 4 tasks on
+# a 0.5 M-cell mesh, most of a node idle for most of the stage. A fixed cap keeps the task count
+# linear in the mesh and bounds a task's wall, whatever cluster later runs the graph.
+_SLAB_TILE_CELLS = 4096
+
 
 def _symmetric_bin_edges(precision: float, max_anomaly: float, dtype: type = np.float64) -> NDArray[np.floating]:
     """Finite histogram bins, symmetric about zero, resolving BOTH tails.
@@ -696,13 +702,18 @@ def _slab_tile_chunks(
     sub-daily cycle no longer shrinks it (``_histogram_tile_chunks`` divides by
     ``cycle_length x n_bins``). Extra dims and the ``window_spatial`` floor follow
     ``_histogram_tile_chunks``.
+
+    The tile is also capped at ``_SLAB_TILE_CELLS`` cells, before the extra dims stack, so the
+    task count grows with the mesh. Each horizontal side is then cut from the input's own
+    spatial chunks (:func:`_align_tile_side`), so the transpose to time-whole tiles splits or
+    merges input chunks and never makes a tile straddle two of them.
     """
     spatial_dims_present = list(spatial_dims(da, dimensions))
     horizontal_present = set(horizontal_dims(dimensions))
     n_horizontal = sum(1 for dim in spatial_dims_present if dim in horizontal_present)
     ntime = max(1, int(da.sizes[dimensions["time"]]))
     per_cell = max(ntime, int(cycle_length))
-    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // per_cell)
+    cells_per_tile = max(1, min(_HISTOGRAM_TASK_ELEMENTS // per_cell, _SLAB_TILE_CELLS))
     tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, n_horizontal)))))
 
     chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
@@ -711,9 +722,10 @@ def _slab_tile_chunks(
         if dim not in horizontal_present:
             continue
         side = tile_side
-        if window_spatial is not None and window_spatial > 1:
-            side = max(side, int(window_spatial))
-        chunk_dict[dim] = min(int(da.sizes[dim]), side)
+        floor = int(window_spatial) if window_spatial is not None and window_spatial > 1 else 1
+        side = max(side, floor)
+        input_chunks = da.chunks[da.get_axis_num(dim)] if da.chunks is not None else None
+        chunk_dict[dim] = min(int(da.sizes[dim]), _align_tile_side(side, input_chunks, int(da.sizes[dim]), floor))
         if side > tile_side and chunk_dict[dim] > tile_side:
             floor_bound.append(dim)
     horizontal_tiled = [dim for dim in spatial_dims_present if dim in horizontal_present]
@@ -739,6 +751,29 @@ def _slab_tile_chunks(
     return chunk_dict
 
 
+def _align_tile_side(side: int, input_chunks: Optional[Sequence[int]], size: int, floor: int) -> int:
+    """Return the largest tile side ``<= side`` that the input's chunks split or merge evenly.
+
+    A divisor of the input chunk when the tile is narrower, a multiple when it is wider, so
+    every tile boundary is an input boundary or falls inside one input chunk. Only a regular
+    chunking (all equal but the trailing one) has such a side; anything else, or a chunk with
+    no divisor in ``[max(floor, side // 2), side]``, keeps ``side`` as it is. Values never
+    depend on the tile, only the rechunk's shard count does.
+    """
+    if input_chunks is None:
+        chunk = size
+    else:
+        body = tuple(input_chunks[:-1]) or tuple(input_chunks)
+        if len(set(body)) != 1 or input_chunks[-1] > body[0]:
+            return side
+        chunk = int(body[0])
+    if side >= chunk:
+        multiple = chunk * (side // chunk)
+        return multiple if multiple >= floor else side
+    divisor = max(d for d in range(1, side + 1) if chunk % d == 0)
+    return divisor if divisor >= max(floor, side // 2) else side
+
+
 def _slab_quantile_block(
     block: NDArray[np.unsignedinteger],
     slots: NDArray[np.int64],
@@ -761,21 +796,38 @@ def _slab_quantile_block(
     day 366 under a 365-slot cycle); both are dropped, as flox's expected groups drop them.
     Each cell's counts go through ``_rolling_histogram_quantile`` exactly as the dense
     engine's do, so the result is the dense result.
+
+    The counts span only the cell's occupied bins. A row's cumulative count is 0 below the
+    lowest occupied bin and the row total above the highest, so the estimator's search over
+    the full width returns the trimmed search shifted by the trim start, provided two bins
+    stay: the empty bin just below the span (the interpolation's lower neighbour when the
+    quantile falls in the first occupied bin) and, when ``q * total`` can round to ``total``,
+    every bin above it. The lower tail trims in the reversed index the estimator sees. At the
+    3000 data-derived bins of a real ICON record a cell occupies a median ~400.
     """
     core_shape = tuple(block.shape[i + 1] - 2 * h for i, h in enumerate(halo))
     out = np.full(core_shape + (n_slots,), np.nan, dtype=np.float32)
     ntime = block.shape[0]
     in_cycle = slots >= 1
-    slot_offset = (slots.astype(np.int64) - 1) * n_bins
+    slot_index = slots.astype(np.int64) - 1
+    q_used = q_mirror if mirror else q
+    # q * total < total for every count an int32 cumsum holds once q sits this far below 1.
+    trim_top = q_used < 1.0 - 1e-6
     for idx in np.ndindex(*core_shape):
         window = block[(slice(None),) + tuple(slice(i, i + 2 * h + 1) for i, h in zip(idx, halo))].reshape(ntime, -1)
         valid = (window < n_bins) & in_cycle[:, None]
-        keys = (slot_offset[:, None] + window)[valid]
-        counts = np.bincount(keys, minlength=n_slots * n_bins).reshape(n_slots, n_bins)
+        # int64 before the mirror and the offset: NumPy 2 keeps uint16 - int in uint16.
+        samples = window[valid].astype(np.int64)
         if mirror:
-            out[idx] = -_rolling_histogram_quantile(counts[:, ::-1], window_steps, q_mirror, bin_centers)
-        else:
-            out[idx] = _rolling_histogram_quantile(counts, window_steps, q, bin_centers)
+            samples = (n_bins - 1) - samples
+        sample_slots = np.broadcast_to(slot_index[:, None], window.shape)[valid]
+        lo, hi = (int(samples.min()), int(samples.max())) if samples.size else (0, 0)
+        start = lo - 1 if lo > 0 else 0
+        stop = hi + 1 if trim_top else n_bins
+        width = stop - start
+        counts = np.bincount(sample_slots * width + (samples - start), minlength=n_slots * width).reshape(n_slots, width)
+        threshold = _rolling_histogram_quantile(counts, window_steps, q_used, bin_centers[start:stop])
+        out[idx] = -threshold if mirror else threshold
     return out
 
 
