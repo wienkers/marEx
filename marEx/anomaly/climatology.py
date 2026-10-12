@@ -205,6 +205,17 @@ def rolling_climatology(
     target_year_da = xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year")
     cycle_da = xr.DataArray(cycle_groups, dims=[long_timedim], name=cycle_dim)
 
+    # flox fills an expected group that received no data by assigning NaN through dask's
+    # `__setitem__`, whose graph build is quadratic in the number of blocks: hours of client
+    # time on the ICON mesh before any task runs. Here the only empty groups are normally
+    # whole target years (the first `window_years` have no history), so reduce over the
+    # years that do have data and pad the rest back with a reindex, which is one indexing
+    # task per block. Any other gap falls back to letting flox fill it.
+    data_years = np.unique(target_year_groups)
+    n_pairs = len(set(zip(target_year_groups.tolist(), cycle_groups.tolist())))
+    complete = len(data_years) > 0 and n_pairs == len(data_years) * len(cycle.labels)
+    reduce_years = data_years if complete else unique_years
+
     # Use flox with both grouping variables to compute climatologies
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
@@ -212,11 +223,14 @@ def rolling_climatology(
         cycle_da,
         dim=long_timedim,
         func="nanmean",
-        expected_groups=(unique_years, cycle.labels),
+        expected_groups=(reduce_years, cycle.labels),
         isbin=(False, False),
         dtype=np.float32,
         fill_value=np.nan,
-    ).chunk({cycle_dim: -1})
+    )
+    if len(reduce_years) < len(unique_years):
+        climatologies = climatologies.reindex(target_year=unique_years, fill_value=np.nan)
+    climatologies = climatologies.chunk({cycle_dim: -1})
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
