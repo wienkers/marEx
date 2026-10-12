@@ -230,7 +230,9 @@ Optional Inputs
    See `Merges and Splits`_.
 
 ``max_iteration`` : int, default 40
-   Iteration limit of the unstructured merge loop. Unused on regular grids.
+   Iteration limit of the unstructured merge loop. Unused on regular grids. A change near the
+   start of the record can need one pass per remaining time chunk to propagate, so when events
+   run through much of the record, set it to at least the number of time chunks.
 
 ``checkpoint`` : ``'save'`` | ``'load'`` | ``None``
    Writes or reads the preprocessed binary field and its statistics in ``temp_dir``, so a
