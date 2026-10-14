@@ -1744,10 +1744,18 @@ class tracker:
 
         # For unstructured grid, make objects unique across time
         if self.unstructured_grid:
-            cumsum_ids = (object_id_field.max(dim=self.xdim)).cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0)
-            object_id_field = xr.where(object_id_field > 0, object_id_field + cumsum_ids, 0)
+            # Accumulate the per-slice maxima in int64 (only nt values), check the total
+            # against the int32 label range, then add int32 offsets so the field is not
+            # widened to int64 before it is written. The largest ID must stay below the
+            # int32 maximum: the overlap step computes max ID + 1 in the field's dtype.
+            per_slice_max = object_id_field.max(dim=self.xdim).astype(np.int64).compute()
+            total_ids = int(per_slice_max.sum())
+            if total_ids >= np.iinfo(np.int32).max:
+                raise ValueError(f"{total_ids} objects exceed the int32 ID range")
+            cumsum_ids = per_slice_max.cumsum(self.timedim).shift({self.timedim: 1}, fill_value=0).astype(np.int32)
+            object_id_field = xr.where(object_id_field > 0, object_id_field + cumsum_ids, 0).astype(np.int32)
             object_id_field = self.refresh_dask_graph(object_id_field)
-            logger.info(f"Finished assigning c. {cumsum_ids.max().compute().values} globally unique object IDs")
+            logger.info(f"Finished assigning c. {int(cumsum_ids.max())} globally unique object IDs")
 
         # Calculate object properties
         object_props = self.calculate_object_properties(object_id_field, properties=["area", "centroid"])
