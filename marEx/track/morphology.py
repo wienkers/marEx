@@ -12,6 +12,7 @@ methods.
 import gc
 from typing import Optional, Tuple
 
+import dask
 import dask.array as dsa
 import numpy as np
 import xarray as xr
@@ -678,14 +679,16 @@ def filter_small_objects(
                 vectorize=True,
                 dask="parallelized",
             )
-        padded_areas = np.atleast_2d(padded_areas.compute().values)  # (time, area_buffer)
-        if np.any(padded_areas[:, -1] != 0):  # pragma: no cover
+        # Drop the padding inside each chunk before gathering, so the driver receives one
+        # int64 per object rather than the whole (time, area_buffer) padded census.
+        census = padded_areas.data
+        object_areas_np, overflow = dask.compute(census[census > 0], (census[..., -1] != 0).any())
+        if overflow:  # pragma: no cover
             raise TrackingError(
                 "Per-slice object-area buffer overflow during small-object filtering",
                 details={"area_buffer": area_buffer},
                 suggestions=["Increase 'area_buffer' in filter_small_objects (structured branch)"],
             )
-        object_areas_np = padded_areas[padded_areas > 0]
 
         N_objects_unfiltered = int(object_areas_np.size)
         if N_objects_unfiltered == 0:  # pragma: no cover
