@@ -23,7 +23,7 @@ from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import configure_logging, get_logger
 from .global_percentile import _identify_extremes_constant
-from .histogram import _RangeSaturated
+from .histogram import _RangeSaturated, _symmetric_bin_edges
 from .seasonal_percentile import _identify_extremes_seasonal
 
 # Get module logger
@@ -84,9 +84,13 @@ _DEFAULT_N_BINS = 1000
 # Above this many bins the histogram stage gets markedly slower (and, on the global path, its
 # tiles smaller and more numerous), so say so.
 _WARN_N_BINS = 10000
-# Ceiling on any bin count. The bin index is uint16 and n_bins=65535 already realises 65536 bins
-# (NEXT Discovered), so stay clear of the edge.
+# Ceiling on a derived bin count. The bin index is uint16 and n_bins=65535 already realises 65536
+# bins (float edge rounding), so stay clear of the edge.
 _MAX_DERIVED_N_BINS = 65000
+# Hard ceiling on the REALISED bin count, for every geometry. The bin index is uint16 in both
+# seasonal engines and NaN digitizes to the index one past the last bin, so a 65536th bin wraps
+# NaN (and every index above it) into the lowest bins, where it is counted.
+_MAX_REALISED_N_BINS = int(np.iinfo(np.uint16).max)
 # Safety factor on the per-cell normal estimate of the most extreme threshold,
 # max over cells of (mean + z_p * std). Measured on 0.25 deg OSTIA p95 seasonal:
 # the true largest threshold is 2.19x that estimate (variance concentrated in one season,
@@ -191,23 +195,14 @@ def _derive_bin_spec(
             suggestions=["Omit n_bins and set `precision` instead", "Increase n_bins for a finer threshold estimate"],
             context={"n_bins": n_bins},
         )
-    # The bin index is stored as uint16 (`extremes/histogram.py`'s flox expected_groups),
-    # so a count above 65535 would wrap silently rather than fail.
-    if n_bins is not None and n_bins > 65535:
-        raise ConfigurationError(
-            f"n_bins must not exceed 65535, got {n_bins}",
-            details=(
-                "Histogram bin indices are stored as uint16; a larger count wraps silently " "and assigns samples to the wrong bins"
-            ),
-            suggestions=["Use a smaller n_bins", "Widen `precision` instead of adding bins"],
-            context={"n_bins": n_bins, "max_supported": 65535},
-        )
+    if n_bins is not None and n_bins > _MAX_REALISED_N_BINS:
+        _raise_bin_ceiling(n_bins)
 
     # A caller-set range (deprecated): honoured exactly, as before, and a saturated threshold raises.
     if max_anomaly is not None:
         if precision is None:
             precision = 2.0 * max_anomaly / (n_bins or _DEFAULT_N_BINS)
-        spec = BinSpec(float(precision), float(max_anomaly), float(max_anomaly), "pinned")
+        spec = _check_bin_ceiling(BinSpec(float(precision), float(max_anomaly), float(max_anomaly), "pinned"))
         _warn_on_bin_count(spec, precision_given=True)
         return spec
 
@@ -261,7 +256,7 @@ def _derive_bin_spec(
             ],
             context={"precision": precision, "max_anomaly": max_anomaly, "max_n_bins": _MAX_DERIVED_N_BINS},
         )
-    spec = BinSpec(float(precision), float(max_anomaly), float(cap), mode)
+    spec = _check_bin_ceiling(BinSpec(float(precision), float(max_anomaly), float(cap), mode))
     _warn_on_bin_count(spec, precision_given)
 
     # An explicit `precision` is the caller's choice and is never second-guessed.
@@ -281,6 +276,38 @@ def _derive_bin_spec(
         f"Histogram bins derived from the data: precision={spec.precision:.6g}, max_anomaly={spec.max_anomaly:.6g} "
         f"({spec.n_bins} bins; range {spec.mode}, {tail}-tail extreme {cap:.6g})"
     )
+    return spec
+
+
+def _raise_bin_ceiling(n_bins: int, precision: Optional[float] = None, max_anomaly: Optional[float] = None) -> None:
+    geometry = "" if precision is None else f" (precision={precision:.4g} over +/-{max_anomaly:.4g})"
+    raise ConfigurationError(
+        f"n_bins must not exceed {_MAX_REALISED_N_BINS}, got {n_bins}{geometry}",
+        details=(
+            "Histogram bin indices are stored as uint16; a larger count wraps silently "
+            "and assigns samples to the wrong bins. The count is the one the bin edges realise, "
+            "which float rounding can make one more than 2 * max_anomaly / precision."
+        ),
+        suggestions=["Use a smaller n_bins", "Widen `precision` instead of adding bins"],
+        context={"n_bins": n_bins, "max_supported": _MAX_REALISED_N_BINS, "precision": precision, "max_anomaly": max_anomaly},
+    )
+
+
+def _check_bin_ceiling(spec: BinSpec) -> BinSpec:
+    """Return ``spec`` if the bins its edges realise fit the uint16 bin index, else raise.
+
+    Counted with the edge function the engines use, in both of their dtypes, since rounding can
+    add a bin to ``spec.n_bins``. A geometry far past the ceiling is rejected before any edges
+    are built.
+    """
+    if not (np.isfinite(spec.precision) and np.isfinite(spec.max_anomaly) and spec.precision > 0 and spec.max_anomaly > 0):
+        return spec
+    nominal = 2.0 * spec.max_anomaly / spec.precision
+    if nominal > 2 * _MAX_REALISED_N_BINS:
+        _raise_bin_ceiling(int(round(nominal)), spec.precision, spec.max_anomaly)
+    realised = max(len(_symmetric_bin_edges(spec.precision, spec.max_anomaly, dtype)) - 1 for dtype in (np.float32, np.float64))
+    if realised > _MAX_REALISED_N_BINS:
+        _raise_bin_ceiling(realised, spec.precision, spec.max_anomaly)
     return spec
 
 
@@ -309,8 +336,9 @@ def _regrow_bin_spec(spec: BinSpec) -> BinSpec:
             f"Keeping precision={spec.precision:.4g} over +/-{spec.cap:.4g} would need {regrown.n_bins} bins; "
             f"widened to precision={widened:.4g} ({_MAX_DERIVED_N_BINS} bins)."
         )
-        regrown = replace(regrown, precision=widened)
+        regrown = _check_bin_ceiling(replace(regrown, precision=widened))
     else:
+        _check_bin_ceiling(regrown)
         _warn_on_bin_count(regrown, precision_given=False)
     return regrown
 
