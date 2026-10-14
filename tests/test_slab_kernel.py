@@ -9,6 +9,9 @@ edge of the trim: a span touching bin 0 or the top bin, a single occupied bin, n
 sparse slots, both tails, the ulp-sensitive percentiles, q at 0 and 1, and a spatial halo.
 """
 
+import time
+import tracemalloc
+
 import numpy as np
 import pytest
 
@@ -127,22 +130,125 @@ def test_trimmed_kernel_is_bitwise_on_many_random_cells():
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_kernel_hands_the_estimator_only_the_occupied_span(monkeypatch, mirror):
+def test_kernel_counts_only_the_occupied_span(mirror):
     # Structure, not values: a cell occupying bins 100..104 of 3000 is counted over 6 bins (one empty
     # bin below), not 3000. The bitwise tests above cannot tell a trimmed kernel from an untrimmed one.
     centres = _centres(0.0131818, 19.7727)
     n_bins = centres.size
-    widths = []
-    original = H._rolling_histogram_quantile
-
-    def record(hist, *a, **k):
-        widths.append(hist.shape[1])
-        return original(hist, *a, **k)
-
-    monkeypatch.setattr(H, "_rolling_histogram_quantile", record)
     ntime = 400
     block = (100 + np.arange(ntime) % 5).astype(np.uint16)[:, None]
-    H._slab_quantile_block(
+    _, widths = H._slab_quantile_cells(
         block, _slots(ntime, 366, np.random.default_rng(0), False), 366, n_bins, [0], 11, 0.95, 0.05, mirror, centres
     )
-    assert widths == [6]
+    assert widths.tolist() == [6]
+
+
+def _peak_bytes(core, halo, n_bins=20, ntime=2):
+    block = np.zeros((ntime, core + 2 * halo, core + 2 * halo), dtype=np.uint16)
+    centres = np.arange(n_bins, dtype=np.float32)
+    slots = np.arange(1, ntime + 1, dtype=np.int64)
+    tracemalloc.start()
+    H._slab_quantile_cells(block, slots, ntime, n_bins, [halo, halo], 1, 0.95, 0.05, False, centres)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak
+
+
+def test_pooling_metadata_does_not_scale_with_cells_times_window():
+    # Structure: the pooled positions are cells + window integers, not a cells x window table. At a
+    # 51-wide window, quadrupling the core cells quadrupled a per-cell neighbourhood table (~21 MB
+    # at 32 x 32); here the peak grows only with the block itself.
+    _peak_bytes(4, 25)  # compile outside the measurement
+    small, large = _peak_bytes(16, 25), _peak_bytes(32, 25)
+    assert large < 2 * small, f"{small} -> {large} bytes"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["slot beyond the cycle", "too few bin centres", "no core cells"],
+)
+def test_kernel_refuses_what_it_would_index_out_of_bounds(case):
+    # The compiled kernel does not bounds-check, so the wrapper refuses these instead of reading or
+    # writing past its arrays; the NumPy kernel raised on all three.
+    block = np.random.default_rng(0).integers(0, 20, (40, 3)).astype(np.uint16)
+    slots = (np.arange(40) % 12 + 1).astype(np.int64)
+    centres = np.linspace(-1, 1, 20, dtype=np.float32)
+    halo = [0]
+    if case == "slot beyond the cycle":
+        slots[5] = 13
+    elif case == "too few bin centres":
+        centres = centres[:10]
+    else:
+        halo = [2]
+    with pytest.raises(ValueError):
+        H._slab_quantile_block(block, slots, 12, 20, halo, 3, 0.9, 0.1, False, centres)
+
+
+def _numpy_kernel(block, slots, n_slots, n_bins, halo, window_steps, q, q_mirror, mirror, bin_centers):
+    """The per-cell NumPy kernel the compiled one replaced, kept so its speed-up stays measurable.
+
+    It built each cell's trimmed counts with ``np.bincount`` and ran ``_rolling_histogram_quantile``
+    on them, about 1.6 ms per cell on a real record, which left most threads of a node idle
+    behind the GIL.
+    """
+    core_shape = tuple(block.shape[i + 1] - 2 * h for i, h in enumerate(halo))
+    out = np.full(core_shape + (n_slots,), np.nan, dtype=np.float32)
+    ntime = block.shape[0]
+    in_cycle = slots >= 1
+    slot_index = slots.astype(np.int64) - 1
+    q_used = q_mirror if mirror else q
+    trim_top = q_used < 1.0 - 1e-6
+    for idx in np.ndindex(*core_shape):
+        window = block[(slice(None),) + tuple(slice(i, i + 2 * h + 1) for i, h in zip(idx, halo))].reshape(ntime, -1)
+        valid = (window < n_bins) & in_cycle[:, None]
+        samples = window[valid].astype(np.int64)
+        if mirror:
+            samples = (n_bins - 1) - samples
+        sample_slots = np.broadcast_to(slot_index[:, None], window.shape)[valid]
+        lo, hi = (int(samples.min()), int(samples.max())) if samples.size else (0, 0)
+        start = lo - 1 if lo > 0 else 0
+        stop = hi + 1 if trim_top else n_bins
+        width = stop - start
+        counts = np.bincount(sample_slots * width + (samples - start), minlength=n_slots * width).reshape(n_slots, width)
+        threshold = H._rolling_histogram_quantile(counts, window_steps, q_used, bin_centers[start:stop])
+        out[idx] = -threshold if mirror else threshold
+    return out
+
+
+def _icon_like_block(n_cells=400, ntime=1096, seed=0):
+    """400 cells x 1096 daily steps over the 3000-bin ICON geometry, ~400 bins occupied per cell."""
+    centres = _centres(0.0131818, 19.7727)
+    n_bins = centres.size
+    rng = np.random.default_rng(seed)
+    centre = rng.integers(400, n_bins - 400, n_cells)
+    block = np.clip(np.round(rng.normal(centre, 60.0, (ntime, n_cells))), 0, n_bins - 1).astype(np.uint16)
+    block[rng.random((ntime, n_cells)) < 0.02] = n_bins  # NaN samples
+    slots = (np.arange(ntime) % 365 + 1).astype(np.int64)
+    return block, slots, centres
+
+
+def _best_of(fn, repeats=3):
+    best, result = np.inf, None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        result = fn()
+        best = min(best, time.perf_counter() - t0)
+    return best, result
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("q, mirror", [(0.95, False), (0.05, True)])
+def test_kernel_is_three_times_the_numpy_kernel_and_bitwise(q, mirror):
+    numba = pytest.importorskip("numba")
+    block, slots, centres = _icon_like_block()
+    args = (slots, 366, centres.size, [0], 11, q, _q_mirror(q), mirror, centres)
+    previous = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        H._slab_quantile_block(block[:, :2], *args)  # compile outside the timing
+        new_time, new = _best_of(lambda: H._slab_quantile_block(block, *args))
+        ref_time, ref = _best_of(lambda: _numpy_kernel(block, *args))
+    finally:
+        numba.set_num_threads(previous)
+    _assert_bitwise(new, ref)
+    assert ref_time / new_time >= 3.0, f"kernel {new_time:.3f} s vs NumPy {ref_time:.3f} s ({ref_time / new_time:.2f}x)"

@@ -17,6 +17,7 @@ import dask.array
 import flox.xarray
 import numpy as np
 import xarray as xr
+from numba import njit
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from xhistogram.xarray import histogram
@@ -774,6 +775,191 @@ def _align_tile_side(side: int, input_chunks: Optional[Sequence[int]], size: int
     return divisor if divisor >= max(floor, side // 2) else side
 
 
+# Not cache=True: numba then needs a writable cache location at import, and a read-only install
+# without one could not import marEx at all. A process compiles the kernel once, in about a second.
+@njit(nogil=True)
+def _slab_cells_kernel(
+    columns, origins, window, slots, n_slots, n_bins, pad_index, window_steps, q, trim_top, mirror, bin_centers, out, widths
+):  # pragma: no cover
+    """Each core cell's thresholds from its pooled bin indices, cell by cell, in one compiled pass.
+
+    ``columns`` is ``(positions, time)``: one row of bin indices per spatial position of the block.
+    Core cell ``c`` pools the positions ``origins[c] + window``, one shared offset list, so the
+    pooling costs ``cells + window`` integers rather than a table of every cell's neighbourhood.
+    The cell's samples are bucketed by slot, and the rolling window over ``pad_index`` (the
+    wrap-padded slot order) is kept as one histogram that gains the entering slot's samples and
+    loses the leaving one's, so a step costs its samples, not ``n_bins``. Each row then follows
+    ``_rolling_histogram_quantile`` operation for operation: int32 cumulative counts, the count of
+    entries ``<= q * total`` (the first entry above it, the counts being non-negative), the clip,
+    and the interpolation in float64 on the float32 centres, cast to float32 last.
+    """
+    ntime = columns.shape[1]
+    n_cells = origins.shape[0]
+    n_pooled = window.shape[0]
+    values = np.empty(ntime * n_pooled, np.int64)
+    value_slots = np.empty(ntime * n_pooled, np.int64)
+    by_slot = np.empty(ntime * n_pooled, np.int64)
+    slot_start = np.zeros(n_slots + 1, np.int64)
+    fill = np.zeros(n_slots, np.int64)
+    rolling = np.zeros(n_bins, np.int64)
+    for c in range(n_cells):
+        n = 0
+        lo = n_bins
+        hi = -1
+        for j in range(n_pooled):
+            column = columns[origins[c] + window[j]]
+            for t in range(ntime):
+                slot = slots[t]
+                if slot < 1:
+                    continue
+                v = np.int64(column[t])
+                if v >= n_bins:
+                    continue
+                if mirror:
+                    v = (n_bins - 1) - v
+                values[n] = v
+                value_slots[n] = slot - 1
+                n += 1
+                lo = min(lo, v)
+                hi = max(hi, v)
+        if n == 0:
+            lo = 0
+            hi = 0
+        start = lo - 1 if lo > 0 else 0
+        stop = hi + 1 if trim_top else n_bins
+        width = stop - start
+        widths[c] = width
+
+        slot_start[:] = 0
+        for i in range(n):
+            slot_start[value_slots[i] + 1] += 1
+        for slot in range(n_slots):
+            slot_start[slot + 1] += slot_start[slot]
+            fill[slot] = slot_start[slot]
+        for i in range(n):
+            slot = value_slots[i]
+            by_slot[fill[slot]] = values[i] - start
+            fill[slot] += 1
+
+        rolling[:width] = 0
+        for j in range(window_steps):
+            slot = pad_index[j]
+            for i in range(slot_start[slot], slot_start[slot + 1]):
+                rolling[by_slot[i]] += 1
+        for row in range(n_slots):
+            if row > 0:
+                slot = pad_index[row - 1]
+                for i in range(slot_start[slot], slot_start[slot + 1]):
+                    rolling[by_slot[i]] -= 1
+                slot = pad_index[row + window_steps - 1]
+                for i in range(slot_start[slot], slot_start[slot + 1]):
+                    rolling[by_slot[i]] += 1
+
+            total = np.int32(0)
+            for b in range(width):
+                total = np.int32(total + np.int32(rolling[b]))
+            position = q * np.float64(total)
+            upper = width
+            run = np.int32(0)
+            below = np.int32(0)
+            if total > 0:
+                for b in range(width):
+                    below = run
+                    run = np.int32(run + np.int32(rolling[b]))
+                    if run > position:
+                        upper = b
+                        break
+            else:
+                upper = 0
+            if upper >= width:
+                upper = width - 1
+                count_upper = total
+                count_lower = np.int32(total - np.int32(rolling[width - 1])) if width > 1 else total
+            elif upper == 0:
+                count_upper = np.int32(rolling[0])
+                count_lower = count_upper
+            else:
+                count_upper = run
+                count_lower = below
+            lower = upper - 1 if upper > 0 else 0
+
+            centre_lower = bin_centers[start + lower]
+            centre_upper = bin_centers[start + upper]
+            count_diff = count_upper - count_lower
+            frac = (position - count_lower) / count_diff if count_diff > 1e-10 else 0.5
+            threshold = np.float64(centre_lower) + frac * np.float64(centre_upper - centre_lower)
+            if not total > 0:
+                threshold = np.nan
+            elif upper == 0:
+                threshold = np.float64(bin_centers[start])
+            result = np.float32(threshold)
+            out[c, row] = -result if mirror else result
+
+
+def _slab_quantile_cells(
+    block: NDArray[np.unsignedinteger],
+    slots: NDArray[np.int64],
+    n_slots: int,
+    n_bins: int,
+    halo: Sequence[int],
+    window_steps: int,
+    q: float,
+    q_mirror: float,
+    mirror: bool,
+    bin_centers: NDArray[np.float32],
+) -> Tuple[NDArray[np.float32], NDArray[np.int64]]:
+    """``_slab_quantile_block``'s thresholds, plus the bin span each core cell's counts covered."""
+    core_shape = tuple(block.shape[i + 1] - 2 * h for i, h in enumerate(halo))
+    # The compiled kernel does not bounds-check: refuse what would index outside its arrays.
+    if any(n < 1 for n in core_shape):
+        raise ValueError(f"A block of spatial shape {block.shape[1:]} has no core cells inside a halo of {tuple(halo)}")
+    if slots.size and int(slots.max()) > n_slots:
+        raise ValueError(f"Slot {int(slots.max())} is beyond the {n_slots}-slot cycle")
+    if len(bin_centers) < n_bins:
+        raise ValueError(f"{len(bin_centers)} bin centres for {n_bins} bins")
+    q_used = q_mirror if mirror else q
+    # q * total < total for every count an int32 cumsum holds once q sits this far below 1.
+    trim_top = q_used < 1.0 - 1e-6
+    # The wrap-padded slot order, built exactly as the estimator pads its rows.
+    pad_size = window_steps // 2
+    order = np.arange(n_slots, dtype=np.int64)
+    pad_index = np.concatenate([order[-pad_size:], order, order[:pad_size]]) if pad_size > 0 else order
+    if len(pad_index) - window_steps + 1 != n_slots:
+        raise ValueError(f"A {window_steps}-step window does not give one row per slot of a {n_slots}-slot cycle")
+
+    n_pooled = int(np.prod([2 * h + 1 for h in halo]))
+    # The int32 cumulative counts never wrap while a cell pools fewer samples than int32 holds,
+    # which is what lets the kernel stop at the first count above q * total.
+    if block.shape[0] * n_pooled > np.iinfo(np.int32).max:
+        raise ValueError(f"{block.shape[0]} steps x {n_pooled} pooled cells exceed the int32 cumulative counts")
+    # A core cell's window starts at its own index in the haloed block, so its pooled positions are
+    # its flat origin plus the flat offsets of a window anchored at the corner.
+    positions = np.arange(int(np.prod(block.shape[1:])), dtype=np.int64).reshape(block.shape[1:])
+    origins = np.ascontiguousarray(positions[tuple(slice(0, n) for n in core_shape)].ravel())
+    window = np.ascontiguousarray(positions[tuple(slice(0, 2 * h + 1) for h in halo)].ravel())
+    n_cells = origins.size
+    columns = np.ascontiguousarray(block.reshape(block.shape[0], -1).T)
+    out = np.empty((n_cells, n_slots), dtype=np.float32)
+    widths = np.zeros(n_cells, dtype=np.int64)
+    _slab_cells_kernel(
+        columns,
+        origins,
+        window,
+        np.ascontiguousarray(slots, dtype=np.int64),
+        int(n_slots),
+        int(n_bins),
+        pad_index,
+        int(window_steps),
+        float(q_used),
+        bool(trim_top),
+        bool(mirror),
+        np.ascontiguousarray(bin_centers),
+        out,
+        widths,
+    )
+    return out.reshape(core_shape + (n_slots,)), widths
+
+
 def _slab_quantile_block(
     block: NDArray[np.unsignedinteger],
     slots: NDArray[np.int64],
@@ -794,8 +980,8 @@ def _slab_quantile_block(
     edges: the caller pads x by wrapping and y with the out-of-range index ``n_bins``).
     Indices ``>= n_bins`` are NaN samples and slot 0 marks a step outside the cycle (NaT, or
     day 366 under a 365-slot cycle); both are dropped, as flox's expected groups drop them.
-    Each cell's counts go through ``_rolling_histogram_quantile`` exactly as the dense
-    engine's do, so the result is the dense result.
+    Each cell's counts go through the estimator of ``_rolling_histogram_quantile`` exactly as
+    the dense engine's do, compiled (``_slab_cells_kernel``), so the result is the dense result.
 
     The counts span only the cell's occupied bins. A row's cumulative count is 0 below the
     lowest occupied bin and the row total above the highest, so the estimator's search over
@@ -805,30 +991,7 @@ def _slab_quantile_block(
     every bin above it. The lower tail trims in the reversed index the estimator sees. At the
     3000 data-derived bins of a real ICON record a cell occupies a median ~400.
     """
-    core_shape = tuple(block.shape[i + 1] - 2 * h for i, h in enumerate(halo))
-    out = np.full(core_shape + (n_slots,), np.nan, dtype=np.float32)
-    ntime = block.shape[0]
-    in_cycle = slots >= 1
-    slot_index = slots.astype(np.int64) - 1
-    q_used = q_mirror if mirror else q
-    # q * total < total for every count an int32 cumsum holds once q sits this far below 1.
-    trim_top = q_used < 1.0 - 1e-6
-    for idx in np.ndindex(*core_shape):
-        window = block[(slice(None),) + tuple(slice(i, i + 2 * h + 1) for i, h in zip(idx, halo))].reshape(ntime, -1)
-        valid = (window < n_bins) & in_cycle[:, None]
-        # int64 before the mirror and the offset: NumPy 2 keeps uint16 - int in uint16.
-        samples = window[valid].astype(np.int64)
-        if mirror:
-            samples = (n_bins - 1) - samples
-        sample_slots = np.broadcast_to(slot_index[:, None], window.shape)[valid]
-        lo, hi = (int(samples.min()), int(samples.max())) if samples.size else (0, 0)
-        start = lo - 1 if lo > 0 else 0
-        stop = hi + 1 if trim_top else n_bins
-        width = stop - start
-        counts = np.bincount(sample_slots * width + (samples - start), minlength=n_slots * width).reshape(n_slots, width)
-        threshold = _rolling_histogram_quantile(counts, window_steps, q_used, bin_centers[start:stop])
-        out[idx] = -threshold if mirror else threshold
-    return out
+    return _slab_quantile_cells(block, slots, n_slots, n_bins, halo, window_steps, q, q_mirror, mirror, bin_centers)[0]
 
 
 def _slab_seasonal_threshold(
