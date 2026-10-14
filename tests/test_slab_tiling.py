@@ -9,6 +9,8 @@ under any tiling equals the dense engine's) are asserted with a cap small enough
 fixtures into many tiles.
 """
 
+import cloudpickle
+import dask
 import dask.array
 import numpy as np
 import pytest
@@ -16,6 +18,7 @@ import xarray as xr
 
 from marEx.core.time_axis import DAILY_CYCLE
 from marEx.extremes import histogram as H
+from marEx.helper.dask_config import DEFAULT_DASK_CONFIG
 
 from .test_slab_engine import GRID_DIMS, MESH_DIMS, _both, _edges_and_centres, _field
 
@@ -28,8 +31,8 @@ def _lazy(shape, chunks, dims):
     return xr.DataArray(data, dims=dims, coords={"dayofyear": ("time", slots)})
 
 
-def _threshold_blocks(da, dims, window_spatial=None):
-    raw = H._slab_seasonal_threshold(
+def _threshold(da, dims, window_spatial=None):
+    return H._slab_seasonal_threshold(
         da,
         *_edges_and_centres(),
         dimensions=dims,
@@ -40,7 +43,39 @@ def _threshold_blocks(da, dims, window_spatial=None):
         q_mirror=0.05,
         tail="upper",
     ).data
-    return raw.chunks[:-1]
+
+
+def _threshold_blocks(da, dims, window_spatial=None):
+    return _threshold(da, dims, window_spatial).chunks[:-1]
+
+
+def _mesh_graph(ntime, ncells, chunk_size=DEFAULT_DASK_CONFIG["array.chunk-size"]):
+    """The raw threshold graph on a mesh chunked as the ICON examples ship it.
+
+    Returns the total tasks; the tasks outside the layers that run once per source block (the
+    rechunk and the kernel); the per-source-block layers marEx adds to the input's own; and the
+    pickled size of one kernel task, which carries everything the kernel callable captured.
+
+    Built by default at the ``array.chunk-size`` marEx's cluster helpers ship, not the suite's:
+    the rechunk planner stages the transpose through intermediate chunks below some chunk size,
+    so the graph a user gets depends on it.
+    """
+    da = _lazy((ntime, ncells), (21, 25_000), ("time", "ncells"))
+    with dask.config.set({"array.chunk-size": chunk_size}):
+        threshold = _threshold(da, MESH_DIMS)
+    graph = threshold.__dask_graph__()
+    n_source = da.data.npartitions
+    source_layers = [layer for layer in graph.layers.values() if len(layer) == n_source]
+    input_layers = [layer for layer in da.data.__dask_graph__().layers.values() if len(layer) == n_source]
+    kernel = graph.layers[threshold.name]
+    first = min(kernel.keys())
+    return {
+        "tasks": len(graph),
+        "tile_side": len(graph) - sum(len(layer) for layer in source_layers),
+        "source_blocks": n_source,
+        "added_source_layers": len(source_layers) - len(input_layers),
+        "kernel_task_bytes": len(cloudpickle.dumps(kernel[first])),
+    }
 
 
 def _boundaries(chunks):
@@ -110,3 +145,50 @@ def test_mesh_values_unchanged_under_a_small_cap(monkeypatch, spatial_chunk):
     dense, slab = _both(da, cycle, MESH_DIMS, 30, q=0.95, tail="upper")
     xr.testing.assert_identical(dense, slab)
     assert H._slab_tile_chunks(da, MESH_DIMS, None, cycle.length)["ncells"] <= 8
+
+
+@pytest.mark.parametrize("ntime", [365, 730])
+def test_mesh_graph_is_linear_in_the_mesh(ntime):
+    # Twice the mesh is twice the source blocks and twice the tiles, so exactly twice the graph.
+    # Without the cell cap both meshes become one tile and the graph stops doubling.
+    small, large = _mesh_graph(ntime, 25_000), _mesh_graph(ntime, 50_000)
+    assert large["source_blocks"] == 2 * small["source_blocks"]
+    assert large["tasks"] == 2 * small["tasks"]
+
+
+@pytest.mark.parametrize("ncells", [25_000, 50_000])
+def test_mesh_graph_grows_less_than_one_tile_side_task_per_added_source_block(ncells):
+    # A longer record adds source blocks, and each adds one task per elementwise layer. The
+    # kernel is per tile; the transpose may be staged (more intermediate merges at small chunk
+    # sizes), but it must add fewer tasks than source blocks were added. A split of the source
+    # blocks, or a rechunk cascade through intermediate time chunks, adds at least one per block.
+    short, long = _mesh_graph(365, ncells), _mesh_graph(730, ncells)
+    added_blocks = long["source_blocks"] - short["source_blocks"]
+    assert added_blocks > 0
+    assert long["tile_side"] - short["tile_side"] < added_blocks
+
+
+@pytest.mark.parametrize("ntime", [365, 730])
+def test_mesh_graph_adds_only_the_digitize_stages_per_source_block(ntime):
+    # Clip, digitize, the -1 offset and the uint16 cast run once per source block before the
+    # transpose; nothing else may. Linearity and record invariance alone pass any number of
+    # extra per-block stages.
+    assert _mesh_graph(ntime, 25_000)["added_source_layers"] == 4
+
+
+@pytest.mark.parametrize("ntime", [365, 730])
+def test_kernel_task_payload_does_not_grow_with_the_mesh(ntime):
+    # A kernel task carries its slots, bin centres and parameters, all independent of the mesh. A
+    # callable that captured a mesh-sized array would double here and still pass the task counts.
+    small, large = _mesh_graph(ntime, 25_000), _mesh_graph(ntime, 50_000)
+    assert large["kernel_task_bytes"] == small["kernel_task_bytes"]
+
+
+@pytest.mark.parametrize("ncells", [25_000, 50_000])
+def test_unstaged_transpose_does_not_grow_with_the_record(ncells):
+    # Where the planner moves each tile in one stage (dask's default chunk size), the transpose
+    # and the kernel are per tile and must not grow with the record at all: an extra rechunk
+    # stage through intermediate time chunks adds tasks per tile per time chunk.
+    short, long = _mesh_graph(365, ncells, "128MiB"), _mesh_graph(730, ncells, "128MiB")
+    assert long["source_blocks"] > short["source_blocks"]
+    assert long["tile_side"] == short["tile_side"]
