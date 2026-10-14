@@ -16,7 +16,6 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import xarray as xr
-from dask.base import is_dask_collection
 from numba import njit, prange
 from numpy.typing import NDArray
 
@@ -120,7 +119,7 @@ def check_overlap_slice(
         inverse_indices = inverse_indices.astype(np.int32)  # Ensure int32 for serialisation
 
         # Sum areas for overlapping cells
-        areas_valid = cell_area.values[combined_mask]
+        areas_valid = (cell_area.values if isinstance(cell_area, xr.DataArray) else cell_area)[combined_mask]
         areas = np.zeros(len(unique_pairs), dtype=np.float32)
         np.add.at(areas, inverse_indices, areas_valid)
     else:
@@ -136,6 +135,13 @@ def check_overlap_slice(
     result = np.column_stack((id_t0, id_next, areas))
 
     return result
+
+
+def _check_overlap_slice_unstructured(
+    ids_t0: NDArray[np.int32], ids_next: NDArray[np.int32], cell_area: NDArray[np.float32]
+) -> NDArray[np.float32]:
+    """``check_overlap_slice`` on an unstructured grid, with the cell areas as a positional argument."""
+    return check_overlap_slice(ids_t0, ids_next, True, cell_area)
 
 
 def find_overlapping_objects(
@@ -163,25 +169,30 @@ def find_overlapping_objects(
             * For structured grid: number of overlapping pixels (int32)
             * For unstructured grid: total overlapping area in m^2 (float32)
     """
-    # Materialise cell_area once. It is bound into the functools.partial below, so it is
-    # shipped to every task: a dask-backed array there means each task re-gathers it, and
-    # check_overlap_slice reads .values on every call. The structured
-    # branch never touches it, so only pay this on unstructured grids.
-    if unstructured_grid and is_dask_collection(getattr(cell_area, "data", None)):
-        cell_area = cell_area.compute()
-
     # Check just for overlap with next time slice.
     #  Keep a running list of all object IDs that overlap
     object_id_field_next = object_id_field.shift({timedim: -1}, fill_value=0)
 
     # Calculate overlaps in parallel
     input_dims = [xdim] if unstructured_grid else [ydim, xdim]
-    check_overlap_slice_bound = functools.partial(check_overlap_slice, unstructured_grid=unstructured_grid, cell_area=cell_area)
+    if unstructured_grid:
+        # Pass cell_area as a single-chunk core-dimension argument: every overlap task then
+        # depends on one shared area key, instead of carrying its own copy of the array
+        # inside a functools.partial. Pass the bare array so it is matched to the cells by
+        # position, as before, and never aligned on a coordinate.
+        area = cell_area.chunk({xdim: -1}).data
+        args = (object_id_field, object_id_field_next, area)
+        core_dims = [input_dims, input_dims, [xdim]]
+        kernel = _check_overlap_slice_unstructured
+    else:
+        args = (object_id_field, object_id_field_next)
+        core_dims = [input_dims, input_dims]
+        # The structured branch counts pixels and never reads cell_area.
+        kernel = functools.partial(check_overlap_slice, unstructured_grid=False, cell_area=None)
     overlap_object_pairs_list = xr.apply_ufunc(
-        check_overlap_slice_bound,
-        object_id_field,
-        object_id_field_next,
-        input_core_dims=[input_dims, input_dims],
+        kernel,
+        *args,
+        input_core_dims=core_dims,
         output_core_dims=[[]],
         vectorize=True,
         dask="parallelized",
