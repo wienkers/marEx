@@ -353,8 +353,15 @@ def cluster_rename_objects_and_props(
             dask_gufunc_kwargs={"output_sizes": {"ID": len(new_ids)}},
         )
         .assign_coords(ID=new_ids)
-        .compute()
+        .rename("global_ID")
     )
+    # (time, ID): it grows with the series length and the event count, so it is anchored on
+    # the cluster or on disk, never gathered to the driver. Presence, the event start and end
+    # times and the area/centroid recomputation below all read it.
+    if materialiser is None:
+        global_id_mapping = global_id_mapping.persist()
+    else:
+        global_id_mapping = materialiser.stage(global_id_mapping, "global_ID", preserve_chunks=True)
 
     # Store original ID mapping
     object_props_extended["global_ID"] = global_id_mapping
@@ -365,16 +372,24 @@ def cluster_rename_objects_and_props(
     dummy = object_props.isel(ID=0) * np.nan  # Add vale of ID = 0 to this coordinate ID
     object_props = xr.concat([dummy.assign_coords(ID=0), object_props], dim="ID")
 
-    for var_name in object_props.data_vars:
+    # area and centroid are recomputed from the relabelled field below, which overwrites
+    # whatever is transferred here, so they are not transferred: the label-indexed gather
+    # would pull the whole (time, ID) mapping onto the driver for values that are discarded.
+    recomputed = {"area", "centroid"} if {"area", "centroid"} & set(object_props.data_vars) else set()
+    transferred = [v for v in object_props.data_vars if v not in recomputed]
+    # Any other property is relabelled by label lookup, which needs the mapping in memory.
+    # Only caller-supplied extra properties take this path; the tracker's own do not.
+    local_id_mapping = global_id_mapping.compute() if transferred else None
+    for var_name in transferred:
         # Filter global_id_mapping to only include IDs that exist in object_props.
         # Pass an ndarray, not a set: xarray/np.isin against a Python set returns all-False,
         # which silently NaN-ed every transferred property (masked only because area and
         # centroid are recomputed below).
         existing_ids = np.asarray(object_props.ID.values)
-        valid_mapping_mask = global_id_mapping.isin(existing_ids)
+        valid_mapping_mask = local_id_mapping.isin(existing_ids)
 
         # Only select existing IDs
-        valid_global_mapping = global_id_mapping.where(valid_mapping_mask, drop=True)
+        valid_global_mapping = local_id_mapping.where(valid_mapping_mask, drop=True)
 
         if len(valid_global_mapping.ID) == 0:
             # No valid IDs - create empty result
@@ -522,13 +537,16 @@ def cluster_rename_objects_and_props(
     valid_presence = object_props_extended["global_ID"] > 0  # i.e. where there is valid data
 
     object_props_extended["presence"] = valid_presence
-    object_props_extended["time_start"] = valid_presence[timecoord][valid_presence.argmax(dim=timedim).astype(np.int32)]
+    # Both ends in one pass: indexing the time coordinate with a lazy argmax computes each end
+    # on its own, and each would re-read the whole (time, ID) mapping. The results are ID-length.
+    first, last_reversed = dask.compute(valid_presence.argmax(dim=timedim), valid_presence[::-1].argmax(dim=timedim))
+    object_props_extended["time_start"] = valid_presence[timecoord][first.astype(np.int32)]
     object_props_extended["time_end"] = valid_presence[timecoord][
-        ((valid_presence.sizes[timedim] - 1) - (valid_presence[::-1]).argmax(dim=timedim)).astype(np.int32)
+        ((valid_presence.sizes[timedim] - 1) - last_reversed).astype(np.int32)
     ]
 
     # Recompute area & centroid (now that the IDs have been consolidated & merged & made continuous)
-    if "area" in object_props_extended.data_vars or "centroid" in object_props_extended.data_vars:
+    if recomputed:
         logger.info("Recalculating area and centroid properties for potentially disjoint events...")
 
         def calculate_area_centroid_for_slice(
@@ -739,7 +757,13 @@ def cluster_rename_objects_and_props(
             output_dtypes=[np.float32, np.float32, np.float32],
         )
 
-        results = persist(areas_computed, centroid_lats_computed, centroid_lons_computed)
+        # One kernel yields all three, so they are anchored together: separately, each would
+        # re-run it. Under streaming they go to disk, not into cluster memory.
+        recomputed_props = {"area": areas_computed, "centroid_lat": centroid_lats_computed, "centroid_lon": centroid_lons_computed}
+        if materialiser is None:
+            results = persist(*recomputed_props.values())
+        else:
+            results = materialiser.stage_many(recomputed_props, "event_properties", preserve_chunks=True)
         areas_computed, centroid_lats_computed, centroid_lons_computed = results
 
         # Update area with proper dimension ordering (time, ID)
@@ -753,6 +777,10 @@ def cluster_rename_objects_and_props(
         object_props_extended["centroid"] = new_centroid.transpose("component", timedim, "ID")
 
         logger.info("Property recalculation complete.")
+
+    # Keep the variable order of the input properties: area and centroid are assigned last above.
+    leading = ["global_ID"] + [v for v in object_props.data_vars if v in object_props_extended.data_vars]
+    object_props_extended = object_props_extended[leading + [v for v in object_props_extended.data_vars if v not in leading]]
 
     # Combine all components into final dataset
     split_merged_relabeled_events_ds = xr.merge(

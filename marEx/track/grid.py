@@ -134,7 +134,9 @@ def remap_coordinates(
     if "centroid" in events_ds.data_vars:
         # Remap centroids to original coordinate system
         # (lat, lon) currently in degrees [-90,90], [-180,180]
-        centroids = events_ds["centroid"].persist()
+        # Not persisted: the centroid is already anchored by the tracker (in cluster memory, or
+        # on disk under streaming), and the remap is elementwise.
+        centroids = events_ds["centroid"]
 
         # Split into components
         centroids_lat = centroids.isel(component=0)  # [-90, 90] degrees
