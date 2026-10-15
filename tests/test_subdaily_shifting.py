@@ -118,6 +118,28 @@ def test_off_grid_timestep_is_rejected():
         )
 
 
+def test_slightly_off_grid_axis_names_the_rounding_that_fixes_it():
+    """Labels decoded from float offsets sit nanoseconds off the grid; the error says how to snap them."""
+    field = _diurnal_field()
+    exact = marEx.anomaly.compute(
+        field, "shifting_baseline", window_years=3, smooth_days=5, dimensions=DIMENSIONS, coordinates=COORDINATES, quiet=True
+    )
+    time = field.time.values.copy()
+    time[1::3] = time[1::3] - np.timedelta64(3, "ns")
+    noisy = field.assign_coords(time=time)
+    with pytest.raises(marEx.exceptions.ConfigurationError, match="time of day") as caught:
+        marEx.anomaly.compute(
+            noisy, "shifting_baseline", window_years=3, smooth_days=5, dimensions=DIMENSIONS, coordinates=COORDINATES, quiet=True
+        )
+    suggestion = "da['time'] = da['time'].dt.round('21600s')"
+    assert any(suggestion in s for s in caught.value.suggestions), caught.value.suggestions
+    snapped = noisy.assign_coords(time=noisy["time"].dt.round("21600s"))
+    rerun = marEx.anomaly.compute(
+        snapped, "shifting_baseline", window_years=3, smooth_days=5, dimensions=DIMENSIONS, coordinates=COORDINATES, quiet=True
+    )
+    xr.testing.assert_identical(rerun.compute(), exact.compute())
+
+
 @pytest.mark.parametrize("bad", [-0.1, 1.0, 1.5, True, "0.1", None])
 def test_smooth_max_missing_is_validated(bad):
     with pytest.raises(marEx.exceptions.ConfigurationError, match="smooth_max_missing"):

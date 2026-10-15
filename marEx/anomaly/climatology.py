@@ -312,10 +312,17 @@ def _subdaily_grid_positions(time_coord: xr.DataArray, stride: int) -> Optional[
         elif (np.diff(positions) <= 0).any():
             problem = "the time axis is not strictly increasing"
     if problem is not None:
+        # Labels decoded from float offsets can sit a few nanoseconds off the grid; snapping them
+        # to the step is then the whole fix.
+        snap = []
+        if problem.startswith("a timestep is not a whole number"):
+            rounding = f"da['time'] = da['time'].dt.round('{step_seconds}s')"
+            snap = [f"If the labels are only slightly off the grid, snap them first: {rounding}"]
         raise ConfigurationError(
             "shifting_baseline cannot smooth this sub-daily time axis by time of day",
             details=f"Smoothing takes every {stride}th step as the same time of day, but {problem}.",
-            suggestions=[
+            suggestions=snap
+            + [
                 "Regrid the data onto a regular sub-daily axis (missing timesteps may be left out)",
                 "Use method='fixed_baseline', which groups by time of day directly",
             ],
