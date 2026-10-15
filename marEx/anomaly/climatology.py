@@ -6,6 +6,7 @@ both public entry points re-exported at the marEx top level. These use flox
 cohorts to efficiently compute multi-year rolling day-of-year climatologies.
 """
 
+from dataclasses import replace
 from typing import Dict, Optional
 
 import flox.xarray
@@ -19,6 +20,7 @@ from ..core.encoding import clear_store_encoding
 from ..core.numerics import rolling_numerics
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
 # Get module logger
@@ -255,8 +257,74 @@ def rolling_climatology(
 _FLOAT32_EXACT_COUNT = 2**24
 
 
-def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int) -> xr.DataArray:
-    """Centred rolling mean over ``steps`` that keeps ``da``'s spatial chunks.
+def _min_count(steps: int, max_missing: float) -> int:
+    """Fewest valid samples a window of ``steps`` needs when ``max_missing`` of it may be missing."""
+    return max(1, steps - int(np.floor(max_missing * steps + 1e-9)))
+
+
+def _check_smooth_max_missing(smooth_max_missing: float) -> float:
+    """Validate ``smooth_max_missing``: a fraction in [0, 1)."""
+    if (
+        isinstance(smooth_max_missing, (bool, np.bool_))
+        or not isinstance(smooth_max_missing, (int, float, np.integer, np.floating))
+        or not 0 <= smooth_max_missing < 1
+    ):
+        raise ConfigurationError(
+            f"smooth_max_missing must be a fraction in [0, 1), got {smooth_max_missing!r}",
+            details="It is the fraction of each smoothing window that may be missing before the window is invalid.",
+            suggestions=[
+                "Use 0.1 (the default) to allow a tenth of each window to be missing",
+                "Use 0 to require complete windows",
+            ],
+        )
+    return float(smooth_max_missing)
+
+
+def _subdaily_grid_positions(time_coord: xr.DataArray, stride: int) -> Optional[np.ndarray]:
+    """Index of each timestep on the regular grid of ``stride`` steps a day that starts at the first one.
+
+    ``None`` when the axis is that grid already. Raises when a timestep is off the grid, so that a
+    window taking every ``stride``-th step really holds one time of day.
+    """
+    values = np.asarray(time_coord.values)
+    if values.size < 2:
+        return None
+    step_seconds, off_grid = divmod(86400, stride)
+    problem = None
+    if off_grid:
+        problem = f"{stride} steps a day is not a whole number of seconds apart"
+    elif np.issubdtype(values.dtype, np.datetime64):
+        if np.isnat(values).any():
+            problem = "the time axis holds NaT"
+        else:
+            microseconds = values.astype("datetime64[us]")
+            offsets = (microseconds - microseconds[0]).astype(np.int64)
+    else:
+        try:
+            deltas = [value - values[0] for value in values]
+            offsets = np.array([(d.days * 86400 + d.seconds) * 10**6 + d.microseconds for d in deltas], dtype=np.int64)
+        except (AttributeError, TypeError):
+            problem = "the time axis is not datetime-like"
+    if problem is None:
+        positions, remainder = np.divmod(offsets, step_seconds * 10**6)
+        if remainder.any():
+            problem = f"a timestep is not a whole number of {step_seconds} s steps after the first"
+        elif (np.diff(positions) <= 0).any():
+            problem = "the time axis is not strictly increasing"
+    if problem is not None:
+        raise ConfigurationError(
+            "shifting_baseline cannot smooth this sub-daily time axis by time of day",
+            details=f"Smoothing takes every {stride}th step as the same time of day, but {problem}.",
+            suggestions=[
+                "Regrid the data onto a regular sub-daily axis (missing timesteps may be left out)",
+                "Use method='fixed_baseline', which groups by time of day directly",
+            ],
+        )
+    return None if positions[-1] == values.size - 1 else positions
+
+
+def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int, stride: int = 1, max_missing: float = 0.0) -> xr.DataArray:
+    """Centred rolling mean over ``steps`` samples ``stride`` apart that keeps ``da``'s spatial chunks.
 
     xarray's ``rolling().mean()`` counts the valid samples per window through a ``construct``
     that lets dask rechunk automatically, which splits every spatial tile about ``steps`` ways.
@@ -265,6 +333,15 @@ def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int) -> xr.D
     ``min_periods`` equal to the window, masked sum divided by count in its dtype), with both
     windows built in place. xarray already builds the float sum's windows in place, so only the
     layout of the integer count changes, and an integer count is exact: the values do not move.
+
+    With ``stride`` > 1 the window takes every ``stride``-th step, e.g. the same time of day on
+    consecutive days, centred as xarray centres ``steps`` (an even window reaches one sample
+    further back than forward): a trailing window of the spanned steps, every ``stride``-th
+    sample kept, shifted back by its forward reach.
+
+    ``max_missing`` is the fraction of a window that may be missing (NaN) before the window is
+    invalid; the mean is then over the valid samples. It applies to gaps inside the record only:
+    a window that reaches past either end of the series stays NaN, as it is at 0.
     """
     window = f"_{timedim}_window"
     while window in da.dims or window in da.coords:
@@ -272,9 +349,14 @@ def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int) -> xr.D
     in_place = {"automatic_rechunk": False}
 
     def window_sum(obj, fill_value, **kwargs):
-        windows = obj.rolling({timedim: steps}, center=True).construct(
-            window, fill_value=fill_value, sliding_window_view_kwargs=in_place
-        )
+        if stride == 1:
+            windows = obj.rolling({timedim: steps}, center=True).construct(
+                window, fill_value=fill_value, sliding_window_view_kwargs=in_place
+            )
+        else:
+            span = (steps - 1) * stride + 1
+            windows = obj.rolling({timedim: span}).construct(window, fill_value=fill_value, sliding_window_view_kwargs=in_place)
+            windows = windows.isel({window: slice(None, None, stride)})
         return windows.sum(window, skipna=False, **kwargs)
 
     total = window_sum(da.fillna(0), 0)
@@ -282,9 +364,21 @@ def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int) -> xr.D
     # the same numbers once cast to the mean's dtype. float32 is exact only up to 2**24, so a
     # longer window counts in float64.
     counts = window_sum(da.notnull(), False, dtype=np.float32 if steps <= _FLOAT32_EXACT_COUNT else np.float64)
-    enough = counts >= steps
+    min_count = _min_count(steps, max_missing)
+    enough = counts >= min_count
     mean = total.where(enough)
     mean = mean / counts.where(enough).astype(mean.dtype)
+    if stride > 1:
+        reach = ((steps - 1) // 2) * stride
+        # A window reaching further forward than the record is long fits nowhere.
+        mean = mean.shift({timedim: -reach}) if reach < da.sizes[timedim] else mean.where(False)
+    if min_count < steps:
+        # The padding beyond the record counts as missing in `counts`; keep those windows NaN.
+        nt = da.sizes[timedim]
+        back, fwd = (steps // 2) * stride, ((steps - 1) // 2) * stride
+        interior = np.zeros(nt, dtype=bool)
+        interior[back : max(back, nt - fwd)] = True
+        mean = mean.where(xr.DataArray(interior, dims=timedim))
     if xr.get_options()["keep_attrs"] is not False:
         mean.attrs = dict(da.attrs)
     return mean
@@ -297,6 +391,7 @@ def smoothed_rolling_climatology(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_max_missing: float = 0.1,
 ) -> xr.DataArray:
     """
     Compute a smoothed rolling climatology using the previous `window_years` years of data
@@ -315,6 +410,14 @@ def smoothed_rolling_climatology(
         Mapping of dimensions to names in the data
     coordinates : dict, optional
         Mapping of coordinates to names in the data
+    cycle : SeasonalCycle, optional
+        Within-year axis the climatology is resolved on. Inferred from the time
+        coordinate's cadence when omitted.
+    smooth_max_missing : float, default=0.1
+        Fraction of each smoothing window that may be missing (NaN, or a timestep absent from a
+        sub-daily axis) before the smoothed value is NaN; otherwise it is the mean of the valid
+        samples. Windows that reach past either end of the record stay NaN, and a missing step
+        adds nothing to the climatology itself. ``0`` requires complete windows.
 
     Returns
     -------
@@ -408,6 +511,7 @@ def smoothed_rolling_climatology(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
     timedim = dimensions["time"]
     cycle = resolve_cycle(da, coordinates["time"], cycle)
+    smooth_max_missing = _check_smooth_max_missing(smooth_max_missing)
 
     # `smooth_days` is a physical duration, so convert it to whole timesteps. On daily
     # data this is the identity (21 days -> 21 steps) and every existing result is
@@ -415,7 +519,12 @@ def smoothed_rolling_climatology(
     # here and forcing it would move existing daily output. On a monthly axis it
     # collapses to 1 step, which `steps_for_days` warns about -- the smoothing then
     # degenerates to `rolling_climatology`, which is correct but worth saying out loud.
-    smooth_steps = cycle.steps_for_days(smooth_days, name="smooth_days")
+    #
+    # On a sub-daily axis the window runs across DAYS at a fixed time of day, as the fixed
+    # baseline's smoothing does: a mean over consecutive steps would average the diurnal cycle
+    # out of the climatology and leave it in the anomaly.
+    stride = cycle.steps_per_day if cycle.is_subdaily else 1
+    smooth_steps = replace(cycle, step_days=cycle.step_days * stride).steps_for_days(smooth_days, name="smooth_days")
     if smooth_steps == 1:
         # Warning, not info. `steps_for_days` only warns when the realised duration is
         # more than half a step from the request, and a 21-day ask on a 31-day axis is
@@ -437,9 +546,28 @@ def smoothed_rolling_climatology(
     caller_chunks = dict(zip(da.dims, da.chunks))
     da = da.chunk(canonical_time_chunks(da, dimensions))
 
+    # The time-of-day window is positional, so a sub-daily axis with missing timesteps is smoothed on
+    # its regular grid, the missing steps as NaN, and read back at the original timesteps.
+    positions = _subdaily_grid_positions(da[coordinates["time"]], stride) if stride > 1 else None
+    if positions is not None:
+        source = np.zeros(positions[-1] + 1, dtype=np.int64)
+        present = np.zeros(positions[-1] + 1, dtype=bool)
+        source[positions] = np.arange(positions.size)
+        present[positions] = True
+        grid = da.isel({timedim: source}).where(xr.DataArray(present, dims=timedim))
+        grid = grid.chunk(canonical_time_chunks(grid, dimensions))
+    else:
+        grid = da
+
     # N.B.: It is more efficient (chunking-wise) to smooth the raw data rather than the climatology
     with rolling_numerics():
-        da_smoothed = _rolling_mean_keep_tiles(da, timedim, smooth_steps).astype(np.float32)
+        da_smoothed = _rolling_mean_keep_tiles(grid, timedim, smooth_steps, stride, smooth_max_missing).astype(np.float32)
+    if _min_count(smooth_steps, smooth_max_missing) < smooth_steps:
+        # A window may now be valid around a missing sample. The climatology still takes only observed
+        # steps, so a missing step adds no value of its own, whether it is NaN or absent from the axis.
+        da_smoothed = da_smoothed.where(grid.notnull())
+    if positions is not None:
+        da_smoothed = da_smoothed.isel({timedim: positions})
 
     clim = rolling_climatology(da_smoothed, window_years, dimensions, coordinates, cycle)
 

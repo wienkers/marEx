@@ -28,6 +28,7 @@ def _compute_anomaly_shifting_baseline(
     dimensions: Optional[Dict[str, str]] = None,
     coordinates: Optional[Dict[str, str]] = None,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_max_missing: float = 0.1,
 ) -> xr.Dataset:
     """
     Compute anomalies using shifting baseline method with smoothed rolling climatology.
@@ -41,7 +42,9 @@ def _compute_anomaly_shifting_baseline(
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
 
     # Compute smoothed rolling climatology
-    climatology_smoothed = smoothed_rolling_climatology(da, window_years, smooth_days, dimensions, coordinates, cycle)
+    climatology_smoothed = smoothed_rolling_climatology(
+        da, window_years, smooth_days, dimensions, coordinates, cycle, smooth_max_missing=smooth_max_missing
+    )
 
     # Compute anomaly as difference from climatology
     anomalies = da - climatology_smoothed

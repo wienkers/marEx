@@ -149,3 +149,44 @@ def test_wide_count_branch_matches_xarray(monkeypatch, steps):
         got = clim._rolling_mean_keep_tiles(da, "time", steps)
         want = da.rolling(time=steps, center=True).mean()
     xr.testing.assert_identical(got, want)
+
+
+@pytest.mark.parametrize(
+    "steps, max_missing, min_count",
+    [(10, 0.0, 10), (5, 0.1, 5), (10, 0.1, 9), (11, 0.1, 10), (21, 0.1, 19), (100, 0.29, 71), (1000, 0.9999999999, 1)],
+)
+def test_missing_fraction_resolves_to_a_valid_count(steps, max_missing, min_count):
+    """A window of ``steps`` needs ``steps - floor(max_missing * steps)`` valid samples, never fewer than one."""
+    assert climatology._min_count(steps, max_missing) == min_count
+
+
+@pytest.mark.parametrize("max_missing", [0.05, 0.1, 0.25, 0.5])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("steps", [2, 5, 10, 11, 21])
+def test_missing_fraction_matches_xarray_min_periods_inside_the_record(dtype, steps, max_missing):
+    """Up to ``max_missing`` of a window may be NaN; a window reaching past the record stays NaN."""
+    from marEx.anomaly.climatology import _min_count, _rolling_mean_keep_tiles
+
+    rng = np.random.default_rng(steps * 100 + int(max_missing * 100))
+    values = rng.normal(size=(400, 40)) * 3 + 290
+    values[rng.random(values.shape) < 0.05] = np.nan
+    values[:30, 3] = np.nan
+    values[-25:, 5] = np.nan
+    values[100:160, 9] = np.nan
+    values[200:400:7, 11] = np.nan
+    da = xr.DataArray(values.astype(dtype), dims=("time", "ncells"), attrs={"units": "K"}).chunk({"time": -1, "ncells": 7})
+    with rolling_numerics():
+        got = _rolling_mean_keep_tiles(da, "time", steps, max_missing=max_missing)
+        want = da.rolling(time=steps, center=True, min_periods=_min_count(steps, max_missing)).mean().values
+    back, fwd = steps // 2, (steps - 1) // 2
+    want[:back] = np.nan
+    want[want.shape[0] - fwd :] = np.nan
+    assert got.chunks[1] == da.chunks[1]
+    assert got.dtype == dtype
+    assert got.attrs == da.attrs
+    np.testing.assert_array_equal(got.values, want)
+    # The rule is live: some window with a gap inside the record now has a value.
+    if _min_count(steps, max_missing) < steps:
+        with rolling_numerics():
+            strict = _rolling_mean_keep_tiles(da, "time", steps).values
+        assert (np.isnan(strict) & ~np.isnan(got.values)).any()

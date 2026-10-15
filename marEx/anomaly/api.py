@@ -29,6 +29,7 @@ from ..core.validation import _infer_dims_coords, _validate_data_values
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from .base import compute_normalised_anomaly
+from .climatology import _check_smooth_max_missing
 
 # Get module logger
 logger = get_logger(__name__)
@@ -79,6 +80,7 @@ def _anomaly_attrs(
     window_years: int,
     smooth_days: int,
     reference_period: Optional[Tuple[int, int]],
+    smooth_max_missing: float = 0.1,
 ) -> Dict[str, object]:
     """Method-specific attributes recorded on the anomaly dataset."""
     if method == "detrend_harmonic":
@@ -91,6 +93,7 @@ def _anomaly_attrs(
         return {
             "window_years": window_years,
             "smooth_days": smooth_days,
+            "smooth_max_missing": smooth_max_missing,
         }
     if method == "fixed_baseline":
         fixed: Dict[str, object] = {"smooth_days": smooth_days}
@@ -123,6 +126,7 @@ def _anomaly_core(
     coordinates: Optional[Dict[str, str]],
     materialiser: Materialiser,
     cycle: Optional[SeasonalCycle] = None,
+    smooth_max_missing: float = 0.1,
 ):
     """
     Compute anomalies, up to but not including output finalisation.
@@ -197,6 +201,8 @@ def _anomaly_core(
     # Standardisation is produced by the harmonic fit's rolling STD, so asking for it
     # with any other method used to be a silent no-op. Fail instead: a caller who asked
     # for `dat_stn` and got a dataset without it has been told nothing.
+    smooth_max_missing = _check_smooth_max_missing(smooth_max_missing)
+
     if standardise and method != "detrend_harmonic":
         raise ConfigurationError(
             f"standardise=True is not supported for method='{method}'",
@@ -234,6 +240,7 @@ def _anomaly_core(
             reference_period,
             materialiser=materialiser,
             cycle=cycle,
+            smooth_max_missing=smooth_max_missing,
         )
         log_memory_usage(logger, "After anomaly computation", logging.DEBUG)
 
@@ -279,7 +286,16 @@ def _anomaly_core(
         method, standardise, detrend_orders, window_years, smooth_days, reference_period
     )
     ds.attrs.update(
-        _anomaly_attrs(method, standardise, detrend_orders, force_zero_mean, window_years, smooth_days, reference_period)
+        _anomaly_attrs(
+            method,
+            standardise,
+            detrend_orders,
+            force_zero_mean,
+            window_years,
+            smooth_days,
+            reference_period,
+            smooth_max_missing,
+        )
     )
 
     return ds, dimensions, coordinates, detrend_orders, cycle
@@ -291,6 +307,7 @@ def compute(
     *,
     window_years: int = 15,
     smooth_days: int = 21,
+    smooth_max_missing: float = 0.1,
     detrend_orders: Optional[List[int]] = None,
     force_zero_mean: bool = True,
     standardise: bool = False,
@@ -341,6 +358,11 @@ def compute(
         ``detrend_fixed_baseline``). The fixed baselines smooth their
         day-of-year climatology with a moving average that wraps the year, as
         in Hobday et al. (2016); ``smooth_days=1`` disables it.
+    smooth_max_missing
+        Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
+        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
+        otherwise over the valid samples. Windows reaching past either end of the record stay
+        NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     detrend_orders
         Polynomial orders to remove, e.g. ``[1]`` for a linear trend
         (harmonic methods only). Defaults to ``[1]``.
@@ -428,6 +450,7 @@ def compute(
             coordinates,
             materialiser,
             cycle,
+            smooth_max_missing,
         )
         ds = finalise_dataset(
             ds,
