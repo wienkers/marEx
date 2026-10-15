@@ -267,9 +267,11 @@ def identify_objects(
             if labels.max() == 0:
                 return labels.astype(np.int32)
             # Compact (seam-merge leaves gaps) so per-slice max == object count -> valid offsets.
+            # A slice with no background has no 0 label, so compact the foreground only.
             unique = np.unique(labels)
+            fg = unique[unique > 0]
             remap = np.zeros(int(unique.max()) + 1, dtype=np.int32)
-            remap[unique] = np.arange(len(unique), dtype=np.int32)  # background 0 -> 0
+            remap[fg] = np.arange(1, len(fg) + 1, dtype=np.int32)  # background stays 0
             return remap[labels]
 
         local_ids = xr.apply_ufunc(
