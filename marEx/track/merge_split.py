@@ -1644,7 +1644,7 @@ def split_and_merge_objects_parallel(
                     new_labels_uint = partition_nn_unstructured_optimised(
                         child_mask,
                         parent_masks_uint,
-                        parent_centroids,
+                        parent_centroids[:n_parents],
                         neighbours_int,
                         lat,
                         lon,
@@ -1653,7 +1653,7 @@ def split_and_merge_objects_parallel(
                     new_labels = child_ids[new_labels_uint]
                     new_labels_uint = None
                 else:
-                    new_labels = partition_centroid_unstructured(child_mask, parent_centroids, child_ids, lat, lon)
+                    new_labels = partition_centroid_unstructured(child_mask, parent_centroids[:n_parents], child_ids, lat, lon)
 
                 data_t[child_mask] = new_labels
                 changed = True
