@@ -207,3 +207,48 @@ def test_geometry_core_dims_are_single_chunk(n_time):
     props.compute()
     geometry_bytes = N_CELLS * 8
     assert spy.total_bytes <= geometry_bytes, f"expected at most one geometry array copied, got {spy.total_bytes} B"
+
+
+def test_property_buffer_holds_the_busiest_timestep(monkeypatch):
+    """All objects of a long record in its last timestep: the buffer must fit the peak, not the mean."""
+    n_time, n_objects = 1096, 101
+    widths = []
+    original = xr.apply_ufunc
+
+    def spy(*args, **kwargs):
+        sizes = (kwargs.get("dask_gufunc_kwargs") or {}).get("output_sizes", {})
+        if "out_id" in sizes:
+            widths.append(sizes["out_id"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(xr, "apply_ufunc", spy)
+    lat, lon, cell_area = _geometry()
+    last = np.zeros(N_CELLS, dtype=np.int32)
+    last[: 2 * n_objects] = np.repeat(np.arange(1, n_objects + 1, dtype=np.int32), 2)
+    ids = np.zeros((n_time, N_CELLS), dtype=np.int32)
+    ids[-1] = last
+    field = xr.DataArray(da.from_array(ids, chunks=(25, N_CELLS)), dims=(TIMEDIM, XDIM))
+    props = _call(field, lat, lon, cell_area).compute()
+
+    # Reference: the same busy timestep after one empty one.
+    ref_field = xr.DataArray(da.from_array(ids[-2:], chunks=(1, N_CELLS)), dims=(TIMEDIM, XDIM))
+    ref = _call(ref_field, lat, lon, cell_area).compute()
+
+    assert props.sizes["ID"] == n_objects
+    xr.testing.assert_identical(props, ref)
+    # The per-timestep buffer is exactly the busiest timestep's object count, never a
+    # count that grows with the record (e.g. the total number of objects).
+    assert widths == [n_objects, n_objects], widths
+
+
+@pytest.mark.parametrize("with_time_axis", [True, False], ids=["size-one-time", "no-time"])
+def test_single_timestep_with_split_cell_dimension(with_time_axis):
+    """The single-slice path takes unpadded output and does not need a whole cell dimension."""
+    lat, lon, cell_area = _geometry()
+    ids = np.zeros(N_CELLS, dtype=np.int32)
+    ids[:6] = [1, 1, 2, 3, 3, 3]
+    field = xr.DataArray(da.from_array(ids, chunks=N_CELLS // 4), dims=(XDIM,))
+    if with_time_axis:
+        field = field.expand_dims(TIMEDIM)
+    props = _call(field, lat, lon, cell_area).compute()
+    assert props["ID"].values.tolist() == [1, 2, 3]

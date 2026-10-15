@@ -595,26 +595,6 @@ def calculate_object_properties(
         lon_rad = np.radians(lon).chunk({xdim: -1})
         cell_area_core = cell_area.chunk({xdim: -1})
 
-        # Calculate buffer size for IDs in chunks
-        max_ID = int(object_id_field.max().compute().item()) + 1
-
-        # Handle case where object_id_field may not have time dimension (e.g., single time slice)
-        if timedim in object_id_field.dims:
-            time_steps = object_id_field.sizes[timedim]
-        else:
-            # For single time slice, use 1 as time steps
-            time_steps = 1
-
-        # Per-timestep property buffer. The estimate is 4x the mean number of objects per
-        # timestep, plus slack. The old floor was `max_ID`, i.e. the total object count over
-        # the whole run, which made these buffers O(time x total objects) and is consistent
-        # with the recorded unstructured-tracking OOM. The floor is now
-        # a constant, so it still gives small runs generous headroom (where max_ID <= 100 it
-        # is exactly the old value) without scaling with the length of the run. Overflow is
-        # not silent: the `result[0, :n_ids] = areas` fill below raises if a timestep holds
-        # more objects than the buffer.
-        ID_buffer_size = max(int(max_ID / time_steps) * 4 + 2, min(max_ID, 100))
-
         def object_properties_chunk(
             ids: NDArray[np.int32],
             lat: NDArray[np.float32],
@@ -724,6 +704,24 @@ def calculate_object_properties(
             props = xr.DataArray(props_np, dims=["prop", "out_id"])
 
         else:
+            # Per-timestep property buffer: exactly the largest number of distinct objects in
+            # any one timestep, from a single pass over the field. A buffer sized from the
+            # mean object count overflows on temporally concentrated activity, and one sized
+            # from the total object count grows with the length of the run.
+            def slice_object_count(ids: NDArray[np.int32]) -> np.int64:
+                return np.int64(np.unique(ids[ids > 0]).size)
+
+            per_slice_count = xr.apply_ufunc(
+                slice_object_count,
+                object_id_field,
+                input_core_dims=[[xdim]],
+                output_core_dims=[[]],
+                output_dtypes=[np.int64],
+                vectorize=True,
+                dask="parallelized",
+            )
+            ID_buffer_size = max(int(per_slice_count.max().compute().item()), 1)
+
             # Process in parallel
             props_buffer, ids_buffer = xr.apply_ufunc(
                 object_properties_chunk,
