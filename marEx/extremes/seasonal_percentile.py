@@ -117,12 +117,13 @@ def _identify_extremes_seasonal(
     # full-size copy -- ~38 GB at 0.25 deg / 25 yr.
     cycle = resolve_cycle(da, coordinates["time"], cycle)
     cycle_dim = cycle.index_name
-    # `window_days` is a physical duration; convert it to whole timesteps. It must be
-    # odd so the window is symmetric about its centre step -- both the exact path's
-    # `half_w` offsets and the histogram path's wrap-padded sliding window depend on
-    # that. On daily data the conversion is the identity (11 days -> 11 steps), which
-    # is what keeps every existing seasonal threshold bit-identical.
-    window_steps = cycle.window_steps(window_days)
+    # `window_days` is a physical duration, and the window is applied along the cycle axis
+    # (the exact path's `half_w` slot offsets, the histogram path's wrap-padded rows), so it is
+    # converted into cycle SLOTS, forced odd to sit symmetric about its centre slot. On daily
+    # and evenly sub-daily data a slot is one step (11 days -> 11 daily slots), which keeps
+    # those thresholds bit-identical; 5-day data still has one slot per day. A window wider
+    # than the cycle pools every slot once, on both paths.
+    window_steps = cycle.window_slots(window_days, calendar=da[coordinates["time"]].dt.calendar)
 
     da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]]).compute()})
 

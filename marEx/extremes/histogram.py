@@ -553,8 +553,15 @@ def _rolling_histogram_quantile(
     # (`window_days` is validated odd and >= 1, so `pad_size >= 1` whenever the window
     # exceeds one day), but it is the NORMAL case on a monthly axis, where any
     # `window_days` under ~45 clamps to a single month.
+    #
+    # A window wider than the cycle would revisit slots (and a pad wider than the cycle would
+    # not even give one row per slot); it pools every slot once instead, as the exact path does,
+    # so each row sums the whole cycle.
     pad_size = window_steps // 2
-    if pad_size > 0:
+    if window_steps > n_doy:
+        window_steps = n_doy
+        hist_pad = np.concatenate([hist_chunk, hist_chunk[: n_doy - 1]], axis=0)
+    elif pad_size > 0:
         hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
     else:
         hist_pad = hist_chunk
@@ -920,10 +927,15 @@ def _slab_quantile_cells(
     q_used = q_mirror if mirror else q
     # q * total < total for every count an int32 cumsum holds once q sits this far below 1.
     trim_top = q_used < 1.0 - 1e-6
-    # The wrap-padded slot order, built exactly as the estimator pads its rows.
+    # The wrap-padded slot order, built exactly as the estimator pads its rows (a window wider
+    # than the cycle pools every slot once).
     pad_size = window_steps // 2
     order = np.arange(n_slots, dtype=np.int64)
-    pad_index = np.concatenate([order[-pad_size:], order, order[:pad_size]]) if pad_size > 0 else order
+    if window_steps > n_slots:
+        window_steps = n_slots
+        pad_index = np.concatenate([order, order[: n_slots - 1]])
+    else:
+        pad_index = np.concatenate([order[-pad_size:], order, order[:pad_size]]) if pad_size > 0 else order
     if len(pad_index) - window_steps + 1 != n_slots:
         raise ValueError(f"A {window_steps}-step window does not give one row per slot of a {n_slots}-slot cycle")
 
