@@ -12,7 +12,7 @@ identical to the original ``tracker`` methods.
 """
 
 import functools
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import dask
 import numpy as np
@@ -405,11 +405,15 @@ def consolidate_object_ids(
     return data_t_minus_1, object_props
 
 
-def _first_time_in_block(block: NDArray[np.int32], t0: int, buffer: int) -> Tuple[NDArray[np.int32], NDArray[np.int64]]:
+def _first_time_in_block(
+    block: NDArray[np.int32], t0: int, buffer: int, keep: Optional[NDArray[np.int64]] = None
+) -> Tuple[NDArray[np.int32], NDArray[np.int64]]:
     """Distinct IDs of a (time, ...) block and the global time index where each first appears in it.
 
     ID 0 counts as present in a slice that has background, or fewer than ``buffer`` distinct
     IDs, which is where the earlier fixed-width per-slice ID list carried zero padding.
+    With ``keep`` (sorted), only those IDs are returned, so the gathered summary follows the
+    queried IDs rather than every object in the block.
     """
     uniques = []
     for row in block.reshape(block.shape[0], -1):
@@ -420,7 +424,15 @@ def _first_time_in_block(block: NDArray[np.int32], t0: int, buffer: int) -> Tupl
     ids = np.concatenate(uniques)
     times = np.concatenate([np.full(u.size, t0 + t, dtype=np.int64) for t, u in enumerate(uniques)])
     distinct, first = np.unique(ids, return_index=True)  # rows are in time order, so this is the earliest
-    return distinct, times[first]
+    first_times = times[first]
+    if keep is not None and len(keep):
+        # searchsorted, not isin: isin sorts the query together with the block's IDs, so each
+        # block would allocate in proportion to the query.
+        wanted = keep[np.minimum(np.searchsorted(keep, distinct), len(keep) - 1)] == distinct
+        return distinct[wanted], first_times[wanted]
+    if keep is not None:
+        return distinct[:0], first_times[:0]
+    return distinct, first_times
 
 
 def compute_id_time_dict(
@@ -461,13 +473,19 @@ def compute_id_time_dict(
     if is_dask_collection(data) and any(len(c) > 1 for c in data.chunks[1:]):
         # Which IDs a slice holds, and whether it has background, is a whole-slice property.
         raise ValueError(f"compute_id_time_dict needs {input_dims} in a single chunk; got chunks {data.chunks[1:]}")
+    # Only the queried IDs leave each block when the query is restricted.
+    keep = None if all_objects else np.unique(np.asarray(child_objects, dtype=np.int64))
     if is_dask_collection(data):
         time_starts = np.cumsum((0,) + data.chunks[0])[:-1]
         blocks = data.to_delayed()
         first_time = dask.delayed(_first_time_in_block, pure=True)
-        parts = dask.compute(*[first_time(blocks[idx], int(time_starts[idx[0]]), buffer) for idx in np.ndindex(blocks.shape)])
+        # One shared node for the query, not a copy embedded in every block's task.
+        keep_node = None if keep is None else dask.delayed(keep, pure=True)
+        parts = dask.compute(
+            *[first_time(blocks[idx], int(time_starts[idx[0]]), buffer, keep_node) for idx in np.ndindex(blocks.shape)]
+        )
     else:
-        parts = [_first_time_in_block(np.asarray(data), 0, buffer)]
+        parts = [_first_time_in_block(np.asarray(data), 0, buffer, keep)]
     ids = np.concatenate([p[0] for p in parts])
     times = np.concatenate([p[1] for p in parts])
     order = np.lexsort((times, ids))
