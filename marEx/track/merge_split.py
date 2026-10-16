@@ -1450,6 +1450,18 @@ def split_and_merge_objects_parallel(
     n_chunks = len(chunk_sizes)
     n_time = int(object_id_field_unique.sizes[timedim])
 
+    # Temporary IDs are minted above two reserved ranges of `n_time * id_stride` IDs past the largest
+    # object ID (see `mint_base` below) and written as int32, so check the whole range before any is
+    # minted. The largest must stay below the int32 maximum: the overlap step computes max ID + 1 in int32.
+    largest_object_id = int(object_props.ID.max().item())
+    id_ceiling = largest_object_id + 1 + 2 * n_time * id_stride
+    if id_ceiling > np.iinfo(np.int32).max:
+        raise ValueError(
+            f"Merging needs IDs up to {id_ceiling}, beyond the int32 ID range: the largest object ID is "
+            f"{largest_object_id} and {n_time} timesteps reserve {2 * id_stride} temporary IDs each. "
+            "Track a shorter period or filter more small objects."
+        )
+
     # -- the kernel -----------------------------------------------------------------------
     def process_chunk(
         chunk_pristine: NDArray[np.int32],
