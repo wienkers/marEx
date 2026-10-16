@@ -795,6 +795,23 @@ def calculate_object_properties(
             ids: NDArray[np.int32],
         ) -> Dict[str, List[Union[int, float]]]:
             """Calculate object properties for a chunk of data."""
+            # Labels are globally offset, so a late slice holds large IDs. regionprops sizes its
+            # per-label lookup by the largest label, not by the objects present: compact to 1..k
+            # (order-preserving, so the label-ordered output is unchanged) and map back at the end.
+            # Compacting costs a few arrays the size of the slice, the lookup ~8 B per label, so
+            # compact only once the largest label exceeds the number of cells.
+            original_labels = None
+            present = np.empty(0, dtype=ids.dtype)
+            if ids.size and int(ids.max()) > ids.size:
+                present = np.unique(ids)
+                present = present[present > 0]
+            if present.size and present[-1] != present.size:
+                original_labels = present
+                compact = np.zeros(ids.shape, dtype=ids.dtype)
+                foreground = ids > 0
+                compact[foreground] = np.searchsorted(present, ids[foreground]) + 1
+                ids = compact
+
             # Ask regionprops for the bounding box as well, so the antimeridian test below
             # is a column comparison rather than a full-slice mask per object.
             wrap_check = check_centroids and not regional_mode
@@ -834,6 +851,10 @@ def calculate_object_properties(
             if bbox_added:
                 for bbox_key in ("bbox-0", "bbox-1", "bbox-2", "bbox-3"):
                     props_slice.pop(bbox_key, None)
+
+            if original_labels is not None:
+                compact_labels = np.asarray(props_slice["label"])
+                props_slice["label"] = original_labels[compact_labels - 1].astype(compact_labels.dtype)
 
             return props_slice
 
