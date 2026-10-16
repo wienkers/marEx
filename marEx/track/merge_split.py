@@ -61,6 +61,22 @@ MAX_MERGES = 64
 MAX_PARENTS = 64
 
 
+# Every unstructured area is summed in float64 and stored as float32, and every overlap fraction
+# divides those float32 values in float64: the serial path's arithmetic, so both paths decide alike.
+def _area_sum(values: NDArray) -> np.float32:
+    """Sum in float64 and round once to float32."""
+    return np.float32(np.sum(values, dtype=np.float64))
+
+
+def _overlap_fraction(overlap, min_area):
+    """``overlap / min_area`` in float64.
+
+    A float32 ratio rounds, and NumPy compares a float32 array with a Python float in float32,
+    so a fraction just below the threshold can round onto it.
+    """
+    return np.asarray(overlap, dtype=np.float64) / np.asarray(min_area, dtype=np.float64)
+
+
 def _consolidate_slice(
     ids_prev: NDArray[np.int32],
     ids_cur: NDArray[np.int32],
@@ -96,7 +112,7 @@ def _consolidate_slice(
         return sums[np.searchsorted(labels, wanted)]
 
     min_area = np.minimum(_areas(ids_prev, pair_parent), _areas(ids_cur, pair_child))
-    accepted = overlap / min_area >= overlap_threshold
+    accepted = _overlap_fraction(overlap, min_area) >= overlap_threshold
     pair_parent = pair_parent[accepted]
     pair_child = pair_child[accepted]
     parents, counts = np.unique(pair_parent, return_counts=True)
@@ -629,8 +645,7 @@ def cluster_rename_objects_and_props(
 
                     # Calculate physical area
                     areas_masked = flat_areas[cells]
-                    total_area = np.sum(areas_masked)
-                    areas[id_idx] = total_area
+                    areas[id_idx] = _area_sum(areas_masked)
 
                     # Calculate area-weighted centroid using spherical geometry
                     cos_lat = np.cos(lat_rad[cells])
@@ -638,10 +653,10 @@ def cluster_rename_objects_and_props(
                     y = cos_lat * np.sin(lon_rad[cells])
                     z = np.sin(lat_rad[cells])
 
-                    # Weighted average in Cartesian coordinates
-                    weighted_x = np.sum(areas_masked * x)
-                    weighted_y = np.sum(areas_masked * y)
-                    weighted_z = np.sum(areas_masked * z)
+                    # Weighted average in Cartesian coordinates, summed in float64 like the areas
+                    weighted_x = np.sum(areas_masked * x, dtype=np.float64)
+                    weighted_y = np.sum(areas_masked * y, dtype=np.float64)
+                    weighted_z = np.sum(areas_masked * z, dtype=np.float64)
 
                     # Normalise
                     norm = np.sqrt(weighted_x**2 + weighted_y**2 + weighted_z**2)
@@ -1556,7 +1571,7 @@ def split_and_merge_objects_parallel(
                     continue
 
                 potential_parents = np.unique(data_m1[child_mask])
-                child_area = area[child_mask].sum()
+                child_area = _area_sum(area[child_mask])
                 parent_masks_uint = np.full(n_pts, 255, dtype=np.uint8)
                 parent_centroids = np.full((MAX_PARENTS, 2), -1.0e10, dtype=np.float32)
                 parent_ids = np.full(MAX_PARENTS, -1, dtype=np.int32)
@@ -1569,10 +1584,10 @@ def split_and_merge_objects_parallel(
                     overlap_cells = child_cells[parent_mask[child_cells]]
                     if not overlap_cells.size:
                         continue
-                    area_0 = area[parent_mask].sum()
+                    area_0 = _area_sum(area[parent_mask])
                     min_area = np.minimum(area_0, child_area)
-                    overlap_area = area[overlap_cells].sum()
-                    if overlap_area / min_area < overlap_threshold:
+                    overlap_area = _area_sum(area[overlap_cells])
+                    if _overlap_fraction(overlap_area, min_area) < overlap_threshold:
                         continue
 
                     # Only an ACCEPTED parent can exhaust the fixed-width arrays; a candidate that
@@ -1604,11 +1619,10 @@ def split_and_merge_objects_parallel(
                     mask_area = area[parent_mask]
                     weighted = np.array(
                         [
-                            np.sum(mask_area * x[parent_mask]),
-                            np.sum(mask_area * y[parent_mask]),
-                            np.sum(mask_area * z[parent_mask]),
+                            np.sum(mask_area * x[parent_mask], dtype=np.float64),
+                            np.sum(mask_area * y[parent_mask], dtype=np.float64),
+                            np.sum(mask_area * z[parent_mask], dtype=np.float64),
                         ],
-                        dtype=np.float32,
                     )
                     norm = np.sqrt(np.sum(weighted * weighted))
                     parent_centroids[n_parents, 0] = np.degrees(np.arcsin(weighted[2] / norm))
@@ -1678,16 +1692,16 @@ def split_and_merge_objects_parallel(
                     parent_cells = child_cells[new_labels == new_id]
                     if not parent_cells.size:
                         continue
-                    area_0 = area[parent_cells].sum()
+                    area_0 = _area_sum(area[parent_cells])
                     for potential_child in np.unique(data_p1[parent_cells]):
                         if potential_child <= 0:
                             continue
                         potential_child_mask = data_p1 == potential_child
-                        area_1 = area[potential_child_mask].sum()
+                        area_1 = _area_sum(area[potential_child_mask])
                         min_area = min(area_0, area_1)
                         overlap_cells = parent_cells[potential_child_mask[parent_cells]]
-                        overlap_area = area[overlap_cells].sum()
-                        if overlap_area / min_area > overlap_threshold:
+                        overlap_area = _area_sum(area[overlap_cells])
+                        if _overlap_fraction(overlap_area, min_area) > overlap_threshold:
                             new_merging_list.append(int(potential_child))
 
                 if t < n_t - 1:

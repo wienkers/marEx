@@ -628,10 +628,10 @@ def calculate_object_properties(
             mapped_indices = np.searchsorted(ids_chunk, ids[valid_mask]).astype(np.int32)
 
             # Pre-allocate arrays
-            areas = np.zeros(n_ids, dtype=np.float32)
-            weighted_x = np.zeros(n_ids, dtype=np.float32)
-            weighted_y = np.zeros(n_ids, dtype=np.float32)
-            weighted_z = np.zeros(n_ids, dtype=np.float32)
+            areas = np.zeros(n_ids, dtype=np.float64)
+            weighted_x = np.zeros(n_ids, dtype=np.float64)
+            weighted_y = np.zeros(n_ids, dtype=np.float64)
+            weighted_z = np.zeros(n_ids, dtype=np.float64)
 
             # Convert to Cartesian for centroid calculation
             cos_lat = np.cos(lat[valid_mask])
@@ -669,6 +669,11 @@ def calculate_object_properties(
                 centroid_lon - 360.0,
                 np.where(centroid_lon < -180.0, centroid_lon + 360.0, centroid_lon),
             )
+
+            # Summed and converted in float64, stored as float32.
+            areas = areas.astype(np.float32)
+            centroid_lat = centroid_lat.astype(np.float32)
+            centroid_lon = centroid_lon.astype(np.float32)
 
             assert areas.shape == (n_ids,)
             assert centroid_lat.shape == (n_ids,)

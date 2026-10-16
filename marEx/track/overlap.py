@@ -122,8 +122,9 @@ def check_overlap_slice(
 
         # Sum areas for overlapping cells
         areas_valid = (cell_area.values if isinstance(cell_area, xr.DataArray) else cell_area)[combined_mask]
-        areas = np.zeros(len(unique_pairs), dtype=np.float32)
+        areas = np.zeros(len(unique_pairs), dtype=np.float64)
         np.add.at(areas, inverse_indices, areas_valid)
+        areas = areas.astype(np.float32)
     else:
         # Get unique pairs and their counts (pixel counts)
         unique_pairs, areas = np.unique(pair_ids, return_counts=True)
