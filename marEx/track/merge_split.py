@@ -1684,7 +1684,7 @@ def split_and_merge_objects_parallel(
                 data_t[child_mask] = new_labels
                 changed = True
 
-                # Forward search: children at t+1 that overlap the new pieces above threshold.
+                # Forward search: children at t+1 that overlap the new pieces at or above the threshold.
                 # Every cell holding a new id was in child_mask, so `child_cells[new_labels ==
                 # new_id]` is exactly what `data_t == new_id` would find, ascending, at O(child).
                 new_merging_list = []
@@ -1701,7 +1701,7 @@ def split_and_merge_objects_parallel(
                         min_area = min(area_0, area_1)
                         overlap_cells = parent_cells[potential_child_mask[parent_cells]]
                         overlap_area = _area_sum(area[overlap_cells])
-                        if _overlap_fraction(overlap_area, min_area) > overlap_threshold:
+                        if _overlap_fraction(overlap_area, min_area) >= overlap_threshold:
                             new_merging_list.append(int(potential_child))
 
                 if t < n_t - 1:
