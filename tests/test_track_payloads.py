@@ -20,7 +20,9 @@ DATA = Path(__file__).parent / "data"
 
 @pytest.fixture(scope="module")
 def unstructured_extremes():
-    return xr.open_zarr(str(DATA / "extremes_unstructured.zarr"), chunks={}).persist()
+    # Rooted in the zarr store, not persisted: futures would tie the fixture to whichever
+    # client was current when it was built, and that client may close before these tests run.
+    return xr.open_zarr(str(DATA / "extremes_unstructured.zarr"), chunks={})
 
 
 def _unstructured_tracker(ds, temp_dir, **kwargs):
@@ -41,6 +43,15 @@ def _unstructured_tracker(ds, temp_dir, **kwargs):
     }
     params.update(kwargs)
     return marEx.tracker(ds.extreme_events.chunk({"time": 25, "ncells": -1}), ds.mask, **params)
+
+
+def test_fixture_carries_no_futures(dask_client_unstructured, unstructured_extremes):
+    """Re-adding ``.persist()`` to the fixture pins it to whichever client was current when it was
+    built, and these tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(unstructured_extremes)
+    assert not held, f"the fixture holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 class TestUniqueIdOffsets:

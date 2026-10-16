@@ -38,7 +38,12 @@ TRACKER_KWARGS = {
 # value. (n_tasks was 678 at the same measurement; not asserted here, but useful as a
 # reference point if these bounds ever need to be revisited.)
 EXPECTED_MAX_RECHUNK = 466  # measured 464 at cbf21ff, +2 margin
-EXPECTED_MAX_TRANSPOSE = 50  # measured 48 at cbf21ff, +2 margin
+# Raised from 50 (48 measured at cbf21ff) when global_ID and presence moved from driver numpy
+# to arrays anchored on the cluster and centroid's anchoring moved: global_ID and presence share
+# one new transpose layer and centroid adds two, each one anchored leaf per time chunk. The
+# returned graph also gained per-chunk getitem, gt and concatenate tasks; the rechunk count did
+# not move.
+EXPECTED_MAX_TRANSPOSE = 98  # measured 96, +2 margin
 
 
 def _graph_stats(dataset):
