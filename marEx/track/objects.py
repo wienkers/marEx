@@ -10,6 +10,7 @@ explicit arguments. Behaviour and numerics are identical to the original
 
 from typing import Dict, List, Optional, Tuple, Union
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 from dask import persist
@@ -22,6 +23,7 @@ from skimage.measure import regionprops_table
 
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
+from .labelling import label_time_connected
 
 logger = get_logger(__name__)
 
@@ -202,7 +204,12 @@ def identify_objects(
         neighbours = np.zeros((3, 3, 3))
         neighbours[:, :, :] = 1  # +-1 in time, _and also diagonal in time_ -- i.e. edges can touch
 
-        if regional_mode:
+        data = data_bin.data
+        if isinstance(data, da.Array) and data.ndim == 3 and len(data.chunks[1]) == 1 and len(data.chunks[2]) == 1:
+            # Same labels and count as dask_image's label, in a graph linear in the number of
+            # time chunks (dask_image's grows roughly quadratically). Space must be whole.
+            object_id_field, N_objects = label_time_connected(data, wrap_x=not regional_mode)
+        elif regional_mode:
             object_id_field, N_objects = label(data_bin, structure=neighbours)
         else:
             object_id_field, N_objects = label(data_bin, structure=neighbours, wrap_axes=(2,))  # Wrap in x-direction !
