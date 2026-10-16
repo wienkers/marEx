@@ -301,7 +301,8 @@ class TestChildTimeLookup:
             finally:
                 tracemalloc.stop()
 
-        (small, ids_small), (large, ids_large) = peak(10_000), peak(1_000_000)
+        # tracemalloc also sees other threads' allocations, so keep the smallest of five runs.
+        (small, ids_small), (large, ids_large) = (min((peak(n) for _ in range(5)), key=lambda r: r[0]) for n in (10_000, 1_000_000))
         assert np.array_equal(ids_small, ids_large) and np.array_equal(ids_small, np.arange(0, 200, 2))
         assert large <= 2 * small + 64 * 1024, f"block peak {small} B with a 1e4 query, {large} B with 1e6"
 
