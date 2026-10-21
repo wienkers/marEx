@@ -18,6 +18,31 @@ import marEx
 from marEx.core.compute_mode import Materialiser, clear_staging, create_staging_dir
 from marEx.exceptions import ConfigurationError
 
+
+def _open_sst():
+    """The shipped gridded SST, rooted in the zarr store and never persisted.
+
+    Futures would tie the input to whichever client was current when a class was set up, and that
+    client may close before the class's tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / "sst_gridded.zarr"), chunks={}).to
+
+
+def test_class_input_carries_no_futures():
+    """Re-adding ``.persist()`` to ``_open_sst`` pins every class's input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes.
+
+    With no client current ``.persist()`` leaves no futures, so the loader is run here under a live
+    distributed one to make the check bite.
+    """
+    from distributed import Client
+    from distributed.client import futures_of
+
+    with Client(processes=False, n_workers=1, threads_per_worker=1, dashboard_address=None):
+        held = futures_of(_open_sst())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 # The pipeline's INFO output is emitted by whichever stage produced the line, so a
 # capture that watches only the chainer misses the extremes stage's event-count summary.
 PIPELINE_LOGGERS = ("marEx.pipeline", "marEx.anomaly.api", "marEx.extremes.api")
@@ -221,8 +246,7 @@ class TestPipelinePlumbing:
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     def _run(self, **overrides):
@@ -314,8 +338,7 @@ class TestLazyMode:
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     def _run(self, **overrides):
@@ -385,8 +408,7 @@ class TestLazyMode:
 class TestValidateFlag:
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     def _run(self, monkeypatch, validate):
@@ -414,8 +436,7 @@ class TestValidateFlag:
 class TestStreamingMode:
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     def _run(self, tmp_path, **overrides):

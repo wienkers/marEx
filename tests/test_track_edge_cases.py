@@ -25,14 +25,26 @@ from marEx.track.objects import ObjectPropsStore
 def extremes_gridded(dask_client):
     """Load gridded extremes data for testing."""
     test_data_path = Path(__file__).parent / "data" / "extremes_gridded.zarr"
-    return xr.open_zarr(str(test_data_path), chunks={}).persist()
+    # Rooted in the zarr store, not persisted: futures would tie the fixture to whichever
+    # client was current when it was built, and that client may close before these tests run.
+    return xr.open_zarr(str(test_data_path), chunks={})
 
 
 @pytest.fixture(scope="module")
 def extremes_unstructured(dask_client):
     """Load unstructured extremes data for testing."""
     test_data_path = Path(__file__).parent / "data" / "extremes_unstructured.zarr"
-    return xr.open_zarr(str(test_data_path), chunks={}).persist()
+    return xr.open_zarr(str(test_data_path), chunks={})
+
+
+def test_fixtures_carry_no_futures(dask_client, extremes_gridded, extremes_unstructured):
+    """Re-adding ``.persist()`` to either fixture pins it to whichever client was current when it was
+    built, and these tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    for name, data in (("extremes_gridded", extremes_gridded), ("extremes_unstructured", extremes_unstructured)):
+        held = futures_of(data)
+        assert not held, f"{name} holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 @pytest.fixture

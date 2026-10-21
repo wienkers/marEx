@@ -102,10 +102,21 @@ GOLDEN_VARS = ["dat_anomaly", "mask", "extreme_events", "thresholds"]
 
 
 def _load_sst():
-    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(-N_GOLDEN_STEPS, None)).persist()
+    # Rooted in the zarr store, not persisted: futures would tie the input to whichever client was
+    # current when the class was set up, and that client may close before these tests run.
+    sst = xr.open_zarr(str(DATA_DIR / "sst_gridded.zarr"), chunks={}).to.isel(time=slice(-N_GOLDEN_STEPS, None))
     # Match the masked-NaN injection used by test_gridded_preprocessing.
     sst = sst.where(~((sst.lat == sst.lat[1]) & (sst.lon == sst.lon[1])), np.nan)
     return sst
+
+
+def test_input_carries_no_futures(dask_client_gridded):
+    """Re-adding ``.persist()`` to ``_load_sst`` pins the class input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes."""
+    from distributed.client import futures_of
+
+    held = futures_of(_load_sst())
+    assert not held, f"the input holds {len(held)} future(s); keep it rooted in the zarr store"
 
 
 class TestDetectGolden:

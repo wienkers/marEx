@@ -18,6 +18,32 @@ import xarray as xr
 import marEx
 from marEx.core.compute_mode import clear_staging
 
+
+def _open_sst(name="sst_gridded.zarr"):
+    """A shipped SST store, rooted in the zarr store and never persisted.
+
+    Futures would tie the input to whichever client was current when a class was set up, and that
+    client may close before the class's tests run.
+    """
+    return xr.open_zarr(str(Path(__file__).parent / "data" / name), chunks={}).to
+
+
+def test_class_inputs_carry_no_futures():
+    """Re-adding ``.persist()`` to ``_open_sst`` pins every class's input to whichever client was current when
+    the class was set up, and the tests fail with ``lost dependencies`` once that client closes.
+
+    With no client current ``.persist()`` leaves no futures, so the loader is run here under a live
+    distributed one to make the check bite.
+    """
+    from distributed import Client
+    from distributed.client import futures_of
+
+    with Client(processes=False, n_workers=1, threads_per_worker=1, dashboard_address=None):
+        for name in ("sst_gridded.zarr", "sst_unstructured.zarr"):
+            held = futures_of(_open_sst(name))
+            assert not held, f"{name} holds {len(held)} future(s); keep it rooted in the zarr store"
+
+
 METHOD_COMBOS = [
     ("detrend_harmonic", "global_percentile"),
     ("detrend_harmonic", "seasonal_percentile"),
@@ -70,8 +96,7 @@ class TestLazyEquivalence:
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     @pytest.mark.parametrize("method_anomaly,method_extreme", METHOD_COMBOS)
@@ -87,8 +112,7 @@ class TestStreamingEquivalence:
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_gridded.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst()
         cls.dimensions = {"time": "time", "x": "lon", "y": "lat"}
 
     @pytest.mark.parametrize("method_anomaly,method_extreme", METHOD_COMBOS)
@@ -107,8 +131,7 @@ class TestUnstructuredEquivalence:
 
     @classmethod
     def setup_class(cls):
-        path = Path(__file__).parent / "data" / "sst_unstructured.zarr"
-        cls.sst = xr.open_zarr(str(path), chunks={}).to.persist()
+        cls.sst = _open_sst("sst_unstructured.zarr")
 
         # The fixture carries no lat/lon; attach mock ones exactly as
         # test_unstructured_preprocessing.py does, since the pipeline requires them.
