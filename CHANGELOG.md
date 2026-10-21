@@ -87,6 +87,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - `start_distributed_cluster` exports the comm timeouts into each SLURM worker job's environment, so workers no longer fall back to dask's 30 s connect timeout.
 - `tracker` raises a `TrackingError` naming the cause when the area filter removes every object, or when the kept objects' `cell_areas` sum to zero, instead of a `ZeroDivisionError`. On unstructured grids the small-object pre-filter error names its cell cutoff and the active `area_filter_absolute` / `area_filter_quartile`, and a longitude range that cannot be classified no longer suggests `regional_mode=True`, which unstructured grids do not support (`coordinate_units=` is the working route).
 - A tuple or list time chunk in `dask_chunks` no longer fails on outputs with a seasonal cycle axis (`dayofyear`, `month`, `hourofyear`); the cycle axis takes the largest block.
+- plotX: a global grid with a cell straddling the map projection's seam (180 degrees from its central longitude) no longer crashes `single_plot` or animations (the cell is drawn split at the seam); an ID field with no objects plots an empty map with a warning instead of raising.
 
 ### Performance
 

@@ -28,6 +28,7 @@ except ImportError:
 
 from ..logging_config import get_logger, log_timing
 from .base import PlotterBase
+from .mesh import pcolormesh_seam_safe
 
 # Get module logger
 logger = get_logger(__name__)
@@ -98,6 +99,6 @@ class GriddedPlotter(PlotterBase):
 
             logger.debug(f"Rendering plot with {len(lons)} x {len(lats)} grid points")
             # imshow has some dimension issues with cartopy...
-            im = ax.pcolormesh(lons, lats, values, **plot_kwargs)
+            im = pcolormesh_seam_safe(ax, lons, lats, values, **plot_kwargs)
 
         return ax, im
