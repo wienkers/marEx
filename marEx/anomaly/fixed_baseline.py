@@ -21,6 +21,7 @@ from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
+from .climatology import last_day_pool
 from .harmonic import _compute_anomaly_detrended
 
 # Get module logger
@@ -181,12 +182,28 @@ def _compute_anomaly_fixed_baseline(
         dtype=np.float32,
     )
 
-    # Ensure the climatology spans the full day-of-year range 1..366. If the reference
-    # period contains no leap year it only has 365 groups, and subtracting it from a
-    # full series that does include 29 Feb (day-of-year 366) would silently NaN every
-    # such day. Reindex to 366 and forward-fill the missing tail group from day 365.
-    # In the common (leap-containing) case both operations are no-ops. The dayofyear
-    # dim is rechunked to a single chunk so the dask ffill is valid.
+    # Day 366 takes every year's 31 December, not only the leap years' (see `last_day_pool`).
+    pool = last_day_pool(da_for_clim[coordinates["time"]], cycle, read_coord=da[coordinates["time"]])
+    if pool is not None and len(pool[0]):
+        positions, slots, last_labels = pool
+        last_day = flox.xarray.xarray_reduce(
+            da_for_clim.isel({dimensions["time"]: positions}),
+            xr.DataArray(slots, dims=[dimensions["time"]], name=cycle_dim),
+            dim=dimensions["time"],
+            func="nanmean",
+            expected_groups=last_labels,
+            isbin=False,
+            dtype=np.float32,
+        )
+        daily_climatology = xr.concat(
+            [daily_climatology.sel({cycle_dim: slice(None, int(last_labels[0]) - 1)}), last_day], dim=cycle_dim
+        )
+
+    # Ensure the climatology spans the full day-of-year range 1..366. A cycle slot no
+    # timestep fell into (no 31 December at all, or a gap) would otherwise silently NaN
+    # every such day of the full series. Reindex to 366 and forward-fill the missing
+    # group from the slot before it. In the common case both operations are no-ops. The
+    # dayofyear dim is rechunked to a single chunk so the dask ffill is valid.
     daily_climatology = (
         daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
     )

@@ -76,7 +76,12 @@ CONFIGS = {
 # lat/lon grid, so on this 10-degree box the edge columns pooled samples from the opposite edge. It now
 # wraps only a grid spanning 360 degrees. Only the outermost window_spatial // 2 columns on each side moved
 # (lon 0, 1, 38, 39): thresholds at 28,505 of 292,800; extreme_events 1,350 of 585,600; dat_anomaly and
-# mask 0. Never regenerate without a deliberate decision.
+# mask 0.
+# Config B was rewritten again 2026-10-21: the day-366 climatology now pools every year's 31 December
+# instead of the leap years' alone, which left a leap year's 31 December with a one-sample climatology
+# carrying the trend. Every moved element sits on the predicted day-366 set: dat_anomaly 799 of 585,600,
+# all on 2020-12-31; thresholds 1,874 of 292,800, on day of year 365, 366 and 1 only; extreme_events 118
+# of 585,600, on dates with those days of year only; mask 0. Never regenerate without a deliberate decision.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # The histogram bins were changed from asymmetric to symmetric ones, so the 1-D path now
