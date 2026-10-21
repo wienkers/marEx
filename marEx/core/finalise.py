@@ -75,8 +75,8 @@ def finalise_dataset(
         default), not elements: a 1-byte boolean variable gets more elements per
         chunk than a float32 one, and can exceed 50 million. A seasonal
         threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
-        chunked from the same entry, capped at the cycle length, and is not held
-        to the element budget.
+        chunked from the same entry (the largest block of a tuple entry), capped
+        at the cycle length, and is not held to the element budget.
     materialiser
         The materialisation policy. Only ``persist`` mode materialises here.
     staging_dir
@@ -115,6 +115,8 @@ def finalise_dataset(
     # Final rechunking. Fall back to the documented default time chunk (25), not 10,
     # so a partial dask_chunks dict does not silently get 10-step chunks.
     time_chunks = dask_chunks.get(dimensions["time"], dask_chunks.get("time", 25))
+    if isinstance(time_chunks, list):
+        time_chunks = tuple(time_chunks)
     logger.debug(f"Final rechunking with time chunks: {time_chunks}")
     # The horizontal dims are made whole (the tracker requires it). Extra dims (depth,
     # level) take whatever of the per-task budget one whole-horizontal time block leaves:
@@ -149,9 +151,12 @@ def finalise_dataset(
     # A cycle-index dimension is only present when a seasonal threshold was computed,
     # so testing for it is equivalent to testing the extreme method -- and it keeps
     # this function ignorant of which method ran.
+    # A tuple (or list) of block sizes sums to the time length, not the cycle length, so the
+    # cycle axis takes its largest block as the step count instead.
+    cycle_chunks = max(time_chunks) if isinstance(time_chunks, tuple) else time_chunks
     for cycle_dim in CYCLE_DIMS:
         if cycle_dim in ds.dims:
-            chunk_dict[cycle_dim] = time_chunks
+            chunk_dict[cycle_dim] = cycle_chunks
     ds = ds.chunk(chunk_dict)
 
     # Clear the input store's encoding: stale ``chunks`` triggers chunk-misalignment errors
