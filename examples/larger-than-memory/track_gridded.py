@@ -22,7 +22,7 @@ from squeeze_common import GB, add_common_args, apply_smoke, default_data_path, 
 
 import marEx
 
-DEFAULT_INPUT = default_data_path("extremes_binary_gridded_shifting_hobday.zarr")
+DEFAULT_INPUT = default_data_path("output/detect_binaries/extremes_binary_gridded_shifting_hobday.zarr")
 
 
 def main() -> None:

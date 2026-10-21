@@ -168,7 +168,7 @@ Every path is an argument or an environment variable, and nothing is hardwired t
 | --- | --- | --- |
 | SLURM account | `SLURM_ACCOUNT` (or `SQUEEZE_ACCOUNT`) | none: `submit.sh` refuses to run without it |
 | Python | `MAREX_PYTHON` | `python` on `PATH` |
-| input stores | `MAREX_LTM_DATA` directory, or `--input` per script | `/scratch/<initial>/$USER/mhws` |
+| input stores | `MAREX_LTM_DATA` directory, or `--input` per script | `/scratch/<initial>/$USER/marEx_data` (OSTIA under `input/ostia/`, detect outputs under `output/detect_binaries/`) |
 | summaries, scratch, job logs | `SQUEEZE_OUT`, `SQUEEZE_SCRATCH`, `SQUEEZE_LOGS` | under `/work/$SLURM_ACCOUNT/$USER/marEx` and `/scratch/<initial>/$USER/marEx` |
 | ICON grid file | `--grid-file` or `MAREX_ICON_GRID` | the DKRZ `/pool` copy |
 | EERIE catalogue | `MAREX_EERIE_CATALOGUE`, or `--input` to skip it | the public catalogue URL (the `dkrz.disk.model-output` entry is DKRZ-only) |

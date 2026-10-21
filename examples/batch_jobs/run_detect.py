@@ -32,7 +32,12 @@ SCRATCH = Path("/scratch") / getuser()[0] / getuser()  # Lustre scratch
 def parse_args():
     """Parse the command line; defaults reproduce the gridded/01 notebook."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--input", type=Path, default=SCRATCH / "mhws" / "ostia.zarr", help="daily SST zarr store (variable `sst`)")
+    p.add_argument(
+        "--input",
+        type=Path,
+        default=SCRATCH / "marEx_data" / "input" / "ostia" / "ostia.zarr",
+        help="daily SST zarr store (variable `sst`)",
+    )
     p.add_argument("--out-dir", type=Path, default=SCRATCH / "marEx" / "examples" / "gridded", help="output directory")
     p.add_argument("--dask-dir", type=Path, default=SCRATCH / "marEx" / "dask", help="scratch directory for the Dask cluster")
     p.add_argument(

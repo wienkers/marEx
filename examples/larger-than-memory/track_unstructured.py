@@ -24,7 +24,7 @@ from track_gridded import run_and_fingerprint
 
 import marEx
 
-DEFAULT_INPUT = default_data_path("extremes_binary_unstruct_shifting_hobday.zarr")
+DEFAULT_INPUT = default_data_path("output/detect_binaries/extremes_binary_unstruct_shifting_hobday.zarr")
 
 
 def main() -> None:

@@ -41,7 +41,7 @@ from squeeze_common import GB, add_common_args, apply_smoke, default_data_path, 
 
 import marEx
 
-DEFAULT_INPUT = default_data_path("ostia.zarr")
+DEFAULT_INPUT = default_data_path("input/ostia/ostia.zarr")
 
 
 def main() -> None:

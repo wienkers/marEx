@@ -28,7 +28,7 @@
 # SITE SETTINGS (no defaults for the account):
 #   SLURM_ACCOUNT or SQUEEZE_ACCOUNT   required
 #   MAREX_PYTHON                       python for the legs (default: `python` on PATH)
-#   MAREX_LTM_DATA                     input stores (default /scratch/<u>/$USER/mhws)
+#   MAREX_LTM_DATA                     input stores (default /scratch/<u>/$USER/marEx_data)
 #   SQUEEZE_SCRATCH, SQUEEZE_OUT, SQUEEZE_LOGS   scratch / summaries / job logs
 #   SMOKE=1                            15 min wall, each script truncates its series
 # Small squeeze legs go to `shared` (backfills in seconds); node-scale legs go to

@@ -49,13 +49,13 @@ GB = 1e9
 def default_data_path(name: str) -> str:
     """Return the default location of an input store: ``$MAREX_LTM_DATA/<name>``.
 
-    ``MAREX_LTM_DATA`` defaults to ``/scratch/<u>/<user>/mhws`` (``<u>`` the first letter of
+    ``MAREX_LTM_DATA`` defaults to ``/scratch/<u>/<user>/marEx_data`` (``<u>`` the first letter of
     the user name, the DKRZ scratch layout).  Every script also takes ``--input``.
     """
     import getpass
 
     user = os.environ.get("USER") or getpass.getuser()
-    root = os.environ.get("MAREX_LTM_DATA") or f"/scratch/{user[:1]}/{user}/mhws"
+    root = os.environ.get("MAREX_LTM_DATA") or f"/scratch/{user[:1]}/{user}/marEx_data"
     return str(Path(root) / name)
 
 
