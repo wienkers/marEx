@@ -135,7 +135,9 @@ below are the common ones.
      - Leave it unset, or change the combination.
    * - ``precision`` rejected
      - ``precision`` was given with ``method_percentile="exact"``, or it implies more than 65,000 bins
-       (a warning appears above 10,000).
+       on a derived range (a warning appears above 10,000). Any geometry whose bin edges realise more than 65,535
+       bins also raises, including ``n_bins=65535`` and a pinned ``max_anomaly`` with a fine
+       ``precision``.
      - Drop ``precision`` for the exact path, or use a coarser value.
    * - ``detrend_harmonic`` does not support sub-daily data
      - The harmonic method works on daily data.
@@ -147,6 +149,11 @@ below are the common ones.
    * - ``reference_period`` rejected
      - It is only used by ``fixed_baseline`` and ``detrend_fixed_baseline``.
      - Remove it for the other methods.
+   * - ``shifting_baseline cannot smooth this sub-daily time axis by time of day``
+     - The sub-daily timestamps are off a regular grid, for example decoded from float offsets
+       a fraction of a microsecond off the hour.
+     - Round the time axis as the message says, e.g. ``da["time"] = da["time"].dt.round("3600s")``
+       for hourly data, or use ``fixed_baseline``.
    * - ``smooth_days`` spans the whole cycle
      - The smoothing window is as long as one seasonal cycle.
      - Use a shorter ``smooth_days``.
