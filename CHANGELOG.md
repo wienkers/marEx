@@ -51,6 +51,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Thresholds clamped onto the guard bin next to zero (a constant anomaly, for example sea ice at the freezing point) are reported as an INFO log with their count, not a `UserWarning`.
 - `ResourceMonitor` reports the peak of the largest single worker alongside the summed peak, and its over-commit warning counts only the workers on its own machine.
 - `start_local_cluster` logs the memory limit it passes to each worker, not the machine's memory divided by the worker count.
+- The detect output `mask` carries its own `long_name` and `description` instead of the input variable's `standard_name`, `units` and valid range.
 
 ### Deprecated
 
