@@ -34,6 +34,7 @@ def unify_coordinates(
     coordinate_units: Optional[str],
     xcoord: str,
     ycoord: str,
+    unstructured_grid: bool = False,
 ) -> Tuple[Optional[str], xr.DataArray]:
     """Unify the coordinate system to degrees.
 
@@ -91,11 +92,16 @@ def unify_coordinates(
 
             # If neither, throw error
             else:
+                # regional_mode is not implemented for unstructured grids, so it is only
+                # offered on a structured one; coordinate_units alone works on both.
+                regional_suggestion = (
+                    [] if unstructured_grid else ["Use regional_mode=True with coordinate_units specified for regional data"]
+                )
                 raise create_coordinate_error(
                     f"Cannot auto-detect coordinate units from range {lon_range:.3f}",
                     details=(f"Expected ranges: ~360 degrees or ~{2*np.pi:.3f} radians. " f"Found range: {lon_range:.3f}"),
                     suggestions=[
-                        "Use regional_mode=True with coordinate_units specified for regional data",
+                        *regional_suggestion,
                         "Specify coordinate_units='degrees' or coordinate_units='radians' explicitly",
                         "Check that your coordinate values are correct",
                         "Verify x-dimension coordinate ranges",

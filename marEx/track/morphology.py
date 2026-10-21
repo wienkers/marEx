@@ -545,27 +545,28 @@ def filter_small_objects(
         # driver. NOTE: it also means "remove the smallest quartile" is evaluated over objects
         # larger than the pre-filter cutoff here, whereas the structured branch uses all objects;
         # the two grid types therefore define the quantile over slightly different populations.
-        if use_absolute_filtering:
-            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 5).data
-        else:
-            cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > 50).data
+        prefilter_cells = 5 if use_absolute_filtering else 50
+        cluster_sizes_filtered_dask = cluster_sizes.where(cluster_sizes > prefilter_cells).data
         cluster_areas_mask = dsa.isfinite(cluster_sizes_filtered_dask)
         object_areas = cluster_sizes_filtered_dask[cluster_areas_mask].compute()
 
         # Filter based on area threshold
         N_objects_unfiltered = len(object_areas)
-        if N_objects_unfiltered == 0:  # pragma: no cover
+        if N_objects_unfiltered == 0:
+            setting = (
+                f"area_filter_absolute={area_filter_absolute}"
+                if use_absolute_filtering
+                else f"area_filter_quartile={area_filter_quartile}"
+            )
             raise TrackingError(
-                "No objects found for area-based filtering",
-                details={
-                    "objects_count": N_objects_unfiltered,
-                    "area_filter_quartile": area_filter_quartile,
-                    "grid_type": "unstructured",
-                },
+                f"No objects larger than {prefilter_cells} cells to filter on an unstructured grid ({setting})",
+                details=(
+                    f"Objects of {prefilter_cells} cells or fewer are dropped before the area filter with {setting}, "
+                    "and no object is larger."
+                ),
                 suggestions=[
-                    "Check if input data contains any extreme events",
-                    "Verify that preprocessing parameters are appropriate",
-                    "Consider lowering the extreme threshold percentile",
+                    "Check that data_bin contains extreme events inside the mask",
+                    "Consider lowering the extreme threshold percentile so that events are larger",
                 ],
             )
         if use_absolute_filtering:
