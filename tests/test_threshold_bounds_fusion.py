@@ -114,10 +114,14 @@ class TestBoundsCheckBehaviourUnchanged:
         with pytest.raises(ConfigurationError, match="exceed expected range"):
             _compute_histogram_quantile_1d(da, q=0.95, dim="time", precision=0.01, max_anomaly=0.5)
 
-    def test_still_warns_and_clamps_when_threshold_is_below_the_lower_bound(self):
+    def test_reports_and_clamps_when_threshold_is_below_the_lower_bound(self, caplog):
+        import logging
+
         da = _anomaly_fixture(constant_corner=True)
-        with pytest.warns(UserWarning, match="below expected range"):
+        logging.getLogger("marEx").propagate = True
+        with caplog.at_level(logging.INFO, logger="marEx"):
             result = _compute_histogram_quantile_1d(da, q=0.95, dim="time")
+        assert any("wrong side of zero anomaly" in r.getMessage() for r in caplog.records)
         lower_bound = float(_default_bin_edges()[3])
         assert float(result.isel(lat=0, lon=0).values) == pytest.approx(lower_bound)
 

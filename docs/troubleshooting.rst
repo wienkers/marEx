@@ -263,7 +263,7 @@ Unexpected Results
 * Check the input for the units you expect and for a land mask that is NaN at the first step.
 * ``dat_anomaly`` should have a mean close to zero.
 * The fraction of ``extreme_events`` should be close to ``100 - threshold_percentile`` per cell. With
-  few years of data the fraction can be off, and marEx logs a warning when fewer than 50 samples lie
+  few years of data the fraction can be off, and marEx logs a warning when fewer than 10 samples lie
   beyond the threshold.
 * Approximate thresholds differ from exact ones by up to a few histogram bins. See
   :doc:`guide/validation`.

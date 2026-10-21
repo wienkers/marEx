@@ -123,7 +123,7 @@ matches NumPy's ``higher`` (upper tail) or ``lower`` (lower tail) interpolation 
 histogram bins. Against the exact path, which uses linear interpolation, the gap can reach
 tens of bins on the sparse per-day-of-year samples at extreme percentiles (on the global path it
 stays within about 8 bins). The cause is the thin sample behind each day-of-year window, not the bin width.
-Where fewer than 50 samples lie beyond the threshold, marEx logs a warning.
+Where fewer than 10 samples lie beyond the threshold, marEx logs a warning.
 
 What Is Not Claimed
 ===================

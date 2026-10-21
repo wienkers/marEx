@@ -392,6 +392,9 @@ def _animate(
         subprocess.run(
             [
                 "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",  # ffmpeg's encoder banner and its full-range-JPEG input notice are not failures
                 "-y",
                 "-threads",
                 "0",

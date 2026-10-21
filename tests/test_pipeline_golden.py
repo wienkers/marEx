@@ -71,7 +71,12 @@ CONFIGS = {
 # input, so the change is the chunk dependence and nothing else.
 # Config B was rewritten AGAIN 2026-10-05: the smoothing's rolling mean moved from bottleneck's
 # float32 running sum to xarray's numpy path on every xarray release (dat_anomaly max 7.3e-4 at 543,605 of
-# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0). Never regenerate without a deliberate decision.
+# 585,600; extreme_events 61; thresholds one 0.01 bin at 9,590 of 292,800; mask 0).
+# Config B was rewritten again 2026-10-18: the seasonal spatial window wrapped longitude on any
+# lat/lon grid, so on this 10-degree box the edge columns pooled samples from the opposite edge. It now
+# wraps only a grid spanning 360 degrees. Only the outermost window_spatial // 2 columns on each side moved
+# (lon 0, 1, 38, 39): thresholds at 28,505 of 292,800; extreme_events 1,350 of 585,600; dat_anomaly and
+# mask 0. Never regenerate without a deliberate decision.
 GOLDEN_STORE = {"A_harm_global": "A_harm_global", "B_shift_seasonal": "B_shift_hobday"}
 
 # The histogram bins were changed from asymmetric to symmetric ones, so the 1-D path now

@@ -111,9 +111,12 @@ def fill_holes(
     if unstructured_grid:
         # Process unstructured grid using sparse matrix operations
         # _Put the data into an xarray.DataArray to pass into the apply_ufunc_ -- Needed for correct memory management !
-        sp_data = xr.DataArray(dilate_sparse.data, dims="sp_data")
-        indices = xr.DataArray(dilate_sparse.indices, dims="indices")
-        indptr = xr.DataArray(dilate_sparse.indptr, dims="indptr")
+        # One chunk each: they are core dimensions, and left to dask's automatic chunking a large
+        # mesh splits them (indices alone is ~0.8 GB at 14.9 M cells), which apply_gufunc then has
+        # to merge back while re-splitting the loop dimension.
+        sp_data = xr.DataArray(dilate_sparse.data, dims="sp_data").chunk(-1)
+        indices = xr.DataArray(dilate_sparse.indices, dims="indices").chunk(-1)
+        indptr = xr.DataArray(dilate_sparse.indptr, dims="indptr").chunk(-1)
 
         def binary_open_close(
             bitmap_binary: NDArray[np.bool_],

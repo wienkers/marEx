@@ -231,7 +231,13 @@ def rolling_climatology(
         fill_value=np.nan,
     )
     if len(reduce_years) < len(unique_years):
-        climatologies = climatologies.reindex(target_year=unique_years, fill_value=np.nan)
+        # Pad by position onto one appended all-NaN year. A `reindex(fill_value=nan)` builds its
+        # fill mask by OR-ing per-dimension dask masks of different chunking, which multiplies
+        # the task count across every spatial tile.
+        nan_year = xr.full_like(climatologies.isel(target_year=slice(0, 1)), np.nan)
+        padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
+        position = pd.Series(range(len(reduce_years)), index=reduce_years).reindex(unique_years, fill_value=len(reduce_years))
+        climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
     climatologies = climatologies.chunk({cycle_dim: -1})
 
     # Create index arrays for final mapping

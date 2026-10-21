@@ -67,6 +67,14 @@ def _job_memory_bytes() -> Optional[float]:
     return None
 
 
+def _local_addresses() -> set:
+    """IP addresses of this machine, to tell this job's workers from workers on other nodes."""
+    try:
+        return {a.address for addrs in psutil.net_if_addrs().values() for a in addrs}
+    except Exception:
+        return set()
+
+
 class ResourceMonitor:
     """
     Record wall time and peak memory for named stages of a Dask workload.
@@ -82,16 +90,18 @@ class ResourceMonitor:
 
     Notes
     -----
-    Worker memory is the summed process memory the workers report to the scheduler
-    (including unmanaged memory), which is what the nanny compares against
-    ``memory_limit``. Client memory is the resident set of this Python process.
+    Worker memory is the process memory the workers report to the scheduler (including
+    unmanaged memory), which is what the nanny compares against ``memory_limit``: the
+    summed peak over all workers, and the largest single worker, which is the number to
+    size ``memory_limit`` from. Client memory is the resident set of this Python process.
     A worker restart shows up as a worker address the monitor has not seen before.
 
     On construction the monitor logs each worker's effective ``memory_limit``. On HPC
     nodes Dask reads the whole node's memory rather than the job's allocation, so a
     cluster started without an explicit ``memory_limit`` can over-commit; the monitor
-    warns when the limits add up to more than the job may use (its cgroup limit, or SLURM's
-    grant when no cgroup limit is visible). Spill is the growth of bytes spilled to disk
+    warns when the limits of the workers on this machine add up to more than the job may use
+    (its cgroup limit, or SLURM's grant when no cgroup limit is visible). Workers started as
+    their own SLURM jobs on other nodes do not count against this job. Spill is the growth of bytes spilled to disk
     during the stage, so data left on disk by an earlier stage does not count.
     """
 
@@ -109,6 +119,8 @@ class ResourceMonitor:
         self.worker_memory_limit = max(limits) if limits else 0
         self.memory_limit_total = float(sum(limits))
         self.job_memory = _job_memory_bytes()
+        local = _local_addresses()
+        local_limits = [w.get("memory_limit") or 0 for w in workers.values() if w.get("host") in local]
 
         logger.info(
             f"Cluster: {self.n_workers} workers, {self.threads} threads, "
@@ -117,9 +129,9 @@ class ResourceMonitor:
         )
         if any(v == 0 for v in limits):
             logger.warning("At least one worker has no memory_limit; Dask will not pause or spill it")
-        if self.job_memory and self.memory_limit_total > self.job_memory:
+        if self.job_memory and sum(local_limits) > self.job_memory:
             logger.warning(
-                f"Worker memory limits total {self.memory_limit_total / _GB:.0f} GB but the job may use "
+                f"Worker memory limits on this node total {sum(local_limits) / _GB:.0f} GB but the job may use "
                 f"{self.job_memory / _GB:.0f} GB: pass memory_limit explicitly when starting the cluster"
             )
 
@@ -129,7 +141,7 @@ class ResourceMonitor:
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
         """Measure the enclosed block as one stage called ``name``."""
-        peak = {"workers": 0.0, "client": 0.0, "spilled": 0.0}
+        peak = {"workers": 0.0, "per_worker": 0.0, "client": 0.0, "spilled": 0.0}
         start_workers = self._workers()
         seen = set(start_workers)
         spilled_at_start = float(
@@ -146,6 +158,7 @@ class ResourceMonitor:
             seen.update(workers)
             metrics = [w.get("metrics", {}) for w in workers.values()]
             peak["workers"] = max(peak["workers"], float(sum(m.get("memory", 0) for m in metrics)))
+            peak["per_worker"] = max(peak["per_worker"], float(max((m.get("memory", 0) for m in metrics), default=0)))
             peak["spilled"] = max(
                 peak["spilled"],
                 float(sum((m.get("spilled_bytes") or {}).get("disk", 0) for m in metrics)),
@@ -171,6 +184,7 @@ class ResourceMonitor:
                 "stage": name,
                 "wall (min)": wall / 60,
                 "peak worker memory (GB)": peak["workers"] / _GB,
+                "peak per worker (GB)": peak["per_worker"] / _GB,
                 "peak client memory (GB)": peak["client"] / _GB,
                 "peak spilled to disk (GB)": max(peak["spilled"] - spilled_at_start, 0.0) / _GB,
                 "worker restarts": len(seen) - n_start,
@@ -178,7 +192,8 @@ class ResourceMonitor:
             self._records.append(record)
             print(
                 f"{name}: {record['wall (min)']:.1f} min, peak worker memory "
-                f"{record['peak worker memory (GB)']:.1f} GB of {self.memory_limit_total / _GB:.0f} GB, "
+                f"{record['peak worker memory (GB)']:.1f} GB of {self.memory_limit_total / _GB:.0f} GB "
+                f"(largest worker {record['peak per worker (GB)']:.1f} of {self.worker_memory_limit / _GB:.1f} GB), "
                 f"client {record['peak client memory (GB)']:.1f} GB, spilled "
                 f"{record['peak spilled to disk (GB)']:.1f} GB, restarts {record['worker restarts']}"
             )
@@ -191,6 +206,7 @@ class ResourceMonitor:
                 "stage": "total",
                 "wall (min)": df["wall (min)"].sum(),
                 "peak worker memory (GB)": df["peak worker memory (GB)"].max(),
+                "peak per worker (GB)": df["peak per worker (GB)"].max(),
                 "peak client memory (GB)": df["peak client memory (GB)"].max(),
                 "peak spilled to disk (GB)": df["peak spilled to disk (GB)"].max(),
                 "worker restarts": df["worker restarts"].sum(),

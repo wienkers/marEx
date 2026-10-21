@@ -28,6 +28,10 @@ from .histogram import _chunk_spatial_for_histogram, _clamp_exact_threshold, _co
 # Get module logger
 logger = get_logger(__name__)
 
+# Fewest expected threshold exceedances per cell and cycle slot below which the threshold is
+# called unreliable.
+_MIN_EXCEEDANCES = 10
+
 
 def _identify_extremes_seasonal(
     da: xr.DataArray,
@@ -99,12 +103,13 @@ def _identify_extremes_seasonal(
     # it exists for (`threshold_percentile=5` has 5 % of samples below it, not 95 %).
     tail_fraction = (1.0 - threshold_percentile / 100.0) if tail == "upper" else (threshold_percentile / 100.0)
     N_above_threshold = N_samples * tail_fraction
-    if N_above_threshold < 50:
-        # Make warning
+    # 10 is below a 30-year, 11-day climatology at the 95th percentile (16.5 on one cell), the
+    # standard Hobday et al. (2016) set-up, so that set-up passes and only thinner windows warn.
+    if N_above_threshold < _MIN_EXCEEDANCES:
         # No advice to switch to method_percentile='exact': it cannot pool spatially, so on
         # a grid it sees fewer samples than the default approximate path, not more.
         logger.warning(
-            f"Not enough samples for accurate extreme detection: {N_above_threshold} < 50. "
+            f"Not enough samples for accurate extreme detection: {N_above_threshold:g} < {_MIN_EXCEEDANCES}. "
             "Consider using a lower threshold_percentile, increasing your time-series size, "
             "increasing the window_days, or (method_percentile='approximate' only) using a larger "
             "window_spatial. Below this count the threshold depends on the percentile convention "

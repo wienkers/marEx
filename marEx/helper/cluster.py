@@ -291,8 +291,16 @@ def start_local_cluster(
         )
         logger.warning("Hyper-threading can reduce performance for compute-intensive tasks!")
 
-    memory_per_worker = memory.total / n_workers / (1024**3)
-    logger.info(f"Memory per worker: {memory_per_worker:.2f} GB")
+    memory_limit = kwargs.get("memory_limit")
+    if isinstance(memory_limit, str) and memory_limit != "auto":
+        memory_limit = dask.utils.parse_bytes(memory_limit)
+    if isinstance(memory_limit, (int, float)) and memory_limit > 0:
+        logger.info(f"Memory limit per worker: {memory_limit / 1e9:.2f} GB")
+    else:
+        logger.info(
+            f"Memory limit per worker: Dask default, {memory.total / n_workers / 1e9:.2f} GB of this machine's "
+            "memory (not the job's allocation; pass memory_limit on a shared node)"
+        )
 
     # Create cluster and client
     logger.debug("Creating local cluster and client")
@@ -330,6 +338,7 @@ def start_distributed_cluster(
     n_workers: int,
     workers_per_node: int,
     runtime: int = 9,
+    threads_per_worker: int = 1,
     node_memory: int = 256,
     dashboard_address: int = 8889,
     queue: str = "compute",
@@ -350,6 +359,10 @@ def start_distributed_cluster(
         Number of workers per node.
     runtime : int, default=9
         Maximum runtime in minutes.
+    threads_per_worker : int, default=1
+        Threads in each worker process. A node then runs ``workers_per_node`` processes of
+        ``threads_per_worker`` threads each. Fewer, multi-threaded workers mean fewer peers in
+        every all-to-all transfer (P2P rechunks) and an event loop that is less often starved.
     node_memory : int, default=256
         Memory per node in GB (256, 512, or 1024).
     dashboard_address : int, default=8889
@@ -464,9 +477,17 @@ def start_distributed_cluster(
     ...     n_workers=64, workers_per_node=16, node_memory=256
     ... )
     """
+    if threads_per_worker < 1:
+        raise ConfigurationError(
+            f"threads_per_worker must be at least 1, got {threads_per_worker}",
+            suggestions=["Use threads_per_worker=1 for single-threaded workers"],
+        )
     n_nodes = -(-n_workers // workers_per_node)  # ceil division: don't under-report partial nodes
     logger.info(f"Starting distributed SLURM cluster - {n_workers} workers on {n_nodes} nodes")
-    logger.info(f"Configuration: {workers_per_node} workers/node, {node_memory}GB memory/node, {runtime} min runtime")
+    logger.info(
+        f"Configuration: {workers_per_node} workers/node x {threads_per_worker} threads, "
+        f"{node_memory}GB memory/node, {runtime} min runtime"
+    )
 
     # SLURMCluster is None whenever the dask_jobqueue import failed at module load
     # (ImportError if absent, ValueError in some worker-thread contexts). Raise directly
@@ -528,26 +549,45 @@ def start_distributed_cluster(
 
     logger.debug(f"Scheduler options: {scheduler_options}")
 
+    # The worker processes are started by SLURM, not from this process, so the dask config set
+    # above never reaches them: they would fall back to dask's 30 s connect timeout. Export the
+    # comm timeouts into each worker job's environment.
+    timeout_exports = [
+        f"export DASK_DISTRIBUTED__COMM__TIMEOUTS__{key.upper()}={value}"
+        for key, value in dask.config.get("distributed.comm.timeouts").items()
+    ]
+    # Keep whatever prologue dask-jobqueue would otherwise have used: the caller's, else the
+    # jobqueue config's, else the deprecated `env_extra`.
+    prologue = kwargs.pop("job_script_prologue", None)
+    if prologue is None:
+        prologue = dask.config.get("jobqueue.slurm.job-script-prologue", None)
+    if not prologue:
+        prologue = kwargs.pop("env_extra", None) or []
+    if isinstance(prologue, str):
+        prologue = [prologue]
+    job_script_prologue = [*timeout_exports, *prologue]
+
     with log_timing(logger, "SLURM cluster creation"):
         cluster = SLURMCluster(
             name="dask-cluster",
-            cores=workers_per_node,
+            cores=workers_per_node * threads_per_worker,
             memory=config["client_memory"],
-            processes=workers_per_node,  # One process per core
+            processes=workers_per_node,
             interface="ib0",
             queue=queue,
             account=account,
             walltime=f"{runtime_hrs:02d}:{runtime_mins:02d}:00",
             asynchronous=0,
             job_extra_directives=config["job_extra"],
+            job_script_prologue=job_script_prologue,
             log_directory=DKRZ_LOG_PATH,
             local_directory=temp_dir.name,
             scheduler_options=scheduler_options,
             **kwargs,
         )
 
-    memory_per_worker = node_memory / workers_per_node
-    logger.info(f"Memory per worker: {memory_per_worker:.2f} GB")
+    memory_per_worker = dask.utils.parse_bytes(config["client_memory"]) / workers_per_node
+    logger.info(f"Memory limit per worker: {memory_per_worker / 1e9:.2f} GB")
 
     # Scale the cluster
     logger.info(f"Scaling cluster to {n_workers} workers")

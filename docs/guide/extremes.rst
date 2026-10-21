@@ -93,7 +93,7 @@ The value that was used is recorded in the output attribute ``window_spatial``.
 
 The number of samples behind each threshold is ``n_years × window_days × window_spatial²``,
 and the number beyond the threshold is that times ``1 - q``. marEx logs a warning when fewer
-than 50 samples lie beyond the threshold.
+than 10 samples lie beyond the threshold.
 
 .. list-table::
    :header-rows: 1

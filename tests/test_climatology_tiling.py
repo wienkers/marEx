@@ -23,7 +23,7 @@ import xarray as xr
 from dask.array import zeros as da_zeros
 
 import marEx.core.dimensions as D
-from marEx.anomaly.climatology import rolling_climatology
+from marEx.anomaly.climatology import rolling_climatology, smoothed_rolling_climatology
 from marEx.core.dimensions import tile_spatial_chunks
 
 WINDOW_YEARS = 2
@@ -158,3 +158,27 @@ class TestClimatologyTilingEquivalence:
         assert result.chunksizes["lat"] == da.chunksizes["lat"]
         assert result.chunksizes["lon"] == da.chunksizes["lon"]
         assert result.chunksizes["depth"] == da.chunksizes["depth"]
+
+
+def test_padding_the_years_without_history_does_not_multiply_chunks(monkeypatch):
+    """The first `window_years` have no climatology. Padding them back must stay one indexing task
+    per block: a dask-backed `reindex(fill_value=nan)` OR-ed per-dimension masks of different
+    chunking and raised dask's "Increasing number of chunks" PerformanceWarning once tiled."""
+    import warnings
+
+    from dask.array.core import PerformanceWarning
+
+    # Whole calendar years (1982-1987), so every (year, day) pair the climatology expects is present
+    # and the years without history are padded rather than filled by flox.
+    da = _synthetic(nt=6 * 365 + 1, nlat=36, nlon=72)
+    da = da.assign_coords(time=xr.date_range("1982-01-01", periods=da.sizes["time"], freq="D"))
+    da = da.chunk({"time": 30, "lat": -1, "lon": -1})
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    untiled = smoothed_rolling_climatology(da, 3, 21, dims, dims).compute()
+    monkeypatch.setattr(D, "TASK_ELEMENTS", 15_000)  # ~190 spatial tiles, as on a 0.25 deg global grid
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerformanceWarning)
+        result = smoothed_rolling_climatology(da, 3, 21, dims, dims)
+    values = result.values
+    assert np.isnan(values).any() and not np.isnan(values).all(), "fixture has no padded years; test would prove nothing"
+    np.testing.assert_array_equal(values, untiled.values)
