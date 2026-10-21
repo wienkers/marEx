@@ -18,7 +18,7 @@ event field alone is 15.8 GB), in a 24 GiB job allocation with a 4 x 4 GB = 16 G
 
 | mode | outcome | peak |
 | --- | --- | ---: |
-| `persist` | OOM-killed in 5 of 5 runs (SLURM `OUT_OF_MEMORY`, one `oom_kill` event) | none (killed) |
+| `persist` | OOM-killed in 5 of 5 runs (SLURM `OUT_OF_MEMORY`) | none (killed) |
 | `streaming` | completed in 7 of 7 runs, with the same event and merge counts every time | 6.65 to 7.30 GB |
 
 The peak of the streaming runs is near-flat in series length, for the same allocation and budget:
@@ -59,14 +59,16 @@ against 1.9 GiB for a streaming client).
 ICON R02B09 (14.9 M cells), 1096 steps, 4 x 8 GB = 32 GB dask budget on a whole node: `persist` did not
 complete within 5 h on either of two replicates, while `streaming` completed in 3 h 50 min with matching
 output reductions (4359 events, 9404 merges). This is a wall-clock statement. Both `persist` replicates
-were stopped by the harness's own deadline, with no out-of-memory event, so it does not show that
-`persist` cannot fit. At 16 x 12 GB (192 GB total) `persist` completes the same track in about 72 minutes.
+were stopped by the harness's own deadline, with no kernel out-of-memory kill (the workers' nanny logged
+9 and 10 memory warnings in the two `persist` runs and 11 in the `streaming` run), so it does not show
+that `persist` cannot fit. At 16 x 12 GB (192 GB total) `persist` completes the same track in about 72 minutes.
 The gridded leg, where the kernel killed `persist`, is what the headline rests on, and the
 unstructured result is supporting evidence.
 
 ### Detect Does Not Squeeze
 
-On 9.1 GB of input, `detect` peaks near 127 GB in both modes while `streaming` pins no bytes. Its peak is a
+On 9.1 GB of input (2200 days), `detect` peaks near 127 GB in both modes while `streaming` pins 35 KB against
+`persist`'s 9.95 GB. Its peak is a
 transient that does not depend on the mode, so `compute_mode` cannot move it. Use `streaming` for detect
 to shrink what is pinned, not to lower the peak.
 
@@ -98,10 +100,10 @@ Each of these exists because its absence has produced a wrong answer.
   the marEx line that requested it, including modules that did `from dask import persist`, which a
   patch of `dask.persist` alone would miss.
 - **Spilling stays enabled.** Switching it off deadlocks the cluster, raises the peak (169.5 GB with
-  spilling off against 118.7 GB with it on, on the same run) and kills both modes. `--no-spill` exists
+  spilling off against 118.7 GB with it on, on the same workload and budget) and kills both modes. `--no-spill` exists
   only as a labelled control.
 - **The spill figure says UNMEASURED when it cannot be read**, and is only printed when every requested
-  worker answered. On the headline leg it read 0 bytes across 333 samples, each covering all 4 workers.
+  worker answered. On one 3804-step `streaming` leg it read 0 bytes across 333 samples, each covering all 4 workers.
   That shows the metric reports honestly where nothing should spill. It does not show that nothing could
   have spilled: a spill shorter than the 5 s sampling interval is invisible, and dask's second path to
   disk (the process-memory threshold) was not tracked per worker.
@@ -110,7 +112,7 @@ Each of these exists because its absence has produced a wrong answer.
 - **Squeeze by worker count and record length, never by absurd per-worker memory.** Workers keep 4 to
   12 GB so that per-task working sets stay comfortable and only aggregate memory can bind.
 - **Never size a squeeze from a measured peak.** Peak memory depends on the room given: the same
-  workload peaked at 22.1 GB with a 32 GB budget and at 57.0 GB with 96 GB. Size it from the arithmetic
+  `persist` workload peaked at 13.1 GB with a 16 GB budget and at 22.1 GB with a 32 GB budget. Size it from the arithmetic
   invariant, the whole int32 field `n_time x n_cells x 4 B`.
 
 ## Sizing
@@ -120,16 +122,17 @@ reduction tile, `n_time x cells in one input spatial chunk x 4 B`.
 
 | leg | data | dimensions | input size | input chunk | slab or whole field |
 | --- | --- | --- | ---: | --- | ---: |
-| F1 gridded detect | OSTIA SST | 14761 x 720 x 1440 | 61.2 GB | `{time:30, lat:90, lon:180}` | slab 0.96 GB |
-| F2 unstructured detect | ICON-ESM-ER, 8 yr | 2922 x 14,886,338 | 174.0 GB | `{time:21, ncells:100_000}` | slab 1.17 GB |
-| F3 gridded track | output of F1 | 9282 x 720 x 1440 | 9.6 GB (bool) | `{time:25, lat:-1, lon:-1}` | int32 field 38.5 GB |
-| F4 unstructured track | binary extremes, ICON | 1096 x 14,886,338 | 16.3 GB (bool) | `{time:4, ncells:-1}` | int32 field 65.3 GB |
+| gridded detect | OSTIA SST, first 2200 days | 2200 x 720 x 1440 | 9.1 GB | `{time:30, lat:-1, lon:-1}` | slab 9.1 GB |
+| unstructured detect (probe) | ICON-ESM-ER, first 200 days | 200 x 14,886,338 | 11.9 GB | `{time:21, ncells:100_000}` | slab 0.08 GB |
+| unstructured detect (`f2_*`, not run) | ICON-ESM-ER, 8 yr | 2922 x 14,886,338 | 174.0 GB | `{time:21, ncells:100_000}` | slab 1.17 GB |
+| gridded track | binary extremes, OSTIA | 3804 x 720 x 1440 | 3.9 GB (bool) | `{time:25, lat:-1, lon:-1}` | int32 field 15.8 GB |
+| unstructured track | binary extremes, ICON | 1096 x 14,886,338 | 16.3 GB (bool) | `{time:4, ncells:-1}` | int32 field 65.3 GB |
 
-Gridded detect (F1) was dropped as a squeeze: that path is compute-bound and not memory-bound (both
-modes hit a 12,000 s deadline at 2200 steps on 48 GB), so it says nothing about `compute_mode`. F2 is
-independent and has not been run. F3 needs F1's output store. F4, the gridded-track legs
-(`g1_*`, `g2_*`, `sc_*`) and the unstructured legs (`u2_*`, `u3_*`) are the validated ones, and the
-results above rest on them.
+The gridded detect path is a poor squeeze: it is compute-bound and not memory-bound (at 2200 steps on
+48 GB both modes were stopped by a 12,000 s deadline), so it says nothing about `compute_mode`. It
+is run at 2200 days for equivalence and for the peak figure above. The full eight-year unstructured
+detect leg (`f2_*`) has not been run. The gridded-track legs (`g1_*`, `g2_*`, `sc_*`) and the
+unstructured-track legs (`u2_*`, `u3_*`, `f4_*`) carry the results above.
 
 ## Running
 
@@ -147,6 +150,8 @@ results above rest on them.
 python report.py <measurements-dir>
 ```
 
+`submit.sh` needs `SLURM_ACCOUNT` set (see "Adapting to Another System").
+
 Pre-flight is the cheapest insurance against spending a headline leg on a failure that has nothing to
 do with `compute_mode`.
 
@@ -157,6 +162,25 @@ marEx source line, spill, nanny events, wall clock and output fingerprints) and 
 
 ## Adapting to Another System
 
-Every path is an argument. Only `slurm/submit.sh` and the `DEFAULT_INPUT` constants carry site-specific
-paths. On another cluster, keep the guard rails, above all the memory-limit assertion, and change the
-partitions, the input stores and the per-leg budgets.
+Every path is an argument or an environment variable, and nothing is hardwired to one account.
+
+| setting | how | default |
+| --- | --- | --- |
+| SLURM account | `SLURM_ACCOUNT` (or `SQUEEZE_ACCOUNT`) | none: `submit.sh` refuses to run without it |
+| Python | `MAREX_PYTHON` | `python` on `PATH` |
+| input stores | `MAREX_LTM_DATA` directory, or `--input` per script | `/scratch/<initial>/$USER/mhws` |
+| summaries, scratch, job logs | `SQUEEZE_OUT`, `SQUEEZE_SCRATCH`, `SQUEEZE_LOGS` | under `/work/$SLURM_ACCOUNT/$USER/marEx` and `/scratch/<initial>/$USER/marEx` |
+| ICON grid file | `--grid-file` or `MAREX_ICON_GRID` | the DKRZ `/pool` copy |
+| EERIE catalogue | `MAREX_EERIE_CATALOGUE`, or `--input` to skip it | the public catalogue URL (the `dkrz.disk.model-output` entry is DKRZ-only) |
+
+The partitions and per-leg budgets in `slurm/submit.sh` are Levante's. On another cluster, keep the
+guard rails, above all the memory-limit assertion, and change the partitions, the input stores and the
+budgets.
+
+## Smoke Runs
+
+`SMOKE=1` truncates each script's series (64 steps for the trackers, 365 for detect, unless `--nt`
+is given), sets a 10 minute self-deadline and, in `submit.sh`, a 15 minute wall. It checks the plumbing,
+the paths and the asserted memory limit, not any result in this document. Give a smoke leg a method
+that fits its short series, for example `--method-anomaly detrend_harmonic --method-extreme global_percentile`
+for detect.

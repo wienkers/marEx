@@ -7,6 +7,7 @@ clusters (with specific support for the DKRZ Levante Supercomputer) and
 for retrieving cluster connection information.
 """
 
+import os
 import re
 import subprocess
 from getpass import getuser
@@ -33,7 +34,33 @@ except (ImportError, ValueError):
 
 
 DKRZ_LOG_PATH = Path("/home/b") / getuser() / ".log_trash"
-DKRZ_ACCOUNT = "bk1377"
+# Where the SLURM account comes from when none is passed: sbatch's own input variables first, then the account of
+# the job this process runs in
+ACCOUNT_ENV_VARS = ("SLURM_ACCOUNT", "SBATCH_ACCOUNT", "SLURM_JOB_ACCOUNT")
+
+
+def _slurm_account() -> Optional[str]:
+    """Return the SLURM account to charge when none is passed, or None if it cannot be found.
+
+    An interactive allocation sets SLURM_JOB_ID but not always SLURM_JOB_ACCOUNT, so the job's account is then
+    read back from squeue.
+    """
+    for name in ACCOUNT_ENV_VARS:
+        if os.environ.get(name):
+            return os.environ[name]
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if not job_id:
+        return None
+    try:
+        result = subprocess.run(["squeue", "-h", "-j", job_id, "-o", "%a"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    # A heterogeneous job lists one line per component, all with the same account
+    lines = result.stdout.split()
+    return lines[0] if lines else None
+
 
 # Memory configuration for different node types
 MEMORY_CONFIGS = {
@@ -372,7 +399,9 @@ def start_distributed_cluster(
     scratch_dir : str or Path, optional
         Directory to use for temporary files.
     account : str, optional
-        SLURM account to charge. Defaults to DKRZ_ACCOUNT.
+        SLURM account to charge. Defaults to the first of ``$SLURM_ACCOUNT``, ``$SBATCH_ACCOUNT`` and
+        ``$SLURM_JOB_ACCOUNT`` that is set, then to the account of the job in ``$SLURM_JOB_ID`` (from squeue).
+        A ConfigurationError is raised if none of these gives an account.
     **kwargs
         Additional keyword arguments to pass to SLURMCluster.
 
@@ -507,9 +536,14 @@ def start_distributed_cluster(
     # Configure Dask
     temp_dir = configure_dask(scratch_dir)
 
-    # Use default account if none specified
     if account is None:
-        account = DKRZ_ACCOUNT
+        account = _slurm_account()
+    if account is None:
+        raise ConfigurationError(
+            "No SLURM account for the worker jobs",
+            details=f"account was not passed, none of {', '.join(ACCOUNT_ENV_VARS)} is set, and no SLURM job account was found",
+            suggestions=["Pass account='<project>'", "Or export SLURM_ACCOUNT=<project>"],
+        )
 
     # Validate node_memory
     if node_memory not in MEMORY_CONFIGS:

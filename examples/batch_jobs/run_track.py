@@ -1,130 +1,134 @@
 #!/usr/bin/env python
 """
-Global Daily Event Analysis: Marine Heatwave ID & Tracking using MarEx
+Global daily marine heatwave identification and tracking with marEx.tracker.
 
-Performs morphological preprocessing, blob identification, temporal tracking,
-and graph reduction to create globally unique IDs for each tracked extreme event.
+Script form of examples/gridded/02_id_track_events.ipynb. Reads the extremes written by run_detect.py, identifies
+and tracks events through mergers and splits, and writes the events (zarr) and the merge records (netCDF).
+The basic tracker (no merging, no gap filling) is available behind --basic.
 
-This script should be run INSIDE a SLURM job (via sbatch submit_track.sh).
-It uses a local Dask cluster that utilizes the compute resources allocated to the job.
-This ensures that all computation, including Numba JIT-compiled functions, runs on
-compute nodes rather than the login node.
+Run it inside a SLURM job (submit_track.sh): it starts a local Dask cluster on the job's own node, with
+compute_mode="streaming" so the working set is staged on disk in --temp-dir instead of pinned in memory.
+
+Usage:
+    python run_track.py
+    python run_track.py --smoke   # works on a short run_detect.py --smoke output
 """
 
-import os
+import argparse
 from getpass import getuser
 from pathlib import Path
 
+import dask
 import xarray as xr
 
 import marEx
 import marEx.helper as hpc
 
+SCRATCH = Path("/scratch") / getuser()[0] / getuser()  # Lustre scratch
+
+
+def parse_args():
+    """Parse the command line; defaults reproduce the gridded/02 notebook."""
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=SCRATCH / "marEx" / "examples" / "gridded",
+        help="where run_detect.py wrote its output; events are written here too",
+    )
+    p.add_argument("--input", type=Path, default=None, help="extremes zarr (default: <out-dir>/extremes_shifting_hobday.zarr)")
+    p.add_argument(
+        "--temp-dir", type=Path, default=SCRATCH / "marEx" / "examples" / "tmp", help="staging for compute_mode='streaming'"
+    )
+    p.add_argument("--dask-dir", type=Path, default=SCRATCH / "marEx" / "dask", help="scratch directory for the Dask cluster")
+    p.add_argument("--n-workers", type=int, default=16, help="Dask workers")
+    p.add_argument("--threads-per-worker", type=int, default=8, help="threads per worker")
+    p.add_argument("--memory-limit", default="14GB", help="memory limit per worker")
+    p.add_argument("--basic", action="store_true", help="also run the basic tracker (no merging, no gap filling)")
+    p.add_argument("--smoke", action="store_true", help="quick check: 2 workers x 2 threads x 3 GB, first 365 days of the input")
+    args = p.parse_args()
+    if args.input is None:
+        args.input = args.out_dir / "extremes_shifting_hobday.zarr"
+    if args.smoke:
+        args.n_workers, args.threads_per_worker, args.memory_limit = 2, 2, "3GB"
+    return args
+
 
 def main():
-    """Run MarEx event tracking pipeline on local Dask cluster within SLURM job allocation."""
-    # Configuration from environment variables
-    n_workers = int(os.getenv("DASK_N_WORKERS", "32"))
-    threads_per_worker = int(os.getenv("DASK_THREADS_PER_WORKER", "1"))
+    """Run the merging tracker (and optionally the basic tracker) on a local Dask cluster."""
+    args = parse_args()
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    args.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Tracking configuration
-    run_basic = os.getenv("RUN_BASIC_TRACKER", "false").lower() == "true"
-    grid_resolution = float(os.getenv("GRID_RESOLUTION", "0.25"))
-    area_filter = int(os.getenv("AREA_FILTER", "600"))
-    r_fill = int(os.getenv("R_FILL", "12"))
-    t_fill = int(os.getenv("T_FILL", "4"))
-    overlap_threshold = float(os.getenv("OVERLAP_THRESHOLD", "0.25"))
+    # graphs of a few hundred MB are expected at this scale
+    dask.config.set({"distributed.admin.large-graph-warning-threshold": "1GB"})
 
-    # Lustre Scratch Directory
-    scratch_dir = Path("/scratch") / getuser()[0] / getuser()
-
-    # Start Local Dask Cluster
-    # This cluster runs within the SLURM job allocation, ensuring all computation
-    # (including Numba JIT-compiled functions) executes on compute nodes
-    print("Starting local Dask cluster within SLURM job allocation...")
-    print(f"  Workers: {n_workers}")
-    print(f"  Threads per worker: {threads_per_worker}")
-
+    # memory_limit is passed explicitly because on an HPC node Dask sizes workers from the whole node's memory,
+    # not from the job's allocation, and without it the workers can claim more than the job was granted.
     client = hpc.start_local_cluster(
-        n_workers=n_workers,
-        threads_per_worker=threads_per_worker,
-        scratch_dir=scratch_dir / "clients",
+        n_workers=args.n_workers,
+        threads_per_worker=args.threads_per_worker,
+        memory_limit=args.memory_limit,
+        scratch_dir=args.dask_dir,
     )
 
-    # Choose optimal chunk size & load preprocessed data
-    print("\nLoading preprocessed extremes data...")
-    input_file = scratch_dir / "mhws" / "extremes_binary_gridded_shifting_hobday_batch.zarr"
-    chunk_size = {"time": 25, "lat": -1, "lon": -1}
-    ds = xr.open_zarr(str(input_file), chunks=chunk_size)
-    print(f"Data loaded: {ds}")
+    # Records wall time, peak memory, spill and worker restarts for each `monitor.stage(...)` block below
+    monitor = hpc.ResourceMonitor(client)
 
-    # Run ID, Tracking, & Merging
-    print("\n" + "=" * 80)
-    print("Running Full Tracking with Merge/Split Detection...")
-    print("=" * 80)
+    # Space stays whole because the morphology and the labelling are global in space. Time is the axis to chunk.
+    ds = xr.open_zarr(args.input, chunks={"time": 25, "lat": -1, "lon": -1})
+    if args.smoke:
+        ds = ds.isel(time=slice(0, 365))
+    print(f"Input: {ds.sizes['time']} days")
+    # The lat/lon grid's anisotropy near the pole biases identification & tracking, so cells north of 85° are masked out
+    mask = ds.mask.where((ds.lat < 85) & (ds.lat > -90), other=False)
 
-    tracker = marEx.tracker(
-        ds.extreme_events,
-        ds.mask.where(
-            (ds.lat < 85) & (ds.lat > -90), other=False
-        ),  # Modify Mask: Anisotropy of lat/lon grid near poles biases ID & Tracking
-        grid_resolution=grid_resolution,  # Grid resolution in degrees, used to calculate object areas on the globe
-        area_filter_absolute=area_filter,  # Remove objects smaller than specified cells
-        R_fill=r_fill,  # Fill small holes with radius < R_fill _cells_
-        T_fill=t_fill,  # Allow gaps of T_fill days and still continue event tracking with same ID
-        allow_merging=True,  # Allow extreme events to split/merge. Keeps track of merge events & unique IDs
-        overlap_threshold=overlap_threshold,  # Overlap threshold for merging events
-        nn_partitioning=True,  # Use new NN method to partition merged children areas
-        verbose=True,
-    )
-
-    extreme_events_ds, merges_ds = tracker.run(return_merges=True)
-    print(f"\nTracking complete: {extreme_events_ds}")
-    print(f"Merges dataset: {merges_ds}")
-
-    # Save IDed/Tracked/Merged Events to zarr for efficient parallel I/O
-    print("\nSaving tracked events data...")
-    output_file = scratch_dir / "mhws" / "extreme_events_merged_gridded_shifting_batch.zarr"
-    extreme_events_ds.to_zarr(output_file, mode="w")
-    print(f"Events data saved to: {output_file}")
-
-    # Save Merges Dataset to netcdf
-    print("Saving merges data...")
-    merges_file = scratch_dir / "mhws" / "extreme_events_merged_gridded_shifting_merges_batch.nc"
-    merges_ds.to_netcdf(merges_file, mode="w")
-    print(f"Merges data saved to: {merges_file}")
-
-    # Optionally run basic tracking for comparison
-    if run_basic:
-        print("\n" + "=" * 80)
-        print("Running Basic Tracking (No Merge/Split, No Temporal Gap Filling)...")
-        print("=" * 80)
-
-        tracker_basic = marEx.tracker(
+    events_file = args.out_dir / "events_merged.zarr"
+    with monitor.stage("Track: merging & splitting"):
+        tracker = marEx.tracker(
             ds.extreme_events,
-            ds.mask.where(
-                (ds.lat < 85) & (ds.lat > -90), other=False
-            ),  # Modify Mask: Anisotropy of lat/lon grid near poles biases ID & Tracking
-            area_filter_absolute=area_filter,  # Remove objects smaller than specified cells
-            R_fill=r_fill,  # Fill small holes with radius < R_fill _cells_
-            T_fill=0,  # No temporal hole filling
-            allow_merging=False,  # Do not allow extreme events to split/merge
+            mask,
+            grid_resolution=0.25,  # degrees, for object areas
+            area_filter_absolute=600,  # drop objects smaller than 600 cells
+            R_fill=12,  # fill holes up to 12 cells in radius
+            T_fill=4,  # bridge gaps of up to 4 days within one event
+            allow_merging=True,  # follow events through mergers and splits, recording the mergers in `merges_ds`
+            overlap_threshold=0.25,  # link objects that overlap by at least 25 % of the smaller area
+            nn_partitioning=True,  # partition merged objects by nearest parent cell (False: nearest centroid, Sun et al. 2023)
+            compute_mode="streaming",
+            temp_dir=str(args.temp_dir),
         )
+        extreme_events_ds, merges_ds = tracker.run(return_merges=True)
+        extreme_events_ds.to_zarr(events_file, mode="w")
+        merges_ds.to_netcdf(args.out_dir / "events_merged_merges.nc", mode="w")
 
-        extreme_events_basic_ds = tracker_basic.run()
-        print(f"\nBasic tracking complete: {extreme_events_basic_ds}")
+    # The staging directory outlives the call: clear it once the output is written, then read the result back from disk
+    marEx.clear_staging(extreme_events_ds)
+    extreme_events_ds = xr.open_zarr(events_file, chunks={})
+    print(f"Wrote {events_file}: {extreme_events_ds.sizes['time']} days, {merges_ds.sizes} merge records")
 
-        # Save Basic IDed Events to zarr
-        print("\nSaving basic tracked events data...")
-        basic_output_file = scratch_dir / "mhws" / "extreme_events_basic_gridded_shifting_batch.zarr"
-        extreme_events_basic_ds.to_zarr(basic_output_file, mode="w")
-        print(f"Basic events data saved to: {basic_output_file}")
+    if args.basic:
+        basic_file = args.out_dir / "events_basic.zarr"
+        with monitor.stage("Track: basic"):
+            basic_tracker = marEx.tracker(
+                # 100-day time chunks (four of the stored 25-day chunks): without merging, events are labelled in 3-D, and the
+                # labelling's task graph grows with the number of time chunks, so fewer, longer chunks keep it small
+                ds.extreme_events.chunk({"time": 100}),
+                mask,
+                area_filter_absolute=600,
+                R_fill=12,
+                T_fill=0,  # no temporal gap filling
+                allow_merging=False,  # touching objects share one ID for all time, before and after they touch
+                compute_mode="streaming",
+                temp_dir=str(args.temp_dir),
+            )
+            extreme_events_basic_ds = basic_tracker.run()
+            extreme_events_basic_ds.to_zarr(basic_file, mode="w")
+        marEx.clear_staging(extreme_events_basic_ds)
+        print(f"Wrote {basic_file}")
 
-    # Close the Dask cluster
+    monitor.summary()
     client.close()
-    print("\n" + "=" * 80)
-    print("Tracking complete!")
-    print("=" * 80)
 
 
 if __name__ == "__main__":

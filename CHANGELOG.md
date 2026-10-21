@@ -25,6 +25,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Changed
 
+- `marEx.helper.start_distributed_cluster` no longer defaults to a fixed SLURM account. Without `account=` it uses the first of `$SLURM_ACCOUNT`, `$SBATCH_ACCOUNT` and `$SLURM_JOB_ACCOUNT` that is set, then the account of the job in `$SLURM_JOB_ID` (an interactive allocation), and raises a `ConfigurationError` when none of these gives one.
 - Extreme-method names are domain neutral: `hobday_extreme` is now `seasonal_percentile`, `global_extreme` is now `global_percentile`.
 - Parameter names: `window_year_baseline` -> `window_years`, `smooth_days_baseline` -> `smooth_days`, `window_days_hobday` -> `window_days`, `window_spatial_hobday` -> `window_spatial`, `std_normalise` -> `standardise`. The output attributes carry the new names.
 - `fixed_baseline` and `detrend_fixed_baseline` now smooth their day-of-year climatology with a circular moving average (default `smooth_days=21`, as `shifting_baseline` always did; wraps the year, as in Hobday et al. 2016). `smooth_days=1` restores the unsmoothed climatology. Anomalies from these two methods change by default.

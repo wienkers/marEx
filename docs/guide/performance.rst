@@ -381,9 +381,11 @@ The signature is ``start_distributed_cluster(n_workers, workers_per_node, runtim
 threads_per_worker=1, node_memory=256, dashboard_address=8889, queue='compute', scratch_dir=None,
 account=None, verbose=None, quiet=None, **kwargs)``. Each node runs ``workers_per_node`` processes of
 ``threads_per_worker`` threads. Fewer, multi-threaded workers mean fewer peers in every all-to-all
-transfer. The function was written for the DKRZ Levante machine: the defaults for
-network interface and log directory are specific to it, and ``node_memory`` outside 256, 512 and 1024
-raises ``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
+transfer. Without ``account`` the worker jobs are charged to ``$SLURM_ACCOUNT``, ``$SBATCH_ACCOUNT`` or
+``$SLURM_JOB_ACCOUNT``, the first that is set, or else to the account of the SLURM job the call runs
+in. The function was written for the DKRZ Levante machine: the defaults for network interface and log
+directory are specific to it, and ``node_memory`` outside 256, 512 and 1024 raises
+``ConfigurationError``. On another site, construct a ``dask_jobqueue`` cluster directly with the
 same memory and spill settings, or run marEx inside a single batch allocation with
 ``start_local_cluster`` and an explicit ``memory_limit``. Inside an allocation, keep
 ``n_workers × memory_limit`` below the memory you were granted.
@@ -543,6 +545,9 @@ What these rows say:
   harness deadline on both attempts, with no out-of-memory event recorded, and ``streaming``
   completed in 3 h 50 min. That is a wall-clock statement and not a statement that ``persist``
   cannot fit.
+
+The scripts behind these rows, with the SLURM legs that produced each one and the per-run summaries they write, are
+in `examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_.
 
 Choosing a Strategy
 ===================

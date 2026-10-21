@@ -46,15 +46,48 @@ GB = 1e9
 # --------------------------------------------------------------------------------------
 # Command line
 # --------------------------------------------------------------------------------------
-def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the CLI flags shared by every squeeze leg (cluster shape, mode, scratch, deadline)."""
+def default_data_path(name: str) -> str:
+    """Return the default location of an input store: ``$MAREX_LTM_DATA/<name>``.
+
+    ``MAREX_LTM_DATA`` defaults to ``/scratch/<u>/<user>/mhws`` (``<u>`` the first letter of
+    the user name, the DKRZ scratch layout).  Every script also takes ``--input``.
+    """
+    import getpass
+
+    user = os.environ.get("USER") or getpass.getuser()
+    root = os.environ.get("MAREX_LTM_DATA") or f"/scratch/{user[:1]}/{user}/mhws"
+    return str(Path(root) / name)
+
+
+def apply_smoke(args, nt: int = 64) -> None:
+    """Shrink a leg to a plumbing check when the environment sets ``SMOKE=1``.
+
+    Truncates the series to ``nt`` steps (unless ``--nt`` was given) and gives the leg a
+    10 minute self-imposed deadline, so a smoke run writes a summary and exits well inside
+    a 15 minute wall.  Does nothing without ``SMOKE=1``.
+    """
+    if os.environ.get("SMOKE") != "1":
+        return
+    if not args.nt:
+        args.nt = nt
+    if not args.deadline:
+        args.deadline = 600
+    print(f"[{args.label}] SMOKE=1: nt={args.nt}, deadline={args.deadline} s", flush=True)
+
+
+def add_common_args(parser: argparse.ArgumentParser, modes: tuple = ("persist", "lazy", "streaming")) -> argparse.ArgumentParser:
+    """Add the CLI flags shared by every squeeze leg (cluster shape, mode, scratch, deadline).
+
+    ``modes`` lists the ``compute_mode`` values the leg accepts; the tracker legs pass
+    ``("persist", "streaming")`` so that ``--mode lazy`` is rejected at parse time.
+    """
     parser.add_argument("--label", required=True, help="Identifier for this leg; names the summary file.")
     parser.add_argument("--outdir", required=True, help="Directory for the JSON summary and memory series.")
     parser.add_argument(
         "--mode",
         default="persist",
-        choices=("persist", "lazy", "streaming"),
-        help="compute_mode under test. 'lazy' is detect-only.",
+        choices=modes,
+        help="compute_mode under test (" + ", ".join(modes) + "). 'lazy' is detect-only.",
     )
     parser.add_argument("--nt", type=int, default=0, help="Truncate the input to this many timesteps (0 = all).")
     parser.add_argument("--workers", type=int, default=8)

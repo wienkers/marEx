@@ -1,36 +1,43 @@
 #!/usr/bin/env python
 """Larger-than-memory squeeze: `marEx.preprocess_data` on an unstructured (ICON) mesh.
 
-Input is the EERIE ICON-ESM-ER R02B09 ocean mesh, 14,886,338 cells.  The full hist-1950
-record is 23741 days, i.e. **1.41 TB** of float32; the default eight-year slice used here
-is 174 GB.  Under ``persist`` that pins about 104 GB (dat_anomaly 65.3, thresholds 21.8,
-extreme_events 16.3), so a cluster of 64 GB cannot hold it however the time axis is
-chunked -- ``thresholds`` in particular is *space*-scaled and does not shrink with time
-chunking at all.  Under ``streaming`` those anchors are staged to a scratch zarr instead.
+Input is the EERIE ICON-ESM-ER R02B09 ocean mesh, 14,886,338 cells.  The default
+eight-year slice (2007 to 2014, 2922 days) is 174 GB of float32 (``n_time x n_cells x 4 B``).
+Under ``persist`` the anchors that ``preprocess_data`` keeps are pinned in cluster memory;
+under ``streaming`` they are staged to a scratch zarr instead.  At 200 steps the pinned
+totals were 31.3 GB (``persist``) and 0.71 GB (``streaming``); the full eight-year leg has not
+been run.  ``thresholds`` is *space*-scaled and does not shrink with time chunking.
 
-The catalogue read needs internet, which on this system means the ``shared`` partition
-rather than ``compute``.  Pass ``--input`` to read a pre-staged local zarr instead and the
-leg becomes network-free.
+The catalogue read needs internet (the ``shared`` partition on DKRZ Levante).  Pass
+``--input`` to read a pre-staged local zarr instead and the leg becomes network-free; the
+grid file (``--grid-file`` or ``$MAREX_ICON_GRID``) is needed either way.
 
 Chunking, as in the gridded leg, is set by the *spatial* width: the notebook's
 ``ncells=100_000`` bounds one full-time slab at ``n_time x 100_000 x 4 B`` (1.17 GB over
-eight years).  Leaving ``ncells`` whole makes it 174 GB and the run thrashes rather than
+eight years, arithmetic).  Leaving ``ncells`` whole makes it 174 GB and the run thrashes rather than
 failing.  The time chunk must stay at or above ``smooth_days``.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 from detect_gridded import fingerprint
-from squeeze_common import GB, add_common_args, execute
+from squeeze_common import GB, add_common_args, apply_smoke, execute
 
 import marEx
 
-GRID_FILE = "/pool/data/ICON/grids/public/mpim/0016/icon_grid_0016_R02B09_O.nc"
-CATALOGUE = "https://raw.githubusercontent.com/eerie-project/intake_catalogues/main/eerie.yaml"
+# DKRZ-only resources.  The ICON R02B09 ocean grid file lives on the DKRZ /pool; override it
+# with --grid-file or $MAREX_ICON_GRID on another system.  The default input is read through
+# the EERIE intake catalogue, whose "dkrz.disk.model-output" key is likewise DKRZ-specific;
+# pass --input (a local zarr with the variable on an ``ncells`` dimension) to avoid it.
+GRID_FILE = os.environ.get("MAREX_ICON_GRID", "/pool/data/ICON/grids/public/mpim/0016/icon_grid_0016_R02B09_O.nc")
+CATALOGUE = os.environ.get(
+    "MAREX_EERIE_CATALOGUE", "https://raw.githubusercontent.com/eerie-project/intake_catalogues/main/eerie.yaml"
+)
 
 
 def load_from_catalogue(start: str, end: str) -> xr.DataArray:
@@ -48,6 +55,7 @@ def main() -> None:
     """Run the unstructured detect leg: build the input, size the histogram slab, execute."""
     parser = add_common_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--input", default="", help="Local zarr instead of the EERIE catalogue (no internet needed).")
+    parser.add_argument("--grid-file", default=GRID_FILE, help="ICON grid file with neighbor_cell_index and cell_area.")
     parser.add_argument("--var", default="to")
     parser.add_argument("--start", default="2007-01-01")
     parser.add_argument("--end", default="2014-12-31")
@@ -59,6 +67,7 @@ def main() -> None:
     parser.add_argument("--out-time-chunk", type=int, default=2)
     parser.add_argument("--write-output", default="")
     args = parser.parse_args()
+    apply_smoke(args, nt=365)
 
     if args.input:
         da = xr.open_zarr(args.input)[args.var]
@@ -68,7 +77,7 @@ def main() -> None:
         da = da.isel(time=slice(0, args.nt))
     da = da.chunk({"time": args.time_chunk, "ncells": args.ncells_chunk})
 
-    grid = xr.open_dataset(GRID_FILE, chunks={}).rename({"cell": "ncells"})
+    grid = xr.open_dataset(args.grid_file, chunks={}).rename({"cell": "ncells"})
     neighbours = grid.neighbor_cell_index.rename({"clat": "lat", "clon": "lon"})
     cell_areas = grid.cell_area.rename({"clat": "lat", "clon": "lon"})
 

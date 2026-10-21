@@ -19,17 +19,17 @@ import argparse
 import sys
 
 import xarray as xr
-from squeeze_common import GB, add_common_args, execute
+from squeeze_common import GB, add_common_args, apply_smoke, default_data_path, execute
 from track_gridded import run_and_fingerprint
 
 import marEx
 
-DEFAULT_INPUT = "/scratch/b/b382615/mhws/extremes_binary_unstruct_shifting_hobday.zarr"
+DEFAULT_INPUT = default_data_path("extremes_binary_unstruct_shifting_hobday.zarr")
 
 
 def main() -> None:
     """Run the unstructured track leg: build the input, size the whole-field arrays, execute."""
-    parser = add_common_args(argparse.ArgumentParser(description=__doc__))
+    parser = add_common_args(argparse.ArgumentParser(description=__doc__), modes=("persist", "streaming"))
     parser.add_argument("--input", default=DEFAULT_INPUT)
     parser.add_argument("--time-chunk", type=int, default=4)
     parser.add_argument("--R-fill", type=int, default=32)
@@ -41,6 +41,7 @@ def main() -> None:
     parser.add_argument("--no-allow-merging", dest="merging", action="store_false", default=True)
     parser.add_argument("--temp-dir", required=True)
     args = parser.parse_args()
+    apply_smoke(args)
 
     ds = xr.open_zarr(args.input, chunks={"time": args.time_chunk, "ncells": -1})
     if args.nt:
