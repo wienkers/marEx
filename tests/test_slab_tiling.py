@@ -128,7 +128,8 @@ def test_extra_dim_does_not_restack_into_a_starved_tile():
 @pytest.mark.parametrize("window_spatial", [None, 3, 5])
 @pytest.mark.parametrize("tail, q", [("upper", 0.95), ("lower", 0.05)])
 def test_gridded_values_unchanged_under_a_small_cap(monkeypatch, window_spatial, tail, q):
-    # A cap of 4 cuts the 6 x 7 fixture into tiles narrower than the halo and across the x wrap.
+    # A cap of 4 cuts the 6 x 7 fixture into tiles narrower than the halo; the fixture is regional
+    # (no x wrap), so the edge pad is pinned.
     monkeypatch.setattr(H, "_SLAB_TILE_CELLS", 4)
     da, cycle = _field(shape=(6, 7))
     tiles = H._slab_tile_chunks(da, GRID_DIMS, window_spatial, cycle.length)
