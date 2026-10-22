@@ -31,6 +31,7 @@ keywords:
   - "dask"
   - "python"
 version: "5.0.0"
+license: AGPL-3.0-or-later
 preferred-citation:
   type: software
   title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"

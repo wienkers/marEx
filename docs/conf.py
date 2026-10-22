@@ -151,6 +151,7 @@ html_context = {
 }
 
 html_static_path = ["_static"]
+html_extra_path = ["_extra"]
 html_css_files = ["custom.css"]
 html_short_title = project
 html_last_updated_fmt = "%b %d, %Y"

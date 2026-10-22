@@ -177,6 +177,14 @@ When using marEx in publications, please cite:
 
 ---
 
+## License
+
+From version 5.0, marEx is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). You can use, study, modify and share it freely. If you distribute a modified version, or run one as a network service, you must release your changes under the same licence. Keep the [NOTICE](NOTICE) and cite marEx in published work. Earlier releases keep the terms they were distributed with.
+
+The code and documentation are reserved from text and data mining, including AI model training (Art. 4(3) of the EU Directive 2019/790). For other licensing terms, [get in touch](mailto:aaron.wienkers@gmail.com).
+
+---
+
 ## Funding
 
 * The [EERIE](https://eerie-project.eu) (European Eddy-Rich ESMs) Project

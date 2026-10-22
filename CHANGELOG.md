@@ -25,6 +25,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Changed
 
+- Licence: marEx 5.0 and later is released under the GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`). Earlier releases keep their original terms. See `LICENSE` and `NOTICE`, which also reserve the code and documentation from text and data mining for AI training.
 - `marEx.helper.start_distributed_cluster` no longer defaults to a fixed SLURM account. Without `account=` it uses the first of `$SLURM_ACCOUNT`, `$SBATCH_ACCOUNT` and `$SLURM_JOB_ACCOUNT` that is set, then the account of the job in `$SLURM_JOB_ID` (an interactive allocation), and raises a `ConfigurationError` when none of these gives one.
 - Extreme-method names are domain neutral: `hobday_extreme` is now `seasonal_percentile`, `global_extreme` is now `global_percentile`.
 - Parameter names: `window_year_baseline` -> `window_years`, `smooth_days_baseline` -> `smooth_days`, `window_days_hobday` -> `window_days`, `window_spatial_hobday` -> `window_spatial`, `std_normalise` -> `standardise`. The output attributes carry the new names.

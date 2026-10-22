@@ -7,6 +7,7 @@ Thank you for your interest in contributing to marEx. This guide covers the deve
 - [Getting Started](#getting-started)
 - [Development Environment Setup](#development-environment-setup)
 - [Contribution Workflow](#contribution-workflow)
+  - [Contributor License Agreement](#contributor-license-agreement)
 - [Code Style Guidelines](#code-style-guidelines)
 - [Testing Requirements](#testing-requirements)
 - [Documentation Guidelines](#documentation-guidelines)
@@ -80,6 +81,11 @@ pytest tests/test_api_surface.py -q
 2. Make focused changes, with tests for new behaviour and docstrings for new public functions.
 3. Run the relevant tests (see [Testing Requirements](#testing-requirements)) and the pre-commit hooks.
 4. Commit, push to your fork, and open a pull request against `main`. Describe the motivation and what you tested.
+5. Agree to the [Contributor License Agreement](CLA.md) by ticking its box in the pull request template. It is needed once, before your first contribution is merged.
+
+### Contributor License Agreement
+
+marEx is released under the GNU Affero General Public License v3.0 or later. You keep the copyright in your contributions. The [CLA](CLA.md) grants the maintainer a licence to distribute them under the AGPL and under other terms, which keeps the option of commercial licences open. If your employer has rights in your work, make sure you have its permission before contributing.
 
 ## Code Style Guidelines
 

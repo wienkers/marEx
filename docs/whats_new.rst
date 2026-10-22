@@ -15,6 +15,7 @@ Version 5.0 splits the detect stage into three peer stages, each usable on its o
 * **Tracker.** ``prefilter_min_cells`` drops small objects before the morphology step; ``mask`` is optional; merge and parent records are 64 wide (were 20 and 10); the unstructured tracker's events no longer depend on the time chunking, except for equidistant tie-breaks.
 * **Zarr 3.** zarr-python 2 (``>=2.18``) and 3 are both supported, along with current xarray releases. Dask is un-pinned (``>=2025.9.0``).
 * **Resource monitor.** ``marEx.helper.ResourceMonitor`` reports wall time and memory per pipeline stage.
+* **Licence.** From 5.0, marEx is released under the GNU Affero General Public License v3.0 or later. Earlier releases keep their original terms.
 
 Already in 4.1.x
 ----------------
