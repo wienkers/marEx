@@ -300,3 +300,117 @@ class TestAnimateExecutesWithMaterialisedCoords:
 
         assert result is not None
         assert result.endswith(".mp4")
+
+
+class TestFrameCentroids:
+    """Centroid markers belong to the objects present in the frame, taken from the ID field."""
+
+    @staticmethod
+    def _centroids():
+        # (component, ID): component 0 = lat, 1 = lon; ID 2 is absent at this time step (NaN).
+        values = np.array([[10.0, np.nan, 30.0], [100.0, np.nan, 300.0]])
+        return xr.DataArray(values, dims=("component", "ID"), coords={"ID": [1, 2, 3]})
+
+    def test_ids_come_from_the_id_field_not_the_animated_values(self):
+        from marEx.plotX.animation import _frame_centroids
+
+        object_ids = np.array([[0, 3], [3, 0]])
+
+        assert _frame_centroids(self._centroids(), object_ids) == [(300.0, 30.0)]
+
+    def test_nan_background_in_a_masked_id_field_is_ignored(self):
+        from marEx.plotX.animation import _frame_centroids
+
+        object_ids = np.array([[np.nan, 1.0], [3.0, np.nan]])
+
+        assert _frame_centroids(self._centroids(), object_ids) == [(100.0, 10.0), (300.0, 30.0)]
+
+    def test_without_an_id_field_every_finite_centroid_is_drawn(self):
+        from marEx.plotX.animation import _frame_centroids
+
+        assert _frame_centroids(self._centroids(), None) == [(100.0, 10.0), (300.0, 30.0)]
+
+
+class TestMakeFrameCentroidIdSource:
+    """``make_frame`` picks the IDs for the centroid markers from ``object_ids``, never from the
+    animated field: on an anomaly movie, values such as 1.0 or 3.0 are not object IDs."""
+
+    @staticmethod
+    def _frame(monkeypatch, tmp_path, plot_IDs, with_object_ids):
+        from marEx.plotX import animation as animation_mod
+
+        lat = np.linspace(-10, 10, 4)
+        lon = np.linspace(0, 30, 4)
+        anomaly = xr.DataArray(np.array([[1.0, 3.0, 0.5, -1.0]] * 4), dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+        ids = np.zeros((4, 4), dtype=int)
+        ids[0, 0] = 2
+        object_ids = xr.DataArray(ids, dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+        centroids = xr.DataArray(
+            np.array([[0.0, 5.0, 8.0], [10.0, 15.0, 20.0]]), dims=("component", "ID"), coords={"ID": [1, 2, 3]}
+        )
+
+        seen = []
+        real = animation_mod._frame_centroids
+
+        def spy(centroids, id_field):
+            seen.append(None if id_field is None else np.array(id_field))
+            return real(centroids, id_field)
+
+        monkeypatch.setattr(animation_mod, "_frame_centroids", spy)
+        plot_params = {
+            "cmap": "viridis",
+            "norm": None,
+            "clim": (-1.0, 3.0),
+            "var_units": "",
+            "extend": "both",
+            "show_colorbar": False,
+            "grid_labels": False,
+            "projection": None,
+            "x_coord": "lon",
+            "y_coord": "lat",
+            "plot_IDs": plot_IDs,
+            "centroids": centroids,
+            "object_ids": object_ids if with_object_ids else None,
+        }
+        animation_mod.make_frame(anomaly, 0, tmp_path, plot_params).compute(scheduler="synchronous")
+        assert len(seen) == 1
+        return seen[0], ids
+
+    def test_anomaly_movie_with_object_ids_reads_ids_from_object_ids(self, monkeypatch, tmp_path):
+        id_field, ids = self._frame(monkeypatch, tmp_path, plot_IDs=False, with_object_ids=True)
+
+        np.testing.assert_array_equal(id_field, ids)
+
+    def test_anomaly_movie_without_object_ids_draws_every_finite_centroid(self, monkeypatch, tmp_path):
+        id_field, _ = self._frame(monkeypatch, tmp_path, plot_IDs=False, with_object_ids=False)
+
+        assert id_field is None
+
+    def test_id_movie_without_object_ids_reads_ids_from_the_animated_field(self, monkeypatch, tmp_path):
+        id_field, _ = self._frame(monkeypatch, tmp_path, plot_IDs=True, with_object_ids=False)
+
+        np.testing.assert_array_equal(id_field, np.array([[1.0, 3.0, 0.5, -1.0]] * 4))
+
+
+class TestAnimatePassesPlotIDsToFrames:
+    """``make_frame`` only knows the animated field is an ID field if ``_animate`` says so."""
+
+    @pytest.mark.parametrize("plot_IDs", [True, False])
+    def test_plot_ids_reaches_every_frame(self, zarr_da, dask_client, monkeypatch, tmp_path, plot_IDs):
+        from marEx.plotX.config import PlotConfig
+
+        animation_mod = TestAnimateExecutesWithMaterialisedCoords._stub_animate_deps(monkeypatch)
+
+        @dask.delayed
+        def checking_make_frame(data_slice, time_ind, temp_dir, plot_params, grid_info):
+            # Raised inside the task, so it propagates out of `_animate`'s dask.compute.
+            if plot_params.get("plot_IDs") is not plot_IDs:
+                raise AssertionError(f"plot_IDs={plot_params.get('plot_IDs')!r}, expected {plot_IDs!r}")
+            filename = f"time_{time_ind:04d}.jpg"
+            (Path(temp_dir) / filename).write_bytes(b"\x00")
+            return filename
+
+        monkeypatch.setattr(animation_mod, "make_frame", checking_make_frame)
+        plotter = TestAnimateExecutesWithMaterialisedCoords._stub_plotter(zarr_da)
+
+        assert animation_mod._animate(plotter, PlotConfig(plot_IDs=plot_IDs), plot_dir=str(tmp_path)) is not None

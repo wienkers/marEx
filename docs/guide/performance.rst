@@ -267,8 +267,8 @@ threads and 14 GB each:
 These runs used an earlier version of the histogram stage. A later per-cell kernel, before the
 data-derived default bins, completed the two global 40-year rows in the table below at no more than
 about 1.4 GB per thread (cgroup peak, page cache included), so the figures here are a conservative
-bound. Read 14 GB per 4-thread worker as the edge for that earlier stage at this size and budget
-above it. Size ``memory_limit`` from the largest single worker's peak, which
+bound. For that earlier stage at this size, treat 14 GB per 4-thread worker as the edge, and
+budget above it. Size ``memory_limit`` from the largest single worker's peak, which
 :class:`~marEx.helper.ResourceMonitor` reports per stage, not from the summed peak. In the detect
 runs of the example notebooks the largest worker reached 5.3 GB of 7.8 GB on single-threaded workers
 (global 0.25°, 40 years of input, ``persist``) and 24.4 GB of 31.2 GB on 8-thread workers (ICON,

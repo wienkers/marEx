@@ -130,7 +130,7 @@ jobs:
 
     - name: Run unit tests
       run: |
-        pytest tests/test_detect_helpers.py tests/test_track_helpers.py -n 2 -v --tb=short
+        pytest tests/test_stage_helpers.py tests/test_track_helpers.py -n 2 -v --tb=short
 
     - name: Run error handling tests
       run: |

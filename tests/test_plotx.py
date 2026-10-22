@@ -1566,3 +1566,55 @@ class TestEmptyIdField:
         shown = np.ma.compressed(im.get_array())
         assert set(np.unique(shown)) == {3.0, 7.0}
         assert not [r for r in plotx_warnings.records if r.levelname == "WARNING" and "no objects" in r.getMessage()]
+
+
+class TestIdPlotNamedCmap:
+    """``PlotConfig.cmap`` documents a colormap name as valid, including for an ID plot."""
+
+    @staticmethod
+    def _ids(n_ids):
+        lon = np.arange(2.5, 360, 5.0)
+        lat = np.arange(-87.5, 90, 5.0)
+        values = np.zeros((36, 72), dtype=int)
+        values.flat[:n_ids] = np.arange(1, n_ids + 1)
+        return xr.DataArray(values, dims=("lat", "lon"), coords={"lat": lat, "lon": lon})
+
+    @pytest.mark.parametrize("n_ids", [5, 300])
+    def test_named_cmap_gives_one_bin_per_id(self, agg_backend, n_ids):
+        # 300 IDs is more than viridis's 256 colours, which a BoundaryNorm would reject.
+        fig, ax, im = self._ids(n_ids).plotX.single_plot(marEx.PlotConfig(plot_IDs=True, cmap="viridis"))
+        fig.canvas.draw()
+
+        assert im.cmap.N == n_ids
+
+    def test_listed_cmap_is_used_as_given(self, agg_backend):
+        from matplotlib.colors import ListedColormap
+
+        cmap = ListedColormap(np.random.default_rng(0).random((5, 3)))
+        fig, ax, im = self._ids(5).plotX.single_plot(marEx.PlotConfig(plot_IDs=True, cmap=cmap))
+
+        assert im.cmap.N == 5
+        np.testing.assert_array_equal(im.cmap.colors, cmap.colors)
+
+    @pytest.mark.parametrize("cmap", ["tab10", "short_listed"])
+    def test_a_map_shorter_than_the_ids_cycles_so_neighbours_differ(self, agg_backend, cmap):
+        from matplotlib.colors import ListedColormap
+
+        n_colours = 10 if cmap == "tab10" else 5
+        if cmap == "short_listed":
+            cmap = ListedColormap(np.random.default_rng(0).random((n_colours, 3)))
+        fig, ax, im = self._ids(300).plotX.single_plot(marEx.PlotConfig(plot_IDs=True, cmap=cmap))
+        fig.canvas.draw()
+
+        colours = im.cmap(np.arange(300))
+        assert im.cmap.N == 300
+        assert not np.array_equal(colours[0], colours[1])
+        np.testing.assert_array_equal(colours[0], colours[n_colours])
+
+    def test_listed_cmap_longer_than_the_ids_is_used_as_given(self, agg_backend):
+        from matplotlib.colors import ListedColormap
+
+        cmap = ListedColormap(np.random.default_rng(0).random((10, 3)))
+        fig, ax, im = self._ids(5).plotX.single_plot(marEx.PlotConfig(plot_IDs=True, cmap=cmap))
+
+        assert im.cmap is cmap
