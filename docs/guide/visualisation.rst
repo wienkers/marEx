@@ -211,7 +211,8 @@ Plotting Event IDs
 
 ``plot_IDs=True`` is for the ``ID_field`` of the tracker (see :doc:`tracking`). IDs of 0 (the
 background) are masked, every ID gets its own colour from a fixed random seed, and the
-colourbar is switched off. Pass a ``cmap`` to use your own colours. An ``ID_field`` with no
+colourbar is switched off. To use your own colours pass a Matplotlib ``Colormap`` object (not a
+name) with at least as many entries as the largest ID. An ``ID_field`` with no
 objects (all zeros) plots an empty map and logs a warning.
 
 .. code-block:: python
@@ -247,10 +248,9 @@ The file name gets ``.mp4`` appended when it is missing, and defaults to
 Overlaying Tracked Events
 -------------------------
 
-A movie of the extreme-event mask or the anomaly can show the tracker output as outlines and
-centroid markers. ``object_ids`` takes an ID field (cells with ID > 0 are contoured as one
-outline) and ``centroids`` the ``centroid`` array of the tracker, with dimensions
-``(component, time, ID)`` in which ``component=0`` is latitude and ``1`` longitude:
+A movie can show the tracker output as outlines and centroid markers. ``object_ids`` takes an
+ID field (cells with ID > 0 are contoured as one outline, on regular grids only) and can be laid
+over any field, such as the anomaly:
 
 .. code-block:: python
 
@@ -258,8 +258,20 @@ outline) and ``centroids`` the ``centroid`` array of the tracker, with dimension
        marEx.PlotConfig(title="Anomaly and Tracked Events", issym=True),
        plot_dir="./animations",
        file_name="events_on_anomaly",
-       centroids=events.centroid,
        object_ids=events.ID_field,
+   )
+
+``centroids`` takes the ``centroid`` array of the tracker, with dimensions
+``(component, time, ID)`` in which ``component=0`` is latitude and ``1`` longitude. A marker is
+drawn for each ID present in the animated field itself, so animate the ``ID_field``:
+
+.. code-block:: python
+
+   movie_path = events.ID_field.plotX.animate(
+       marEx.PlotConfig(title="Tracked Events", plot_IDs=True),
+       plot_dir="./animations",
+       file_name="events_with_centroids",
+       centroids=events.centroid,
    )
 
 Unstructured Meshes

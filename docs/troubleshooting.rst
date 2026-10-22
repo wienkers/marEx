@@ -35,7 +35,8 @@ Reading a Failure
 **symptoms**. They are almost never the cause, and a run that dies with any of them should be
 treated as a memory problem until the logs show otherwise.
 
-The usual chain is an oversized task, a worker that crosses 95 % of its memory limit, a restart by the
+The usual chain is an oversized task, a worker that crosses its termination threshold (80 % of its
+memory limit under ``start_local_cluster``, dask's default of 95 % elsewhere), a restart by the
 nanny, and then an error somewhere else. A shuffle that loses its state when its worker restarts
 raises ``P2PConsistencyError: No active shuffle with id=... found``. A task that has failed too often
 raises ``KilledWorker``. A run that restarts workers repeatedly makes no progress and is eventually
@@ -45,7 +46,7 @@ Look for the cause above the final traceback:
 
 .. code-block:: text
 
-   distributed.nanny.memory - WARNING - Worker ... exceeded 95% memory budget. Restarting...
+   distributed.nanny.memory - WARNING - Worker ... exceeded 80% memory budget. Restarting...
 
 .. _troubleshooting-worker-warnings:
 
@@ -69,7 +70,7 @@ restore the level for the run:
 What to Try, in Order
 ---------------------
 
-1. **Find the real error.** Search the log for ``exceeded 95%`` and read what came before it.
+1. **Find the real error.** Search the log for ``memory budget. Restarting`` and read what came before it.
 2. **Compute the per-task working set** and compare it with one worker's ``memory_limit`` divided
    among its threads. This is the most common miss. For detect on a large mesh the working set is
    ``n_time × cells in one input spatial chunk × 4 B`` (see :ref:`performance-chunking`).
@@ -199,14 +200,13 @@ below are the common ones.
      - Lower it below the area of the largest object.
    * - ``TrackingError``: no objects larger than the cutoff on an unstructured grid
      - Objects of 5 cells or fewer (50 under ``area_filter_quartile``) are dropped before the area filter.
-     - Check that ``data_bin`` has events inside the mask, or lower the threshold percentile.
+     - Check that ``data_bin`` has events inside the mask, or relax the detection threshold.
    * - ``CoordinateError`` on longitude range
      - The tracker detects coordinate units from a roughly 360 degree range.
      - For regional data use ``regional_tracker`` with ``coordinate_units``.
    * - Unstructured tracker rejects the input
-     - It needs ``neighbours``, ``cell_areas`` and ``temp_dir``, and every time chunk must hold at
-       least two steps.
-     - Supply them, and re-chunk after any ``.sel`` so that no final chunk has a single step.
+     - It needs ``neighbours``, ``cell_areas`` and ``temp_dir``.
+     - Supply them.
    * - Time chunks rejected in streaming
      - The tracker needs uniformly chunked time.
      - It re-chunks with a warning. Chunk time uniformly yourself to avoid the cost.
@@ -216,17 +216,18 @@ below are the common ones.
 Warning About the Per-Task Element Budget
 =========================================
 
-On sub-daily data you may see a warning that one task "exceeds the per-task element budget". The
-per-cell output of the day-of-year histogram grows with the number of steps per day, while the
-spatial window set by ``window_spatial`` does not shrink, so at the gridded default of ``window_spatial=5`` the
-tile the budget allows is smaller than the window needs. marEx uses the larger tile and warns, and the
-warning never alters the result. It names the estimate, the budget and the window that forced it.
+On a very long record you may see a warning that one task "exceeds the per-task element budget".
+Each cell in a task counts the larger of its number of timesteps and the cycle length, and the
+spatial window set by ``window_spatial`` sets a minimum tile, so once ``n_time × window_spatial²``
+exceeds the budget the tile the budget allows is smaller than the window needs. At the gridded
+default of ``window_spatial=5`` that takes more than 2 million timesteps. marEx uses the larger
+tile and warns, and the warning never alters the result. It names the estimate, the budget and
+the window that forced it.
 
 If the run then dies on memory, apply one of these:
 
 * a narrower ``window_spatial``,
-* a shorter ``window_years``,
-* a coarser ``precision`` (fewer bins),
+* a shorter record,
 * fewer threads per worker at the same ``memory_limit``,
 * ``compute_mode="streaming"``.
 
@@ -269,11 +270,14 @@ Unexpected Results
 ------------------
 
 * Check the input for the units you expect and for a land mask that is NaN at the first step.
-* ``dat_anomaly`` should have a mean close to zero.
-* The fraction of ``extreme_events`` should be close to ``100 - threshold_percentile`` per cell. With
-  few years of data the fraction can be off, and marEx logs a warning when fewer than 10 samples lie
-  beyond the threshold.
-* Approximate thresholds differ from exact ones by up to a few histogram bins. See
+* ``dat_anomaly`` from ``detrend_harmonic``, or from either fixed-baseline method over the full
+  record, should have a mean close to zero. ``shifting_baseline`` and a restricted
+  ``reference_period`` leave an offset that grows with any trend in the data.
+* The fraction of ``extreme_events`` should be close to ``100 - threshold_percentile`` per cell
+  (``threshold_percentile`` for ``tail="lower"``). With few years of data the fraction can be off,
+  and marEx logs a warning when fewer than 10 samples are expected beyond the threshold.
+* On sparse seasonal samples, approximate and exact thresholds can differ by tens of histogram bins,
+  because they take different order statistics, and a finer ``precision`` does not close the gap. See
   :doc:`guide/validation`.
 
 Installation

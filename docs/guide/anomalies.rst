@@ -166,7 +166,9 @@ Detrending
 
 ``detrend_orders`` lists the polynomial orders to remove. The default ``[1]`` removes a
 linear trend, and ``[1, 2]`` adds a quadratic. It must be non-empty and contain orders of at
-least 1. With ``force_zero_mean=True`` the final anomaly is shifted to zero mean.
+least 1. With ``force_zero_mean=True`` the detrended field is shifted to zero mean.
+``detrend_fixed_baseline`` then subtracts its reference climatology, so its final anomaly is not
+guaranteed to have zero mean.
 
 .. code-block:: python
 
@@ -184,7 +186,7 @@ Standardising
 =============
 
 ``standardise=True`` (``detrend_harmonic`` only) divides the anomaly by a local standard
-deviation, a 30-day rolling mean of the per-day-of-year standard deviation, and returns it as
+deviation, the square root of a circular 30-day rolling mean of the per-day-of-year variance, and returns it as
 ``dat_stn`` with the divisor as ``STD``. Through ``preprocess_data`` the extremes stage then
 runs a second time on ``dat_stn`` and adds ``extreme_events_stn`` and ``thresholds_stn``.
 Use it when variability differs strongly between regions or seasons and you want events

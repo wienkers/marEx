@@ -90,13 +90,16 @@ that decides its value is:
 * Passing any value raises a ``ConfigurationError`` on unstructured meshes, with
   ``global_percentile`` and with ``method_percentile="exact"``.
 
-The neighbourhood wraps in longitude only when the grid spans the globe. On a regional box the
-edge columns pool only real neighbours, as the latitude edges always have. The value that was
-used is recorded in the output attribute ``window_spatial``.
+When the x dimension has a one-dimensional numeric coordinate, the neighbourhood wraps in
+longitude only if that coordinate spans the globe, and on a regional box the edge columns pool only
+real neighbours, as the latitude edges always have. Without such a coordinate the neighbourhood
+keeps wrapping. The value that was used is recorded in the output attribute ``window_spatial``,
+which is omitted when no spatial pooling is used.
 
 The number of samples behind each threshold is ``n_years × window_days × window_spatial²``,
-and the number beyond the threshold is that times ``1 - q``. marEx logs a warning when fewer
-than 10 samples lie beyond the threshold.
+and the number expected beyond the threshold is that times ``1 - q`` in the upper tail and ``q``
+in the lower tail, with ``q = threshold_percentile / 100``. marEx logs a warning when fewer than 10
+samples are expected beyond the threshold.
 
 .. list-table::
    :header-rows: 1
@@ -231,7 +234,8 @@ continuous anomaly with a seasonal cycle. Work through these in order.
 2. **Percentile.** 95 and 90 are the usual choices. Rarer percentiles need more samples. Use
    the table above to see how many lie beyond the threshold.
 3. **Samples.** If marEx warns that fewer than 10 lie beyond the threshold, raise ``window_spatial`` on
-   a grid, widen ``window_days``, or lower the percentile.
+   a grid, widen ``window_days``, or move the percentile toward the median (lower it for
+   ``tail="upper"``, raise it for ``tail="lower"``).
 4. **Units.** ``precision`` is in the units of the anomaly. Leave it unset first and read the
    derived value from the log or the output attributes. Set it only if that bin width is
    coarse relative to the spread of the variable.
@@ -301,7 +305,7 @@ Checks Worth Making
 .. code-block:: python
 
    freq = ds.extreme_events.mean("time")                     # fraction flagged per cell
-   print(float(freq.where(ds.mask).mean()))                  # close to 1 - q / 100?
+   print(float(freq.where(ds.mask).mean()))                  # close to 1 - q (q for the lower tail)?
 
    spread = ds.thresholds.max("dayofyear") - ds.thresholds.min("dayofyear")
 

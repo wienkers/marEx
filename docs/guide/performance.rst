@@ -195,9 +195,8 @@ Tracker Chunking
 ----------------
 
 Because space stays whole, one chunk is ``time_chunk × n_cells``. On the ICON mesh a boolean chunk of
-4 steps is 59.5 MB, and on the 720 × 1440 grid a chunk of 25 steps is 25.9 MB. The unstructured tracker needs every time chunk to hold at least two steps,
-and a series length of the form ``k × chunk + 1`` leaves a one-step final chunk. A 365-day record
-fails at ``time=4`` for that reason and works at ``time=5``. Re-chunk after any ``.sel``.
+4 steps is 59.5 MB, and on the 720 × 1440 grid a chunk of 25 steps is 25.9 MB. Interior time chunks
+should be uniform; a shorter final chunk, including a single step, is accepted.
 
 Output Chunking
 ---------------
@@ -219,14 +218,14 @@ The Tile-Fit Warning
 --------------------
 
 The internal re-chunk holds time whole and caps the spatial tile near 50 million elements per task,
-but a ``window_spatial`` floor overrides that cap, because a rolling window may not cross a chunk
-boundary. On a sub-daily cadence the per-cell output of the day-of-year histogram grows with the
-number of steps per day while the window does not. At an hourly cycle with 1000 bins and the
-gridded default of ``window_spatial=5``, one task touches 219.6 million elements (about 878 MB), roughly 4.4
-times the budget. marEx logs a warning that names the estimate, the budget and the
-window that forced it. The warning never changes the tile and therefore cannot change a result.
-The levers are a narrower ``window_spatial``, a shorter ``window_years``, fewer bins, fewer threads
-per worker, or ``compute_mode="streaming"``. See also :ref:`troubleshooting-tile-warning`.
+where each cell counts the larger of its number of timesteps and the cycle length. The bin count
+does not enter this budget. A ``window_spatial`` floor overrides the cap, because a rolling window
+may not cross a chunk boundary, so the warning fires only when ``n_time × window_spatial²`` alone
+exceeds the budget. At the gridded default of ``window_spatial=5`` that takes more than 2 million
+timesteps, over two centuries of hourly data. marEx logs a warning that names the estimate, the
+budget and the window that forced it. The warning never changes the tile and therefore cannot
+change a result. The levers are a narrower ``window_spatial``, a shorter record, fewer threads per
+worker, or ``compute_mode="streaming"``. See also :ref:`troubleshooting-tile-warning`.
 
 .. _detect-memory-sizing:
 
@@ -276,7 +275,8 @@ runs of the example notebooks the largest worker reached 5.3 GB of 7.8 GB on sin
 30 years of input, ``streaming``). Each is one run, sampled once a second, so the peaks are lower
 bounds, and one run per shape does not give a crash rate.
 
-A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during extreme
+A run at the edge logs the dask line ``exceeded 80% memory budget. Restarting...`` (80 % under
+``start_local_cluster``, dask's default of 95 % elsewhere) during extreme
 identification (see :ref:`troubleshooting-worker-warnings` for why you may not see it). A restart
 costs time, because dask recomputes the lost tasks. Two settings should move a run away from the
 edge, though neither has been measured at full scale:

@@ -147,7 +147,7 @@ For HPC environments and optional dependencies, see the **[Installation Guide](h
 ## What's New in 5.0
 
 - A standalone `marEx.anomaly.compute` and `marEx.extremes.identify`, a lower tail, fields with an extra dimension, and monthly or sub-daily time axes.
-- `compute_mode` (`persist`, `lazy`, `streaming`) on detection and tracking, plus a per-stage `ResourceMonitor` and a small-object prefilter for the tracker.
+- `compute_mode` on detection (`persist`, `lazy`, `streaming`) and tracking (`persist`, `streaming`), plus a per-stage `ResourceMonitor` and a small-object prefilter for the tracker.
 - Renamed methods and parameters (`seasonal_percentile`, `window_years`, `standardise`) and a removed `marEx.detect` module. The [migration table](https://marex.readthedocs.io/en/latest/whats_new.html) maps every old name to its replacement.
 
 ---

@@ -109,7 +109,7 @@ Output Attributes and Variables
    * - attrs ``window_year_baseline``, ``smooth_days_baseline``, ``std_normalise``, ``window_days_hobday``
      - ``window_years``, ``smooth_days``, ``standardise``, ``window_days``
    * - attr ``window_spatial_hobday``
-     - ``window_spatial`` (the effective value; ``None`` on the exact path)
+     - ``window_spatial`` (the effective value; omitted on the exact path)
    * - (none)
      - attr ``tail``. The streaming staging directory is on ``ds.encoding["marex_staging_dir"]``, not in attrs.
    * - boolean and ``None`` attrs
@@ -130,8 +130,9 @@ Changed Defaults
 * The approximate percentile range and bin width come from the data (about 3000 bins over the tail's range) instead of a fixed ``precision=0.01`` and ``max_anomaly=5.0``.
 * Tracker merge and parent limits: 64 and 64 (were 20 and 10).
 * ``dask`` is ``>=2025.9.0`` (was ``==2025.3.0``); ``zarr>=2.18`` is declared.
-* ``window_spatial`` is recorded as ``None`` for ``method_percentile="exact"``, where it was never used.
-* On the exact path, a threshold at or below zero is nudged to the smallest value above zero.
+* ``window_spatial`` is omitted from the output for ``method_percentile="exact"``, where it was never used.
+* On the exact path, an upper-tail threshold at or below zero is nudged to the smallest positive
+  normal float32, and a lower-tail threshold at or above zero to its negative.
 
 Now Raises
 ----------
