@@ -103,7 +103,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Tracker, gridded: a slice whose largest label exceeds its number of cells has its object properties computed on compacted labels, so late in a long record the cost per slice is capped near what a slice of that size costs instead of growing with the globally offset IDs.
 - Tracker, gridded, `allow_merging=False`: space-time labelling builds a task graph linear in the number of time chunks (578 tasks at 64 chunks; `dask_image.ndmeasure.label` built 2037 at 8, 6517 at 16 and about 82,000 at 64) and gives the same labels and count. Input chunked in space still uses `dask_image`.
 - Seasonal slab quantile kernel compiled with numba (4.3-20x faster single-threaded, releases the GIL); outputs bitwise identical.
-- Detect keeps the caller's spatial chunk as its internal tile while one task on it stays within 4x the 50-million-element budget, instead of splitting it and merging it back (about 3x fewer tasks on a 25,000-cell ICON chunk over 20 years).
+- Detect keeps the caller's spatial chunk as its internal tile while one task on it stays within 4x the 50-million-element budget, instead of splitting it and merging it back (about 3x fewer anomaly-stage tasks with 25,000-cell ICON chunks over 16 years).
 - The rolling climatology pads missing target years by position instead of `reindex`, and the unstructured `fill_holes` keeps its sparse-matrix inputs in one chunk each, so neither multiplies tasks across spatial tiles.
 
 ## Earlier Versions

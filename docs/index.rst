@@ -74,6 +74,7 @@ Quick example
    import xarray as xr
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="8GB")
 
    # Load sea surface temperature (Dask-backed)

@@ -211,7 +211,8 @@ Plotting Event IDs
 
 ``plot_IDs=True`` is for the ``ID_field`` of the tracker (see :doc:`tracking`). IDs of 0 (the
 background) are masked, every ID gets its own colour from a fixed random seed, and the
-colourbar is switched off. Pass a ``cmap`` to use your own colours.
+colourbar is switched off. Pass a ``cmap`` to use your own colours. An ``ID_field`` with no
+objects (all zeros) plots an empty map and logs a warning.
 
 .. code-block:: python
 

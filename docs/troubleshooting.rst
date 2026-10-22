@@ -194,6 +194,12 @@ below are the common ones.
    * - ``TrackingError`` on a second ``run()``
      - A tracker instance is single use.
      - Construct a new tracker.
+   * - ``TrackingError``: the area filter removed every object
+     - ``area_filter_absolute`` is larger than every object.
+     - Lower it below the area of the largest object.
+   * - ``TrackingError``: no objects larger than the cutoff on an unstructured grid
+     - Objects of 5 cells or fewer (50 under ``area_filter_quartile``) are dropped before the area filter.
+     - Check that ``data_bin`` has events inside the mask, or lower the threshold percentile.
    * - ``CoordinateError`` on longitude range
      - The tracker detects coordinate units from a roughly 360 degree range.
      - For regional data use ``regional_tracker`` with ``coordinate_units``.
@@ -205,12 +211,6 @@ below are the common ones.
      - The tracker needs uniformly chunked time.
      - It re-chunks with a warning. Chunk time uniformly yourself to avoid the cost.
 
-Day 366 is NaN
---------------
-
-With ``shifting_baseline``, a trailing window that spans no leap year leaves day-of-year 366
-undefined, which is exactly one timestep. This is expected.
-
 .. _troubleshooting-tile-warning:
 
 Warning About the Per-Task Element Budget
@@ -218,7 +218,7 @@ Warning About the Per-Task Element Budget
 
 On sub-daily data you may see a warning that one task "exceeds the per-task element budget". The
 per-cell output of the day-of-year histogram grows with the number of steps per day, while the
-spatial window set by ``window_spatial`` does not shrink, so at the default ``window_spatial=5`` the
+spatial window set by ``window_spatial`` does not shrink, so at the gridded default of ``window_spatial=5`` the
 tile the budget allows is smaller than the window needs. marEx uses the larger tile and warns, and the
 warning never alters the result. It names the estimate, the budget and the window that forced it.
 
@@ -243,6 +243,7 @@ Memory Errors
 
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=2,
        threads_per_worker=1,
@@ -261,7 +262,7 @@ Slow Runs
 * Do not read a long wall time as evidence of a slow algorithm until you have checked for worker
   restarts.
 * A chunk size of 25 steps is a sound start for the tracker and a modest time chunk for detect. The
-  shipped examples run with chunks of 1.9 MB (lat/lon detect), 25.9 MB (lat/lon tracker) and
+  shipped examples run with chunks of 124 MB (lat/lon detect input), 25.9 MB (lat/lon tracker) and
   59.5 MB (unstructured tracker). No single target size suits every stage.
 
 Unexpected Results

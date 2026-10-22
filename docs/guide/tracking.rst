@@ -46,6 +46,7 @@ not the cgroup limit of a batch allocation, so without it a memory constraint ne
    import xarray as xr
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=4, threads_per_worker=1, memory_limit="8GB"
    )
@@ -390,6 +391,7 @@ main dataset is in final event IDs, and is the one to use for event-level questi
 
 .. code-block:: python
 
+   # Call this in place of run(): a tracker instance runs only once.
    events, merges = event_tracker.run(return_merges=True)
 
 Event Statistics
@@ -559,6 +561,17 @@ Troubleshooting
 ``TrackingError``: extra dimension
    The tracker is 2-D in space. Select a level (``isel(depth=0)``) or loop over levels.
 
+``TrackingError``: the area filter removed every object
+   ``area_filter_absolute`` is larger than the largest object. Lower it.
+
+``TrackingError``: no objects larger than the cutoff on an unstructured grid
+   Before the area filter, objects of 5 cells or fewer (50 under ``area_filter_quartile``) are
+   dropped, and none was larger. Check that ``data_bin`` has events inside the mask, or lower
+   the threshold percentile so that events are larger.
+
+``TrackingError``: the objects kept after filtering have zero total area
+   ``cell_areas`` is zero over the kept objects. It must be positive wherever the mask is True.
+
 ``CoordinateError`` on a regional domain
    The longitude range is not about 360 degrees. Use ``regional_tracker`` with
    ``coordinate_units``.
@@ -589,6 +602,7 @@ Complete Workflow
    import xarray as xr
    import marEx
 
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
    client = marEx.helper.start_local_cluster(
        n_workers=4, threads_per_worker=1, memory_limit="8GB"
    )

@@ -230,7 +230,7 @@ continuous anomaly with a seasonal cycle. Work through these in order.
    ``lower``.
 2. **Percentile.** 95 and 90 are the usual choices. Rarer percentiles need more samples. Use
    the table above to see how many lie beyond the threshold.
-3. **Samples.** If fewer than about 50 lie beyond the threshold, raise ``window_spatial`` on
+3. **Samples.** If marEx warns that fewer than 10 lie beyond the threshold, raise ``window_spatial`` on
    a grid, widen ``window_days``, or lower the percentile.
 4. **Units.** ``precision`` is in the units of the anomaly. Leave it unset first and read the
    derived value from the log or the output attributes. Set it only if that bin width is

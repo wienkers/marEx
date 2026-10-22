@@ -9,8 +9,8 @@ tolerance, the same answer is required from different chunkings and compute mode
 that need real scale are measured on real data. This page says what each check covers and, as
 important, what it does not.
 
-The test suite lives in ``tests/`` and holds about 1,400 tests. The most recent full run in both
-environments listed below passed 1390 tests with 4 skipped and no failures.
+The test suite lives in ``tests/`` and contains about 2,100 tests. The most recent full run, in the
+first environment listed below, passed 2078 tests with 4 skipped and no failures.
 
 Reference-Output Tests
 ======================
