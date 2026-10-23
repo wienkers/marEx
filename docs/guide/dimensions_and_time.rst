@@ -117,7 +117,10 @@ independently. No mapping entry is needed.
   share a chunk. ``dask_chunks`` sets the time chunk only.
 * Both the tracker and ``plotX`` accept a 2-D field per timestep. Select a level with
   ``isel`` (or loop over levels) before tracking or plotting. They raise an error that says
-  so otherwise.
+  so otherwise. ``multi_plot(config, col="lev")`` draws one panel per level.
+
+The :doc:`../tutorials/3d` tutorial runs this on a century of daily ocean temperature on seven
+levels.
 
 ``dask_chunks`` defaults to ``{"time": 25}`` and only its time entry is used. An integer is a
 number of timesteps. ``"auto"`` is Dask's byte budget (the ``array.chunk-size`` setting).

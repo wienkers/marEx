@@ -182,3 +182,28 @@ def test_padding_the_years_without_history_does_not_multiply_chunks(monkeypatch)
     values = result.values
     assert np.isnan(values).any() and not np.isnan(values).all(), "fixture has no padded years; test would prove nothing"
     np.testing.assert_array_equal(values, untiled.values)
+
+
+def test_the_grouped_mean_skips_flox_cohort_search(monkeypatch):
+    """flox's automatic method choice builds a label-by-label containment matrix whose size grows
+    with the square of the number of (target year, day) groups. On a century of daily data that
+    alone exhausts a 16 GB client before any task runs, so the climatology reduction must name its
+    method. The day-366 pool is one block along the reduced axis and may still be resolved by flox."""
+    import dask
+    import flox.core
+
+    searched = []
+    real_search = flox.core.find_group_cohorts
+
+    def spy(by, chunks, *args, **kwargs):
+        searched.append([len(c) for c in chunks])
+        return real_search(by, chunks, *args, **kwargs)
+
+    monkeypatch.setattr(flox.core, "find_group_cohorts", spy)
+    da = _synthetic(nt=6 * 365 + 1, nlat=12, nlon=16).chunk({"time": 30, "lat": -1, "lon": -1})
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    with dask.config.set({"array.chunk-size": "256KiB"}):  # splits the long-form array along time
+        rolling_climatology(da, WINDOW_YEARS, dims, dims)
+    assert searched, "flox never resolved a method here: the spy no longer sees the search and proves nothing"
+    multi_block = [chunks for chunks in searched if max(chunks) > 1]
+    assert not multi_block, f"flox searched cohorts over {multi_block} blocks along the reduced axis"

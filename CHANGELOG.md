@@ -66,6 +66,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Fixed
 
+- `shifting_baseline` on long records: the rolling climatology always reduces with flox's map-reduce instead of letting flox search for cohorts, a client-side step whose memory grows with the square of the number of years (a century of daily data exhausted a 16 GB session before any task ran). Where flox used to pick map-reduce, results are unchanged. Where it picked cohorts, which depends on how the data is tiled rather than on record length, anomalies can differ by float rounding and approximate-percentile thresholds by up to one histogram bin (`precision`).
 - Approximate percentiles: the 1-D (global) quantile now interpolates within the containing bin (the old interpolation branch never ran); values beyond the range are counted in the outermost bin instead of dropped; a threshold is masked only where a cell is NaN at every timestep, so cells valid for part of the year (for example under sea ice) keep a threshold.
 - Exact percentiles: cells with no variance (for example permanent sea ice) no longer flag every timestep; a non-positive upper threshold is nudged to the smallest value past zero (mirrored for the lower tail).
 - Histogram counts per (cell, day, bin) are no longer allowed to wrap at 65535 samples.

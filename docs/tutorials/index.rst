@@ -45,6 +45,13 @@ a few grid-specific arguments change.
       ERA5 wind over Europe, 1980-2024: lower-tail extremes of hub-height
       capacity factor tracked into a catalogue of low-wind spells.
 
+   .. grid-item-card:: Ocean extremes in 3-D
+      :link: 3d
+      :link-type: doc
+
+      A century of daily North Atlantic temperature on seven levels down to
+      1415 m: marine heatwaves at every depth with a shifting baseline.
+
 Scripts
 =======
 
@@ -61,3 +68,4 @@ time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/exa
    regional
    unstructured
    wind_drought
+   3d

@@ -250,7 +250,12 @@ def rolling_climatology(
     complete = len(data_years) > 0 and n_pairs == len(data_years) * len(cycle.labels)
     reduce_years = data_years if complete else unique_years
 
-    # Use flox with both grouping variables to compute climatologies
+    # Use flox with both grouping variables to compute climatologies. The method is named:
+    # flox's automatic choice searches for cohorts with a label-by-label containment matrix that
+    # grows with the square of the (target year, cycle) group count, client-side before any task
+    # runs (a 60-year daily record peaked near 9 GB against 2 GB with map-reduce). Whether flox
+    # then picks cohorts depends on how many blocks the long-form axis has, not on the record
+    # length, so naming the method also makes the result independent of that heuristic.
     climatologies = flox.xarray.xarray_reduce(
         long_form_data,
         target_year_da,
@@ -259,6 +264,7 @@ def rolling_climatology(
         func="nanmean",
         expected_groups=(reduce_years, cycle.labels),
         isbin=(False, False),
+        method="map-reduce",
         dtype=np.float32,
         fill_value=np.nan,
     )
