@@ -9,12 +9,14 @@ cohorts to efficiently compute multi-year rolling day-of-year climatologies.
 from dataclasses import replace
 from typing import Dict, Optional
 
+import dask.array
 import flox.xarray
 import numpy as np
 import pandas as pd
 import xarray as xr
 from dask import persist
 
+from ..core import dimensions as core_dimensions
 from ..core.dimensions import canonical_time_chunks, spatial_dims, tile_spatial_chunks
 from ..core.encoding import clear_store_encoding
 from ..core.numerics import rolling_numerics
@@ -57,6 +59,11 @@ def last_day_pool(time_coord: xr.DataArray, cycle: SeasonalCycle, read_coord: Op
     positions = np.flatnonzero(own | borrowed)
     slots = np.where(borrowed, index + steps_per_day, index)[positions].astype(np.int32)
     return positions, slots, np.arange(first_slot, cycle.length + 1, dtype=np.int32)
+
+
+def _gather_slots(block: np.ndarray, flat_index: np.ndarray) -> np.ndarray:
+    """Read one value per time step from a block whose last two axes are (target_year, cycle)."""
+    return block.reshape(block.shape[:-2] + (-1,))[..., flat_index]
 
 
 def rolling_climatology(
@@ -306,22 +313,43 @@ def rolling_climatology(
         padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
         position = pd.Series(range(len(reduce_years)), index=reduce_years).reindex(unique_years, fill_value=len(reduce_years))
         climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
-    climatologies = climatologies.chunk({cycle_dim: -1})
+    climatologies = climatologies.chunk({"target_year": -1, cycle_dim: -1})
 
     # Create index arrays for final mapping
     year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
     year_indices = year_to_idx[year_vals].values
 
-    # Select appropriate climatology for each time point
-    result = climatologies.isel(
-        {
-            "target_year": xr.DataArray(year_indices, dims=[timedim]),
-            cycle_dim: xr.DataArray(doy_vals - 1, dims=[timedim]),
-        }
+    # Select appropriate climatology for each time point. Both slot axes are whole in every tile,
+    # so the (target_year, cycle) pair is one flat position and the time index is one dask array
+    # that every tile references. Pointwise `isel` with two indexers embeds that index in each
+    # tile's tasks instead: the graph grows as tiles x time steps (about 1 GB on a century of
+    # daily data over 7 x 161 x 321 cells).
+    climatologies = climatologies.transpose(..., "target_year", cycle_dim)
+    # The tile was budgeted on the long-form input, which can be shorter than the record (a one-year window, or a
+    # cycle coarser than the time step), so the gather also splits time to keep each output block within budget.
+    n_spatial = climatologies.ndim - 2
+    tile_cells = int(np.prod([max(chunks) for chunks in climatologies.chunks[:n_spatial]]))
+    flat_index = dask.array.from_array(
+        year_indices * climatologies.sizes[cycle_dim] + (doy_vals - 1),
+        chunks=max(1, core_dimensions.TASK_ELEMENTS // tile_cells),
     )
-
-    # Clean up dimensions and coordinates
-    result = result.drop_vars(["target_year", cycle_dim])
+    spatial_index = tuple(range(n_spatial))
+    result = xr.DataArray(
+        dask.array.blockwise(
+            _gather_slots,
+            spatial_index + (n_spatial + 2,),
+            climatologies.data,
+            spatial_index + (n_spatial, n_spatial + 1),
+            flat_index,
+            (n_spatial + 2,),
+            dtype=climatologies.dtype,
+            concatenate=True,
+        ),
+        dims=climatologies.dims[:-2] + (timedim,),
+        coords={name: coord for name, coord in climatologies.coords.items() if not {"target_year", cycle_dim} & set(coord.dims)},
+        attrs=climatologies.attrs,
+    )
+    result.name = climatologies.name  # an unnamed input stays unnamed rather than taking the dask array's name
 
     result = result.chunk(original_chunk_dict)
     clear_store_encoding(result)  # the caller may write it; a format-2 input's codecs would not survive zarr 3
