@@ -9,6 +9,7 @@ timestep must not shift later samples into another time of day.
 
 import functools
 
+import dask
 import numpy as np
 import pandas as pd
 import pytest
@@ -285,3 +286,58 @@ def test_gappy_axis_is_the_same_in_every_compute_mode(compute_mode, tmp_path):
     )
     np.testing.assert_array_equal(got["dat_anomaly"].values, ref["dat_anomaly"].values)
     marEx.clear_staging(got)
+
+
+def _old_strided_window_sum(obj, timedim, steps, stride, fill_value, **kwargs):
+    """The strided window sum as first written: one numpy sum over the whole stepped window view."""
+    span = (steps - 1) * stride + 1
+    windows = obj.rolling({timedim: span}).construct(
+        "_w", fill_value=fill_value, sliding_window_view_kwargs={"automatic_rechunk": False}
+    )
+    return windows.isel(_w=slice(None, None, stride)).sum("_w", skipna=False, **kwargs)
+
+
+@pytest.mark.parametrize("time_chunk", [-1, 37, 5])
+@pytest.mark.parametrize("partial_steps", [0, 3])
+@pytest.mark.parametrize("days", [1, 2, 5, 21])
+@pytest.mark.parametrize("stride", [4, 8, 24])
+def test_strided_window_sum_is_unchanged_by_blocking(stride, days, partial_steps, time_chunk):
+    """The blocked strided sum is bit-identical to one numpy sum over the whole stepped window view."""
+    from marEx.anomaly.climatology import _strided_window_sum
+
+    nt = 60 * stride + partial_steps
+    rng = np.random.default_rng(stride * 100 + days)
+    values = (rng.normal(size=(nt, 7)) * 3 + 290).astype(np.float32)
+    values[rng.random(values.shape) < 0.04] = np.nan
+    da = xr.DataArray(values, dims=("time", "ncells")).chunk({"time": time_chunk, "ncells": 4})
+    for obj, fill, kwargs in ((da.fillna(0), 0, {}), (da.notnull(), False, {"dtype": np.float32})):
+        want = _old_strided_window_sum(obj, "time", days, stride, fill, **kwargs).values
+        got = _strided_window_sum(obj, "time", days, stride, fill, block_elements=50, **kwargs).values
+        assert got.dtype == want.dtype
+        np.testing.assert_array_equal(got, want)
+    assert _strided_window_sum(da.fillna(0), "time", days, stride, 0).chunks == da.chunks
+
+
+def test_strided_smoothing_memory_does_not_scale_with_stride():
+    """A 6-hourly (stride 4) smoothing of one tile peaks no higher than a daily (stride 1) one of the same tile.
+
+    One numpy sum over the stepped window view copies the whole (time, cells, window) view first, so the
+    peak grew with the window: about 23 tiles at 21 days x 4 steps a day against 4 at stride 1.
+    """
+    import tracemalloc
+
+    from marEx.anomaly.climatology import _rolling_mean_keep_tiles
+
+    values = np.random.default_rng(0).standard_normal((1460, 4000)).astype(np.float32)
+    da = xr.DataArray(values, dims=("time", "ncells")).chunk({"time": -1, "ncells": -1})
+
+    def peak(stride):
+        with dask.config.set(scheduler="synchronous"):
+            tracemalloc.start()
+            _rolling_mean_keep_tiles(da, "time", 21, stride, 0.1).compute()
+            _, top = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        return top
+
+    daily, subdaily = peak(1), peak(4)
+    assert subdaily <= 1.5 * daily, (subdaily / values.nbytes, daily / values.nbytes)

@@ -432,6 +432,85 @@ def _subdaily_grid_positions(time_coord: xr.DataArray, stride: int) -> Optional[
     return None if positions[-1] == values.size - 1 else positions
 
 
+def _blocked_window_sum(
+    block: np.ndarray, time_axis: int, span: int, stride: int, n_out: int, block_elements: int, **kwargs
+) -> np.ndarray:
+    """Trailing window sums of a time-padded block, a few rows at a time.
+
+    ``block`` holds ``span - 1`` rows of history before its ``n_out`` output rows (and possibly
+    rows after them, which are not used). Output row ``i`` sums every ``stride``-th sample of
+    block rows ``i .. i + span - 1``. Each row block's windows are copied to a C-ordered
+    (rows, ..., span) array before the stepped sum, the layout xarray's ``construct`` gives the
+    whole tile, so the sums are rounded exactly as they would be there; only one row block's
+    copy exists at a time instead of ``span`` copies of the tile.
+    """
+    windows = np.lib.stride_tricks.sliding_window_view(
+        np.take(block, np.arange(n_out + span - 1), axis=time_axis), span, axis=time_axis
+    )
+    per_row = max(1, windows.size // max(1, n_out))
+    rows = max(1, block_elements // per_row)
+    out_shape = windows.shape[:-1]
+    out = None
+    index = [slice(None)] * windows.ndim
+    for start in range(0, n_out, rows):
+        index[time_axis] = slice(start, start + rows)
+        part = np.ascontiguousarray(windows[tuple(index)])[..., ::stride].sum(axis=-1, **kwargs)
+        if out is None:
+            out = np.empty(out_shape, dtype=part.dtype)
+        out[tuple(index[:-1])] = part
+    if out is None:  # no output rows
+        out = np.ascontiguousarray(windows)[..., ::stride].sum(axis=-1, **kwargs)
+    return out
+
+
+def _strided_window_sum(
+    obj: xr.DataArray, timedim: str, steps: int, stride: int, fill_value, block_elements: int = 2**23, **kwargs
+) -> xr.DataArray:
+    """Trailing window sum over ``steps`` samples ``stride`` apart, padded with ``fill_value``.
+
+    The window is the trailing ``(steps - 1) * stride + 1`` steps with every ``stride``-th sample
+    kept, the windows ``obj.rolling(...).construct(...)`` would build. Built through ``construct``
+    on a dask array, each task holds its tile's windows densely, ``span`` copies of the tile. Here
+    each time chunk gets ``span - 1`` steps of history from its neighbours (``fill_value`` before
+    the record) and builds its windows a few rows at a time (about ``block_elements`` window
+    samples per block).
+    """
+    span = (steps - 1) * stride + 1
+    if obj.sizes[timedim] <= span - 1 or not isinstance(obj.data, dask.array.Array):
+        # A record no longer than the history window cannot take its halo from neighbours, and the
+        # dense windows of so short a series cost nothing; an in-memory array has no tiles to protect
+        # and sums its strided view in a different order. Both build the windows as xarray does.
+        window = f"_{timedim}_window"
+        while window in obj.dims or window in obj.coords:
+            window = f"_{window}"
+        windows = obj.rolling({timedim: span}).construct(
+            window, fill_value=fill_value, sliding_window_view_kwargs={"automatic_rechunk": False}
+        )
+        return windows.isel({window: slice(None, None, stride)}).sum(window, skipna=False, **kwargs)
+    data = obj.data
+    t = obj.get_axis_num(timedim)
+    original_chunks = data.chunks
+    # Every time chunk must hold a whole halo; merge neighbours locally, restore the layout below
+    time_chunks = dask.array.overlap.ensure_minimum_chunksize(span - 1, data.chunks[t])
+    if time_chunks != data.chunks[t]:
+        data = data.rechunk({t: time_chunks})
+    depth = {i: (span - 1 if i == t else 0) for i in range(obj.ndim)}
+    boundary = {i: (fill_value if i == t else "none") for i in range(obj.ndim)}
+    padded = dask.array.overlap.overlap(data, depth=depth, boundary=boundary)
+    out_dtype = np.zeros(1, dtype=obj.dtype).sum(**kwargs).dtype
+    out_chunks = data.chunks
+    n_rows = out_chunks[t]
+
+    def func(block, block_info=None):
+        n_out = n_rows[block_info[0]["chunk-location"][t]]
+        return _blocked_window_sum(block, t, span, stride, n_out, block_elements, **kwargs)
+
+    summed = padded.map_blocks(func, chunks=out_chunks, dtype=out_dtype)
+    if summed.chunks != original_chunks:
+        summed = summed.rechunk(original_chunks)
+    return xr.DataArray(summed, dims=obj.dims, coords=obj.coords, name=obj.name)
+
+
 def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int, stride: int = 1, max_missing: float = 0.0) -> xr.DataArray:
     """Centred rolling mean over ``steps`` samples ``stride`` apart that keeps ``da``'s spatial chunks.
 
@@ -463,9 +542,7 @@ def _rolling_mean_keep_tiles(da: xr.DataArray, timedim: str, steps: int, stride:
                 window, fill_value=fill_value, sliding_window_view_kwargs=in_place
             )
         else:
-            span = (steps - 1) * stride + 1
-            windows = obj.rolling({timedim: span}).construct(window, fill_value=fill_value, sliding_window_view_kwargs=in_place)
-            windows = windows.isel({window: slice(None, None, stride)})
+            return _strided_window_sum(obj, timedim, steps, stride, fill_value, **kwargs)
         return windows.sum(window, skipna=False, **kwargs)
 
     total = window_sum(da.fillna(0), 0)

@@ -1,0 +1,79 @@
+# Daily OSTIA SST on its native 0.05° grid, cut to Europe (30°N-66°N, 16°W-37°E): the settings of
+# regional/01_preprocess_extremes.ipynb and regional/02_id_track_events.ipynb.
+# The input is read from the EERIE intake catalogue (data on DKRZ Levante); elsewhere point `input.path` at a store.
+
+output_dir: ${MAREX_SCRATCH}/marEx/examples/regional
+scratch_dir: ${MAREX_SCRATCH}/marEx/batch
+
+dask_config:
+  distributed.admin.large-graph-warning-threshold: 1GB
+
+input:
+  intake:
+    catalog: https://raw.githubusercontent.com/eerie-project/intake_catalogues/main/eerie.yaml
+    entry: [dkrz.disk.observations.OSTIA.OSTIA.daily]
+    kwargs: {chunks: {}}
+  variable: sst
+  dtype: float32
+  sel: {lat: [30, 66], lon: [-16, 37]}   # a [start, stop] pair selects a range
+  time: [1982-01-01, 2022-05-31]
+  chunks: {time: 30, lat: -1, lon: -1}
+
+dimensions: {time: time, x: lon, y: lat}
+
+detect:
+  cluster:
+    type: slurm
+    n_workers: 256
+    workers_per_node: 32
+    node_memory: 256
+    runtime: 119
+  runs:
+    - name: shifting_hobday
+      output: extremes_shifting_hobday.zarr
+      kwargs:
+        method_anomaly: shifting_baseline
+        method_extreme: seasonal_percentile
+        threshold_percentile: 95
+        window_years: 15
+        smooth_days: 21
+        window_days: 11
+        dask_chunks: {time: 25}
+
+track:
+  input: extremes_shifting_hobday.zarr
+  chunks: {time: 25, lat: -1, lon: -1}
+  # A 64 GB shared job: 4 workers x 16 threads x 12 GB, the rest for the client
+  cluster:
+    type: local
+    n_workers: 4
+    threads_per_worker: 16
+    memory_limit: 12GB
+  runs:
+    - name: merged
+      tracker: regional                  # marEx.regional_tracker: a box that does not wrap around the globe
+      output: events_merged.zarr
+      merges: events_merged_merges.nc
+      kwargs:
+        coordinate_units: degrees        # required in regional mode
+        grid_resolution: 0.05
+        area_filter_absolute: 600
+        R_fill: 16
+        T_fill: 4
+        allow_merging: true
+        overlap_threshold: 0.25
+        nn_partitioning: true
+
+smoke:
+  output_dir: ${MAREX_SCRATCH}/marEx/examples/regional_smoke
+  input: {time: [1982-01-01, 1986-12-31]}
+  detect:
+    cluster: {type: local, n_workers: 8, threads_per_worker: 1, memory_limit: 7GB}
+    runs:
+      - name: shifting_hobday
+        output: extremes_shifting_hobday.zarr
+        kwargs: {method_anomaly: shifting_baseline, method_extreme: seasonal_percentile, threshold_percentile: 95,
+                 window_years: 2, smooth_days: 21, window_days: 11, dask_chunks: {time: 25}}
+  track:
+    time: [1984-01-01, 1984-12-31]
+    cluster: {n_workers: 2, threads_per_worker: 4, memory_limit: 6GB}
