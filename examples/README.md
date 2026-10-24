@@ -21,6 +21,7 @@ input path changed.
 | | `03_visualise_events` | outputs of 01-02 | 1 node, 32 workers × 7 GB | 2.5-2.8 min per movie |
 | `3d/` | `01_preprocess_extremes` | FESOM daily ocean temperature on 7 levels (2.5-1415 m), North Atlantic, 1950-2050 | 256 SLURM workers × 7.8 GB | 8.7 min shifting baseline + Hobday |
 | `applications/` | `wind_drought_europe` | ERA5 daily wind capacity factor over Europe, 1980-2024 | 8 workers × 6 GB | 1.6 min detect (lower tail), 4.5 min regional tracking |
+| `larger-than-memory/` | `larger_than_memory` | IFS-FESOM2-SR 6-hourly SST, 0.25° global, 10 and 20 years | 32 GiB job, 3 workers × 9 GB | 63-192 min detect, 57-139 min track per batch run (the notebook reads their summaries) |
 
 ## Paths
 
@@ -40,7 +41,7 @@ and the input path in each notebook's setup cell. The inputs come from:
 - **`batch_jobs/`**: a template for running detection and tracking as SLURM jobs without Jupyter: two driver scripts
   configured by one YAML file per dataset, with worked configs for the gridded, regional and unstructured examples. See
   its [README](batch_jobs/README.md).
-- **`larger-than-memory/`**: the measurement harness behind the `compute_mode="streaming"` claims in the performance
-  guide, with the numbers and how to reproduce them. See its [README](larger-than-memory/README.md).
+- **`larger-than-memory/`**: detect and track 20 years of 6-hourly global SST inside one 32 GiB job, with
+  `compute_mode="streaming"` and `"persist"`, and the measured memory and wall time of each run. See its [README](larger-than-memory/README.md).
 - **`applications/prepare_era5_wind.sh`**: builds the daily wind input for the wind-drought notebook from ERA5 GRIB. See
   [applications/README.md](applications/README.md).

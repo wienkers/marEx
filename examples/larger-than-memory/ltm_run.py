@@ -48,11 +48,14 @@ def parse_args():
     p.add_argument("--start", default=START, help="first day of the input record")
     p.add_argument("--mode", choices=["streaming", "persist"], default="streaming", help="compute_mode")
     p.add_argument("--window-years", type=int, default=5, help="shifting-baseline length (detect)")
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--workers", type=int, default=3)
     p.add_argument("--threads", type=int, default=2, help="threads per worker")
-    p.add_argument("--memory-limit", default="7GB", help="memory limit per worker")
+    p.add_argument("--memory-limit", default="9GB", help="memory limit per worker")
     p.add_argument(
         "--lat-chunk", type=int, default=103, help="latitude rows per detect input chunk (721 = 7 x 103); 0 keeps space whole"
+    )
+    p.add_argument(
+        "--stall-minutes", type=float, default=0, help="stop the run if the scheduler makes no progress for this long (0: never)"
     )
     p.add_argument("--out-dir", type=Path, default=SCRATCH / "marEx" / "ltm")
     p.add_argument("--label", default=None, help="name of this run (default: <stage>_<years>y_<mode>)")
@@ -115,24 +118,45 @@ class CgroupSampler:
         return int(events.get("oom_kill", 0))
 
 
-def heartbeat(client, t0, stop, interval=60):
-    """Log one progress line a minute: tasks the scheduler holds and is running, worker and client memory."""
+def _scheduler_state(dask_scheduler):
+    """Tasks held, transitions so far, and per worker: status, tasks processing and executing, process/managed GB."""
+    workers = [
+        (ws.status.name, len(ws.processing), len(ws.executing), ws.memory.process / 1e9, ws.memory.managed / 1e9)
+        for ws in dask_scheduler.workers.values()
+    ]
+    return len(dask_scheduler.tasks), dask_scheduler.transition_counter, workers
+
+
+def heartbeat(client, t0, stop, stall_minutes=0, on_stall=None, interval=60):
+    """
+    Log one progress line a minute: tasks the scheduler holds, and each worker's status, load and memory.
+
+    A worker that stays above Dask's pause threshold stops taking work without logging anything at marEx's log level,
+    so the status column is what tells a paused cluster from a slow one. With `stall_minutes`, a run whose scheduler
+    makes no transition for that long prints the workers' call stacks and calls `on_stall`.
+    """
     import psutil
 
     me = psutil.Process()
+    last_count, last_change = None, time.time()
     while not stop.wait(interval):
         try:
-            n_tasks, n_proc = client.run_on_scheduler(
-                lambda dask_scheduler: (len(dask_scheduler.tasks), sum(len(w.processing) for w in dask_scheduler.workers.values()))
-            )
-            workers = client.scheduler_info()["workers"].values()
-            mem = sum(w["metrics"]["memory"] for w in workers) / 1e9
-            spilled = sum(w["metrics"].get("spilled_bytes", {}).get("disk", 0) for w in workers) / 1e9
+            n_tasks, count, workers = client.run_on_scheduler(_scheduler_state)
+            spilled = sum(w["metrics"].get("spilled_bytes", {}).get("disk", 0) for w in client.scheduler_info()["workers"].values())
+            per_worker = " ".join(f"{s[:5]} {p}/{e} {m:.1f}/{g:.1f}" for s, p, e, m, g in workers)
             print(
-                f"[heartbeat {time.time() - t0:7.0f} s] tasks {n_tasks} processing {n_proc} | workers {mem:.1f} GB, "
-                f"spilled {spilled:.1f} GB | client {me.memory_info().rss / 1e9:.1f} GB, cpu {me.cpu_percent():.0f}%",
+                f"[heartbeat {time.time() - t0:7.0f} s] tasks {n_tasks} transitions {count} | workers "
+                f"(status processing/executing process/managed GB) {per_worker} | spilled {spilled / 1e9:.1f} GB | "
+                f"client {me.memory_info().rss / 1e9:.1f} GB, cpu {me.cpu_percent():.0f}%",
                 flush=True,
             )
+            if count != last_count:
+                last_count, last_change = count, time.time()
+            elif stall_minutes and time.time() - last_change > stall_minutes * 60:
+                print(f"[stall] no scheduler transition for {stall_minutes} min; worker call stacks:", flush=True)
+                print(json.dumps(client.call_stack(), indent=1, default=str)[:200_000], flush=True)
+                on_stall(workers)
+                return
         except Exception as exc:  # a heartbeat must never stop the run
             print(f"[heartbeat] {type(exc).__name__}: {exc}", flush=True)
 
@@ -151,7 +175,7 @@ def open_sst(start, years, lat_chunk=0):
     """
     sst = xr.open_zarr(STORE, chunks={"time": 40, "lat": -1, "lon": -1}).sst
     if SMOKE:
-        sst = sst.isel(lat=slice(309, 412))  # plumbing check: one latitude band (30-55 N)
+        sst = sst.isel(lat=slice(309, 412))  # plumbing check: one latitude band (12.75 S to 12.75 N)
     if lat_chunk:
         # A local split of each stored chunk: every chunk is still read once. At 6-hourly cadence the climatology has
         # 1464 hour-of-year slots, so one whole-globe tile of it is ~6 GB; latitude bands keep each tile under 1 GB.
@@ -285,15 +309,12 @@ def main():
 
     t0 = time.time()
     stop = threading.Event()
-    threading.Thread(target=heartbeat, args=(client, t0, stop), daemon=True).start()
-    try:
-        summary["result"] = (run_detect if args.stage == "detect" else run_track)(args, monitor, staging)
-        summary["outcome"] = "completed"
-    except Exception as exc:  # recorded, then re-raised so the job fails visibly
-        summary["outcome"] = f"failed: {type(exc).__name__}: {exc}"
-        summary["traceback"] = traceback.format_exc()
-        raise
-    finally:
+    finished = threading.Lock()
+
+    def finish():
+        """Record wall time, cgroup peaks and the Dask monitor, and write the summary (once, from either thread)."""
+        if not finished.acquire(blocking=False):
+            return
         stop.set()
         summary["wall_s"] = round(time.time() - t0, 1)
         sampler.stop()
@@ -305,6 +326,24 @@ def main():
         summary["monitor"] = monitor.summary().reset_index().to_dict(orient="records")
         write(summary, path)
         print(json.dumps({k: v for k, v in summary.items() if k not in ("anon_series", "traceback")}, indent=1, default=str))
+
+    def on_stall(workers):
+        """Finish from this thread and exit: the main thread is stuck waiting on Dask."""
+        summary["outcome"] = f"stalled: no scheduler transition for {args.stall_minutes} min"
+        summary["workers_at_stall"] = workers
+        finish()
+        os._exit(3)
+
+    threading.Thread(target=heartbeat, args=(client, t0, stop, args.stall_minutes, on_stall), daemon=True).start()
+    try:
+        summary["result"] = (run_detect if args.stage == "detect" else run_track)(args, monitor, staging)
+        summary["outcome"] = "completed"
+    except Exception as exc:  # recorded, then re-raised so the job fails visibly
+        summary["outcome"] = f"failed: {type(exc).__name__}: {exc}"
+        summary["traceback"] = traceback.format_exc()
+        raise
+    finally:
+        finish()
         client.close()
 
 

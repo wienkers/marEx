@@ -35,18 +35,18 @@ Reading a Failure
 **symptoms**. They are almost never the cause, and a run that dies with any of them should be
 treated as a memory problem until the logs show otherwise.
 
-The usual chain is an oversized task, a worker that crosses its termination threshold (80 % of its
-memory limit under ``start_local_cluster``, dask's default of 95 % elsewhere), a restart by the
-nanny, and then an error somewhere else. A shuffle that loses its state when its worker restarts
-raises ``P2PConsistencyError: No active shuffle with id=... found``. A task that has failed too often
-raises ``KilledWorker``. A run that restarts workers repeatedly makes no progress and is eventually
-stopped by the scheduler's wall time, which looks like a run that was too slow.
+The usual chain is an oversized task, a worker that crosses its termination threshold (95 % of its
+memory limit), a restart by the nanny, and then an error somewhere else. A shuffle that loses its
+state when its worker restarts raises ``P2PConsistencyError: No active shuffle with id=... found``.
+A task that has failed too often raises ``KilledWorker``. A run that restarts workers repeatedly
+makes no progress and is eventually stopped by the scheduler's wall time, which looks like a run
+that was too slow.
 
 Look for the cause above the final traceback:
 
 .. code-block:: text
 
-   distributed.nanny.memory - WARNING - Worker ... exceeded 80% memory budget. Restarting...
+   distributed.nanny.memory - WARNING - Worker ... exceeded 95% memory budget. Restarting...
 
 .. _troubleshooting-worker-warnings:
 

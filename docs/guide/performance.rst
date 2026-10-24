@@ -275,8 +275,7 @@ runs of the example notebooks the largest worker reached 5.3 GB of 7.8 GB on sin
 30 years of input, ``streaming``). Each is one run, sampled once a second, so the peaks are lower
 bounds, and one run per shape does not give a crash rate.
 
-A run at the edge logs the dask line ``exceeded 80% memory budget. Restarting...`` (80 % under
-``start_local_cluster``, dask's default of 95 % elsewhere) during extreme
+A run at the edge logs the dask line ``exceeded 95% memory budget. Restarting...`` during extreme
 identification (see :ref:`troubleshooting-worker-warnings` for why you may not see it). A restart
 costs time, because dask recomputes the lost tasks. Two settings should move a run away from the
 edge, though neither has been measured at full scale:
@@ -354,7 +353,7 @@ Leave dask's spill-to-disk on. Switching it off does not sharpen a memory test. 
 crosses the ``pause`` threshold can no longer spill back down and pauses permanently, so the cluster
 deadlocks, the peak rises because what would have spilled stays resident, and both compute modes fail.
 :func:`marEx.helper.configure_dask` applies marEx's defaults: worker memory ``target``, ``spill``,
-``pause`` and ``terminate`` at 0.4, 0.5, 0.6 and 0.8, work stealing off, an ``array.chunk-size`` of
+``pause`` and ``terminate`` at dask's own 0.6, 0.7, 0.8 and 0.95, work stealing off, an ``array.chunk-size`` of
 24 MiB and 300 s communication timeouts. It sets ``temporary_directory`` to a fresh directory under
 ``scratch_dir`` and returns the object that owns it, which must stay alive. Pass ``scratch_dir``
 explicitly: the default is a site-specific path.
@@ -479,6 +478,12 @@ Detect
      - 4563 to 5199 s per slab
      - spill peak 143 to 167 GiB per slab, 0 restarts
      - 1 per slab
+   * - 20 yr 6-hourly global 0.25° SST (121.3 GB float32), 5 yr ``shifting_baseline`` +
+       ``seasonal_percentile``, in a 32 GiB job
+     - 3 workers × 2 threads × 9 GB
+     - ``persist`` 11490.3 s, ``streaming`` 9984.5 s
+     - cgroup anon peak 21.5 and 20.6 GiB, spill 161 and 138 GB, 0 OOM kills
+     - 1 per mode
    * - ICON R02B09 (14.9 M cells), 30 yr input (7305 output days), ``streaming``, all cells in one run
      - 48 workers × 8 threads × 31.2 GB (6 nodes)
      - 36.6 min
@@ -530,6 +535,12 @@ Tracking
      - peak 126.9 and 128.2 GB (``persist``), 118.7 GB (``streaming``). Pinned 751.4 GB falls
        to 147.5 GB
      - ``persist`` 2, ``streaming`` 1
+   * - Gridded tracker, 0.25°, 15 yr of 6-hourly extremes (91.0 GB int32 ID field), 32 GiB job
+     - 3 workers × 2 threads × 9 GB
+     - ``streaming`` 8316.5 s
+     - ``streaming`` anon peak 9.4 GiB. ``persist`` OOM-killed after 86 min with the workers under
+       their limits and the client at 14.6 GB
+     - 1 per mode
 
 What these rows say:
 
@@ -540,6 +551,11 @@ What these rows say:
   0.65 GB, which is the size of the growth being measured, so nothing sharper than that is
   defensible. At 28 GiB ``persist`` did not finish within its deadline and at 40 GiB it completed,
   so the result is about this allocation and this budget, not a general threshold.
+* The 6-hourly rows keep one 32 GiB job fixed while the record grows to 3.5 times its memory. The
+  ``streaming`` peak moved 6 % for detect when the input doubled, and under 1 % for track when the
+  ID field tripled. ``persist`` detect also completed, by spilling more, so detection at this size
+  does not need ``streaming``. ``persist`` track did not complete. Before the job hit its limit the
+  client, which runs the merge loop, had grown to 14.6 GB while the workers stayed under theirs.
 * At a 96 GB budget the wall times of the two runs, one per mode, differ by under 1 %. Streaming is
   not a speed-up. Its effect is on pinned bytes, 337.0 GB to 0.340 GB, and the peak fell as well because
   this is the one wide-window case.
@@ -549,8 +565,9 @@ What these rows say:
   completed in 3 h 50 min. That is a wall-clock statement and not a statement that ``persist``
   cannot fit.
 
-The scripts behind these rows, with the SLURM legs that produced each one and the per-run summaries they write, are
-in `examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_.
+The two 6-hourly rows are reproduced by the notebook and batch job in
+`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_, which ship each run's summary. The other rows were
+measured with an earlier harness that is no longer distributed.
 
 Choosing a Strategy
 ===================

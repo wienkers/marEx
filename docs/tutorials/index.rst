@@ -58,8 +58,9 @@ Scripts
 `examples/batch_jobs <https://github.com/wienkers/marEx/tree/main/examples/batch_jobs>`_ is a template for running
 detection and tracking as SLURM jobs without Jupyter: two driver scripts configured by one YAML file per dataset, with
 worked configs for the gridded, regional and unstructured examples.
-`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ holds the
-measurement harness behind :doc:`../guide/performance`. An index of every example, with its input and measured run
+`examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ detects and
+tracks 20 years of 6-hourly global SST inside one 32 GiB job, in both compute modes. It is the source of the 6-hourly rows
+in :doc:`../guide/performance`. An index of every example, with its input and measured run
 time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/examples/README.md>`_.
 
 .. toctree::
