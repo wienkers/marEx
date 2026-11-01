@@ -2,11 +2,12 @@
 Tracking Extreme Events
 =======================
 
-The tracker turns the boolean ``extreme_events`` field from the detect stage into **events**:
-labelled objects that keep one identity through time, with their area, centroid, lifetime and
-merge history. It accepts any boolean field on a latitude/longitude grid or an unstructured
-mesh, so it also runs on masks that did not come from marEx. See :doc:`../api/track` for the
-signatures of :class:`marEx.tracker` and :func:`marEx.regional_tracker`.
+The ``marEx.tracker`` module turns the boolean ``extreme_events`` field from the
+``marEx.extremes`` module into **events**: labelled objects that keep one identity through time,
+with their area, centroid, lifetime and merge history. It accepts any boolean field on a
+latitude/longitude grid or an unstructured mesh, including masks from outside marEx. See
+:doc:`../api/track` for the signatures of :class:`marEx.tracker` and
+:func:`marEx.regional_tracker`.
 
 .. contents::
    :local:
@@ -17,13 +18,13 @@ Why Overlap-Based Tracking
 
 Labelling the field as a 3-D array (time as a third spatial axis) joins any two objects that
 touch in space-time. Events that brush against each other for one day become permanently
-linked, and a few weeks later a single "event" spans the basin. Its duration, area and
-intensity describe no physical phenomenon.
+linked, and a few weeks later a single "event" spans the basin, with a duration, area and
+intensity that describe no physical phenomenon.
 
-The tracker instead labels each timestep separately and links objects between consecutive
-timesteps only when they overlap by at least ``overlap_threshold`` of the smaller object's
-area. Where several objects merge, the merged child is partitioned back to its parents, and
-each merge is written to ``merge_ledger``. The video shows both approaches on the same data.
+The marEx tracker labels each timestep separately and links objects at consecutive timesteps
+only when they overlap by at least ``overlap_threshold`` of the smaller object's area. When
+several objects merge, the merged child is partitioned back to its parents, and each merge is
+recorded in ``merge_ledger``. The video compares both approaches on the same data.
 
 .. video:: /_static/videos/tracking_comparison.mp4
    :width: 700
@@ -37,9 +38,9 @@ their identities.
 Quick Start
 ===========
 
-The tracker needs an active ``dask.distributed`` client. Without one, ``run()`` fails with
-"No clients found". Pass ``memory_limit`` explicitly: Dask reads the memory of the whole node,
-not the cgroup limit of a batch allocation, so without it a memory constraint never binds.
+The tracker needs an active ``dask.distributed`` client. Pass ``memory_limit`` explicitly,
+since Dask otherwise sizes its workers from the memory of the whole node and ignores the limit
+of a batch allocation.
 
 .. code-block:: python
 
@@ -70,10 +71,9 @@ not the cgroup limit of a batch allocation, so without it a memory constraint ne
 
    events.to_zarr("tracked_events.zarr", mode="w")
 
-``R_fill`` has no default and ``mask`` is the second positional parameter, so
+``R_fill`` is required and ``mask`` is the second positional parameter, so
 ``marEx.tracker(events, 8)`` binds ``8`` to ``mask``. Always pass ``R_fill`` by keyword.
-``data_bin`` must be Dask-backed and of boolean dtype. A tracker instance is single use: a
-second ``run()`` raises ``TrackingError``.
+``data_bin`` must be a Dask-backed boolean array. A tracker instance runs only once.
 
 How the Tracker Works
 =====================
@@ -101,7 +101,7 @@ The Morphological Step
 
 Extreme events are spatially coherent, so small holes inside one are usually artefacts of a
 threshold crossing at neighbouring cells, and isolated flagged cells are usually noise. The
-closing handles the first, the opening the second. With ``R_fill=1``::
+closing fills the holes and the opening removes the noise. With ``R_fill=1``::
 
         Initial State                  After Closing                  After Opening
     ┌──────────────────────┐       ┌──────────────────────┐       ┌──────────────────────┐
@@ -119,10 +119,9 @@ The kernel is a disk of diameter ``2 * R_fill + 1`` cells. On a gridded field ``
 grid cells. On an unstructured mesh it counts neighbour hops, so the same value spans a
 different physical distance on each mesh and needs to be chosen per resolution.
 
-Two properties of the closing matter in practice. It can bridge two objects that are separated
-by less than the kernel, and a speck between them acts as a stepping stone. The area filter
-runs after the closing, so it cannot undo such a bridge. ``prefilter_min_cells`` removes the
-specks first.
+The closing can also bridge two objects separated by less than the kernel, and a speck between
+them acts as a stepping stone. The area filter runs after the closing, so the bridge stays.
+Set ``prefilter_min_cells`` to remove the specks first.
 
 Merges and Splits
 -----------------
@@ -138,9 +137,9 @@ area is the denominator).
   ``merge_ledger``.
 
 ``nn_partitioning`` selects how the child is partitioned. The default ``False`` assigns each
-cell to the nearest parent **centroid**. ``True`` assigns it to the parent that owns the
-nearest parent **cell**. Centroid partitioning goes wrong for non-convex parents. Take a
-C-shaped object A and a small nearby object B that merge into one 20-cell child::
+cell to the nearest parent centroid. ``True`` assigns it to the parent that owns the nearest
+parent cell. Centroid partitioning misassigns cells of non-convex parents. Take a C-shaped object A and a
+small nearby object B that merge into one 19-cell child::
 
    Merged child (#)                  Centroid partition            Nearest-cell partition
    ┌───┬───┬───┬───┬───┐            ┌───┬───┬──╦┬───┬───┐         ┌───┬───┬───┬───┬───┐
@@ -159,13 +158,11 @@ C-shaped object A and a small nearby object B that merge into one 20-cell child:
 The centroid of A lies in the hollow of the C, away from A's cells, so the dividing line cuts
 the child into a B that is spatially disjoint. The nearest-cell partition keeps B contiguous.
 Use ``nn_partitioning=True`` unless you need to reproduce a centroid-based method (Sun and
-Zhang, 2023). The choice affects only how merged children are partitioned. It does not change
-which objects are linked.
+Zhang, 2023).
 
-The number of parents of one child, and the number of merges in one timestep, are held in
-fixed-width arrays of 64 entries. These are implementation widths, not physical limits, and
-an event that exceeds them raises ``TrackingError``. Raising ``overlap_threshold`` reduces the
-number of accepted parents.
+One child can have at most 64 parents, and one timestep at most 64 merges. Beyond either limit
+the tracker raises ``TrackingError``, and raising ``overlap_threshold`` reduces the number of
+accepted parents.
 
 Parameters
 ==========
@@ -174,53 +171,50 @@ Required
 --------
 
 ``data_bin`` : :class:`xarray.DataArray`
-   Boolean, Dask-backed, with dimensions ``(time, lat, lon)`` or ``(time, cells)``. Extra
-   dimensions such as depth are rejected with ``TrackingError``: select one level with
-   ``isel`` first, or loop over levels.
+   Boolean, Dask-backed, with dimensions ``(time, lat, lon)`` or ``(time, cells)``. For a field
+   with an extra dimension such as depth, select one level with ``isel`` first, or loop over
+   levels.
 
 ``R_fill`` : int
-   See `The Morphological Step`_. It is required and has no default. Guidance: small values (3 to
-   5) preserve narrow features and suit coarse grids, larger values (10 to 15) produce more
-   coherent objects from noisy fields. Choose it against the physical scale you want to
-   bridge, in cells.
+   See `The Morphological Step`_. Small values (3 to 5) preserve narrow features and suit
+   coarse grids, and larger values (10 to 15) give more coherent objects from noisy fields.
+   Choose it from the physical scale you want to bridge, in cells.
 
 Optional Inputs
 ---------------
 
 ``mask`` : :class:`xarray.DataArray`, optional
-   Boolean validity mask (``True`` = valid), as returned by ``preprocess_data``. Omit it for
-   a field with no invalid region, such as an atmospheric variable. Omitting it is equivalent
-   to passing an all-``True`` mask. An all-``False`` mask raises an error.
+   Boolean validity mask (``True`` = valid), as returned by ``preprocess_data``. Omitting it is
+   equivalent to an all-``True`` mask, which suits a field with no invalid region, such as an
+   atmospheric variable.
 
 ``prefilter_min_cells`` : int, optional (keyword-only)
    Drop connected components smaller than this many cells at each timestep, before the
    closing. Default ``None`` (off). On a fine grid it stops specks from bridging objects. The
    unstructured example in the repository uses 23 cells, roughly one 0.25 degree cell on the
-   ICON R02B09 mesh. The attribute ``prefilter_min_cells`` is written to the output only when
-   the option is set.
+   ICON R02B09 mesh.
 
 ``area_filter_quartile`` : float in (0, 1)
    Fraction of the smallest objects to remove. Default 0.5 when neither area filter is given.
-   Adaptive: the cut-off adapts to the object-size distribution of each dataset.
-   On an unstructured mesh the quantile is evaluated over objects above a small size cut-off
-   (50 cells), not over every speck, so the same value removes a different fraction there
-   than on a regular grid.
+   The cut-off adapts to the object-size distribution of each dataset. On an unstructured mesh
+   the quantile is taken over objects above 50 cells, so the same value removes a different
+   fraction there than on a regular grid.
 
 ``area_filter_absolute`` : int
-   Minimum object area (in cells) to keep. Reproducible across datasets. Mutually exclusive
-   with ``area_filter_quartile``. The cut-off that was applied is recorded as the attribute
+   Minimum object area (in cells) to keep, reproducible across datasets. Mutually exclusive
+   with ``area_filter_quartile``. The applied cut-off is recorded in the attribute
    ``area_threshold (cells)``.
 
 ``T_fill`` : int, default 2
-   Temporal closing. Must be even. The kernel is ``T_fill + 1`` **timesteps**, so on daily data
+   Temporal closing. Must be even. The kernel is ``T_fill + 1`` timesteps, so on daily data
    ``T_fill=2`` bridges absences of up to two days, and on a weekly or monthly cadence the unit
    is weeks or months. ``T_fill=0`` skips the step and is the usual choice for coarse
    cadences. For daily data 2 to 4 is typical, and larger values link more intermittent
    events at the cost of joining distinct ones.
 
 ``allow_merging`` : bool, default ``True``
-   ``False`` runs classical connected-component labelling with time connectivity. The output
-   then holds ``ID_field`` only. The unstructured tracker always uses the merge path.
+   ``False`` runs classical connected-component labelling with time connectivity, and the
+   output contains ``ID_field`` only. The unstructured tracker always uses the merge path.
 
 ``overlap_threshold`` : float, default 0.5
    Fraction of the smaller object's area that must overlap for two objects to be linked.
@@ -231,33 +225,33 @@ Optional Inputs
    See `Merges and Splits`_.
 
 ``max_iteration`` : int, default 40
-   Iteration limit of the unstructured merge loop. Unused on regular grids. A change near the
+   Iteration limit of the unstructured merge loop (regular grids ignore it). A change near the
    start of the record can need one pass per remaining time chunk to propagate, so when events
-   run through much of the record, set it to at least the number of time chunks.
+   span much of the record, set it to at least the number of time chunks.
 
 ``checkpoint`` : ``'save'`` | ``'load'`` | ``None``
    Writes or reads the preprocessed binary field and its statistics in ``temp_dir``, so a
    rerun with different linking parameters skips the morphology. Requires ``temp_dir``.
 
 ``debug`` : int (0 to 2), ``verbose``, ``quiet``
-   Logging controls. ``run()`` also prints a "Tracking Statistics" block to standard output,
-   independent of the logging level.
+   Logging controls. ``run()`` also prints a "Tracking Statistics" block to standard output at
+   every logging level.
 
 Grid and Areas
 --------------
 
 ``dimensions``, ``coordinates`` : dict
-   Defaults ``{"time": "time", "x": "lon", "y": "lat"}``. Required for other names. For an
-   unstructured mesh ``dimensions`` carries only the cell dimension under ``"x"``.
+   Defaults ``{"time": "time", "x": "lon", "y": "lat"}``. Set them when your names differ. For
+   an unstructured mesh ``dimensions`` contains only the cell dimension, under ``"x"``.
 
 ``grid_resolution`` : float, optional
-   Degrees, for regular grids. Computes spherical cell areas in km\ :sup:`2` (Earth radius
-   6378 km) and **overrides** ``cell_areas``. Not accepted for unstructured meshes.
+   Grid spacing in degrees, for regular grids only. Computes spherical cell areas in
+   km\ :sup:`2` (Earth radius 6378 km) and takes precedence over ``cell_areas``.
 
 ``cell_areas`` : :class:`xarray.DataArray`, optional
-   Physical cell areas, in whatever unit you supply. Without ``grid_resolution`` or
-   ``cell_areas`` on a regular grid, every cell has unit area and ``area`` is a cell count.
-   Required on unstructured meshes.
+   Physical cell areas, which set the unit of ``area``. On a regular grid without
+   ``grid_resolution`` or ``cell_areas``, every cell has unit area and ``area`` is a cell
+   count. Required on unstructured meshes.
 
 ``unstructured_grid``, ``neighbours``, ``temp_dir`` : see `Unstructured Meshes`_.
 
@@ -271,9 +265,9 @@ Grid Types
 Regular Latitude/Longitude Grids
 --------------------------------
 
-Coordinates are converted to degrees internally. The tracker decides the units, and whether
-the domain wraps in longitude, from a coordinate range of about 360 degrees (or 2π). A field
-that does not span the globe raises ``CoordinateError``: use the regional tracker.
+Coordinates are converted to degrees internally. The tracker infers the units, and whether the
+domain wraps in longitude, from a coordinate range of about 360 degrees (or 2π). For a field
+that covers only part of the globe, use the regional tracker (see `Regional Domains`_).
 
 Unstructured Meshes
 -------------------
@@ -290,7 +284,7 @@ directory, all passed explicitly:
    event_tracker = marEx.tracker(
        ds.extreme_events.chunk({"time": 5, "ncells": -1}),
        ds.mask,
-       R_fill=80,                           # neighbour hops, not cells of a regular grid
+       R_fill=80,                           # in neighbour hops
        area_filter_absolute=13549,
        T_fill=4,
        overlap_threshold=0.25,
@@ -306,20 +300,18 @@ directory, all passed explicitly:
    )
    events = event_tracker.run()
 
-These settings are the ones used for the ICON R02B09 tracking video (14.9 million cells).
-They are a starting point for a comparable mesh, not defaults to reuse at another
-resolution.
+These are the settings of the ICON R02B09 tracking video (14.9 million cells), and a starting
+point for a comparable mesh. Retune them for another resolution.
 
-The unstructured tracker's events are independent of the time chunking and of the worker
-layout, except where a cell is equidistant from two parents: the nearest-cell partition then breaks the tie
-by cell order, and a different chunking can break it differently. In the full-mesh
-comparisons this affected a very small number of cells.
+Events on an unstructured mesh are identical across time chunkings and worker layouts, apart
+from cells equidistant from two parents. The nearest-cell partition breaks such ties by cell
+order, which can change with the chunking.
 
 Regional Domains
 ----------------
 
-A limited-area field has no 360 degree range to detect. Use ``regional_tracker``, which takes
-the same arguments plus ``coordinate_units``:
+For a limited-area field, use ``regional_tracker``. It takes the same arguments plus the
+required ``coordinate_units``, and works on regular grids:
 
 .. code-block:: python
 
@@ -330,9 +322,6 @@ the same arguments plus ``coordinate_units``:
        R_fill=8,
        area_filter_quartile=0.5,
    ).run()
-
-``regional_tracker`` without ``coordinate_units`` raises ``ConfigurationError``, and regional
-mode is not available on unstructured meshes.
 
 Output
 ======
@@ -371,23 +360,24 @@ Output
      - ``(time, ID, sibling_ID)``, int32
      - Parent event IDs at merge times, ``-1`` where unused.
 
-The ``ID`` coordinate runs from 1 to ``N_events_final``. The dataset attributes record how
-the run was configured and what the filters did: ``N_objects_prefiltered`` and
-``N_objects_filtered`` (object counts before and after the area filter),
-``N_events_final``, ``R_fill``, ``T_fill``, ``area_threshold (cells)``,
-``accepted_area_fraction``, ``preprocessed_area_fraction``, and, with merging,
-``overlap_threshold``, ``nn_partitioning``, ``total_merges`` and ``multi_parent_merges``.
+``ID`` takes the values 1 to ``N_events_final``. The dataset attributes record the
+configuration and what the filters did: ``N_objects_prefiltered`` and ``N_objects_filtered``
+(object counts before and after the area filter), ``N_events_final``, ``R_fill``, ``T_fill``,
+``area_threshold (cells)``, ``accepted_area_fraction``, ``preprocessed_area_fraction``, and,
+with merging, ``overlap_threshold``, ``nn_partitioning``, ``total_merges`` and
+``multi_parent_merges``.
 
 ``preprocessed_area_fraction`` is the area of the input field divided by the area after the
-closing, opening and filtering. It is measured against the input **before** any
+closing, opening and filtering. It is measured against the input before any
 ``prefilter_min_cells`` step, so enabling the prefilter changes it. Compare it with 1 to see
-how much area the morphology added or removed.
-``accepted_area_fraction`` is the share of object area that survives the area filter.
+how much area the morphology added or removed. ``accepted_area_fraction`` is the share of
+object area that survives the area filter.
 
 With ``run(return_merges=True)`` the tracker also returns a second Dataset with one entry per
 merge: ``parent_IDs``, ``child_IDs``, ``overlap_areas``, ``merge_time``, ``n_parents`` and
-``n_children``. Its IDs are the object IDs of the identification stage. ``merge_ledger`` in the
-main dataset is in final event IDs, and is the one to use for event-level questions.
+``n_children``. Its IDs are the per-timestep object IDs from the identification step, whereas
+``merge_ledger`` in the main dataset uses final event IDs and is the one to use for event-level
+questions.
 
 .. code-block:: python
 
@@ -398,7 +388,7 @@ Event Statistics
 ================
 
 All per-event variables other than ``ID_field`` are small, so compute them once and work in
-memory. ``ID_field`` stays lazy.
+memory. Keep ``ID_field`` lazy.
 
 .. code-block:: python
 
@@ -429,21 +419,20 @@ memory. ``ID_field`` stays lazy.
 ``duration`` counts calendar days only on a daily cadence. On other cadences count timesteps
 with ``stats.presence.sum("time")``.
 
-These variables are the inputs to event catalogues: duration, area and the footprint give
-the frequency and severity of events for exposure studies. See :doc:`../applications/index`
-for worked cases.
+See :doc:`../applications/index` for event catalogues and other worked cases.
 
 Visualising Tracks
 ==================
 
-``ID_field`` plots directly with ``plot_IDs=True`` (see :doc:`visualisation`). Movies can
-overlay event outlines and centroids through the ``object_ids`` and ``centroids`` arguments
-of ``animate``:
+``ID_field`` plots directly with ``plot_IDs=True``:
 
 .. code-block:: python
 
    config = marEx.PlotConfig(title="Tracked Events", plot_IDs=True)
    fig, ax, im = events.ID_field.isel(time=0).plotX.single_plot(config)
+
+Movies can overlay event outlines and centroids through the ``object_ids`` and ``centroids``
+arguments of ``animate`` (see :doc:`visualisation`).
 
 .. _larger-than-memory-tracking:
 
@@ -451,17 +440,15 @@ Compute Modes and Larger-Than-Memory Tracking
 =============================================
 
 ``compute_mode`` controls what happens to the whole-field intermediates (the filled and
-filtered fields, the ID field and the merge ledger accumulator).
+filtered fields, the ID field and the merge ledger accumulator). The tracker has two modes, because its merge loop is sequential in time.
 
 ``'persist'`` (default)
-   Pins them in cluster memory. Fastest, and the right choice whenever the run fits.
+   Pins them in cluster memory. The default, and the right choice whenever the run fits.
 
 ``'streaming'``
-   Stages them to Zarr under ``temp_dir`` and reads them back, so the bytes held in worker
-   memory depend on the cluster and the time chunk and not on the length of the series.
+   Stages them to Zarr under ``temp_dir`` and reads them back, so the bytes pinned in worker
+   memory are set by the cluster and the time chunk, independent of the length of the series.
    Requires ``temp_dir``. Supports both grid types.
-
-``'lazy'`` is rejected: the merge loop is sequential in time, so recomputing buys nothing.
 
 .. code-block:: python
 
@@ -479,63 +466,33 @@ filtered fields, the ID field and the merge ledger accumulator).
    events.to_zarr("tracked_events.zarr", mode="w")
    marEx.clear_staging(events)
 
-What streaming changes
-----------------------
-
-Streaming cuts the **pinned** (resident) bytes. It does not by itself lower peak memory in
-every configuration, and the measurements below say which cases move.
-
-Measured on DKRZ Levante, single runs unless stated:
-
-* Gridded tracker, 0.25 degree global field, 3804 days (a 15.8 GB int32 ID field), at a
-  96 GB dask budget: pinned bytes fell from 337 GB (persist) to 0.34 GB (streaming), and peak
-  cluster memory from 56.7 GB to 19.1 GB. Wall time was within 1 % (1104 s and 1100 s).
-* The same tracker in a 24 GiB SLURM allocation with a 16 GB dask budget (4 workers x 4 GB):
-  ``persist`` was OOM-killed in 5 of 5 runs, while ``streaming`` completed in 7 of 7 runs in
-  the same allocation, with peak memory of 6.65 to 7.30 GB. This is the larger-than-memory
-  result. The ID field alone is 15.8 GB against the 24 GiB allocation, so the margin is
-  modest, and no allocation threshold for ``persist`` is claimed.
-* The gridded tracker on 15 years of 6-hourly 0.25 degree SST extremes (a 91.0 GB ID field) in a 32 GiB
-  job with 3 x 9 GB workers: ``streaming`` completed in 139 minutes with a peak anon of 9.4 GiB,
-  within 1 % of the peak for a field a third the size. ``persist`` was OOM-killed after 86 minutes. Its
-  workers stayed under their limits, and the client, which runs the merge loop, grew to 14.6 GB.
-  One run each.
-* ICON R02B09 (14.9 million cells), 1096 days, 16 x 12 GB: pinned bytes fell from 751 GB to
-  148 GB, but peak memory fell only 6.5 %, and ``persist`` completes at this budget (about
-  72 minutes). With 4 x 8 GB, ``persist`` did not finish within the 5 hour limit in two runs,
-  and ``streaming`` completed in 3 h 50 min. That is a wall-clock statement, not a
-  memory-failure one.
-
-The gridded peak reduction therefore does not transfer to the unstructured tracker. Plan
-around pinned bytes, and size the cluster with a margin: ``P2PConsistencyError``,
-``KilledWorker`` and a timeout are symptoms, and the cause is usually a worker over its
-termination threshold (95 % of its memory limit).
+With ``streaming``, the gridded tracker completed 15 years of 6-hourly 0.25 degree SST
+extremes (a 91.0 GB ID field) in a 32 GiB job with 3 x 9 GB workers. Size the cluster from the
+pinned bytes, with a margin. :doc:`performance` lists the measured runs for both grid types.
 
 Staging, disk and chunking requirements
 ---------------------------------------
 
-* **Disk.** About 14 bytes per cell-timestep before compression (roughly 55 GB for the
-  gridded run above, less on disk since the ID fields are mostly zero). The ICON run needs
-  about 230 GB at 1096 steps. Size ``temp_dir`` for it.
-* **The staging directory outlives** ``run()`` by design. Write your output, then call
-  :func:`marEx.clear_staging`. The path is on ``events.encoding["marex_staging_dir"]``, not
-  in ``attrs``. ``xr.merge`` and ``xr.concat`` drop that encoding, after which
-  ``clear_staging`` can only warn. Cleanup also runs at interpreter exit, but not after a
-  ``SIGKILL`` such as a wall-clock kill, so sweep ``temp_dir`` periodically.
-* **Uniform time chunks.** Every chunk except a shorter last one. ``.chunk({"time": k})``
-  satisfies this. Ragged input is re-chunked with a warning.
+* **Disk.** About 14 bytes per cell-timestep before compression: roughly 55 GB for a 0.25
+  degree global field over 3804 days, and about 230 GB for ICON R02B09 over 1096 steps. The ID
+  fields are mostly zero, so the compressed size is smaller. Size ``temp_dir`` for it.
+* **Cleanup.** The staging directory outlives ``run()``. Write your output, then call
+  :func:`marEx.clear_staging`. The path is stored in ``events.encoding["marex_staging_dir"]``.
+  ``xr.merge`` and ``xr.concat`` drop that encoding, after which ``clear_staging`` can only
+  warn. Cleanup also runs at interpreter exit, but a ``SIGKILL`` (such as a wall-clock kill)
+  skips it, so sweep ``temp_dir`` periodically.
 * **Equivalence.** On gridded data ``ID_field`` and the event properties are bit-identical
-  across the two modes and across time chunkings in the tests, and a full global tracking
-  comparison (3438 days, 3116 events) matched in every compared output. The unstructured
-  tracker matches except for the equidistant tie-breaks described above.
+  across the two modes and across time chunkings, and a full global track (3438 days, 3116
+  events) matched in every compared output. The unstructured tracker matches apart from
+  the equidistant tie-breaks (see `Unstructured Meshes`_).
 
 Chunking
 ========
 
-The tracker needs the **spatial dimensions whole** and chunks **time**. Connected-component
-labelling and the dilation are global in space, so a spatially split field is rebuilt into
-one chunk per timestep, and the transposition is the expensive part. This is the opposite of
-advice for ``preprocess_data`` on a large unstructured mesh, which chunks the cell dimension.
+The tracker needs the spatial dimensions whole and chunks time. Connected-component labelling
+and the dilation are global in space, so a spatially split field is rebuilt into one chunk per
+timestep, and this transposition is expensive. ``preprocess_data`` on a large unstructured
+mesh is the opposite case, and chunks the cell dimension.
 
 .. code-block:: python
 
@@ -545,13 +502,14 @@ advice for ``preprocess_data`` on a large unstructured mesh, which chunks the ce
    # unstructured: cells whole, small time blocks
    data_bin = data_bin.chunk({"time": 5, "ncells": -1})
 
-* A time chunk of 25 is what the gridded examples use (about 26 MB per chunk for a 0.25
-  degree global boolean field). Keep the chunk at least ``T_fill + 1`` timesteps long, so the
-  temporal closing does not have to rebalance chunk boundaries.
-* On the full ICON R02B09 mesh the time chunk is a few timesteps, because a chunk is already
-  tens of megabytes. Interior chunks should be uniform; a shorter final chunk, including a
-  single step, is accepted.
-* ``neighbours`` and ``cell_areas`` do not constrain the chunking of the input.
+* The gridded examples use a time chunk of 25 (about 26 MB per chunk for a 0.25 degree global
+  boolean field). Keep the chunk at least ``T_fill + 1`` timesteps long, which avoids
+  rebalancing chunk boundaries in the temporal closing.
+* On the full ICON R02B09 mesh the time chunk is a few timesteps, because one chunk is already
+  tens of megabytes.
+* Time chunks must be uniform, apart from a shorter final chunk (a single step is accepted).
+  ``.chunk({"time": k})`` gives this, and ragged input is re-chunked with a warning.
+* ``neighbours`` and ``cell_areas`` can be chunked independently of the input.
 
 Troubleshooting
 ===============
@@ -577,15 +535,14 @@ Troubleshooting
    ``cell_areas`` is zero over the kept objects. It must be positive wherever the mask is True.
 
 ``CoordinateError`` on a regional domain
-   The longitude range is not about 360 degrees. Use ``regional_tracker`` with
+   The field covers only part of the globe. Use ``regional_tracker`` with
    ``coordinate_units``.
 
 Workers killed, or ``P2PConsistencyError``
-   Look for a worker memory warning above the traceback. Try ``compute_mode="streaming"``,
-   smaller time chunks, or more memory per worker. For ICON-scale unstructured tracking,
-   12 GB per worker was stable on a 3-year run where 9 GB per worker was bistable. The one-year
-   example notebook (``R_fill=80``, 8 workers × 8 threads × 28 GB) peaked at 13.2 GB in its
-   largest worker.
+   These are symptoms. The cause is usually a worker over its termination threshold (95 % of
+   its memory limit), so look for a worker memory warning above the traceback. Try
+   ``compute_mode="streaming"``, smaller time chunks, or more memory per worker. For ICON-scale
+   unstructured tracking, give each worker at least 12 GB.
 
 One enormous event
    ``overlap_threshold`` is too low, ``T_fill`` or ``R_fill`` too large, or the specks that

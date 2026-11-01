@@ -1,14 +1,11 @@
 """
 Percentile thresholding and binary extreme-event identification.
 
-Takes anomalies -- from :mod:`marEx.anomaly` or from anywhere else -- and returns
-a boolean event field plus the thresholds that defined it. The two methods are a
-constant-in-time percentile per cell, and a day-of-year resolved percentile
-following Hobday et al. (2016).
-
-Neither method is specific to any domain: the same definitions apply to marine
-heatwaves, atmospheric heatwaves, and extremes in any other gridded or
-unstructured field.
+This module takes anomalies, from :mod:`marEx.anomaly` or any other source, and
+returns a boolean event field plus the thresholds that defined it. The two
+methods are a constant-in-time percentile per cell and a day-of-year resolved
+percentile following Hobday et al. (2016). Both apply to marine heatwaves,
+atmospheric heatwaves, and extremes in any other gridded or unstructured field.
 
     >>> import marEx
     >>> events = marEx.extremes.identify(anomalies, threshold_percentile=90)

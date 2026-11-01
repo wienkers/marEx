@@ -23,7 +23,7 @@ Quick Diagnostic Checklist
    print(your_data.dims, your_data.shape)
    print(your_data.chunks)            # None means the array is not dask-backed
 
-Every stage requires dask-backed input. ``DataValidationError`` at the first call usually means
+Every module requires dask-backed input. ``DataValidationError`` at the first call usually means
 the array was opened without ``chunks``.
 
 .. _troubleshooting-reading-failures:
@@ -32,8 +32,7 @@ Reading a Failure
 =================
 
 ``KilledWorker``, ``P2PConsistencyError`` and a job that hits its wall-clock limit are
-**symptoms**. They are almost never the cause, and a run that dies with any of them should be
-treated as a memory problem until the logs show otherwise.
+**symptoms**, almost always of a memory problem. Treat them as one until the logs show otherwise.
 
 The usual chain is an oversized task, a worker that crosses its termination threshold (95 % of its
 memory limit), a restart by the nanny, and then an error somewhere else. A shuffle that loses its
@@ -50,15 +49,14 @@ Look for the cause above the final traceback:
 
 .. _troubleshooting-worker-warnings:
 
-The Absence of Worker Warnings Proves Nothing
----------------------------------------------
+Hidden Worker Warnings
+----------------------
 
 marEx sets the ``distributed.worker``, ``distributed.scheduler``, ``distributed.comm`` and
 ``distributed.core`` loggers to ``ERROR`` so that routine output stays readable. That hides the
 worker-side memory warnings, such as the "unmanaged memory is high" and "worker is at 80 % memory"
 messages. If the lines above are missing from your log, check the dashboard or the batch system's
-accounting record before concluding that memory was not the problem. To see the worker warnings,
-restore the level for the run:
+accounting record for memory use. To see the worker warnings, restore the level for the run:
 
 .. code-block:: python
 
@@ -67,38 +65,36 @@ restore the level for the run:
    for name in ("distributed.worker", "distributed.scheduler"):
        logging.getLogger(name).setLevel(logging.WARNING)
 
-What to Try, in Order
----------------------
+What to Try
+-----------
 
 1. **Find the real error.** Search the log for ``memory budget. Restarting`` and read what came before it.
 2. **Compute the per-task working set** and compare it with one worker's ``memory_limit`` divided
-   among its threads. This is the most common miss. For detect on a large mesh the working set is
+   among its threads. For detection on a large mesh the working set is
    ``n_time × cells in one input spatial chunk × 4 B`` (see :ref:`performance-chunking`).
 3. **Check the allocation.** Compare the batch system's maximum resident memory with the memory you
-   requested, to rule out the client, the scheduler or the cgroup rather than the workers.
-4. **Check ``memory_limit``.** If you did not pass one, workers may be sized from the whole machine and
-   not from your allocation (see :ref:`performance-memory-limit`).
+   requested, which shows whether the client, the scheduler or the job's memory cap was the limit.
+4. **Check ``memory_limit``.** Without one, workers can be sized from the whole machine's memory
+   (see :ref:`performance-memory-limit`).
 5. **Look at the store's chunks** and how far your requested chunking is from them.
-6. **Reduce threads per worker before reducing workers.** Threads multiply concurrent task memory
-   within one limit, and workers do not.
-7. **Only then change ``compute_mode``.** It addresses pinned data, which is a different problem from
-   an oversized task.
+6. **Reduce threads per worker before reducing workers.** Threads share one worker's limit, so each
+   extra thread adds a concurrent task to the same memory.
+7. **Then change ``compute_mode``.** ``streaming`` reduces pinned data, and an oversized task needs
+   one of the steps above.
 
-Change one thing at a time. Shortening a failing run does not reliably make it cheaper per task:
-the internal tiling divides a fixed element budget by the length of the reduced axis, so a shorter
-series can produce a larger spatial tile. Reduce the spatial extent or the tile size instead.
+Change one thing at a time. A shorter record can make each task larger, because the internal tiling
+divides a fixed element budget by the length of the reduced axis. To shrink a task, reduce the
+spatial extent or the tile size.
 
-Do not turn off dask's spilling to make a memory test cleaner. Workers that cannot spill pause for
-good, the cluster deadlocks, and both compute modes fail.
+Keep dask's spilling on. Workers that cannot spill pause for good and the cluster deadlocks.
 
 Streaming Staging Left Behind
 =============================
 
-A ``compute_mode="streaming"`` run stages intermediates in a directory that must outlive the call.
-It is removed by ``marEx.clear_staging(ds)`` after you have written your output. A cleanup hook also
-runs when the interpreter exits normally, but it cannot run when the process is killed. A job stopped by
-``SIGKILL``, an out-of-memory kill or a wall-clock limit can leave the directory behind, and the
-tracker's ``temp_dir`` accumulates stores the same way.
+A ``compute_mode="streaming"`` run stages intermediates in a directory that outlives the call.
+Remove it with ``marEx.clear_staging(ds)`` once your output is written. A cleanup hook also runs at a
+normal interpreter exit, so only a killed job (``SIGKILL``, an out-of-memory kill or a wall-clock
+limit) leaves the directory behind. The tracker's ``temp_dir`` accumulates stores the same way.
 
 * Detect: directories named ``marex_stage_<pid>_<hash>`` under the ``scratch_dir`` you passed.
 * Tracker: stores named ``marEx_temp_*.zarr`` under ``temp_dir``. Stores older than 24 hours are
@@ -113,8 +109,7 @@ and ``clear_staging`` only warns, so pass the path you recorded earlier.
 Configuration Errors
 ====================
 
-Errors are raised before any compute starts wherever the problem can be seen up front. The messages
-below are the common ones.
+marEx checks its arguments before any compute starts. The table lists the common messages.
 
 .. list-table::
    :header-rows: 1
@@ -124,7 +119,7 @@ below are the common ones.
      - Cause
      - Fix
    * - ``Unknown extreme method`` / ``Unknown anomaly method``
-     - A name that is not one of the current options.
+     - An unrecognised method name.
      - Use ``"global_percentile"`` or ``"seasonal_percentile"`` for ``method_extreme``, and see
        :doc:`guide/anomalies` for ``method_anomaly``. See :doc:`whats_new` for the renamed options.
    * - ``window_days must be an odd number``
@@ -207,7 +202,7 @@ below are the common ones.
    * - Unstructured tracker rejects the input
      - It needs ``neighbours``, ``cell_areas`` and ``temp_dir``.
      - Supply them.
-   * - Time chunks rejected in streaming
+   * - Non-uniform time chunks in streaming
      - The tracker needs uniformly chunked time.
      - It re-chunks with a warning. Chunk time uniformly yourself to avoid the cost.
 
@@ -217,12 +212,7 @@ Warning About the Per-Task Element Budget
 =========================================
 
 On a very long record you may see a warning that one task "exceeds the per-task element budget".
-Each cell in a task counts the larger of its number of timesteps and the cycle length, and the
-spatial window set by ``window_spatial`` sets a minimum tile, so once ``n_time × window_spatial²``
-exceeds the budget the tile the budget allows is smaller than the window needs. At the gridded
-default of ``window_spatial=5`` that takes more than 2 million timesteps. marEx uses the larger
-tile and warns, and the warning never alters the result. It names the estimate, the budget and
-the window that forced it.
+Each cell in a task counts the larger of its number of timesteps and the cycle length, and ``window_spatial`` sets a minimum tile. Once ``n_time × window_spatial²`` exceeds the budget, marEx uses the larger tile, with the same result, and the warning names the estimate, the budget and the window. At the gridded default of ``window_spatial=5`` that takes more than 2 million timesteps.
 
 If the run then dies on memory, apply one of these:
 
@@ -251,8 +241,8 @@ Memory Errors
        memory_limit="8GB",       # always pass this
    )
 
-Aggregate memory does not rescue an oversized task. Only a larger per-worker limit or a smaller task
-does.
+An oversized task needs a larger per-worker limit or a smaller task, whatever the cluster's total
+memory.
 
 Slow Runs
 ---------
@@ -260,11 +250,10 @@ Slow Runs
 * Open the dask dashboard (``marEx.helper.get_cluster_info(client)`` prints the link and the port
   forwarding command) and look for idle workers, which usually mean a chunking mismatch.
 * Time the stages with :class:`marEx.helper.ResourceMonitor` (see :ref:`performance-resource-monitor`).
-* Do not read a long wall time as evidence of a slow algorithm until you have checked for worker
-  restarts.
-* A chunk size of 25 steps is a sound start for the tracker and a modest time chunk for detect. The
-  shipped examples run with chunks of 124 MB (lat/lon detect input), 25.9 MB (lat/lon tracker) and
-  59.5 MB (unstructured tracker). No single target size suits every stage.
+* Check for worker restarts before attributing a long wall time to the algorithm.
+* A chunk size of 25 steps is a sound start for the tracker and a modest time chunk for detection.
+  The shipped examples run with chunks of 124 MB (lat/lon detection input), 25.9 MB (lat/lon
+  tracker) and 59.5 MB (unstructured tracker).
 
 Unexpected Results
 ------------------
@@ -277,7 +266,7 @@ Unexpected Results
   (``threshold_percentile`` for ``tail="lower"``). With few years of data the fraction can be off,
   and marEx logs a warning when fewer than 10 samples are expected beyond the threshold.
 * On sparse seasonal samples, approximate and exact thresholds can differ by tens of histogram bins,
-  because they take different order statistics, and a finer ``precision`` does not close the gap. See
+  because they take different order statistics, whatever the ``precision``. See
   :doc:`guide/validation`.
 
 Installation

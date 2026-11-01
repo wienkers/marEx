@@ -1,14 +1,11 @@
 """
 Climatology, detrending, and anomaly computation.
 
-A complete, standalone half of marEx. Use it when you want a smoothed daily
-climatology, detrended anomalies, or standardised anomalies on data too large to
-fit in memory -- and nothing else. There is no threshold parameter anywhere in
-this package.
-
-Nothing here is specific to any domain or variable. The same four methods apply
-to sea surface temperature, 2 m air temperature, precipitation, soil moisture, or
-a biogeochemical tracer, on gridded or unstructured meshes.
+This module computes smoothed climatologies, detrended anomalies, and
+standardised anomalies on data too large to fit in memory, and can be used on
+its own. Its four methods apply equally to sea surface temperature, 2 m air
+temperature, precipitation, soil moisture, or a biogeochemical tracer, on
+gridded or unstructured meshes.
 
     >>> import marEx
     >>> ds = marEx.anomaly.compute(t2m, method="shifting_baseline")

@@ -4,9 +4,8 @@ Helper (:mod:`marEx.helper`)
 
 .. currentmodule:: marEx.helper
 
-The :mod:`marEx.helper` module provides utilities for HPC environments:
-managing Dask clusters on SLURM systems and tuning performance for large
-datasets. For deployment guidance and examples, see :doc:`../guide/performance`.
+The :mod:`marEx.helper` module starts local and SLURM Dask clusters, configures
+Dask for large datasets and monitors resources. For deployment guidance and examples, see :doc:`../guide/performance`.
 
 .. autosummary::
    :nosignatures:
@@ -31,5 +30,5 @@ Detailed reference
 .. autoclass:: ResourceMonitor
    :members: stage, summary
 
-Helpers are reached as ``marEx.helper.<name>`` and are not exported at the top level
-(only :func:`marEx.configure_dask` is).
+Helpers are reached as ``marEx.helper.<name>``. Only :func:`marEx.configure_dask`
+is also exported at the top level.

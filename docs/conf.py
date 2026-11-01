@@ -230,8 +230,6 @@ nbsphinx_prolog = (
     This page is generated from the Jupyter notebook
     `{{ gh_path }} <{{ gh_url }}>`__.
     `View on GitHub <{{ gh_url }}>`__ · `Download notebook <{{ raw_url }}>`__
-    (the notebook reads datasets that are not bundled with the docs, so it is
-    rendered here from its committed outputs rather than re-executed).
 {% endif %}
 """
 )

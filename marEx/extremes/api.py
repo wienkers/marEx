@@ -2,13 +2,9 @@
 Public entry point for extreme-event identification.
 
 :func:`identify` turns anomalies into a boolean extreme-event field plus the
-percentile thresholds that defined it. It is a peer of
-:func:`marEx.anomaly.compute`, not a stage of it: it accepts anomalies from
-anywhere, including a dataset this package never produced.
-
-Nothing here knows how the anomalies were made, and nothing here mentions
-standardisation -- a caller wanting thresholds on a standardised series simply
-calls this function again with that series.
+percentile thresholds that defined it. It accepts anomalies from any source,
+including datasets produced outside marEx. For thresholds on a standardised
+series, call it again with that series.
 """
 
 import logging
@@ -221,65 +217,64 @@ def identify(
     quiet: Optional[bool] = None,
 ) -> xr.Dataset:
     """
-    Identify extreme events exceeding a percentile threshold.
+    Identify extreme events using a percentile threshold.
 
     Parameters
     ----------
     data
-        Anomalies to threshold. A ``DataArray``, or a ``Dataset`` carrying a
-        ``dat_anomaly`` variable -- so that the output of
-        :func:`marEx.anomaly.compute` composes directly.
+        Anomalies to threshold: a ``DataArray``, or a ``Dataset`` with a
+        ``dat_anomaly`` variable, such as the output of
+        :func:`marEx.anomaly.compute`.
     method
         Thresholding method.
 
-        * ``'seasonal_percentile'`` (default) -- day-of-year resolved
-          thresholds computed over a rolling day window, optionally pooled over
+        * ``'seasonal_percentile'`` (default): thresholds per cycle slot computed over a rolling day window, optionally pooled over
           spatial neighbours. Follows the Hobday et al. (2016) definition.
-        * ``'global_percentile'`` -- one constant-in-time threshold per cell.
+        * ``'global_percentile'``: one constant-in-time threshold per cell.
     threshold_percentile
         Percentile defining an extreme, e.g. ``95``.
     tail
         Which side of the distribution counts as extreme. ``'upper'`` (default)
-        flags ``data >= threshold``; ``'lower'`` flags ``data <= threshold``, for
-        cold spells, drought, or any low-side extreme. The threshold is the
+        flags ``data >= threshold``, and ``'lower'`` flags ``data <= threshold``
+        for cold spells, drought, or any low-side extreme. The threshold is the
         ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
         is ``threshold_percentile=5, tail='lower'``.
     window_days
-        Width of the rolling day-of-year window
+        Width of the seasonal window in days
         (``seasonal_percentile`` only).
     window_spatial
         Width in cells (odd) of the square spatial pooling window
         (``seasonal_percentile`` with ``method_percentile='approximate'`` on
         gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
-        on that path and to no pooling everywhere else. Passing a value is an
-        error on unstructured meshes, with ``global_percentile`` and with
+        on that path and to no pooling elsewhere. Passing a value raises an
+        error on unstructured meshes, with ``global_percentile``, and with
         ``method_percentile='exact'``.
     method_percentile
-        ``'approximate'`` (default) uses a histogram-based quantile, which is
-        what allows the reduction to stream. ``'exact'`` computes a true
-        quantile and needs the full series resident per cell.
+        ``'approximate'`` (default) uses a histogram-based quantile. ``'exact'`` computes a true quantile and needs
+        the full series of each cell in memory.
     precision
         Histogram bin width for ``method_percentile='approximate'``, in the variable's
         units. The binned range is derived from the data, so the default works for any
-        variable and units: the requested tail's own extreme is a hard cap, a per-cell
+        variable and units. The requested tail's own extreme caps the range, a per-cell
         normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
         when that extreme is an outlier, and a threshold that reaches the edge regrows the
-        range and is recomputed. Omitted, ``precision`` gives 3000 bins over that range;
-        given, the bin count follows (a warning above 10000 bins, an error above 65000).
+        range and is recomputed. Without ``precision``, the range is split into 3000 bins.
+        Given a ``precision``, the bin count follows, with a warning above 10000 bins and an
+        error above 65000.
     max_anomaly, n_bins
         Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
-        threshold then raises); ``n_bins`` replaces the 3000-bin target.
+        threshold then raises), and ``n_bins`` replaces the 3000-bin target.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
-        An integer time entry is a step count, and with one, extra dimensions on
-        time-indexed variables are sized so a chunk stays within 50 million
+        An integer time entry is a step count, and extra dimensions on
+        time-indexed variables are then sized to keep a chunk within 50 million
         elements where one level allows it. ``"auto"`` hands the time chunk to
         dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
-        default), not elements: a 1-byte boolean variable gets more elements per
-        chunk than a float32 one, and can exceed 50 million. A seasonal
-        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
-        chunked from the same entry, capped at the cycle length, and is not held
-        to the element budget.
+        default), so a 1-byte boolean variable gets more elements per chunk
+        than a float32 one and can exceed 50 million. A seasonal threshold's
+        cycle axis (``dayofyear``, ``month``, ``hourofyear``) is chunked from
+        the same entry, capped at the cycle length, and exempt from the element
+        budget.
     compute_mode
         Materialisation policy: ``'persist'``, ``'lazy'`` or ``'streaming'``.
     scratch_dir
@@ -298,7 +293,7 @@ def identify(
     -------
     xr.Dataset
         ``extreme_events`` (boolean) and ``thresholds``. When given a Dataset,
-        its existing variables are carried through.
+        its existing variables are kept.
 
     Examples
     --------

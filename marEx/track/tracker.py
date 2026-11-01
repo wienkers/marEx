@@ -4,9 +4,9 @@ MarEx-Track: Marine Extreme Event Identification, Tracking, and Splitting/Mergin
 MarEx identifies and tracks extreme events in oceanographic data across time,
 supporting both structured (regular grid) and unstructured datasets. It can identify
 discrete objects at single time points and track them as evolving events through time,
-seamlessly handling splitting and merging.
+including splitting and merging.
 
-This package provides algorithms to:
+This module provides algorithms to:
 
 * Identify binary objects in spatial data at each time step
 * Track these objects across time to form coherent events
@@ -14,7 +14,7 @@ This package provides algorithms to:
 * Calculate and maintain object/event properties through time
 * Filter by size criteria to focus on significant events
 
-Key terminology:
+Terminology:
 
 * Object: A connected region in binary data at a single time point
 * Event: One or more objects tracked through time and identified as the same entity
@@ -160,7 +160,7 @@ class tracker:
     Tracker identifies and tracks arbitrary binary objects in spatial data through time.
 
     The tracker supports both structured (regular grid) and unstructured data,
-    and seamlessly handles splitting & merging of objects. It identifies
+    and handles splitting & merging of objects. It identifies
     connected regions in binary data at each time step, and tracks these as
     evolving events through time.
 
@@ -175,17 +175,14 @@ class tracker:
     ----------
     data_bin : xarray.DataArray
         Binary field of extreme points to group, label, and track (True = object, False = background)
-        Must represent and underlying `dask` array.
+        Must be backed by a `dask` array.
     mask : xarray.DataArray, optional
         Binary mask indicating valid regions (True = valid, False = invalid). Omit it
-        for a field with no invalid region -- an atmospheric variable has no land mask
-        the way SST does -- and every cell is treated as valid. Defaulting it here is
-        not the same as passing an all-True mask by hand only in that it costs nothing
-        to write; the tracking result is identical either way.
+        for a field with no invalid region (e.g. an atmospheric variable with no land
+        mask), and every cell is treated as valid, as with an all-True mask.
     R_fill : int
         The radius of the kernel used in morphological opening & closing, relating to the largest hole/gap that can be filled.
-        In units of grid cells. Required: it carries a default in the signature only so
-        that ``mask`` can be omitted, and is rejected when left unset.
+        In units of grid cells. Required.
     area_filter_quartile : float, optional
         The fraction of the smallest objects to discard, i.e. the quantile defining the smallest area object retained.
         Quantile must be in (0-1) (e.g., 0.25 removes smallest 25%). Mutually exclusive with area_filter_absolute.
@@ -193,49 +190,39 @@ class tracker:
     area_filter_absolute : int, optional
         The minimum area (in grid cells) for an object to be retained. Mutually exclusive with area_filter_quartile.
         Use this for fixed minimum area thresholds (e.g., 10 cells minimum).
-        Applied after the morphological closing, so it cannot stop small specks from
-        bridging objects during the closing; see ``prefilter_min_cells`` for that.
+        Applied after the morphological closing. To stop small specks bridging objects
+        during the closing, use ``prefilter_min_cells``.
     temp_dir : str, optional
         Path to temporary directory for storing intermediate results
     compute_mode : {'persist', 'streaming'}, default='persist'
         Materialisation policy for whole-field intermediates during tracking.
 
-        * 'persist' (default): pins intermediates in cluster RAM. Fastest, and correct
-          whenever the run fits (in one measured gridded run, 0.25 deg global, n_time=3804: peak ~57 GB).
+        * 'persist' (default): pins intermediates in cluster RAM. Fastest when the run
+          fits in cluster memory.
         * 'streaming': stages the ID field, the filled/filtered fields, the merge loop's
-          output accumulator and the merge ledger to zarr under ``temp_dir`` instead of
-          pinning them, so memory scales with cluster size rather than series length
-          (on the same run: peak 19.1 GB, bytes pinned 337 -> 0.34 GB; single measurements,
-          gridded tracker only). Requires
-          ``temp_dir``. Disk cost is roughly 5 stores of 2 bool + 3 int32 whole fields,
-          ~14 bytes per cell-timestep uncompressed (~55 GB uncompressed at that same
-          n_time=3804 x 720 x 1440 run; less on disk, since the ID fields are mostly
-          zeros). The merge ledger adds a sixth store but negligible disk: it is nearly
-          all ``-1`` fill and compresses to a few MB.
+          output accumulator and the merge ledger to zarr under ``temp_dir``, so far less is
+          pinned in worker memory. Requires ``temp_dir``.
+          Budget ~14 bytes per cell-timestep uncompressed, plus a few MB for the merge
+          ledger.
 
-          **Restrictions**: requires the input's time chunking to be uniform (every chunk
-          equal except a possibly-smaller last one, exactly what ``.chunk({'time': k})``
-          always produces); a genuinely ragged chunking is rejected at construction time
-          rather than failing inside the zarr write. Both gridded and unstructured grids
-          are supported.
+          **Restrictions**: the input's time chunking must be uniform (every chunk equal
+          except a possibly-smaller last one, as ``.chunk({'time': k})`` produces). A
+          ragged chunking is rejected at construction time. Both gridded and unstructured
+          grids are supported.
 
-          **Staging-lifetime contract**: the returned dataset reads *lazily* from the
-          staged zarr store, so the staging directory deliberately **outlives**
-          ``run()``. Write your output first, then call
-          ``marEx.clear_staging(events_ds)`` -- the path is on
-          ``events_ds.encoding["marex_staging_dir"]`` (not ``attrs``: attrs are copied
-          verbatim into whatever you write ``events_ds`` to, and by the time
-          ``clear_staging`` runs that directory is gone, so an attrs-recorded path would
-          be a dead reference baked into your output). An ``atexit`` hook cleans up on
-          normal interpreter exit, but it does **not** survive SIGKILL (e.g. a
-          wall-clock kill), so sweep ``temp_dir`` periodically.
+          **Staging lifetime**: the returned dataset reads lazily from the staged zarr
+          store, so the staging directory outlives ``run()``. Write your output first,
+          then call ``marEx.clear_staging(events_ds)``. The path is on
+          ``events_ds.encoding["marex_staging_dir"]``. An ``atexit`` hook cleans up on
+          normal interpreter exit only (a SIGKILL skips it), so sweep ``temp_dir``
+          periodically.
     prefilter_min_cells : int, optional
         Keyword-only. Drop connected components smaller than this many cells from each
         time slice *before* the morphological closing. On a fine grid, specks below the
-        scale of interest act as stepping stones under dilation and join objects that
-        would otherwise stay separate. ``area_filter_absolute`` runs after the closing and
-        cannot undo that. Connectivity is the tracker's own (8-connected with the
-        longitude seam joined on a global grid, edge neighbours on an unstructured mesh).
+        scale of interest bridge separate objects under dilation, and
+        ``area_filter_absolute`` runs too late to separate them again. Connectivity is
+        the tracker's own (8-connected with the longitude seam joined on a global grid,
+        edge neighbours on an unstructured mesh).
         Default ``None`` disables it.
     T_fill : int, default=2
         The permissible temporal gap, in timesteps, between objects for tracking continuity to be maintained
@@ -244,13 +231,13 @@ class tracker:
     allow_merging : bool, default=True
         Allow objects to split and merge across time.
         Apply splitting & merging criteria, track merge events, and maintain original identities of merged objects across time.
-        N.B.: `False` reverts to classical `ndmeasure.label` with simplar time connectivity, i.e. Scannell et al.
+        N.B.: `False` reverts to classical `ndmeasure.label` with simple time connectivity, i.e. Scannell et al.
     nn_partitioning : bool, default=False
-        Implement a better partitioning of merged child objects based on closest parent cell.
+        Partition merged child objects by the closest parent cell.
         `False` reverts to using parent centroids to determine partitioning between new child objects,
         i.e. Di Sun & Bohai Zhang 2023.
-        N.B.: Centroid-based partitioning has major problems with small merging objects suddenly obtaining unrealistically-large
-        (and often disjoint) fractions of the larger object.
+        N.B.: Centroid-based partitioning can assign small merging objects unrealistically large
+        (and often disjoint) fractions of a larger object.
     overlap_threshold : float, default=0.5
         The fraction of the smaller object's area that must overlap with the larger object's area to be considered the same event
         and continue tracking with the same ID.
@@ -312,7 +299,7 @@ class tracker:
     ...     extreme_events,
     ...     mask,
     ...     R_fill=8,                    # Fill holes up to 8 grid cells
-    ...     area_filter_quartile=0.5     # Remove smallest 50% of objects
+    ...     area_filter_quartile=0.5,    # Remove smallest 50% of objects
     ...     allow_merging=False          # Basic tracking without splitting/merging
     ... )
     >>>
@@ -413,7 +400,7 @@ class tracker:
     >>> print(f"Conservative: {conservative_events.ID.max().compute()} events")
     >>> print(f"Aggressive: {aggressive_events.ID.max().compute()} events")
 
-    Using absolute area filtering instead of percentile-based:
+    Using absolute area filtering:
 
     >>> # Filter objects smaller than 25 grid cells
     >>> absolute_tracker = marEx.tracker(
@@ -1737,8 +1724,7 @@ class tracker:
         Parameters
         ----------
         data_bin : xarray.DataArray
-            Preprocessed binary data:  Field of globally unique integer IDs of each element in connected regions.
-            ID = 0 indicates no object.
+            Preprocessed binary data (True = object, False = background).
 
         Returns
         -------
@@ -1751,8 +1737,8 @@ class tracker:
         """
         # Identify objects at each time step
         object_id_field, _, _ = self.identify_objects(data_bin, time_connectivity=False)
-        # pin, NOT stage: this is the same array identify_objects already anchored
-        # (objects.py:250, Task 5). Staging it again would write a second copy of the
+        # pin, NOT stage: this is the same array identify_objects already anchored.
+        # Staging it again would write a second copy of the
         # whole field to zarr. In persist mode dask.persist on an already-persisted
         # collection returns the same futures, so the default is unchanged.
         object_id_field = self.materialiser.pin_one(object_id_field)
@@ -1835,7 +1821,7 @@ class tracker:
         object_id_field_unique : xarray.DataArray
             Field of unique object IDs. IDs must not be repeated across time.
         object_props : xarray.Dataset
-            Properties of each object that also need to be relabeled.
+            Properties of each object that also need relabelling.
         overlap_objects_list : (N x 2) numpy.ndarray
             Array of object ID pairs that indicate which objects are in the same event.
             The object in the first column precedes the second column in time.
@@ -1845,7 +1831,7 @@ class tracker:
         Returns
         -------
         split_merged_events_ds : xarray.Dataset
-            Dataset with relabeled events and their properties. ID = 0 indicates no object.
+            Dataset of relabelled events and their properties. ID = 0 indicates no object.
         """
         return _merge_split.cluster_rename_objects_and_props(
             object_id_field_unique,
@@ -1916,12 +1902,9 @@ class tracker:
         self, object_id_field_unique: xr.DataArray, object_props: xr.Dataset
     ) -> Tuple[xr.DataArray, xr.Dataset, NDArray[np.int32], xr.Dataset]:
         """
-        Optimised parallel implementation of object splitting and merging.
+        Parallel implementation of object splitting and merging.
 
-        This version is specifically designed for unstructured grids with more efficient
-        memory handling and better parallelism than the standard split_and_merge_objects
-        method. It processes data in chunks, handles merging events, and efficiently
-        updates object IDs.
+        Processes unstructured data in chunks, handles merging events, and updates object IDs.
 
         Parameters
         ----------

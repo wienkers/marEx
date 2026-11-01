@@ -11,42 +11,39 @@
 
 **Efficient & scalable climatologies, anomalies, extreme detection, & event tracking for exascale climate data.**
 
-marEx is a Python framework of three stages, each usable on its own: smoothed climatologies and anomalies, extreme identification against a percentile threshold, and tracking of the resulting events through time. The same code runs on sea surface temperature, 2 m air temperature, precipitation, wind or a biogeochemical tracer, on regular grids and unstructured meshes, with a high or a low tail.
+marEx computes climatologies and anomalies, identifies extremes, and tracks the resulting events through space and time in geospatial time series. The same calls detect marine and atmospheric heatwaves, cold spells, droughts and subsurface ocean extremes.
 
 **[Full documentation on ReadTheDocs](https://marex.readthedocs.io/)**
 
 ---
 
-https://github.com/user-attachments/assets/501537ff-5adb-4e13-ba08-6a333bac2a02
+<!-- pypi-video-thumbnail: media/film_thumbnail.jpg -->
+https://github.com/user-attachments/assets/845b6269-972c-4d77-bbdb-eb0d80c84958
 
-![marEx_front](https://github.com/user-attachments/assets/939fceee-8990-46fb-b3f8-30e803b6c802)
+<sub>Tracked marine heatwaves (white outlines) and atmospheric heatwaves in 2 m air temperature (cyan) through 2016, over the daily sea surface temperature anomaly. OSTIA SST and ERA5.</sub>
 
 ---
 
-## The Three Stages
+## Key Features
 
-```
- marEx.anomaly.compute()      marEx.extremes.identify()         marEx.tracker()
-┌────────────────────────┐   ┌────────────────────────┐   ┌────────────────────────┐
-│ 1. Anomalies           │ → │ 2. Extremes            │ → │ 3. Tracking            │
-│ climatology, detrend,  │   │ percentile thresholds, │   │ events with IDs, areas,│
-│ standardise            │   │ upper or lower tail    │   │ merges and splits      │
-└────────────────────────┘   └────────────────────────┘   └────────────────────────┘
-          └───────────── marEx.preprocess_data() chains stages 1 and 2 ─────────────┘
-```
+- **High Performance**: Process 100+ years of high-resolution daily global data in minutes.
+- **Multiple Detection Methods**: Hobday et al. (2016) and its generalisations, with four anomaly baselines and seasonal or constant-in-time percentile thresholds, on either tail, at daily, sub-daily or monthly cadence.
+- **Larger-than-Memory**: Intelligent chunking, lazy evaluation and on-disk staging compute the global climatologies, percentile thresholds and event tracks of datasets much larger than memory.
+- **Cloud-Native Scaling**: Identical code scales from a laptop to a supercomputer using 1024+ cores.
+- **Advanced Event Tracking**: Follows coherent events as they evolve, split and merge, keeping each event's identity and merge history.
+- **Universal Grid Support**: Regular lat/lon grids and unstructured meshes (FESOM, ICON, MPAS) through one API, with depth or level as an extra dimension in detection.
 
-Stage 1 never asks for a threshold, and stage 2 accepts anomalies from marEx or from anywhere else. If all you need is a smoothed daily climatology of a dataset that does not fit in memory:
+---
 
-```python
-import xarray as xr
-import marEx
+## Core Modules
 
-sst = xr.open_dataset("sst_data.nc", chunks={"time": 25}).sst
-anomalies = marEx.anomaly.compute(sst, method="shifting_baseline")
-anomalies.dat_anomaly.to_zarr("sst_anomaly.zarr")
-```
+| Step | Returns | Methods |
+| --- | --- | --- |
+| **1. Anomaly**<br>`marEx.anomaly.compute` | The anomaly field, i.e. the input minus its seasonal climatology (`dat_anomaly`).<br>With `detrend_harmonic`, also standardised anomalies and their rolling standard deviation. `marEx.anomaly.smoothed_rolling_climatology` returns the shifting-baseline climatology itself. | `shifting_baseline`, `fixed_baseline`, `detrend_harmonic`, `detrend_fixed_baseline` |
+| **2. Extremes**<br>`marEx.extremes.identify` | A boolean field flagging every extreme cell and time (`extreme_events`).<br>Also: the percentile threshold of every cell, resolved through the year when seasonal (`thresholds`). | `seasonal_percentile` or `global_percentile`, upper or lower tail, exact or histogram percentiles |
+| **3. Tracking**<br>`marEx.tracker(...).run()` | An event-ID field labelling each tracked event in space and time (`ID_field`).<br>Also: each event's area and centroid through time, its start and end, and the full merge history. | overlap-based merging and splitting, gap filling, area filtering |
 
-The full pipeline, from raw field to tracked events:
+`marEx.preprocess_data` runs steps 1 and 2 in one call. Chained together, from daily SST to tracked marine heatwaves:
 
 ```python
 import xarray as xr
@@ -57,12 +54,8 @@ client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="8GB")
 
 sst = xr.open_dataset("sst_data.nc", chunks={"time": 25}).sst
 
-extremes = marEx.preprocess_data(
-    sst,
-    method_anomaly="shifting_baseline",
-    method_extreme="seasonal_percentile",
-    threshold_percentile=95,
-)
+anomalies = marEx.anomaly.compute(sst, method="shifting_baseline")
+extremes = marEx.extremes.identify(anomalies, method="seasonal_percentile", threshold_percentile=95)
 
 events = marEx.tracker(
     extremes.extreme_events,
@@ -77,46 +70,24 @@ fig, ax, im = (events.ID_field > 0).mean("time").plotX.single_plot(
 )
 ```
 
-`events` includes `ID_field`, `global_ID`, `area`, `centroid`, `presence`, `time_start`, `time_end` and `merge_ledger`.
+<a href="media/mhw_family.png"><img src="media/mhw_family.png" alt="Seven tracked North Atlantic marine heatwaves, 2017-18: four map snapshots above a timeline of each event's area and its contacts with the others" width="100%"></a>
+
+<sub>A family of seven tracked marine heatwaves in the North Atlantic, October 2017 to August 2018 (95th percentile, OSTIA SST). Each colour is one event, and ribbon thickness is its area. Grey bands mark when two events touch. The tracker resolves merges and splits there, and each event keeps its identity.</sub>
 
 ---
 
-## Key Features
+## Performance
 
-- **Stages that stand alone**: anomalies without events, events from anomalies computed elsewhere, or the whole chain. No stage needs the next one's parameters.
-- **Any grid, any cadence, either tail**: lat/lon grids and unstructured meshes (FESOM, ICON, MPAS) share one API. Fields with an extra dimension such as depth run through detection (a 3-D run equals the per-level 2-D runs), and monthly or sub-daily time axes are supported. `tail="lower"` flags cold spells and droughts.
-- **Larger than memory**: `compute_mode="streaming"` keeps intermediates on disk instead of pinning them in worker memory. It cuts pinned bytes, not peak memory, and in the table below it completes a track in an allocation where `persist` is killed.
-- **Advanced Event Tracking**: merges and splits require overlap rather than contact, and every parent and child relationship is written to `merge_ledger`. Naive 3-D connected-component labelling chains anything that touches into one basin-spanning event.
-- **Results independent of how you chunk**: detection output does not change with the input chunking, verified on the test fixtures for every anomaly and threshold method, and the gridded tracker agreed across time chunks and compute modes in the cases tested. The unstructured tracker is chunk-independent except for equidistant tie-breaks.
+| Stage | Data | Size | Wall-time |
+| --- | --- | ---: | ---: |
+| Detect | ICON SST, 14.9 M cells, 30 yr daily | **1.3 TB** | 37 min |
+| Detect | Global SST 0.25°, 20 yr 6-hourly | **243 GB** | 166 min |
+| Detect | Global SST 0.25°, 40 yr daily | **122 GB** | 61 min |
+| Track | Global 0.25°, 20 yr 6-hourly | **91 GB** | 139 min |
+| Track | ICON, 14.9 M cells, 3 yr daily | **66 GB** | 70 min |
+| Track | Global 0.25°, 10 yr daily | **16 GB** | 27 min |
 
----
-
-## Measured at Scale
-
-Runs on one DKRZ Levante node, one per mode unless a row says otherwise, with outputs compared between modes wherever both completed.
-
-| Stage and data | Configuration | Result |
-| --- | --- | --- |
-| Detect, 40 years of daily 0.25° global SST (9282 × 720 × 1440 output days) | 4 workers × 22 GB, 64 threads | 3954 s with `persist`, 3663 s with `streaming`, identical arrays |
-| Track, 0.25° global, 3804 days | 24 GiB allocation, 4 × 4 GB dask budget | `persist` OOM-killed in 5 of 5 runs, `streaming` completed in 7 of 7 |
-| Track, same field, 96 GB budget | single run each | pinned 337 GB → 0.34 GB; peak 56.7 → 19.1 GB; wall time within 1 % |
-| Track, ICON R02B09 (14.9 M cells), 1096 days | 16 workers × 12 GB | `persist` 4297 and 4302 s (two runs), `streaming` 4219 s; pinned 751 → 148 GB |
-| Track, 15 years of 6-hourly 0.25° SST (91 GB event field) | 32 GiB job, 3 workers × 9 GB | `persist` OOM-killed, `streaming` completed with a 9.4 GiB peak |
-
-The squeeze result rests on the gridded tracker. Detection did not show a peak-memory saving from streaming. Details, sizing guidance and caveats are in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).
-
----
-
-## Applications
-
-The [application gallery](https://marex.readthedocs.io/en/latest/applications/index.html) has a configuration and its caveats for each case.
-
-- **Marine heatwaves**: the original use, on satellite and model SST.
-- **Atmospheric heatwaves**: heat-driven electricity demand and heat stress.
-- **Wind drought**: low-tail wind speed events for energy supply.
-- **Precipitation drought**: monthly, lower-tail events for hydro and agriculture.
-- **Subsurface ocean**: 3-D temperature extremes relevant to aquaculture and fisheries.
-- **Event catalogues**: tracked footprints with duration, area and intensity, the input to frequency and severity analysis.
+Sizing guidance is in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).
 
 ---
 
@@ -136,26 +107,18 @@ For HPC environments and optional dependencies, see the **[Installation Guide](h
 | --- | --- |
 | **[Getting Started](https://marex.readthedocs.io/en/latest/getting_started/index.html)** | Installation and a five-minute quickstart |
 | **[Tutorials](https://marex.readthedocs.io/en/latest/tutorials/index.html)** | End-to-end notebooks for gridded, regional and unstructured data |
-| **[Applications](https://marex.readthedocs.io/en/latest/applications/index.html)** | Worked cases by domain |
+| **[Applications](https://marex.readthedocs.io/en/latest/applications/index.html)** | Marine and atmospheric heatwaves, wind and precipitation droughts, subsurface ocean extremes and event catalogues |
 | **[User Guide](https://marex.readthedocs.io/en/latest/guide/index.html)** | [Anomalies](https://marex.readthedocs.io/en/latest/guide/anomalies.html), [extremes](https://marex.readthedocs.io/en/latest/guide/extremes.html), [dimensions and time](https://marex.readthedocs.io/en/latest/guide/dimensions_and_time.html), tracking, performance, [validation](https://marex.readthedocs.io/en/latest/guide/validation.html) |
-| **[What's New](https://marex.readthedocs.io/en/latest/whats_new.html)** | Changes in 5.0 and the migration table |
+| **[What's New](https://marex.readthedocs.io/en/latest/whats_new.html)** | Changes in 5.0 and the migration table for renamed methods and parameters |
 | **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** | The design choices, with a tracking-comparison video |
 | **[API Reference](https://marex.readthedocs.io/en/latest/api/index.html)** | Every public function and class |
 | **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** | Common issues and solutions |
 
 ---
 
-## What's New in 5.0
-
-- A standalone `marEx.anomaly.compute` and `marEx.extremes.identify`, a lower tail, fields with an extra dimension, and monthly or sub-daily time axes.
-- `compute_mode` on detection (`persist`, `lazy`, `streaming`) and tracking (`persist`, `streaming`), plus a per-stage `ResourceMonitor` and a small-object prefilter for the tracker.
-- Renamed methods and parameters (`seasonal_percentile`, `window_years`, `standardise`) and a removed `marEx.detect` module. The [migration table](https://marex.readthedocs.io/en/latest/whats_new.html) maps every old name to its replacement.
-
----
-
 ## Development and Validation
 
-I developed the scientific methodology and the implementation of marEx by hand up to and including v4.1 (April 2026). From v4.1 onward I have used Claude Code to help optimise, generalise and test it. Since mid-2026 every change has been held to reference-output (golden) tests at zero tolerance (one threshold field allows 2e-14 of round-off), plus tests that the results do not depend on chunking or compute mode. Deliberate corrections are listed in the changelog. How correctness is tested, and where the tests stop, is described on the [validation page](https://marex.readthedocs.io/en/latest/guide/validation.html), and the changes are listed in [What's New](https://marex.readthedocs.io/en/latest/whats_new.html).
+I developed the scientific methodology and the implementation of marEx by hand up to and including v4.1 (April 2026), and have since used Claude Code as an aide to help optimise, generalise and test it. Since mid-2026 every change has been checked against reference outputs to round-off precision. The [validation page](https://marex.readthedocs.io/en/latest/guide/validation.html) describes what is tested.
 
 ---
 
@@ -165,7 +128,7 @@ I developed the scientific methodology and the implementation of marEx by hand u
 - **[GitHub Issues](https://github.com/wienkers/marEx/issues)**: bug reports and feature requests
 - **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)**: questions, ideas and community support
 
-When reporting issues, please include the marEx version (`marEx.__version__`), Python version and OS, dependency status (`marEx.print_dependency_status()`), a minimal reproducible example and the full traceback.
+When reporting an issue, include `marEx.__version__`, the Python version and OS, `marEx.print_dependency_status()`, a minimal reproducible example and the full traceback.
 
 ---
 
@@ -180,7 +143,7 @@ When using marEx in publications, please cite:
 
 ## License
 
-From version 5.0, marEx is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). You can use, study, modify and share it freely. If you distribute a modified version, or run one as a network service, you must release your changes under the same licence. Keep the [NOTICE](NOTICE) and cite marEx in published work. Earlier releases keep the terms they were distributed with.
+marEx is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). You can use, study, modify and share it freely. If you distribute a modified version, or run one as a network service, you must release your changes under the same licence. Keep the [NOTICE](NOTICE) and cite marEx in published work.
 
 The code and documentation are reserved from text and data mining, including AI model training (Art. 4(3) of the EU Directive 2019/790). For other licensing terms, [get in touch](mailto:aaron.wienkers@gmail.com).
 

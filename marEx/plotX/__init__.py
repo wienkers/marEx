@@ -1,17 +1,16 @@
 """
 MarEx-PlotX: Marine Extremes Visualisation Module
 
-Comprehensive visualisation module for marine extreme events supporting both
-structured (regular grid) and unstructured oceanographic data.
-Provides automated grid detection and specialised plotting capabilities optimised
-for each data structure type.
+Visualisation of marine extreme events on structured (regular grid) and
+unstructured oceanographic data, with the grid type detected automatically and a
+plotting backend for each.
 
 Core capabilities:
 
-* Polymorphic plotting with automatic grid type detection
-* Single plot generation with customisable styling and projections
-* Multi-panel plotting for comparative analysis
-* Animation generation for temporal visualisation
+* One accessor for both grid types, with automatic grid type detection
+* Single plots with customisable styling and projections
+* Multi-panel plots
+* Animations through time
 * Memory-efficient handling of large oceanographic datasets
 
 Supported data formats:
@@ -199,11 +198,11 @@ def specify_grid(
     fpath_ckdtree: Optional[Union[str, Path]] = None,
 ) -> None:
     """
-    Set the global grid specification that will be used by all plotters.
+    Set the global grid specification used by all plotters.
 
     Args:
-        grid_type: str, either 'gridded' or 'unstructured'. If specified, this will be used as the primary method
-            to determine grid type.
+        grid_type: str, either 'gridded' or 'unstructured'. If specified, it takes precedence over
+            automatic grid type detection.
         fpath_tgrid: Path to the triangulation grid file
         fpath_ckdtree: Path to the pre-computed KDTree indices directory
 

@@ -3,8 +3,7 @@ Dask cluster management for HPC environments.
 --------------------------------------------------------------------
 
 Provides utilities for starting local and SLURM-based distributed Dask
-clusters (with specific support for the DKRZ Levante Supercomputer) and
-for retrieving cluster connection information.
+clusters and for retrieving cluster connection information.
 """
 
 import os
@@ -94,7 +93,7 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
 
     Examples
     --------
-    Basic cluster info retrieval:
+    Basic usage:
 
     >>> import marEx
     >>>
@@ -111,7 +110,7 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
     Connect via: localhost:8787/status
     >>> client.close()
 
-    SSH tunneling for remote access:
+    SSH tunnelling for remote access:
 
     >>> # Start cluster on HPC system
     >>> client = marEx.helper.start_distributed_cluster(
@@ -120,12 +119,12 @@ def get_cluster_info(client: Client) -> Dict[str, str]:  # pragma: no cover
     >>>
     >>> # Get tunneling information
     >>> info = marEx.helper.get_cluster_info(client)
-    Hostname: levante-login01
-    Forward Port: levante-login01:8889
+    Hostname: login01
+    Forward Port: login01:8889
     Dashboard Link: localhost:8889/status
     >>>
     >>> # Use this info to set up SSH tunnel:
-    >>> # ssh -L 8889:localhost:8889 levante-login01.dkrz.de
+    >>> # ssh -L 8889:localhost:8889 login01
     >>> # Then access dashboard at localhost:8889/status
     >>>
     >>> client.close()
@@ -389,7 +388,7 @@ def start_distributed_cluster(
     threads_per_worker : int, default=1
         Threads in each worker process. A node then runs ``workers_per_node`` processes of
         ``threads_per_worker`` threads each. Fewer, multi-threaded workers mean fewer peers in
-        every all-to-all transfer (P2P rechunks) and an event loop that is less often starved.
+        every all-to-all transfer (P2P rechunks) and an event loop starved less often.
     node_memory : int, default=256
         Memory per node in GB (256, 512, or 1024).
     dashboard_address : int, default=8889

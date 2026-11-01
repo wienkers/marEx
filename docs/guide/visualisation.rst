@@ -14,8 +14,7 @@ Overview
 ========
 
 Importing ``marEx`` registers a ``.plotX`` accessor on every :class:`xarray.DataArray`. Calling
-one of its methods builds a plotter for the data, and the plotter draws a Cartopy map. Three
-methods cover the use cases:
+one of its three methods builds a plotter for the data, and the plotter draws a Cartopy map:
 
 ``single_plot(config, ax=None)``
    One map for one timestep. Returns ``(fig, ax, im)``.
@@ -25,13 +24,12 @@ methods cover the use cases:
    colourbar. Returns ``(fig, axes)``.
 
 ``animate(config, plot_dir="./", file_name=None, centroids=None, object_ids=None)``
-   An MP4 movie with one frame per timestep. Returns the file path, or ``None`` if ``ffmpeg``
-   cannot be found.
+   An MP4 movie with one frame per timestep. Returns the file path, or ``None`` when ``ffmpeg``
+   is missing.
 
-All appearance options live in a :class:`marEx.PlotConfig`. Plotting is **two-dimensional**: a
-field has one horizontal slice per timestep, and a field with a further dimension (depth,
-level, member) is rejected with ``VisualisationError``. Select one level first, for example
-``temperature.isel(depth=0)``.
+All appearance options are set in a :class:`marEx.PlotConfig`. Each plot shows one horizontal
+slice per timestep, so for a field with a further dimension (depth, level, member), select one
+level first, for example ``temperature.isel(depth=0)``.
 
 Plotting needs ``matplotlib`` and ``cartopy``, which are installed with marEx. Movies also need
 ``pillow`` and an ``ffmpeg`` executable on the ``PATH`` (the ``plotting`` extra provides them,
@@ -65,13 +63,11 @@ dimension has length 1.
 Grid Detection
 ==============
 
-The accessor decides between the two backends from the dimensions of the data. A field is
-**gridded** if the dimension named by ``dimensions["y"]`` (default ``lat``) is present, and
-**unstructured** otherwise. For an unstructured field the cell dimension is the one that the
-``x`` coordinate (default ``lon``) is defined on. A field with several non-time dimensions
-where that cannot be decided (for example ``(time, depth, ncells)`` without a ``lon``
-coordinate on ``ncells``) raises ``VisualisationError`` and asks for the dimensions
-explicitly.
+The accessor chooses the backend from the dimensions of the data. A field is **gridded** if
+the dimension named by ``dimensions["y"]`` (default ``lat``) is present, and **unstructured**
+otherwise. For an unstructured field the cell dimension is the one that the ``x`` coordinate
+(default ``lon``) is defined on. Where that is ambiguous, for example ``(time, depth, ncells)``
+without a ``lon`` coordinate on ``ncells``, pass the dimensions explicitly.
 
 :func:`marEx.specify_grid` with ``grid_type="gridded"`` or ``"unstructured"`` overrides the
 detection and logs a warning when it disagrees with the data.
@@ -90,9 +86,9 @@ Names other than ``time``, ``lat`` and ``lon`` are passed to the accessor call, 
    )
    fig, ax, im = plotter.single_plot(marEx.PlotConfig(title="Temperature"))
 
-The accessor call returns a ``GriddedPlotter`` or an ``UnstructuredPlotter``, and all three
-methods are available on it. The ``dimensions`` and ``coordinates`` fields of ``PlotConfig``
-only select the title text in ``multi_plot``. The shortcuts ``da.plotX.single_plot(config)``
+The accessor call returns a ``GriddedPlotter`` or an ``UnstructuredPlotter``, with all three
+methods. The ``dimensions`` and ``coordinates`` fields of ``PlotConfig``
+select the title text in ``multi_plot`` and the animation's name mapping. The shortcuts ``da.plotX.single_plot(config)``
 use the default names.
 
 The PlotConfig
@@ -113,7 +109,7 @@ The PlotConfig
      - Colourbar label.
    * - ``cmap``
      - ``None``
-     - Colormap name or object. ``None`` gives ``viridis``, or ``RdBu_r`` with ``issym=True``.
+     - Colourmap name or object. ``None`` gives ``viridis``, or ``RdBu_r`` with ``issym=True``.
    * - ``issym``
      - ``False``
      - Make the colour limits symmetric about zero.
@@ -174,7 +170,7 @@ comparable between plots.
 Single Plots and Existing Axes
 ==============================
 
-``single_plot`` accepts an existing Cartopy axes, so a map can sit inside your own figure
+``single_plot`` accepts an existing Cartopy axes, so a map can be placed in your own figure
 layout. The axes need a projection:
 
 .. code-block:: python
@@ -203,17 +199,17 @@ column, and ``name=value`` for any other dimension.
    config = marEx.PlotConfig(title="Anomaly", var_units="K", issym=True)
    fig, axes = anomaly.isel(time=slice(0, 6)).plotX.multi_plot(config, col="time", col_wrap=3)
 
-Select the panels before calling it: one map is rendered per entry, so slicing a decade of
-daily data draws thousands.
+Select the panels before calling it: one map is rendered per entry, so a decade of daily data
+draws thousands.
 
 Plotting Event IDs
 ==================
 
-``plot_IDs=True`` is for the ``ID_field`` of the tracker (see :doc:`tracking`). IDs of 0 (the
+``plot_IDs=True`` is for the ``ID_field`` from the tracker module (see :doc:`tracking`). IDs of 0 (the
 background) are masked, every ID gets its own colour from a fixed random seed, and the
-colourbar is switched off. To use your own colours pass a Matplotlib ``Colormap`` object (not a
-name) with at least as many entries as the largest ID. An ``ID_field`` with no
-objects (all zeros) plots an empty map and logs a warning.
+colourbar is switched off. For your own colours, pass a Matplotlib ``Colormap`` object (not a
+name) with at least as many entries as the largest ID. An ``ID_field`` of all zeros plots an
+empty map and logs a warning.
 
 .. code-block:: python
 
@@ -224,10 +220,10 @@ objects (all zeros) plots an empty map and logs a warning.
 Animations
 ==========
 
-``animate`` renders each timestep as a frame on the Dask scheduler and encodes the frames
-with ``ffmpeg`` (H.264, ``yuv420p``, constant frame size). Frames are
-rendered in batches, so a long record is not held in memory at once. If a Dask client is
-running, the frames use its workers.
+``animate`` renders each timestep as a frame with Dask and encodes the frames
+with ``ffmpeg`` (H.264, ``yuv420p``, constant frame size). Frames are rendered in batches, so
+only one batch of a long record is in memory at a time. If a Dask client is running, the frames
+use its workers.
 
 .. code-block:: python
 
@@ -243,7 +239,7 @@ running, the frames use its workers.
 
 The file name gets ``.mp4`` appended when it is missing, and defaults to
 ``movie_<variable name>.mp4``. Colour limits are set once, from a sample of the record or from
-``clim``, so the scale does not change between frames.
+``clim``, so the scale stays fixed across frames.
 
 Overlaying Tracked Events
 -------------------------
@@ -299,7 +295,6 @@ shows the true cell geometry and is slower on a large mesh.
    sst = xr.open_zarr("icon_sst.zarr").sst   # dims (time, ncells), coords lon/lat on ncells
    fig, ax, im = sst.isel(time=0).plotX.single_plot(marEx.PlotConfig(title="ICON SST"))
 
-Without either path, plotting raises ``VisualisationError`` that names the missing option.
 ``specify_grid`` is global to the process. To set the paths on one plotter only, use
 ``sst.plotX().specify_grid(fpath_tgrid=..., fpath_ckdtree=...)``.
 
@@ -311,11 +306,12 @@ File Formats
 
 Triangulation file (NetCDF)
    Variables ``vertex_of_cell`` (``(nvertices, ncells)`` as in ICON grid files, 1-based
-   vertex indices), and ``clon`` and ``clat`` (longitude and latitude, in degrees). They are used as stored, with no unit conversion.
+   vertex indices), and ``clon`` and ``clat`` (longitude and latitude in degrees, used as
+   stored).
 
 Interpolation directory
    One file per resolution named ``res<value>.nc`` (for example ``res0.30.nc``, with two
-   decimals), each holding ``ickdtree_c`` (``(nlat, nlon)`` nearest-cell indices), ``lon`` and
+   decimals), each containing ``ickdtree_c`` (``(nlat, nlon)`` nearest-cell indices), ``lon`` and
    ``lat`` of the target regular grid. The resolution that is read is ``ckdtree_res``. For a
    movie it is ``PlotConfig.ckdtree_res``. For ``single_plot`` and ``multi_plot`` it is the
    ``ckdtree_res`` attribute of the plotter, which defaults to 0.3:
@@ -337,15 +333,14 @@ The default display projection is Robinson, and any Cartopy projection can be pa
 projection.
 
 Global fields that span the full 360 degrees with the seam between the last and first column
-get one extra column at ``lon + 360``, so the map has no gap at the date line. This applies when
-``abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing``. Regional fields, for example
-``-180`` to ``-120`` or ``0`` to ``90``, are not wrapped.
+get one extra column at ``lon + 360``, so the map is continuous across the seam. This applies
+when ``abs(360 - (lon.max() - lon.min())) < 2 * lon_spacing``.
 
 Errors
 ======
 
 Failures raise ``marEx.VisualisationError`` (or ``marEx.DependencyError`` when a plotting
-dependency is missing). Both hold the cause and suggested fixes:
+dependency is missing). Both contain the cause and suggested fixes:
 
 .. code-block:: python
 

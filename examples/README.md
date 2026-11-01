@@ -1,10 +1,7 @@
 # marEx Examples
 
-Every notebook runs the same detect → track → visualise chain, and only the input and a few grid-specific arguments
-change. The notebooks are committed with their outputs, and each one prints the wall time and peak memory of every stage
-on the cluster it ran on, copied into the table below. The 3-D notebook covers the detect step only. The inputs live on
-DKRZ's Levante (OSTIA, EERIE ICON and FESOM output and ERA5 in the DKRZ pool), so outside Levante each notebook needs its
-input path changed.
+Most notebooks run the same detect → track → visualise chain on their own input, with a few grid-specific arguments, and print the wall time and peak memory of every stage. The table below collects them with the cluster each ran on. The 3-D
+notebook covers detection only.
 
 ## Notebooks
 
@@ -25,9 +22,7 @@ input path changed.
 
 ## Paths
 
-The notebooks build `scratch_dir = /scratch/<initial>/<user>` (the DKRZ Levante layout), write their output under
-`scratch_dir/marEx/examples/`, and read kept inputs under `scratch_dir/marEx_data/input/`. Elsewhere, change `scratch_dir`
-and the input path in each notebook's setup cell. The inputs come from:
+The tutorials write output under `scratch_dir/marEx/examples/`. To run them on another system, change `scratch_dir` and the input paths in their setup cells. The input sources are:
 
 - **gridded**: OSTIA daily SST (CMEMS OSTIA L4), regridded to 0.25° and stored as `ostia/ostia.zarr`.
 - **regional**: the same OSTIA product at full resolution, read through the public EERIE intake catalogue.
@@ -38,10 +33,10 @@ and the input path in each notebook's setup cell. The inputs come from:
 
 ## Scripts
 
-- **`batch_jobs/`**: a template for running detection and tracking as SLURM jobs without Jupyter: two driver scripts
-  configured by one YAML file per dataset, with worked configs for the gridded, regional and unstructured examples. See
+- **`batch_jobs/`**: a template for running detection and tracking as SLURM jobs: two driver scripts configured by one
+  YAML file per dataset, with worked configs for the gridded, regional and unstructured examples. See
   its [README](batch_jobs/README.md).
-- **`larger-than-memory/`**: detect and track 20 years of 6-hourly global SST inside one 32 GiB job, with
-  `compute_mode="streaming"` and `"persist"`, and the measured memory and wall time of each run. See its [README](larger-than-memory/README.md).
+- **`larger-than-memory/`**: detection and tracking of 20 years of 6-hourly global SST inside one 32 GiB job,
+  comparing `compute_mode="streaming"` with `"persist"` by the memory and wall time of each run. See its [README](larger-than-memory/README.md).
 - **`applications/prepare_era5_wind.sh`**: builds the daily wind input for the wind-drought notebook from ERA5 GRIB. See
   [applications/README.md](applications/README.md).

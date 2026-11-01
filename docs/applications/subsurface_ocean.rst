@@ -10,19 +10,18 @@ be absent at the surface, and cages, benthic habitats and thermoclines sit at sp
 Why marEx Fits
 ==============
 
-* Extra dimensions are kept. A field ``(time, depth, lat, lon)`` is detected
-  as it is. Any dimension that is not time or horizontal is treated as an extra dimension,
+* A field ``(time, depth, lat, lon)`` is detected
+  whole. Any dimension that is not time or horizontal is treated as an extra dimension,
   with a separate threshold at every level.
-* The mask is three-dimensional. Levels below the sea floor are NaN at the first time step and
+* Levels below the sea floor are NaN at the first time step and
   are masked at that point, so a shelf and an abyssal plain share one array.
-* Pooling is horizontal only. ``window_spatial`` pools neighbouring cells within a level and
-  never across depth.
+* ``window_spatial`` pools neighbouring cells within each level.
 
 Configuration
 =============
 
 The snippet builds a four-level temperature field with a warm anomaly confined to 25 and 50 m.
-It runs the detection stage on all levels at once, then selects one level for tracking.
+It runs detection on all levels at once, then selects one level for tracking.
 
 .. code-block:: python
 
@@ -69,26 +68,24 @@ It runs the detection stage on all levels at once, then selects one level for tr
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 Output
 ======
 
 The detection outputs keep the depth axis: ``dat_anomaly`` and ``extreme_events`` are
 ``(time, depth, lat, lon)``, ``mask`` is ``(depth, lat, lon)`` and ``thresholds`` is
-``(depth, lat, lon, dayofyear)``. The tracker and the ``plotX`` plotting accessor are 2-D and
-reject extra dimensions, so select a level with ``.sel`` or loop over levels.
+``(depth, lat, lon, dayofyear)``. The tracker and the ``plotX`` accessor work on 2-D fields, so
+select a level with ``.sel`` or loop over levels.
 
 Caveats
 =======
 
-* Events are tracked within a level. The tracker does not join events across depth, so a
-  warm anomaly spanning several levels appears as one event per level. Matching them is up
-  to the application.
+* Events are tracked within a level, so a warm anomaly spanning several levels appears as
+  one event per level, and matching them across depth is left to the application.
 * Detection needs finite values at every unmasked cell and time, so interpolate or mask
   data gaps first.
 * The mask is taken from the first time step. A cell that is NaN there is treated as land or
   sea floor for the whole record.
-* Vertical resolution of the input limits what depth structure can be resolved, and the
-  thermocline is only as well represented as the source model or analysis represents it.
+* Vertical resolution of the input limits what depth structure can be resolved.

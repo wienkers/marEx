@@ -2,17 +2,7 @@
 Tutorials
 =========
 
-End-to-end Jupyter notebooks, each running the full **detect → track → visualise**
-workflow on real data. The calls are the same throughout, and only the input and
-a few grid-specific arguments change.
-
-.. note::
-
-   These pages are rendered from the notebooks' committed outputs. The notebooks
-   read datasets on HPC storage that are not bundled with the documentation, so
-   they are not re-executed during the docs build. Each page links to the original
-   notebook on GitHub, and each notebook reports the wall time and memory of every
-   stage on the cluster it ran on.
+Jupyter notebooks running the **detect → track → visualise** workflow on real data, with the same calls throughout and a few grid-specific arguments.
 
 .. grid:: 1 1 2 2
    :gutter: 3
@@ -28,15 +18,14 @@ a few grid-specific arguments change.
       :link: regional
       :link-type: doc
 
-      The same workflow on a bounded European domain at 0.05°, with
-      :func:`marEx.regional_tracker` handling the non-periodic edges.
+      The same workflow on a bounded European domain at 0.05°.
+      :func:`marEx.regional_tracker` handles the non-periodic edges.
 
    .. grid-item-card:: Unstructured data
       :link: unstructured
       :link-type: doc
 
-      ICON-O ocean model output on its native R02B09 mesh (14.9 million cells),
-      detected and tracked without regridding.
+      ICON-O ocean model output detected and tracked on its native R02B09 mesh (14.9 million cells).
 
    .. grid-item-card:: European wind droughts
       :link: wind_drought
@@ -56,10 +45,10 @@ Scripts
 =======
 
 `examples/batch_jobs <https://github.com/wienkers/marEx/tree/main/examples/batch_jobs>`_ is a template for running
-detection and tracking as SLURM jobs without Jupyter: two driver scripts configured by one YAML file per dataset, with
+detection and tracking as SLURM jobs: two driver scripts configured by one YAML file per dataset, with
 worked configs for the gridded, regional and unstructured examples.
 `examples/larger-than-memory <https://github.com/wienkers/marEx/tree/main/examples/larger-than-memory>`_ detects and
-tracks 20 years of 6-hourly global SST inside one 32 GiB job, in both compute modes. It is the source of the 6-hourly rows
+tracks 20 years of 6-hourly global SST inside one 32 GiB job and compares the two compute modes. It is the source of the 6-hourly rows
 in :doc:`../guide/performance`. An index of every example, with its input and measured run
 time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/examples/README.md>`_.
 

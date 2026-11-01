@@ -3,8 +3,8 @@ Wall time and memory of a Dask workload, stage by stage.
 
 :class:`ResourceMonitor` wraps blocks of work and records, for each block, the wall time,
 the peak memory of the worker processes and of the client, the peak bytes spilled to disk
-and the number of worker restarts. A background thread polls the scheduler, so nothing is
-added to the task graph.
+and the number of worker restarts. A background thread polls the scheduler, outside the
+task graph.
 
 >>> monitor = ResourceMonitor(client)
 >>> with monitor.stage("detect"):
@@ -91,18 +91,18 @@ class ResourceMonitor:
     Notes
     -----
     Worker memory is the process memory the workers report to the scheduler (including
-    unmanaged memory), which is what the nanny compares against ``memory_limit``: the
-    summed peak over all workers, and the largest single worker, which is the number to
-    size ``memory_limit`` from. Client memory is the resident set of this Python process.
-    A worker restart shows up as a worker address the monitor has not seen before.
+    unmanaged memory), the quantity the nanny compares against ``memory_limit``. The
+    monitor reports the summed peak over all workers and the largest single worker, and
+    the latter is the number to size ``memory_limit`` from. Client memory is the resident
+    set of this Python process. A worker restart is counted when a new worker address
+    appears.
 
     On construction the monitor logs each worker's effective ``memory_limit``. On HPC
-    nodes Dask reads the whole node's memory rather than the job's allocation, so a
-    cluster started without an explicit ``memory_limit`` can over-commit; the monitor
-    warns when the limits of the workers on this machine add up to more than the job may use
-    (its cgroup limit, or SLURM's grant when no cgroup limit is visible). Workers started as
-    their own SLURM jobs on other nodes do not count against this job. Spill is the growth of bytes spilled to disk
-    during the stage, so data left on disk by an earlier stage does not count.
+    nodes Dask sizes workers from the whole node's memory, so a cluster started without
+    an explicit ``memory_limit`` can over-commit the job. The monitor warns when the
+    limits of the workers on this machine add up to more than the job may use (its cgroup
+    limit, or SLURM's grant when no cgroup limit is visible). Spill is the growth of bytes
+    spilled to disk during the stage.
     """
 
     def __init__(self, client: Client, interval: float = 1.0) -> None:

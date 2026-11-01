@@ -3,18 +3,19 @@ Climatologies Only
 ==================
 
 
-The anomaly stage has no threshold. Anomalies of a large dataset are often the result
-itself: input to an empirical orthogonal function analysis, a regression target, a training
-set or a seasonal-cycle diagnostic. ``marEx.anomaly.compute`` runs that stage alone.
+Climatologies and anomalies are often the result itself: the input to an empirical
+orthogonal function analysis, a regression target, a training set or a seasonal-cycle
+diagnostic. The anomaly module runs on its own and handles multi-terabyte datasets on a cluster with a fraction of that memory: ``marEx.anomaly.compute`` returns the anomalies, and ``marEx.anomaly.rolling_climatology`` and ``marEx.anomaly.smoothed_rolling_climatology`` return climatologies.
 
 Why marEx Fits
 ==============
 
 * Four anomaly methods cover the common baselines: ``shifting_baseline`` (rolling
   climatology), ``fixed_baseline`` (a fixed reference period), ``detrend_fixed_baseline``
-  and ``detrend_harmonic`` (harmonic seasonal cycle plus polynomial trend, not available on sub-daily data).
-* The climatology is computed lazily on a Dask array, so the input is read chunk by chunk. With ``compute_mode="streaming"`` the intermediate fields go to a Zarr store in
-  ``scratch_dir`` instead of staying pinned in cluster memory.
+  and ``detrend_harmonic`` (harmonic seasonal cycle plus polynomial trend).
+* The climatology is computed lazily on a Dask array, so the input is read chunk by chunk.
+  With ``compute_mode="streaming"`` the intermediate fields are staged in a Zarr store in
+  ``scratch_dir``, so far less data is pinned in cluster memory.
 * The same code handles gridded and unstructured grids, 3-D fields with an extra
   dimension, and non-daily cadences.
 
@@ -41,7 +42,7 @@ period, and a streaming run that writes the result and then clears the staging d
    da = xr.DataArray(sst.astype("float32"), dims=("time", "lat", "lon"),
                      coords={"time": time, "lat": lat, "lon": lon}, name="sst").chunk({"time": 100})
 
-   # Anomaly stage alone: rolling 15-year climatology (3 years here), no threshold
+   # Anomaly module alone: rolling 15-year climatology (3 years here), no threshold
    anom = marEx.anomaly.compute(da, method="shifting_baseline", window_years=3, smooth_days=21)
    print(anom.dat_anomaly.sizes, list(anom.data_vars))
    print(float(anom.dat_anomaly.mean().compute()))
@@ -63,8 +64,7 @@ Output
 
 A Dataset with ``dat_anomaly`` and ``mask``. With ``standardise=True`` (``detrend_harmonic``
 only) it also has ``dat_stn`` and ``STD``. ``shifting_baseline`` returns a series shorter
-by ``window_years`` years, since the first years lack a full baseline. The other methods keep
-the full series.
+by ``window_years`` years, since the first years lack a full baseline.
 
 With ``compute_mode="streaming"`` the returned Dataset reads lazily from a staging directory.
 Write the output first, then call ``marEx.clear_staging(ds)``. The path is in
@@ -76,6 +76,3 @@ Caveats
 * The input must be Dask-backed.
 * The first time step defines the mask, and ``validate=True`` rejects NaN or infinite values
   at unmasked cells.
-* ``shifting_baseline`` raises an error if the record spans fewer years than ``window_years``.
-* ``reference_period`` applies only to the fixed-baseline methods.
-* Anomalies are float32.

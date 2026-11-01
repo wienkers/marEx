@@ -1,15 +1,12 @@
 """
 MarEx Track: Marine extreme event identification, tracking, and splitting/merging.
 
-This package identifies and tracks extreme events in oceanographic data across
-time, supporting both structured (regular grid) and unstructured datasets. It is
-the modular successor to the single-file ``marEx.track`` module: the tracker
-orchestrator class lives in :mod:`marEx.track.tracker`, the regional factory in
+This module identifies and tracks extreme events in oceanographic data across
+time, on both structured (regular grid) and unstructured datasets. The tracker
+class is in :mod:`marEx.track.tracker`, the regional factory in
 :mod:`marEx.track.regional`, and the JIT-compiled helper primitives in
-:mod:`marEx.track.partitioning` and :mod:`marEx.track.overlap`.
-
-Every public name previously importable as ``marEx.track.<name>`` is re-exported
-here so existing import paths (and the test suite) keep working unchanged.
+:mod:`marEx.track.partitioning` and :mod:`marEx.track.overlap`. Their public names
+are re-exported as ``marEx.track.<name>``.
 """
 
 from .overlap import sparse_bool_power

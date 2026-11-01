@@ -4,8 +4,6 @@ Dask configuration for HPC environments.
 
 Provides the default Dask configuration tuned for large-scale climate
 data processing and the :func:`configure_dask` helper used to apply it.
-This is the leaf module of the helper package: it has no cross-module
-dependencies within ``marEx.helper``.
 """
 
 from getpass import getuser

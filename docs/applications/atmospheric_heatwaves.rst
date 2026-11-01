@@ -3,24 +3,21 @@ Atmospheric Heatwaves
 =====================
 
 
-Atmospheric heatwaves matter to people through heat stress and through electricity demand,
-and both depend on how widely a hot spell spreads as well as how hot it gets. Cooling load
+Heat stress and electricity demand depend on how widely a hot spell spreads as well as how
+hot it gets. Cooling load
 rises across a whole system when a hot spell covers it, and heat-related health impacts
 scale with the population under the footprint.
 
 Why marEx Fits
 ==============
 
-* The field is whatever scalar you supply. Daily maximum 2 m temperature, a wet-bulb
-  temperature, a heat index or cooling degree days all pass through the same stages, because
-  the stages do not assume a variable.
-* The anomaly and the threshold are separate steps. :func:`marEx.anomaly.compute` followed by
+* Daily maximum 2 m temperature, a wet-bulb temperature, a heat index or cooling degree days
+  all pass through the same calls.
+* :func:`marEx.anomaly.compute` followed by
   :func:`marEx.extremes.identify` lets you choose the anomaly definition (a fixed reference
   period here, to match an operational baseline) independently of the exceedance rule.
-* ``seasonal_percentile`` flags a day that is hot for its time of year. ``global_percentile``
-  uses one threshold per cell over all days, which is closer to an absolute-magnitude rule
-  and flags mostly summer days.
-* Exceedance fields give footprint directly. The fraction of valid cells exceeding on each
+* ``seasonal_percentile`` flags a day that is hot for its time of year. ``global_percentile`` uses one threshold per cell over all days.
+* The fraction of valid cells exceeding on each
   day is a footprint time series, and the tracker gives each spell an identity, an area and a
   centroid track.
 
@@ -64,7 +61,7 @@ tracks the spells.
        footprint = ds.extreme_events.where(mask).mean(["lat", "lon"])
        print(days_per_year.compute().sizes, float(footprint.max().compute()))
 
-       # Regional footprint tracking requires a Client and ~360-degree coordinates, or the regional tracker
+       # Tracking needs a Client, and a regional domain needs the regional tracker
        client = marEx.helper.start_local_cluster(n_workers=2, threads_per_worker=2, memory_limit="3GB")
        events = marEx.regional_tracker(
            ds.extreme_events, ds.mask, coordinate_units="degrees", R_fill=2, area_filter_absolute=20, T_fill=2
@@ -77,8 +74,8 @@ tracks the spells.
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 Output
 ======
@@ -92,11 +89,9 @@ default tracker detects units from a roughly 360 degree longitude range.
 Caveats
 =======
 
-* A percentile threshold is relative to local climate. It does not say whether a temperature
-  is dangerous or whether it moves demand. For an impact threshold, compute the impact
-  variable first (cooling degree days, for example) and then pass that to marEx.
-* Electricity demand depends on calendar, behaviour and installed cooling as well as
-  temperature. marEx identifies the hot spells. It does not model demand.
+* A percentile threshold is relative to local climate. For an impact threshold, compute the
+  impact variable first (cooling degree days, for example) and pass that to marEx.
+* Electricity demand also depends on calendar, behaviour and installed cooling.
 * Thresholds need enough samples. With a short record the sample-count warning fires, and
   ``window_days`` and ``window_spatial`` can be widened to pool more data.
 * The tracker call here uses ``area_filter_absolute`` in cell counts because no

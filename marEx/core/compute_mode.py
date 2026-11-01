@@ -1,32 +1,21 @@
 """
-Materialisation policy for the marEx detection pipeline.
+Materialisation policy (``compute_mode``) for the marEx detection pipeline.
 
-:func:`marEx.preprocess_data` has three honest positions on a trilemma -- low RAM, low
-recompute, low disk I/O; pick two -- and this module is where that choice is made concrete.
-Every materialisation site in ``detect`` routes through a :class:`Materialiser`, so the
-modes are three implementations of two verbs rather than conditionals scattered through the
-pipeline.
-
-Two verbs, because the pinned intermediates fall into two distinct scaling classes:
+The ``persist``, ``lazy`` and ``streaming`` modes trade memory, recompute and disk I/O
+against each other. A :class:`Materialiser` implements each mode through two verbs, one
+for each scaling class of intermediate:
 
 ``pin``
-    Bounded or space-scaled intermediates whose only job is to stop a re-computation
-    within one stage. Materialised in ``persist`` mode, skipped otherwise.
+    Bounded or space-scaled intermediates that would otherwise be recomputed within one
+    module. Materialised in ``persist`` mode, skipped otherwise.
 
 ``stage``
     Anchors: objects read by two or more downstream consumers, where leaving them lazy
     re-executes the entire upstream graph once per consumer. ``persist`` mode pins them in
-    cluster RAM; ``streaming`` mode writes them to a scratch zarr and re-opens them, which
-    is the same anchoring guarantee with a disk-resident rather than RAM-resident backing
-    store; ``lazy`` mode returns them untouched and accepts the recompute.
+    cluster memory. ``streaming`` mode writes them to a Zarr store under a per-run staging
+    directory and re-opens them. ``lazy`` mode returns them untouched and recomputes.
 
-Streaming mode is conceptually the checkpointing that was removed from marEx earlier this
-year. It was removed because the *implementation* was a set of hacks -- fixed scratch paths
-and tuple bandages -- not because the idea was wrong, so it returns here as a first-class,
-explicit, opt-in mode with per-run unique paths.
 
-This module is a leaf in the detect dependency graph: it imports only dask, xarray, and the
-package logger and exceptions.
 """
 
 import atexit
@@ -73,9 +62,7 @@ def create_staging_dir(scratch_dir: Union[str, Path]) -> Path:
 
     Notes
     -----
-    Uniqueness is per (process, call). The checkpointing removed from marEx earlier this
-    year used fixed scratch paths, so two concurrent runs collided silently; the same
-    lesson was already forced on the tracker's temporary stores.
+    Staging directories are unique to each call in each process.
     """
     root = Path(scratch_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -98,7 +85,7 @@ def clear_staging(target: Union[str, Path, xr.Dataset]) -> None:
 
     Notes
     -----
-    Idempotent: clearing an already-removed directory is not an error. Call this only
+    Idempotent, so clearing an already-removed directory is a no-op. Call this only
     after the returned Dataset has been written out, since in streaming mode it reads
     lazily from the staged stores.
     """
@@ -195,7 +182,7 @@ class Materialiser:
 
     @property
     def is_streaming(self) -> bool:
-        """True when intermediates are staged to disk rather than pinned in RAM."""
+        """True when intermediates stay on disk, reducing memory pinning."""
         return self.mode == "streaming"
 
     def pin(self, *objs: Any) -> Tuple[Any, ...]:
@@ -266,10 +253,9 @@ class Materialiser:
             Short identifier, used as the staged store's filename in streaming mode.
         preserve_chunks : bool, default False
             In ``streaming`` mode only, restore ``obj``'s chunk layout after staging if
-            ``_stage_to_zarr``'s uniform rechunk changed it. Default ``False`` leaves
-            detect's existing, documented behaviour (staging may change chunk layout)
-            completely unchanged; callers with downstream logic that depends on chunk
-            boundaries not moving (e.g. the tracker's merge loop) should pass ``True``.
+            ``_stage_to_zarr``'s uniform rechunk changed it. With ``False``, staging may change
+            chunk layout. Pass ``True`` when downstream logic depends on chunk boundaries (e.g. the
+            tracker's merge loop).
 
         Returns
         -------
@@ -329,12 +315,12 @@ class Materialiser:
 
     def stage_many(self, objs: dict, label: str, preserve_chunks: bool = False) -> Tuple[xr.DataArray, ...]:
         """
-        Anchor several arrays that **one graph** produces, in a single materialisation.
+        Materialise several arrays from one graph together.
 
         :meth:`stage` called once per array would execute that shared graph once per
-        array. The motivating case is ``marEx.track.morphology``'s absolute-threshold
-        filter, where a single per-slice labelling pass yields both the keep-mask and the
-        area census: staging them separately labels every slice twice.
+        array. In ``marEx.track.morphology``'s absolute-threshold filter, one per-slice labelling
+        pass gives the keep-mask and the area census. Staging them separately labels every slice
+        twice.
 
         Parameters
         ----------

@@ -32,23 +32,23 @@ class PlotConfig:
     Attributes:
         title: Plot title
         var_units: Variable units for colorbar label
-        issym: Whether data is symmetric (centers colormap at 0)
+        issym: Whether data is symmetric (centres colormap at 0)
         cmap: Colormap name or ListedColormap object
-        cperc: Percentile range for automatic color limits [min, max]
-        clim: Manual color limits (vmin, vmax)
+        cperc: Percentile range for automatic colour limits [min, max]
+        clim: Manual colour limits (vmin, vmax)
         show_colorbar: Whether to display colorbar
         grid_lines: Whether to display grid lines
         grid_labels: Whether to display grid labels
         dimensions: Mapping of conceptual to actual dimension names
         coordinates: Mapping of conceptual to actual coordinate names
-        norm: Custom normalization (BoundaryNorm or Normalize)
-        plot_IDs: Whether to plot object IDs with random colors
+        norm: Custom normalisation (BoundaryNorm or Normalize)
+        plot_IDs: Whether to plot object IDs with random colours
         extend: Colorbar extension ('neither', 'both', 'min', 'max')
         verbose: Enable verbose logging
         quiet: Enable quiet logging
         projection: Cartopy projection for map plots
         framerate: Frames per second for animations (default 10)
-        ckdtree_res: Resolution (degrees) of the pre-computed ckdtree grid used for unstructured interpolation,
+        ckdtree_res: Resolution (degrees) of the pre-computed ckdtree grid for unstructured interpolation,
             matching the ``res<value>.nc`` file naming (default 0.3)
     """
 

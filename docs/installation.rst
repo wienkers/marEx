@@ -8,7 +8,7 @@ marEx needs Python 3.10 to 3.13 and runs on Linux, macOS and Windows. Install th
 
    pip install marEx
 
-The core install covers all three stages (anomalies, extremes, tracking) and the plotting accessor. The key dependencies are ``dask[complete]>=2025.9.0``, ``zarr>=2.18``, ``flox>=0.10.1``, ``numba`` and ``xarray``. Dask is a floor, not a pin.
+The core install covers all three modules (anomalies, extremes, tracking) and the plotting accessor. The dependencies include ``dask[complete]>=2025.9.0``, ``zarr>=2.18``, ``flox>=0.10.1``, ``numba`` and ``xarray``.
 
 Optional Extras
 ===============
@@ -23,17 +23,17 @@ Optional Extras
 
 Animations need the ``ffmpeg`` binary on your path (``apt-get install ffmpeg``, ``brew install ffmpeg`` or ``choco install ffmpeg``).
 
-The ``hpc`` extra provides ``marEx.helper.start_distributed_cluster``, which builds a SLURM cluster through ``dask_jobqueue``. It is written for DKRZ Levante. On other systems, build your own ``dask.distributed`` cluster and pass the client to marEx.
+The ``hpc`` extra provides ``marEx.helper.start_distributed_cluster``, which builds a SLURM cluster through ``dask_jobqueue``. Set ``queue``, ``account`` and ``node_memory`` for your system, or build your own ``dask.distributed`` cluster and pass the client to marEx.
 
 JAX
 ---
 
-JAX is optional and is used in one place: building the sparse dilation matrix for the unstructured-grid tracker. Nothing in the anomaly or extremes stages uses it, and no speed-up is claimed. Without JAX, ``import marEx`` emits an ``ImportWarning`` and the same routine falls back to NumPy.
+JAX is optional and builds the sparse dilation matrix for the unstructured-grid tracker. Without JAX, ``import marEx`` emits an ``ImportWarning`` and the routine falls back to NumPy.
 
 Zarr 2 and Zarr 3
 =================
 
-Both major versions of zarr-python are supported. Zarr 3 requires Python 3.12 or newer, so on Python 3.10 and 3.11 pip resolves zarr 2. Both are exercised in the test suite. Outputs written to Zarr use the writing store's default compressor rather than inheriting the input's.
+Both major versions of zarr-python are supported and tested. Zarr 3 requires Python 3.12 or newer, so on Python 3.10 and 3.11 pip resolves zarr 2. Outputs written to Zarr use the writing store's default compressor.
 
 Development Install
 ===================

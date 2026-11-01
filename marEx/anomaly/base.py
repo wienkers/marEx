@@ -46,7 +46,7 @@ def compute_normalised_anomaly(
     smooth_max_missing: float = 0.1,  # for shifting_baseline
 ) -> xr.Dataset:
     """
-    Generate normalised anomalies using specified methodology.
+    Compute normalised anomalies with the chosen method.
 
     Parameters
     ----------
@@ -55,11 +55,11 @@ def compute_normalised_anomaly(
     method_anomaly : str, default='shifting_baseline'
         Anomaly computation method. Options:
 
-        * 'detrend_harmonic': Detrending with harmonics and polynomials (efficient, biased)
-        * 'shifting_baseline': Rolling climatology (accurate, shortens time series)
-        * 'fixed_baseline': Daily climatology using full time series (keeps long-term trends in the anomaly)
-        * 'detrend_fixed_baseline': Polynomial detrending + fixed climatology (does not shorten time series,
-          keeps trends in seasonal timing in the anomaly)
+        * 'detrend_harmonic': Detrending with harmonics and polynomials (efficient)
+        * 'shifting_baseline': Rolling climatology (shortens time series)
+        * 'fixed_baseline': Climatology using full time series (keeps long-term trends in the anomaly)
+        * 'detrend_fixed_baseline': Polynomial detrending + fixed climatology (keeps the full time series,
+          and trends in seasonal timing stay in the anomaly)
 
     dimensions : dict, optional
         Mapping of conceptual dimensions to actual dimension names in the data
@@ -68,23 +68,23 @@ def compute_normalised_anomaly(
     window_years : int, default=15
         Number of years for rolling climatology (shifting_baseline only)
     smooth_days : int, default=21
-        Days for smoothing the climatology (shifting_baseline, fixed_baseline and
-        detrend_fixed_baseline; ``1`` disables it for the fixed baselines)
+        Days in the smoothing window (shifting_baseline, fixed_baseline and
+        detrend_fixed_baseline). ``1`` disables it for the fixed baselines.
     smooth_max_missing : float, default=0.1
         Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
-        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
-        otherwise over the valid samples. Windows reaching past either end of the record stay
+        timestep absent from a sub-daily axis) before the smoothed value is NaN. Otherwise the
+        mean is over the valid samples. Windows reaching past either end of the record are
         NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     standardise : bool, default=False
         Whether to normalise by 30-day rolling standard deviation (detrend_harmonic only)
     detrend_orders : list, default=[1]
         Polynomial orders for trend removal (detrend_harmonic and detrend_fixed_baseline only)
     force_zero_mean : bool, default=True
-        Explicitly enforce zero mean in final anomalies (detrend_harmonic and detrend_fixed_baseline only)
+        Enforce zero mean in the detrended field (detrend_harmonic and detrend_fixed_baseline only)
     reference_period : tuple of (int, int), optional
         Year range (start_year, end_year) inclusive for computing the daily climatology
         (fixed_baseline and detrend_fixed_baseline only). If None (default), uses all
-        available years. Anomalies are computed for the full time series regardless.
+        available years. Anomalies are still computed for the full time series.
 
     Returns
     -------
@@ -112,8 +112,7 @@ def compute_normalised_anomaly(
     >>> print(f"Mean anomaly: {result.dat_anomaly.mean().compute():.6f}")
     Mean anomaly: 0.000023
 
-    Previous configuration (marEx v2.0 default) of detrended baseline with higher-order polynomials and standardisation.
-    Note: marEx v3.0+ uses shifting_baseline as the default method:
+    Harmonic detrending with higher-order polynomials and standardisation:
 
     >>> result_advanced = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
@@ -132,7 +131,7 @@ def compute_normalised_anomaly(
     >>> # Standardised anomalies have unit variance
     >>> print(f"STD of standardised anomalies: {result_advanced.dat_stn.std().compute():.3f}")
 
-    Accurate shifting baseline method for climate-aware anomalies:
+    Shifting baseline with a shorter rolling window:
 
     >>> result_shifting = marEx.anomaly.compute_normalised_anomaly(
     ...     sst,
@@ -148,7 +147,7 @@ def compute_normalised_anomaly(
     >>> icon_data = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
     >>> result_unstructured = marEx.anomaly.compute_normalised_anomaly(
     ...     icon_data,
-    ...     dimensions={"time": "time", "x": "ncells"}
+    ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"},
     ... )
     >>> print(result_unstructured.dims)

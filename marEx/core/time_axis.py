@@ -32,17 +32,15 @@ _DAYS_PER_CALENDAR_YEAR = {"360_day": 360.0, "noleap": 365.0, "365_day": 365.0, 
 class SeasonalCycle:
     """The repeating within-year axis a climatology or seasonal threshold is resolved on.
 
-    marEx was written for daily data, where that axis is ``dayofyear`` with 366 slots.
-    This dataclass states the axis explicitly so monthly and sub-daily series can use
-    the same code paths with a ``month`` or ``hourofyear`` axis instead.
+    For daily data the axis is ``dayofyear`` with 366 slots. Monthly and sub-daily
+    series use the same code paths with a ``month`` or ``hourofyear`` axis.
 
     Attributes
     ----------
     index_name : str
         Name of the cycle dimension/coordinate: ``"dayofyear"``, ``"month"`` or
-        ``"hourofyear"``. This is the *label* used for the output dimension, so it
-        must stay ``"dayofyear"`` for daily data -- it appears in the golden zarr
-        schema and in every shipped example notebook.
+        ``"hourofyear"``. It also labels the output dimension, and is
+        ``"dayofyear"`` for daily data.
     length : int
         Number of slots in one cycle (366 daily, 12 monthly, ``366 * steps_per_day``
         sub-daily).
@@ -56,7 +54,7 @@ class SeasonalCycle:
 
     @property
     def labels(self) -> np.ndarray:
-        """1-based cycle labels, ``[1, ..., length]`` -- the ``expected_groups`` axis."""
+        """1-based cycle labels, ``[1, ..., length]`` (the ``expected_groups`` axis)."""
         return np.arange(1, self.length + 1, dtype=np.int32)
 
     @property
@@ -78,11 +76,11 @@ class SeasonalCycle:
 
     @property
     def slot_days(self) -> float:
-        """Width of one cycle SLOT in days, as opposed to :attr:`step_days`, the data cadence.
+        """Width of one cycle slot in days. :attr:`step_days` is the data cadence.
 
-        The two differ whenever the data is coarser than the cycle it is grouped on: 5-day
-        data still sits on the 366-slot ``dayofyear`` cycle, one slot per day. Anything that
-        operates along the cycle axis itself (smoothing a climatology) must count in slots.
+        The two differ when the data is coarser than the cycle it is grouped on (5-day data
+        is grouped on the 366-slot ``dayofyear`` cycle, one slot per day). Operations along
+        the cycle axis itself (smoothing a climatology) count in slots.
         """
         if self.is_subdaily:
             return 1.0 / self.steps_per_day
@@ -110,19 +108,17 @@ class SeasonalCycle:
     def steps_for_days(self, days: float, *, odd: bool = False, name: str = "window") -> int:
         """Convert a physical duration in days into a whole number of cycle steps.
 
-        ``window_days`` and ``smooth_days`` are physical durations, not step counts.
-        On daily data the conversion is the identity, which is what keeps every
-        existing result bit-identical.
+        ``window_days`` and ``smooth_days`` are physical durations. On daily data the
+        conversion is the identity.
 
         Parameters
         ----------
         days : float
             Requested duration in days.
         odd : bool, default False
-            Force the result odd. Required where the window must be symmetric about
-            a centre step (the seasonal-percentile window); **not** applied to the
-            climatology smoothing or the standardisation window, where an even step
-            count is legitimate and forcing it odd would move existing daily output.
+            Force the result odd, for a window symmetric about a centre step (the
+            seasonal-percentile window). The climatology smoothing and standardisation
+            windows accept an even step count.
         name : str, default "window"
             Parameter name used in the clamp warning.
         """
@@ -145,13 +141,13 @@ class SeasonalCycle:
         return self.steps_for_days(days, odd=True, name=name)
 
     def window_slots(self, days: float, calendar: str = "standard", name: str = "window_days") -> int:
-        """Count an odd window of ``days`` in cycle SLOTS, for a window applied along the cycle axis.
+        """Count an odd window of ``days`` in cycle slots, for a window applied along the cycle axis.
 
-        The seasonal-percentile window pools neighbouring slots, so it is measured in
-        :attr:`slot_days`, not in the data cadence: 11 days of 5-day data still spans 11
-        ``dayofyear`` slots. Where a slot is one step (daily, evenly sub-daily) this is
-        :meth:`window_steps`. A month is the mean month of ``calendar`` (the time coordinate's
-        ``.dt.calendar``): 30 days on a 360-day calendar, whatever the data's own cadence.
+        The seasonal-percentile window pools neighbouring slots and is measured in
+        :attr:`slot_days`, so 11 days of 5-day data spans 11 ``dayofyear`` slots. Where a slot
+        is one step (daily, evenly sub-daily) this equals :meth:`window_steps`. A month is the
+        mean month of ``calendar`` (the time coordinate's ``.dt.calendar``), i.e. 30 days on a
+        360-day calendar, whatever the data's own cadence.
         """
         slot_days = self.slot_days
         if self.index_name == "month":
@@ -196,25 +192,18 @@ def infer_cycle(time_coord: xr.DataArray, dim: str = "time") -> SeasonalCycle:
     ``step_days >= 28`` gives a monthly cycle, ``>= 1`` the daily cycle, and anything
     finer a sub-daily ``hourofyear`` cycle of ``366 * round(1 / step_days)`` slots.
 
-    The cadence is the **median** spacing, never the first: a single gap (a missing
-    file, a concat seam) must not redefine the cycle. A genuinely irregular axis --
-    one whose interquartile spread of spacings exceeds the median -- raises
-    :class:`~marEx.exceptions.ConfigurationError` rather than guessing, and the caller
-    can override with the ``cycle=`` escape hatch.
+    The cadence is the median spacing, so a single gap (a missing file, a concat seam)
+    leaves the cycle unchanged. A few ``NaT`` timestamps among many leave it unchanged
+    too, and give the same result as the axis with those timestamps dropped. An
+    irregular axis, one whose interquartile spread of spacings exceeds half the median,
+    raises :class:`~marEx.exceptions.ConfigurationError`. Pass ``cycle=`` to override
+    the inference. An axis too short to measure (fewer than two timesteps), or one that
+    is not datetime-like, falls back to :data:`DAILY_CYCLE`.
 
-    An axis too short to measure (fewer than two timesteps), or one that is not
-    datetime-like, falls back to :data:`DAILY_CYCLE`. A ``NaT`` in the coordinate is NOT
-    rejected here and never was: the cadence is a MEDIAN, so a handful of missing
-    timestamps among many leaves it untouched, and a run over such an axis produces the
-    same answer as one over the axis with those timestamps dropped (measured: identical
-    extreme counts, ``max|diff|`` 0.0). Masking the ``NaT`` spacings in :func:`_step_days`
-    only extends that to the short axes where they used to outvote the real steps.
-
-    **Sub-daily ceiling.** ``extremes/histogram.py`` builds its flox ``expected_groups``
-    as ``uint16``, so a cycle longer than 65535 slots would wrap. That bound is
-    ``steps_per_day > 179``, i.e. finer than roughly 8-minute data; hourly (8784 slots)
-    and even 1-minute-of-15 (35136) are well inside it. Anything finer is rejected here
-    rather than silently wrapping thousands of timesteps into the wrong group.
+    **Sub-daily ceiling.** The histogram path labels its groups as ``uint16``, so a
+    cycle is limited to 65535 slots. This is exceeded at ``steps_per_day > 179``, i.e.
+    finer than roughly 8-minute data. Hourly (8784 slots) and 15-minute (35136) data are within the
+    limit. Exceeding it raises :class:`~marEx.exceptions.ConfigurationError`.
     """
     diffs = _step_days(time_coord)
     if diffs is None or diffs.size == 0:

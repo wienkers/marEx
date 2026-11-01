@@ -5,25 +5,23 @@ Marine Heatwaves
 
 Marine heatwaves are the most developed use of marEx. They are prolonged, spatially
 coherent periods of anomalously warm sea surface temperature, and their footprints matter
-as much as their intensity. A heatwave over a reef system, a kelp forest or a set of
-aquaculture leases is a statement about where the warm water was and for how long, which a
-time series at one grid cell cannot give.
+as much as their intensity. For reef systems, kelp forests and aquaculture leases, exposure depends on where the warm water was and for how long.
 
 Why marEx Fits
 ==============
 
-* The threshold is seasonal and local. ``seasonal_percentile`` computes one threshold per
+* ``seasonal_percentile`` computes one threshold per
   cell for each day of the year, pooling a window of days (``window_days``) and, on gridded
   data, neighbouring cells (``window_spatial``). This follows the form of the Hobday et al.
   (2016) definition, with a configurable percentile in place of a fixed 90th.
-* The baseline can shift. With ``shifting_baseline`` the climatology is a rolling mean over
-  the preceding ``window_years`` (15 by default), so the warming trend is not counted as
-  extreme year after year. The first ``window_years`` years are trimmed from the output.
-* Events are tracked as objects. The tracker joins exceeding cells into events with an area,
+* With ``shifting_baseline`` the climatology is a rolling mean over
+  the preceding ``window_years`` (15 by default), so the warming trend is absorbed into the
+  baseline. The first ``window_years`` years are trimmed from the output.
+* The tracker joins exceeding cells into events with an area,
   a centroid track, a start and an end, and handles splits and merges, so a heatwave that
-  breaks into two and rejoins is one record rather than two.
-* The whole chain is lazy. Detection works on a Dask array, and ``compute_mode="streaming"``
-  keeps the intermediate fields on disk when they would not fit in memory (see
+  breaks in two and rejoins stays one record.
+* Detection works on a Dask array, and ``compute_mode="streaming"``
+  keeps the intermediate fields on disk for records larger than memory (see
   :doc:`../guide/performance`).
 
 Configuration
@@ -31,9 +29,8 @@ Configuration
 
 The snippet builds a small synthetic SST field (30 years, daily, 20 x 30 grid, a warm patch
 planted for 40 days in 2015 and a land block of NaNs), then runs detection and tracking.
-``window_years`` is left at its default of 15, so the output covers 2005 to 2019. Real use
-differs in the input and the sizes: ``R_fill`` and the area filter are chosen for the grid
-spacing.
+``window_years`` is left at its default of 15, so the output covers 2005 to 2019. For real
+data, choose ``R_fill`` and the area filter for the grid spacing.
 
 .. code-block:: python
 
@@ -83,8 +80,8 @@ spacing.
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 Output
 ======
@@ -92,26 +89,24 @@ Output
 ``preprocess_data`` returns a Dataset with ``dat_anomaly``, ``mask``, ``extreme_events`` and
 ``thresholds``. The tracker returns ``ID_field`` (the event ID at every cell and time, 0 for
 background), ``area``, ``centroid``, ``presence``, ``time_start``, ``time_end``, ``global_ID`` and
-``merge_ledger``. On this synthetic input the longest-lived event is the planted 40-day patch (the run printed
-40 days, starting 2015-01-10), alongside many short-lived events from the noise. Those are an artefact of 5 % exceedance on random data
-and are removed in real use by the area filter and by examining duration.
+``merge_ledger``. On this synthetic input the longest-lived event is the planted 40-day patch, starting
+2015-01-10. The many short-lived events come from 5 % exceedance on random noise, and in real
+use the area filter and a duration cut remove them.
 
 Measured Scale
 ==============
 
 On 40 years of daily 0.25 degree global SST (output 9282 days x 720 x 1440 after the 15-year
-trim), approximate detection took 3954 s with ``persist`` and 3663 s with ``streaming``, on 4
-workers x 16 threads x 22 GB on one compute node of DKRZ's Levante system. Both arms
-produced identical arrays and neither restarted a worker. This is one run per arm, measured, not
-guaranteed.
+trim), approximate detection takes 66 min with ``persist`` and 61 min with ``streaming`` on one node,
+with 4 workers x 16 threads x 22 GB.
 
 Caveats
 =======
 
 * Percentile thresholds define extremes relative to the local climate. A cell that is never
   warm enough to matter ecologically is still flagged at its own 95th percentile.
-* The first ``window_years`` years of a ``shifting_baseline`` run are not available as
-  output. For a record shorter than that, use ``fixed_baseline`` with a ``reference_period``.
+* A ``shifting_baseline`` output starts ``window_years`` years into the record. For a shorter
+  record, use ``fixed_baseline`` with a ``reference_period``.
 * The tracker requires a bool field, a Dask ``Client`` and, for the default global
   coordinate handling, longitudes covering about 360 degrees. Regional domains use
   :func:`marEx.regional_tracker`.

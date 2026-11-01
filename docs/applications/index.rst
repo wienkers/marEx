@@ -2,11 +2,8 @@
 Applications
 ============
 
-marEx handles any scalar field on a regular or unstructured grid, so the same three stages
-(anomaly, extreme, track) serve several fields of study. Each page below states the problem,
-what marEx does for it, a configuration that runs on a small synthetic field, the outputs, and
-the caveats. The snippets use synthetic data. They show the API and the output structure, and
-they are not results.
+marEx handles any scalar field on a regular or unstructured grid, so the same three modules
+(anomaly, extremes, tracking) serve each field below.
 
 .. list-table::
    :widths: 28 72
@@ -16,7 +13,7 @@ they are not results.
        kelp and aquaculture exposure depends on footprint and persistence.
    * - :doc:`atmospheric_heatwaves`
      - Hot spells in 2 m temperature or a heat-stress index, with yearly exceedance days and
-       a daily footprint. Heat stress and electricity demand peaks.
+       a daily footprint, for heat stress and electricity demand peaks.
    * - :doc:`wind_drought`
      - Lower-tail wind speed or capacity factor, tracked. Extent and persistence of lulls
        decide how far sites of a portfolio fail together.
@@ -24,13 +21,13 @@ they are not results.
      - Lower-tail monthly precipitation. Extent and duration of dry spells for hydropower
        catchments and growing regions.
    * - :doc:`subsurface_ocean`
-     - Three-dimensional (time, depth, lat, lon) anomalies with per-level thresholds.
-       Relevant to fisheries and aquaculture at depth.
+     - Three-dimensional (time, depth, lat, lon) anomalies with per-level thresholds,
+       for fisheries and aquaculture at depth.
    * - :doc:`climatologies_only`
-     - The anomaly stage alone, on large datasets, with no threshold.
+     - The anomaly module alone, on datasets larger than memory.
    * - :doc:`event_catalogues`
-     - Tracked events as a table of duration, area, footprint and intensity, for frequency and
-       severity distributions and clustering. Structurally an event set.
+     - Tracked events as a catastrophe-model event set: a table of duration, area, footprint and
+       intensity for frequency and severity distributions and clustering.
 
 Choosing a Configuration
 ========================
@@ -64,7 +61,7 @@ Choosing a Configuration
      - ``seasonal_percentile``
      - upper
 
-These are the configurations in the snippets and not prescriptions. The guide pages
+These are the configurations used in the snippets. The guide pages
 :doc:`../guide/anomalies` and :doc:`../guide/extremes` give the full option tables, and
 :doc:`../guide/tracking` covers the tracker parameters.
 

@@ -2,7 +2,7 @@
 
 Provides ``PlotterBase``, the common infrastructure subclassed by the gridded
 and unstructured plotters: parameter setup, axes/map features, colorbars,
-single/multi panel plots, and animation (delegated to ``animation._animate``).
+single/multi panel plots, and animation.
 """
 
 from pathlib import Path

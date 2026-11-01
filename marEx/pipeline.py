@@ -3,12 +3,8 @@ The full preprocessing chain.
 
 :func:`preprocess_data` runs :func:`marEx.anomaly.compute` and
 :func:`marEx.extremes.identify` back to back and returns one dataset ready for
-:class:`marEx.tracker`. It is a convenience over the two peers, not a third
-implementation: everything it does beyond calling them in order is bookkeeping.
-
-Reach for the peers directly when you want only one of the two stages. In
-particular, a caller who wants a climatology and anomalies should call
-``marEx.anomaly.compute`` and never meet a threshold parameter at all.
+:class:`marEx.tracker`. Everything it does beyond calling them in order is
+bookkeeping. Call either module directly when only one of them is needed.
 """
 
 from typing import Dict, List, Literal, Optional, Tuple
@@ -62,12 +58,11 @@ def preprocess_data(
     smooth_max_missing: float = 0.1,
 ) -> xr.Dataset:
     """
-    Compute anomalies and identify extreme events in one pass.
+    Compute anomalies and identify extreme events in one call.
 
-    Chains :func:`marEx.anomaly.compute` and :func:`marEx.extremes.identify`. See
-    those two for the meaning of each parameter -- the names here match theirs,
-    except that ``method`` is spelled ``method_anomaly`` and ``method_extreme``
-    to distinguish the two stages.
+    Chains :func:`marEx.anomaly.compute` and :func:`marEx.extremes.identify`,
+    which describe each parameter in full. The names match theirs, except that
+    ``method`` becomes ``method_anomaly`` and ``method_extreme``.
 
     Parameters
     ----------
@@ -84,21 +79,21 @@ def preprocess_data(
         Percentile defining an extreme.
     tail
         Which side of the distribution counts as extreme. ``'upper'`` (default)
-        flags ``data >= threshold``; ``'lower'`` flags ``data <= threshold``, for
-        cold spells, drought, or any low-side extreme. The threshold is the
+        flags ``data >= threshold``, and ``'lower'`` flags ``data <= threshold``
+        for cold spells, drought, or any low-side extreme. The threshold is the
         ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
         is ``threshold_percentile=5, tail='lower'``.
     window_years
         Rolling-climatology length (``shifting_baseline`` only).
     smooth_days
-        Climatology smoothing window in days (``shifting_baseline``,
+        Smoothing window in days (``shifting_baseline``,
         ``fixed_baseline`` and ``detrend_fixed_baseline``). The fixed baselines
         smooth their day-of-year climatology with a moving average that wraps
-        the year, as in Hobday et al. (2016); ``smooth_days=1`` disables it.
+        the year, as in Hobday et al. (2016). ``smooth_days=1`` disables it.
     smooth_max_missing
         Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
-        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
-        otherwise over the valid samples. Windows reaching past either end of the record stay
+        timestep absent from a sub-daily axis) before the smoothed value is NaN. Otherwise the
+        mean is over the valid samples. Windows reaching past either end of the record are
         NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     window_days
         Day-of-year window in days (``seasonal_percentile`` only).
@@ -106,15 +101,15 @@ def preprocess_data(
         Width in cells (odd) of the square spatial pooling window
         (``seasonal_percentile`` with ``method_percentile='approximate'`` on
         gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
-        on that path and to no pooling everywhere else. Passing a value is an
-        error on unstructured meshes, with ``global_percentile`` and with
+        on that path and to no pooling elsewhere. Passing a value raises an
+        error on unstructured meshes, with ``global_percentile``, and with
         ``method_percentile='exact'``.
     standardise
         Also threshold a standardised series, adding ``dat_stn``, ``STD``,
         ``extreme_events_stn`` and ``thresholds_stn``. Requires
         ``method_anomaly='detrend_harmonic'``.
     detrend_orders, force_zero_mean
-        Polynomial detrending controls (harmonic methods only).
+        Controls for both polynomial detrending methods.
     reference_period
         ``(start_year, end_year)`` for the climatology (fixed-baseline methods
         only).
@@ -124,25 +119,26 @@ def preprocess_data(
     precision
         Histogram bin width for ``method_percentile='approximate'``, in the variable's
         units. The binned range is derived from the data, so the default works for any
-        variable and units: the requested tail's own extreme is a hard cap, a per-cell
+        variable and units. The requested tail's own extreme caps the range, a per-cell
         normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
         when that extreme is an outlier, and a threshold that reaches the edge regrows the
-        range and is recomputed. Omitted, ``precision`` gives 3000 bins over that range;
-        given, the bin count follows (a warning above 10000 bins, an error above 65000).
+        range and is recomputed. Without ``precision``, the range is split into 3000 bins.
+        Given a ``precision``, the bin count follows, with a warning above 10000 bins and an
+        error above 65000.
     max_anomaly, n_bins
         Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
-        threshold then raises); ``n_bins`` replaces the 3000-bin target.
+        threshold then raises), and ``n_bins`` replaces the 3000-bin target.
     dask_chunks
         Output chunking. Defaults to ``{"time": 25}``.
-        An integer time entry is a step count, and with one, extra dimensions on
-        time-indexed variables are sized so a chunk stays within 50 million
+        An integer time entry is a step count, and extra dimensions on
+        time-indexed variables are then sized to keep a chunk within 50 million
         elements where one level allows it. ``"auto"`` hands the time chunk to
         dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
-        default), not elements: a 1-byte boolean variable gets more elements per
-        chunk than a float32 one, and can exceed 50 million. A seasonal
-        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
-        chunked from the same entry, capped at the cycle length, and is not held
-        to the element budget.
+        default), so a 1-byte boolean variable gets more elements per chunk
+        than a float32 one and can exceed 50 million. A seasonal threshold's
+        cycle axis (``dayofyear``, ``month``, ``hourofyear``) is chunked from
+        the same entry, capped at the cycle length, and exempt from the element
+        budget.
     compute_mode, scratch_dir
         Materialisation policy and its staging directory.
     validate
@@ -150,14 +146,14 @@ def preprocess_data(
     dimensions, coordinates
         Name mappings. Inferred when omitted.
     cycle
-        Within-year axis both stages are resolved on, as a
+        Within-year axis the climatology and thresholds are resolved on, as a
         :class:`~marEx.SeasonalCycle`. Inferred from the median spacing of the
         time coordinate when omitted: ``dayofyear`` for daily data, ``month``
         for monthly, ``hourofyear`` for sub-daily. Pass one explicitly to
         override the inference on an irregular time axis.
     neighbours, cell_areas
         Optional unstructured-mesh connectivity and cell areas, attached to the
-        output for the tracker. They do not constrain the input chunking.
+        output for the tracker.
     verbose, quiet
         Logging verbosity overrides.
 

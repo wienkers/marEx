@@ -128,8 +128,17 @@ jobs:
           EXPECTED: ${{ needs.validate.outputs.version }}
         run: |
           python -m pip install --upgrade pip build twine packaging
+          # PyPI cannot resolve relative paths or play a GitHub video: pin media and links to this tag.
+          # The script exits non-zero if a relative target survives or a pinned file is missing.
+          # skip-worktree keeps setuptools_scm from reading the rewritten README as a dirty tree,
+          # which would turn the version into a .dev local version and fail the check below.
+          python .github/scripts/pypi_readme.py "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+          git update-index --skip-worktree README.md
           python -m build
           twine check dist/*
+          META="$(unzip -p dist/*.whl '*.dist-info/METADATA')"
+          grep -q "raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/media/logo.png" <<< "$META"
+          if grep -qE '(src|href)="media/|\]\((LICENSE|NOTICE)\)' <<< "$META"; then echo "relative path left in the PyPI description"; exit 1; fi
           ls -la dist
           python - <<'PY'
           import os

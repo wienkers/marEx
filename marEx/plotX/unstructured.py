@@ -1,8 +1,8 @@
 """
 Unstructured data visualisation module for irregular meshes.
 
-Provides specialised plotting capabilities for irregular oceanographic data
-on triangular grids (2D arrays: time, cell) with triangulation support.
+Plotting for irregular oceanographic data on triangular grids
+(2D arrays: time, cell), using the grid triangulation.
 """
 
 from pathlib import Path

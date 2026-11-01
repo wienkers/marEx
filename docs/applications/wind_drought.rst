@@ -4,20 +4,16 @@ Wind Drought
 
 
 A wind drought is a spell of unusually low wind over a region where generation is
-concentrated. For an energy portfolio the quantity of interest is not one site's wind
-speed. It is how far a lull extends and how long it persists, because that decides how far
-sites of a portfolio fail together and whether diversification across a grid helps.
+concentrated. A lull's extent and duration determine how much generation falls across the sites of a portfolio together, and whether diversification across a grid helps.
 
 Why marEx Fits
 ==============
 
-* The lower tail is first class. ``tail="lower"`` with ``threshold_percentile=10`` flags
-  values at or below the 10th percentile for each time of year. The data are not negated,
-  so thresholds and exceedance counts stay in the units of the input.
+* ``tail="lower"`` with ``threshold_percentile=10`` flags
+  values at or below the 10th percentile for each time of year.
 * Tracked footprints give the quantities that matter for diversification: the area of a
-  lull through time, how long it lives, and where its centroid moves. A per-cell tool returns
-  a time series for each cell and leaves the spatial correlation to be reconstructed.
-* The pipeline accepts non-daily cadences. Hourly and 6-hourly input is thresholded per
+  lull through time, how long it lives, and where its centroid moves.
+* Hourly and 6-hourly input is thresholded per
   hour of the year. ``window_days`` and ``smooth_days`` are in days and converted to cycle
   slots and time steps.
 
@@ -74,12 +70,12 @@ lulls.
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 On sub-daily input (hourly or 6-hourly wind), ``fixed_baseline`` and ``shifting_baseline``
-both resolve their climatology by hour of year, so the diurnal cycle is part of the baseline
-and does not appear in the anomaly. ``detrend_harmonic`` raises an error on sub-daily data. See :doc:`../guide/dimensions_and_time`.
+both resolve their climatology by hour of year, so the diurnal cycle goes into the baseline
+and is removed from the anomaly. See :doc:`../guide/dimensions_and_time`.
 
 For a worked example on reanalysis data, see the ERA5 notebook in :doc:`../tutorials/index`.
 
@@ -89,18 +85,16 @@ Output
 The tracker output gives, for each lull, ``time_start`` and ``time_end`` (duration), ``area``
 through time, and the ``centroid`` track. ``ID_field`` marks the cells in each lull at each
 time, so overlaying it on a map of installed capacity gives the capacity exposed by each
-event. The overlay is plain xarray and is not part of marEx.
+event. The overlay is plain xarray.
 
 Caveats
 =======
 
 * Wind speed at hub height and capacity factor behave differently. Capacity factor is bounded
   by 0 and 1 and saturates at rated speed, so its lower tail can contain many tied values.
-  A cell whose anomaly is constant zero is never flagged.
 * A low-wind spell defined by percentile of wind speed is not necessarily a low-generation
   spell, because the power curve is nonlinear. If generation is the target, transform to
   capacity factor first.
-* A seasonal lower-tail threshold flags the calmest 10 % of days for each time of year. It
-  does not guarantee that the lull is long enough to matter to a system. Judge by the tracked
-  duration and area.
+* A seasonal lower-tail threshold flags the calmest 10 % of days for each time of year, so
+  filter the catalogue by tracked duration and area for the lulls that matter to a system.
 * Tracker parameters in time steps (``T_fill``) mean different durations on hourly and daily data.

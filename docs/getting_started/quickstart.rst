@@ -2,7 +2,7 @@
 Quickstart
 ==========
 
-marEx runs in three stages: anomalies, extremes, tracking. Each can be used alone. The examples below build a small synthetic daily field (12 years on a 5-degree global grid, with a few warm blobs added) so everything runs in seconds. For real data see the :doc:`../tutorials/index`.
+marEx has three modules (anomalies, extremes, tracking), and each runs on its own. The examples below build a small synthetic daily field (12 years on a 5-degree global grid, with a few warm blobs added) so everything runs in seconds. For real data see the :doc:`../tutorials/index`.
 
 Synthetic Data
 ==============
@@ -41,7 +41,7 @@ Synthetic Data
 Step 1: Anomalies Only
 ======================
 
-``marEx.anomaly.compute`` removes the seasonal cycle and trend, with no thresholding. Use it when you want a climatology or anomaly field and nothing else.
+``marEx.anomaly.compute`` removes the seasonal cycle and trend, and returns the anomaly field.
 
 .. code-block:: python
 
@@ -54,7 +54,7 @@ Step 1: Anomalies Only
 Step 2: Extremes
 ================
 
-``marEx.preprocess_data`` chains the anomaly stage and the threshold stage. Here the 95th percentile of each day of year, pooled over an 11-day window, flags the extremes.
+``marEx.preprocess_data`` chains the anomaly and extremes modules. Here the 95th percentile of each day of year, pooled over an 11-day window, flags the extremes.
 
 .. code-block:: python
 
@@ -68,7 +68,7 @@ Step 2: Extremes
    ds.extreme_events     # (time, lat, lon), bool
    ds.thresholds         # per-cell threshold for each day of year
 
-For cold spells or droughts, add ``tail="lower"`` (with ``threshold_percentile=5`` for the coldest 5 %). If you already have anomalies from elsewhere, ``marEx.extremes.identify`` runs the threshold stage alone.
+For cold spells or droughts, add ``tail="lower"`` (with ``threshold_percentile=5`` for the coldest 5 %). If you already have anomalies from elsewhere, ``marEx.extremes.identify`` thresholds them directly.
 
 Step 3: Tracking and a Plot
 ===========================
@@ -88,7 +88,7 @@ The tracker needs a ``dask.distributed`` client, a boolean event field, and ``R_
        area_filter_absolute=5,
    ).run()
 
-   events.ID_field       # (time, lat, lon), int32; 0 is background
+   events.ID_field       # (time, lat, lon), int32 (0 is background)
    events.area           # (time, ID)
    events.time_start     # (ID)
 
@@ -106,6 +106,6 @@ The tracker keeps the spatial dimensions whole and chunks in time. Pass ``return
 Next Steps
 ==========
 
-* :doc:`../guide/index` for how each stage works and how to choose methods.
+* :doc:`../guide/index` for how each module works and how to choose methods.
 * :doc:`../tutorials/index` for full notebooks on gridded, regional and unstructured data.
 * :doc:`../whats_new` if you are upgrading from 4.x.

@@ -5,7 +5,7 @@ Visualisation (:mod:`marEx.plotX`)
 .. currentmodule:: marEx
 
 The :mod:`marEx.plotX` module provides visualisation through an xarray accessor
-(``.plotX``) that auto-detects structured vs. unstructured grids. For usage
+(``.plotX``) that detects whether the grid is structured or unstructured. For usage
 patterns and examples, see :doc:`../guide/visualisation`.
 
 .. autosummary::

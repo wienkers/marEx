@@ -3,14 +3,14 @@ Precipitation Drought
 =====================
 
 
-Meteorological drought is a persistent deficit of precipitation, and its consequences reach
-hydropower reservoirs, irrigation supply and crop yield. A drought is characterised by the
-months it lasts and the region it covers, not by a single dry month at one location.
+Meteorological drought is a persistent deficit of precipitation, characterised by the months
+it lasts and the region it covers. Its consequences reach hydropower reservoirs, irrigation
+supply and crop yield.
 
 Why marEx Fits
 ==============
 
-* Monthly input is supported. The cadence is inferred from the time axis and thresholds are
+* The cadence is inferred from the time axis and thresholds are
   computed per calendar month (the ``thresholds`` variable gets a ``month`` dimension).
 * ``tail="lower"`` flags the driest months for each cell and calendar month, so a normally
   dry season is judged against its own dry months.
@@ -55,7 +55,7 @@ block of cells, and flags the driest 10 % for each calendar month. Monthly data 
            threshold_percentile=10,
            tail="lower",
            smooth_days=1,                          # a 21-day smoother has no meaning on monthly steps
-           window_days=31,                         # pool the neighbouring months: one 31-day window = 1 step
+           window_days=31,                         # one 31-day window = 1 step
            reference_period=(1990, 2019),
        )
        print(ds.thresholds.dims, int(ds.extreme_events.sum().compute()))
@@ -73,15 +73,15 @@ block of cells, and flags the driest 10 % for each calendar month. Monthly data 
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 Output
 ======
 
 ``extreme_events`` marks dry months. The tracker output counts duration in the time axis of
-the input, so on monthly data ``time_start`` and ``time_end`` are month starts and the
-elapsed time between them is in months. ``T_fill`` is in time steps, which here are months.
+the input, so on monthly data ``time_start`` and ``time_end`` are month starts, and the
+snippet's ``dur`` counts the days between them plus one. ``T_fill`` is in time steps, which here are months.
 
 Caveats
 =======
@@ -97,6 +97,6 @@ Caveats
   sample-count warning and consider ``window_spatial``.
 * Seasonal percentiles flag dry months in every season, including those with little water
   to lose. A dry spell during the wet season is more consequential than one during the dry
-  season, and the percentile does not weight that.
+  season, and the percentile weights both equally.
 * Long monthly shifting baselines lose ``window_years`` years at the start. Here the baseline
   is a fixed reference period.

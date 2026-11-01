@@ -57,7 +57,7 @@ and the sub-daily caveats.
 Exception hierarchy
 ===================
 
-marEx provides a structured exception hierarchy for precise error handling.
+All marEx errors derive from ``MarExError``, so they can be caught together or by type.
 
 .. autosummary::
    :toctree: ../_autosummary

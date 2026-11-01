@@ -98,6 +98,7 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 - Higher-order detrending without a linear term (for example `detrend_orders=[2, 3]`) reports its instability warning through the marEx logger instead of printing it, so it respects `configure_logging` (it is kept in quiet mode and silenced with `console_output=False`).
 - Dask worker memory warnings (`distributed.worker.memory`, `distributed.nanny.memory`) stay visible under marEx logging; they were silenced along with the rest of `distributed.worker`, hiding the message that explains a killed worker.
 - `configure_dask` (and so `start_local_cluster`) no longer fails off DKRZ when no `scratch_dir` is given: the DKRZ scratch path is used only where `/scratch` exists, and the system temporary directory otherwise.
+- An even `window_spatial` now suggests the neighbouring odd `window_spatial` values, where the error previously suggested `window_days` values.
 
 ### Performance
 

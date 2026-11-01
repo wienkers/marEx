@@ -407,7 +407,7 @@ def identify_extremes(
     bin_spec_out: Optional[list] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     """
-    Identify extreme events exceeding a percentile threshold using specified method.
+    Identify extreme events using a percentile threshold.
 
     Parameters
     ----------
@@ -422,21 +422,21 @@ def identify_extremes(
     coordinates : dict, optional
         Mapping of coordinates to names in the data
     window_days : int, default=11
-        Window for day-of-year threshold (seasonal_percentile only)
+        Window in days (seasonal_percentile only)
     window_spatial : int, default=None
         Width in cells (odd) of the square spatial pooling window (seasonal_percentile
         with method_percentile='approximate' on gridded data only). ``None`` resolves
-        to 5 (a 5x5 window) on that path and to no pooling everywhere else.
+        to 5 (a 5x5 window) on that path and to no pooling elsewhere.
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, optional
         Histogram bin width for the approximate method, in the variable's units. The
-        binned range is derived from the data (the requested tail's extreme, lowered by a
+        binned range is derived from the data: the requested tail's extreme, lowered by a
         per-cell normal estimate of the largest threshold and regrown if a threshold
-        reaches its edge; see ``resolve_bin_spec``). Omitted, it is ``range / 1500``
-        (3000 bins over +/- range). Warns above 10000 bins; raises above 65000.
+        reaches its edge (see ``resolve_bin_spec``). Omitted, the bin width is
+        ``range / 1500`` (3000 bins over +/- range). Warns above 10000 bins, raises above 65000.
     max_anomaly : float, optional
-        Deprecated. Pins the half-width of the binned range; a threshold reaching it raises.
+        Deprecated. Pins the half-width of the binned range. A threshold reaching it raises.
     n_bins : int, optional
         Deprecated. Replaces the 3000-bin target when ``precision`` is omitted.
     tail : {'upper', 'lower'}, default='upper'
@@ -445,8 +445,9 @@ def identify_extremes(
         threshold is the ``threshold_percentile``-th percentile in both cases, so
         the coldest 5 % is ``threshold_percentile=5, tail='lower'``.
     bin_spec_out : list, optional
-        Internal. When given, the :class:`BinSpec` actually used (after any regrow; ``None``
+        Internal. When given, the :class:`BinSpec` actually used (after any regrow, or ``None``
         on the exact path) is appended, so a caller can record it in its output attributes.
+
     Returns
     -------
     tuple
@@ -485,8 +486,8 @@ def identify_extremes(
     ...     anomalies,
     ...     method_extreme="seasonal_percentile",
     ...     threshold_percentile=95,
-    ...     window_days=11  # 11-day window around each day-of-year
-    ...     window_spatial=3  # 3x3 spatial window for clustering percentile calcuation
+    ...     window_days=11,  # 11-day window around each day-of-year
+    ...     window_spatial=3  # 3x3 spatial window for clustering percentile calculation
     ... )
     >>> print(f"Seasonal thresholds shape: {thresholds_seasonal.shape}")
     Seasonal thresholds shape: (366, 180, 360)
@@ -508,7 +509,7 @@ def identify_extremes(
     ...     anomalies, method_percentile="exact"
     ... )
     >>>
-    >>> # Compare threshold precision — ~0.005C
+    >>> # Compare threshold precision: ~0.005C
     >>> threshold_diff = (thresh_exact - thresh_approx).std().compute()
     >>> print(f"Threshold difference (exact vs approx): {threshold_diff:.6f}")
 
@@ -525,7 +526,7 @@ def identify_extremes(
     ... )
     >>>
     >>> # Compare event frequency
-    >>> print(f"99th percentile events: {extremes_99.sum().compute()}")
+    >>> print(f"98th percentile events: {extremes_98.sum().compute()}")
     >>> print(f"90th percentile events: {extremes_90.sum().compute()}")
 
     Processing unstructured data:
@@ -768,7 +769,8 @@ def identify_extremes(
                 f"window_spatial={window_spatial} is even, which would create asymmetric spatial windows."
             ),
             suggestions=[
-                f"Use window_days={window_days + 1} or {window_days - 1}",
+                "Use window_spatial="
+                + " or ".join(str(v) for v in [w for w in (window_spatial + 1, window_spatial - 1) if w >= 1] or [1]),
                 "Choose an odd number.",
             ],
             context={

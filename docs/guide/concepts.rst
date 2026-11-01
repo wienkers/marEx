@@ -3,9 +3,8 @@ Core Concepts
 =============
 
 marEx turns a gridded or unstructured time series into a catalogue of tracked extreme
-events. The work is split into three stages, each usable on its own, and every stage runs
-on Dask so the data never has to fit in memory at once. This page defines the vocabulary
-the rest of the guide uses and shows how the entry points fit together.
+events. Each of its three modules can be used on its own, and all of them run on Dask, so
+the data is processed chunk by chunk.
 
 The Pipeline
 ============
@@ -13,22 +12,21 @@ The Pipeline
 .. code-block:: text
 
    field ──> anomaly ──> extremes ──> track ──> events
-              stage       stage       stage
 
    marEx.anomaly.compute   marEx.extremes.identify   marEx.tracker
    └────────── marEx.preprocess_data ───────────┘
 
-1. **Anomaly stage.** Subtract a climatology from the raw field. Output: ``dat_anomaly``
+1. **Anomaly module.** Subtracts a climatology from the raw field. Output: ``dat_anomaly``
    and a ``mask``. See :doc:`anomalies`.
-2. **Extremes stage.** Compare the anomaly with a percentile threshold. Output:
+2. **Extremes module.** Compares the anomaly with a percentile threshold. Output:
    ``thresholds`` and a boolean ``extreme_events`` field. See :doc:`extremes`.
-3. **Tracking stage.** Label connected extreme regions, follow them through time, and
-   handle merges and splits. Output: ``ID_field`` plus per-event statistics. See
+3. **Tracker module.** Labels connected extreme regions, follows them through time, and
+   handles merges and splits. Output: ``ID_field`` plus per-event statistics. See
    :doc:`tracking`.
 
-:func:`marEx.preprocess_data` chains stages 1 and 2. Stage 3 takes the boolean
-``extreme_events`` field (and, optionally, the ``mask``) from any source, so a threshold
-you computed elsewhere can be tracked without running marEx's own stages 1 and 2.
+:func:`marEx.preprocess_data` chains the anomaly and extremes modules. The tracker takes a
+boolean ``extreme_events`` field (and, optionally, the ``mask``) from any source, so a
+threshold computed elsewhere can be tracked directly.
 
 Vocabulary
 ==========
@@ -40,14 +38,13 @@ Climatology
 
 Anomaly
   The field minus its climatology, ``anomaly = observed - climatology``. marEx has four
-  ways to build the climatology, which differ in how they treat trends
-  (:doc:`anomalies`).
+  climatology methods, which differ in how they treat trends (:doc:`anomalies`).
 
 Threshold
   The percentile of the anomaly distribution that separates ordinary from extreme values,
   one number per cell, and per position in the seasonal cycle for ``seasonal_percentile``.
   ``threshold_percentile=95`` with ``tail="upper"`` gives the value exceeded 5 % of the
-  time (Hobday et al. 2016).
+  time.
 
 Extreme
   A cell and time at which the anomaly passes the threshold on the chosen side (``>=`` for
@@ -66,8 +63,7 @@ Mask
 Three Entry Points
 ==================
 
-The anomaly and extremes stages are available as standalone functions as well as through
-the chainer. The chainer is the shortest way to a result.
+:func:`marEx.preprocess_data` runs the anomaly and extremes modules in one call.
 
 .. code-block:: python
 
@@ -83,7 +79,7 @@ the chainer. The chainer is the shortest way to a result.
        threshold_percentile=95,
    )
 
-The same two stages, run separately:
+The two modules can also be called separately:
 
 .. code-block:: python
 
@@ -93,11 +89,9 @@ The same two stages, run separately:
    )
 
 :func:`marEx.extremes.identify` accepts a DataArray of anomalies from any source, or a
-Dataset carrying ``dat_anomaly``. :func:`marEx.anomaly.compute` has no threshold parameter
-anywhere, so it can be used for climatologies and anomalies alone
-(:doc:`../applications/climatologies_only`).
+Dataset containing ``dat_anomaly``. :func:`marEx.anomaly.compute` on its own returns anomalies (:doc:`../applications/climatologies_only`).
 
-The choice of method is spelled differently at each entry point:
+Each entry point names the method parameter differently:
 
 .. list-table::
    :header-rows: 1
@@ -120,11 +114,9 @@ The choice of method is spelled differently at each entry point:
      - keyword-only
      - keyword-only
 
-``method`` is the second positional argument of ``compute`` and ``identify``. Every other
-parameter is keyword-only there. Parameters of the same name mean the same thing at every
-entry point. Some combinations are rejected outright, for example ``standardise=True``
-with any method but ``detrend_harmonic``, or ``reference_period`` with a method that has
-no fixed reference. Each is listed on the page for its stage.
+``method`` is the second positional argument of ``compute`` and ``identify``, and every
+other parameter there is keyword-only. A parameter of a given name means the same thing at
+every entry point.
 
 Outputs
 =======
@@ -151,16 +143,15 @@ Outputs
      - ``(lat, lon, dayofyear)``
      - Threshold per cell and cycle slot
 
-With ``standardise=True`` the Dataset also carries ``dat_stn``, ``STD``,
+With ``standardise=True`` the Dataset also contains ``dat_stn``, ``STD``,
 ``extreme_events_stn`` and ``thresholds_stn``. ``anomaly.compute`` returns the anomaly
 variables and ``mask``. ``extremes.identify`` returns its input variables plus
-``extreme_events`` and ``thresholds``. The attributes of the Dataset record the resolved
-method names, window lengths, percentile, tail and the histogram bin width that was
-actually used, so a saved file documents how it was made.
+``extreme_events`` and ``thresholds``. The Dataset attributes record the resolved method
+names, window lengths, percentile, tail and histogram bin width, so a saved file documents
+how it was made.
 
-Any dimension besides time and the horizontal ones is carried through as an extra
-dimension (depth, pressure level, ensemble member), and ``mask`` and ``thresholds`` gain it
-too.
+Any dimension besides time and the horizontal ones (depth, pressure level, ensemble
+member) passes through as an extra dimension, and ``mask`` and ``thresholds`` gain it too.
 
 Grids
 =====
@@ -169,8 +160,8 @@ A field has dimensions ``(time, *extra, *horizontal)``. A **gridded** field has 
 horizontal dimensions, for example ``(time, lat, lon)``. An **unstructured** field has one,
 for example ``(time, ncells)``, with latitude and longitude as coordinates. The same
 functions handle both, with the dimension names passed through ``dimensions`` and
-``coordinates``. Details, including what each grid type additionally requires for tracking,
-are in :doc:`dimensions_and_time`.
+``coordinates``. :doc:`dimensions_and_time` gives the details, including what each grid
+type needs for tracking.
 
 Scale and Compute Modes
 =======================
@@ -180,20 +171,12 @@ in pieces. ``compute_mode`` sets what happens to intermediates that more than on
 needs:
 
 * ``persist`` (default) pins them in cluster memory.
-* ``streaming`` writes them to Zarr under ``scratch_dir`` and reads them back. It reduces the
-  bytes pinned in memory, not the peak memory of a run.
+* ``streaming`` keeps them on disk, as Zarr under ``scratch_dir``, so far less is pinned in worker memory.
 * ``lazy`` keeps nothing and recomputes.
 
-Two measurements, both single runs on one DKRZ Levante compute node:
-
-* 40 years of daily 0.25° global SST (output 9282 × 720 × 1440 after the 15-year baseline
-  is trimmed), anomalies and approximate percentiles, 4 workers × 22 GB with 16 threads
-  each: 3954 s with ``persist`` and 3663 s with ``streaming``, with identical results.
-* Gridded tracking of 3804 days of 0.25° data: ``persist`` was OOM-killed in a 24 GiB
-  allocation while ``streaming`` completed in the same allocation.
-
-Chunking, sizing and cluster set-up are in :doc:`performance`. How correctness is tested is
-in :doc:`validation`.
+With ``streaming``, gridded tracking of 3804 days of 0.25° data completes in a 24 GiB
+allocation. Chunking, sizing and cluster set-up are in :doc:`performance`, and how
+correctness is tested is in :doc:`validation`.
 
 Where to Go Next
 ================
@@ -201,7 +184,7 @@ Where to Go Next
 * :doc:`../getting_started/quickstart` runs the full pipeline end to end.
 * :doc:`anomalies` and :doc:`extremes` explain how to choose methods and settings.
 * :doc:`dimensions_and_time` covers extra dimensions, grids and cadences.
-* :doc:`tracking` and :doc:`visualisation` cover the later stages.
+* :doc:`tracking` and :doc:`visualisation` cover tracking and plotting.
 * :doc:`performance` covers chunking, memory sizing and clusters.
 
 References

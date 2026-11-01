@@ -208,7 +208,7 @@ def test_extremes_stage_rejects_bad_configuration():
             (
                 "even window_spatial",
                 ConfigurationError,
-                [r"window_spatial must be an odd number"],
+                [r"window_spatial must be an odd number", r"Use window_spatial=5 or 3"],
                 identify(method_extreme="seasonal_percentile", method_percentile="approximate", window_spatial=4, **grid),
             ),
             (

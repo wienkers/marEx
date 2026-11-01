@@ -1,28 +1,26 @@
 """
 marEx: scalable detection and tracking of extremes in weather and climate data.
 
-Three independent stages, each usable on its own:
+Each of its three modules can be used on its own:
 
-- :mod:`marEx.anomaly` -- climatology, detrending, and anomalies. A complete
-  product for anyone who wants a smoothed daily climatology on larger-than-memory
-  data and nothing else. No threshold parameter appears here.
-- :mod:`marEx.extremes` -- percentile thresholding and binary event
-  identification, on anomalies from anywhere.
-- :mod:`marEx.track` -- connected-component identification and tracking through
+- :mod:`marEx.anomaly`: climatology, detrending, and anomalies on
+  larger-than-memory data.
+- :mod:`marEx.extremes`: percentile thresholding and binary event
+  identification, on anomalies from any source.
+- :mod:`marEx.track`: connected-component identification and tracking through
   time, with merge/split handling.
 
-:func:`marEx.preprocess_data` chains the first two for convenience.
+:func:`marEx.preprocess_data` chains the first two.
 
-Nothing in marEx is specific to a domain or a variable: the same pipeline applies
-to ocean, atmosphere, land surface, and biogeochemistry, on regular grids and
-unstructured meshes alike.
+The same pipeline applies to ocean, atmosphere, land surface, and
+biogeochemistry, on regular grids and unstructured meshes alike.
 
 Example
 -------
 >>> import xarray as xr
 >>> import marEx
 >>> t2m = xr.open_dataset("t2m.zarr", chunks={"time": 25}).t2m
->>> # Anomalies only -- no detection
+>>> # Anomalies only
 >>> anomalies = marEx.anomaly.compute(t2m, method="shifting_baseline")
 >>> # Or the full chain, then track the events through time
 >>> ds = marEx.preprocess_data(t2m, threshold_percentile=95)

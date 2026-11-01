@@ -2,21 +2,20 @@
 Dimensions and Time
 =====================
 
-How marEx reads the shape of your data: which dimensions are space, which are extra, how
-the time axis sets the seasonal cycle, and what is not supported. The anomaly and extremes
-stages share these rules.
+How marEx interprets the shape of your data: which dimensions are horizontal, which are
+extra, and how the time axis sets the seasonal cycle. The anomaly and extremes modules
+share these rules.
 
 Input Requirements
 ==================
 
-* An ``xarray.DataArray`` with a time dimension, backed by Dask. A NumPy-backed array raises
-  a ``DataValidationError``.
+* An ``xarray.DataArray`` with a time dimension, backed by Dask.
 * Land, or any other invalid cell, must be NaN at the **first timestep**. The ``mask`` is
-  ``isfinite`` of that timestep and holds for the whole run. With ``validate=True`` (default)
-  any non-finite value at an unmasked cell, at any time, raises a ``DataValidationError``.
-  ``validate=False`` skips the check.
-* The data is cast to float32. Non-standard (cftime) calendars are handled. A
-  ``NaT`` in the time axis raises a ``ConfigurationError``.
+  ``isfinite`` of that timestep and applies to the whole run. ``validate=True`` (default)
+  checks that every unmasked cell is finite at every time, and ``validate=False`` skips the
+  check.
+* Every time value must be valid (no ``NaT``). Non-standard (cftime) calendars are
+  handled.
 
 .. code-block:: python
 
@@ -25,16 +24,15 @@ Input Requirements
    sst = xr.open_zarr("sst_daily.zarr").sst                       # Zarr
    sst = xr.open_mfdataset("sst_*.nc", chunks={}, parallel=True).sst   # many NetCDF files
 
-``chunks={}`` keeps the on-disk chunking. Detection does not depend on how the input is
-chunked, and on a lat/lon grid keeping space whole is fine. Chunking advice for large runs is
-in :doc:`performance`. Tracking has different chunking requirements and is covered in
-:doc:`tracking`.
+``chunks={}`` keeps the on-disk chunking. Detection results are independent of the input
+chunking, and on a lat/lon grid space can stay whole. :doc:`performance` covers chunking
+for large runs, and :doc:`tracking` the chunking the tracker needs.
 
 Gridded and Unstructured Inputs
 ===============================
 
 A field is ``(time, *extra, *horizontal)``. marEx reads the horizontal dimensions from the
-``dimensions`` mapping, and the coordinate variables that hold latitude and longitude from
+``dimensions`` mapping, and the latitude and longitude coordinate variables from
 ``coordinates``.
 
 .. list-table::
@@ -54,11 +52,9 @@ A field is ``(time, *extra, *horizontal)``. marEx reads the horizontal dimension
      - copied from ``dimensions``
      - **required**, for example ``{"time": "time", "x": "lon", "y": "lat"}``
 
-A field is treated as gridded when both ``"x"`` and ``"y"`` appear in ``dimensions``. A
-mapping that names any non-time dimension must therefore carry ``"x"``. A mapping with
-``"y"`` and no ``"x"`` raises a ``DataValidationError`` instead of silently treating the
-longitude axis as an extra dimension. Unstructured data without ``coordinates`` raises the
-same error.
+A field is gridded when ``dimensions`` contains both ``"x"`` and ``"y"``, and unstructured
+when it contains ``"x"`` alone. Any mapping that names a non-time dimension must include
+``"x"``.
 
 .. code-block:: python
 
@@ -75,14 +71,15 @@ Non-default names on a grid work the same way:
 ``dimensions={"time": "time", "x": "longitude", "y": "latitude"}``.
 
 ``preprocess_data`` also takes ``neighbours`` and ``cell_areas``. They are attached to the
-output and used by the tracker, and place no constraint on how the input is chunked. Their
-use in tracking is described in :doc:`tracking`.
+output for the tracker (:doc:`tracking`), and the input can be chunked independently of
+them.
 
-Spatial pooling with ``window_spatial`` is gridded-only. On a large unstructured mesh, chunk
-the cell dimension of the input (for example ``{"time": 21, "ncells": 25000}``), because
-leaving space whole turns the internal regrouping into an all-to-all transpose. Unstructured
-detection on a large mesh left spatially whole is not recommended. Tracking is the opposite and
-needs space whole. See :doc:`performance`.
+Spatial pooling with ``window_spatial`` applies to gridded fields only. On a large
+unstructured mesh, chunk the cell dimension of the input (for example
+``{"time": 21, "ncells": 25000}``), because a spatially whole input turns the internal
+regrouping into an all-to-all transpose. Tracking is the opposite and needs space whole.
+See :doc:`performance`. Regional data spanning less than about 360° in longitude is tracked
+with ``regional_tracker`` (:doc:`tracking`).
 
 .. _extra-dimensions:
 
@@ -91,7 +88,7 @@ Extra Dimensions
 
 Any dimension besides time and the horizontal ones is an extra dimension: depth, pressure
 level, ensemble member. marEx detects it automatically and treats each index along it
-independently. No mapping entry is needed.
+independently, with no mapping entry needed.
 
 .. code-block:: python
 
@@ -109,29 +106,30 @@ independently. No mapping entry is needed.
    ds.extreme_events     # (time, depth, lat, lon)
    ds.thresholds         # (depth, lat, lon, dayofyear)
 
-* A 3-D run equals the per-level 2-D runs, which the slice-equivalence tests in the suite check.
-* ``mask`` has the extra dimension, so seabed depth is handled by NaN at the first timestep
-  at each level.
-* ``window_spatial`` pools horizontal cells only, never across depth.
-* On a large grid each chunk of the output holds one level. On a small one several levels
-  share a chunk. ``dask_chunks`` sets the time chunk only.
-* Both the tracker and ``plotX`` accept a 2-D field per timestep. Select a level with
-  ``isel`` (or loop over levels) before tracking or plotting. They raise an error that says
-  so otherwise. ``multi_plot(config, col="lev")`` draws one panel per level.
+* A 3-D run gives the same result as separate 2-D runs on each level.
+* ``mask`` has the extra dimension, so the seabed is masked by NaN at the first timestep of
+  each level.
+* ``window_spatial`` pools horizontal neighbours within each level.
+* On a large grid each output chunk contains one level, and on a small one several levels
+  share a chunk.
+* The tracker and ``plotX`` take a 2-D field per timestep, so select a level with ``isel``
+  (or loop over levels) before tracking or plotting. ``multi_plot(config, col="lev")`` draws
+  one panel per level.
 
 The :doc:`../tutorials/3d` tutorial runs this on a century of daily ocean temperature on seven
 levels.
 
-``dask_chunks`` defaults to ``{"time": 25}`` and only its time entry is used. An integer is a
-number of timesteps. ``"auto"`` is Dask's byte budget (the ``array.chunk-size`` setting).
+``dask_chunks`` (default ``{"time": 25}``) sets the time chunk of the output, and only its
+time entry is used. An integer is a number of timesteps, and ``"auto"`` uses Dask's byte
+budget (the ``array.chunk-size`` setting).
 
 .. _cadence-rules:
 
 Time Cadences
 =============
 
-marEx infers the **within-year cycle** that climatologies and seasonal thresholds are resolved
-on from the median spacing of the time coordinate:
+marEx infers the **within-year cycle**, on which climatologies and seasonal thresholds are
+resolved, from the median spacing of the time coordinate:
 
 .. list-table::
    :header-rows: 1
@@ -154,17 +152,18 @@ on from the median spacing of the time coordinate:
      - ``366 × steps_per_day``
      - Hourly, 6-hourly
 
-``marEx.infer_cycle(data.time)`` shows what would be inferred. A 6-hourly axis gives
+``marEx.infer_cycle(data.time)`` shows the inferred cycle. A 6-hourly axis gives
 ``SeasonalCycle(index_name="hourofyear", length=1464, step_days=0.25)``.
 
-Durations are in days
----------------------
+Window Durations
+----------------
 
 ``window_days`` and ``smooth_days`` are always **durations in days**, whatever the cadence.
 ``smooth_days`` is converted to whole timesteps (to whole days at one time of day for
-``shifting_baseline`` on sub-daily data). ``window_days`` pools neighbouring slots of
-the cycle, so it is converted to cycle slots: one per day of year on daily and multi-day data,
-one per step on sub-daily data, and one per month (the calendar's mean month) on monthly data.
+``shifting_baseline`` on sub-daily data). ``window_days`` pools neighbouring slots of the
+cycle, so it is converted to cycle slots: one per day of year on daily and multi-day data,
+one per step on sub-daily data, and one per month (the calendar's mean month) on monthly
+data.
 
 .. list-table::
    :header-rows: 1
@@ -178,7 +177,7 @@ one per step on sub-daily data, and one per month (the calendar's mean month) on
      - Unchanged
    * - 5-day
      - 11 slots
-     - 11 day-of-year slots, not 3 steps
+     - 11 days, as on daily data
    * - 6-hourly
      - 45 slots
      - 11.25 days, with a warning about the rounding
@@ -186,15 +185,13 @@ one per step on sub-daily data, and one per month (the calendar's mean month) on
      - 1 slot
      - 30.44 days (30 on a ``360_day`` calendar), with a warning
 
-An 11-day window cannot be represented on a monthly axis, so marEx uses a single month and
-warns, naming the requested and the realised duration. A window wider than the cycle pools
-every slot once. On a day-of-year cycle (daily and multi-day data) ``window_days`` must be
-odd. On other cadences the window is forced to an odd number of slots and an even request
-does not raise. ``smooth_days`` is not forced odd, and on a monthly axis the default 21 days
-rounds below one step, so no smoothing is applied and a warning says so.
+On a monthly axis an 11-day window becomes a single month, and the warning names the
+requested and the realised duration. A window wider than the cycle pools every slot once.
+On a day-of-year cycle (daily and multi-day data) ``window_days`` must be odd, and on other
+cadences an even request is forced to an odd number of slots.
 
-Which methods run where
------------------------
+Methods by Cadence
+------------------
 
 .. list-table::
    :header-rows: 1
@@ -229,31 +226,23 @@ Which methods run where
      - yes
      - yes
 
-``detrend_harmonic`` raises a ``ConfigurationError`` on sub-daily data, because its basis
-removes annual and semi-annual cycles only and the diurnal cycle would remain in the anomaly.
-``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline`` resolve their
-climatologies on the sub-daily cycle and remove the diurnal cycle. ``shifting_baseline``
-smooths each time of day across days, which needs the timestamps on a regular sub-daily grid
-(missing steps may be left out). Timestamps slightly off that grid, for example decoded from
-float offsets, raise a ``ConfigurationError`` whose message gives the rounding that fixes them,
-such as ``da["time"] = da["time"].dt.round("3600s")`` for hourly data.
+``detrend_harmonic`` rejects sub-daily data, because its basis has only annual and
+semi-annual cycles and the diurnal cycle would stay in the anomaly. ``shifting_baseline``,
+``fixed_baseline`` and ``detrend_fixed_baseline`` resolve their climatologies on the
+sub-daily cycle and remove the diurnal cycle. ``shifting_baseline`` smooths each time of
+day across days, which needs the timestamps on a regular sub-daily grid (missing steps may
+be left out). Timestamps slightly off that grid, for example decoded from float offsets,
+raise a ``ConfigurationError`` whose message gives the rounding that fixes them, such as
+``da["time"] = da["time"].dt.round("3600s")`` for hourly data.
 
-Sub-daily runs are expensive because a cell has more time steps: 6-hourly data has four times
-the steps of daily data over the same record, and hourly data twenty-four times. The seasonal
-threshold holds each cell's whole series in one task and builds its ``cycle_length × number of
-bins`` counts one cell at a time, so the record length sets a task's memory and the number of
-bins does not. The tile-fit warning on this path needs a very long record: about 2.4 million
-steps per cell with ``window_spatial=5``, over 250 years of hourly data. An even
-``window_spatial`` keeps the older dense histogram, whose per-cell cost is ``cycle_length ×
-number of bins``, so there hourly data is twenty-four times the daily size. For long sub-daily
-series, prefer ``global_percentile`` or coarsen to daily first.
+Sub-daily runs are expensive because each cell has more timesteps: 6-hourly data has four
+times the steps of daily data over the same record, and hourly data twenty-four times. The seasonal threshold processes each cell's whole series in one task, so a task's memory depends on the record length.
 
 Irregular axes and overrides
 ----------------------------
 
 A time axis with no single characteristic spacing, for example a daily series appended to a
-monthly one, raises a ``ConfigurationError`` instead of being guessed. So does a cadence finer
-than about 8 minutes. Pass the cycle yourself:
+monthly one, or a cadence finer than about 8 minutes, needs an explicit ``cycle``:
 
 .. code-block:: python
 
@@ -264,27 +253,12 @@ than about 8 minutes. Pass the cycle yourself:
        cycle=marEx.SeasonalCycle("month", 12, 30.44),
    )
 
-``cycle=`` is accepted by ``preprocess_data``, ``anomaly.compute`` and ``extremes.identify``,
-and the chainer passes it to both stages. ``global_percentile`` never needs a cycle.
+``preprocess_data``, ``anomaly.compute`` and ``extremes.identify`` all accept ``cycle=``,
+and the chainer passes it to both modules. ``global_percentile`` needs no cycle.
 
 Leap days
 ---------
 
-The daily cycle has 366 slots. With ``shifting_baseline``, a window that contains no leap
-year leaves day 366 without a climatology, so that one timestep has a NaN anomaly. This is
-expected and is described in :doc:`anomalies`.
-
-What Is Not Supported
-=====================
-
-* **Tracking and plotting of fields with extra dimensions.** Select one level first.
-* **A time axis with mixed cadences**, without an explicit ``cycle`` (``global_percentile`` is
-  exempt).
-* **Sub-daily data with** ``detrend_harmonic``. ``shifting_baseline`` is not recommended
-  there.
-* **tail="both".** Run the lower and upper tails separately.
-* **Spatial pooling on unstructured meshes**, with ``global_percentile``, or with exact
-  percentiles.
-* **Unstructured detection on a large mesh left spatially whole.** It thrashes. Chunk the cell dimension.
-* **Regional tracking** on data that does not span about 360° in longitude needs
-  ``regional_tracker``. See :doc:`tracking`.
+The daily cycle has 366 slots. The day-366 climatology pools every year's 31 December, so a
+leap year's last day has a climatology even when the window contains no other leap year
+(:doc:`anomalies`).

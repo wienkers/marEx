@@ -2,9 +2,9 @@
 Anomalies
 =========
 
-The anomaly stage subtracts a climatology from the raw field. It is available alone as
-:func:`marEx.anomaly.compute`, which has no threshold parameter, and as the first half of
-:func:`marEx.preprocess_data`. The function reference is in :doc:`../api/anomaly`.
+The ``marEx.anomaly`` module subtracts a climatology from the raw field. Call it alone as
+:func:`marEx.anomaly.compute`, or as the first half of :func:`marEx.preprocess_data`. The
+function reference is in :doc:`../api/anomaly`.
 
 .. code-block:: python
 
@@ -22,8 +22,8 @@ The anomaly stage subtracts a climatology from the raw field. It is available al
    anomalies.dat_anomaly      # (time, lat, lon), float32
    anomalies.mask             # (lat, lon), True where valid
 
-The output Dataset holds ``dat_anomaly`` and ``mask``, plus ``dat_stn`` and ``STD`` when
-``standardise=True``. Input is cast to float32.
+The output Dataset contains ``dat_anomaly`` and ``mask``, plus ``dat_stn`` and ``STD`` when
+``standardise=True``.
 
 .. _anomaly-methods:
 
@@ -59,29 +59,27 @@ trends.
      - Unchanged
 
 **Use** ``shifting_baseline`` **when the question is about extremes relative to a recent
-normal.** It is the default. Each year is compared with the years just before it, so slow
-warming does not turn the end of a record into one long extreme. It costs the most
-computation, loses the first ``window_years`` years of output, and raises a
-``DataValidationError`` if the series is not longer than ``window_years``.
+normal.** It is the default. Each year is compared with the years just before it, so the
+baseline follows slow warming. It is the most expensive method, and it needs a series
+longer than ``window_years``, whose first ``window_years`` years are dropped from the
+output.
 
-**Use** ``fixed_baseline`` **when the baseline itself is part of the question.** A
-heatwave definition tied to a fixed reference period (``reference_period=(1991, 2020)``,
-say) is the typical case. Because the trend stays in the anomaly, later years exceed a
-fixed threshold more often.
+**Use** ``fixed_baseline`` **when the baseline itself is part of the question**, as in a
+heatwave definition tied to a reference period such as ``reference_period=(1991, 2020)``.
+The trend stays in the anomaly, so later years exceed a fixed threshold more often.
 
-**Use** ``detrend_fixed_baseline`` **when you want a fixed climatology but not the trend**,
-for example to study variability without the warming signal, or when the record is too short
+**Use** ``detrend_fixed_baseline`` **for a fixed climatology without the trend**, for
+example to study variability without the warming signal, or when the record is too short
 to spend ``window_years`` of it on a baseline.
 
 **Use** ``detrend_harmonic`` **for fast exploratory runs, or with** ``standardise=True``.
-Fitting a handful of harmonics is much cheaper than building a day-of-year climatology.
-It approximates the seasonal cycle, so structure those harmonics cannot represent stays in
-the anomaly. It rejects sub-daily data with a ``ConfigurationError``. Monthly data is not blocked, but
-the method has not been exercised there.
+Fitting a handful of harmonics is cheaper than building a day-of-year climatology.
+The harmonics approximate the seasonal cycle, so any structure they cannot represent stays
+in the anomaly.
 
-On sub-daily data ``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline``
-resolve their climatologies on the sub-daily cycle, so the diurnal cycle is removed from the
-anomaly. See :doc:`dimensions_and_time`.
+For sub-daily data use one of the other three methods. They resolve their climatologies on
+the sub-daily cycle, so the diurnal cycle is removed from the anomaly. See
+:doc:`dimensions_and_time`.
 
 Parameters by Method
 ====================
@@ -144,31 +142,32 @@ Parameters by Method
 Smoothing
 =========
 
-``smooth_days`` is a duration in days and is converted to whole timesteps for the cadence of
-your data. ``smooth_days=1`` turns smoothing off.
+``smooth_days`` is a duration in days, converted to whole timesteps for the cadence of the
+data. ``smooth_days=1`` turns smoothing off.
 
 * ``shifting_baseline`` smooths the raw field with a centred rolling mean of ``smooth_days``
-  before taking the rolling climatology. On sub-daily data each time of day is averaged across
-  days. Up to ``smooth_max_missing`` (default 0.1) of a window may be missing (NaN, or a step
-  absent from a sub-daily axis) before the smoothed value is NaN, and windows that reach past
-  either end of the record stay NaN. ``smooth_max_missing=0`` requires complete windows.
+  before taking the rolling climatology. On sub-daily data each time of day is averaged
+  across days. A smoothed value is NaN once more than ``smooth_max_missing`` (default 0.1)
+  of its window is missing (NaN, or a step absent from a sub-daily axis), and windows that
+  reach past either end of the record are NaN. ``smooth_max_missing=0`` requires complete
+  windows.
 * ``fixed_baseline`` and ``detrend_fixed_baseline`` smooth the day-of-year climatology with
   a circular moving average, so 31 December is averaged with 1 January, as in Hobday et al.
-  (2016). A smoothing window as long as the whole cycle raises a ``ConfigurationError``.
-  On sub-daily cycles the average runs across days at a fixed time of day.
+  (2016). The window must be shorter than the whole cycle. On sub-daily cycles the average
+  is taken across days at a fixed time of day.
 * ``detrend_harmonic`` ignores ``smooth_days``.
 
-On a monthly axis 21 days is less than one step, so no smoothing is applied and a warning
-says so.
+On a monthly axis the default 21 days is less than one step, so no smoothing is applied and
+a warning says so.
 
 Detrending
 ==========
 
-``detrend_orders`` lists the polynomial orders to remove. The default ``[1]`` removes a
-linear trend, and ``[1, 2]`` adds a quadratic. It must be non-empty and contain orders of at
-least 1. With ``force_zero_mean=True`` the detrended field is shifted to zero mean.
-``detrend_fixed_baseline`` then subtracts its reference climatology, so its final anomaly is not
-guaranteed to have zero mean.
+``detrend_orders`` lists the polynomial orders to remove, each 1 or higher. The default
+``[1]`` removes a linear trend, and ``[1, 2]`` adds a quadratic. With
+``force_zero_mean=True`` the detrended field is shifted to zero mean.
+``detrend_fixed_baseline`` then subtracts its reference climatology, so its final anomaly
+can have a non-zero mean.
 
 .. code-block:: python
 
@@ -179,45 +178,42 @@ guaranteed to have zero mean.
        reference_period=(1991, 2020),
    )
 
-Only the climatology step uses ``reference_period``. The trend is fitted to all data. The
-anomaly is returned for the whole series regardless.
+Here ``reference_period`` sets only the climatology. The trend is fitted to, and the
+anomaly returned for, the whole series.
 
 Standardising
 =============
 
 ``standardise=True`` (``detrend_harmonic`` only) divides the anomaly by a local standard
-deviation, the square root of a circular 30-day rolling mean of the per-day-of-year variance, and returns it as
-``dat_stn`` with the divisor as ``STD``. Through ``preprocess_data`` the extremes stage then
-runs a second time on ``dat_stn`` and adds ``extreme_events_stn`` and ``thresholds_stn``.
-Use it when variability differs strongly between regions or seasons and you want events
-defined in units of local variability rather than in the units of the field.
+deviation (the square root of a circular 30-day rolling mean of the per-day-of-year
+variance) and returns it as ``dat_stn``, with the divisor as ``STD``. Through
+``preprocess_data`` the extremes module then runs a second time on ``dat_stn`` and adds
+``extreme_events_stn`` and ``thresholds_stn``. Use it when variability differs strongly
+between regions or seasons, to define events in units of local variability.
 
 Trimming and Leap Days
 ======================
 
 ``shifting_baseline`` removes the first ``window_years`` years from the output, so a
-20-year input with ``window_years=15`` gives 5 years of anomalies. If the series is
-too short, the stage raises a ``DataValidationError`` before computing anything.
+20-year input with ``window_years=15`` gives 5 years of anomalies.
 
-The day-of-year 366 climatology pools every year's 31 December (day 365 in a non-leap
-year), in all three baseline methods. A leap year's 31 December therefore has a climatology
-even when the window or reference period contains no other leap year, and it no longer
-inherits years of trend as a whole-field anomaly.
+In all three baseline methods the day-of-year 366 climatology pools every year's 31
+December (day 365 in a non-leap year). A leap year's 31 December therefore has a
+climatology even when the window or reference period contains no other leap year.
 
 Cadence
 =======
 
-Climatologies are resolved on a within-year cycle that is inferred from the time axis:
-``dayofyear`` for daily data, ``month`` for monthly data and ``hourofyear`` for
-sub-daily data. The cycle can be overridden with ``cycle=``. Everything about cadences,
-including which methods run at which cadence, is on :doc:`dimensions_and_time`.
+Climatologies are resolved on a within-year cycle inferred from the time axis:
+``dayofyear`` for daily data, ``month`` for monthly data and ``hourofyear`` for sub-daily
+data. Override it with ``cycle=``. :doc:`dimensions_and_time` covers cadences in full,
+including which methods run at each.
 
-Checks Worth Making
+Checking the Output
 ===================
 
-``validate=True`` (default) raises a ``DataValidationError`` if any unmasked cell is
-non-finite at any time. The mask comes from the first timestep only, so land must be NaN
-there. A quick look at the result catches most set-up mistakes:
+The mask comes from the first timestep only, so land must be NaN there
+(:doc:`dimensions_and_time`). Check the result:
 
 .. code-block:: python
 

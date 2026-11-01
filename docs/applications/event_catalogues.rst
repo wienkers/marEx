@@ -3,21 +3,17 @@ Event Catalogues
 ================
 
 
-Tracked extremes make a table of events. Each has a start, an end, a footprint, a path and an
-intensity, and a table of that form supports the questions that scalar indices cannot answer:
-how often events of a given size occur, how severe the worst ones are, and whether they cluster
-in time. This page assembles that table from the tracker output and the anomaly field.
+Tracked extremes form an event table with a start, an end, a footprint, a path and an intensity for each event. This page builds it from the tracker output and the anomaly field, to examine how often events of a given size occur, how severe the worst ones are, and whether they cluster in time.
 
 Why marEx Fits
 ==============
 
-* The event is a coherent object. The tracker gives each connected, persistent exceedance an
-  ID that persists through splits and merges, so counts and sizes are of events and not of
-  exceeding cells or days.
-* The output has the pieces of a hazard record. ``time_start`` and ``time_end`` give duration,
+* The tracker gives each connected, persistent exceedance an
+  ID that persists through splits and merges, so counts and sizes are per event.
+* ``time_start`` and ``time_end`` give duration,
   ``area`` gives extent through time, ``centroid`` gives the path, and ``ID_field`` gives the
   footprint. Intensity comes from the anomaly field sampled where ``ID_field`` marks the event.
-* The record is reproducible. The definitions are a handful of parameters (percentile, fill
+* The definitions are a handful of parameters (percentile, fill
   radii, overlap, size filter) that can be varied to see how the catalogue depends on them.
 
 Configuration
@@ -87,8 +83,8 @@ an empirical rate of events lasting at least a given duration.
        client.close()
 
 The ``if __name__ == "__main__":`` guard is needed because the local cluster starts worker
-processes that re-import the script. The ``memory_limit`` is passed explicitly because Dask does
-not read a SLURM or container memory cap. Size both to your own allocation.
+processes that re-import the script. Pass ``memory_limit`` explicitly and size the cluster to your
+own allocation, since Dask sizes workers from the machine's physical memory.
 
 Output
 ======
@@ -105,11 +101,9 @@ Relation to Catastrophe-Model Event Sets
 
 A catastrophe model's hazard module is, in structure, an event set: a list of events, each with
 a footprint and intensity, and an annual rate. A catalogue built here has the same structure,
-with the difference that it is derived from one observed, reanalysed or simulated record instead
-of being generated stochastically. It describes hazard only. Vulnerability, exposure and loss
-are outside marEx. Applying the same pipeline to each member of a simulation ensemble is a
-natural way to enlarge the sample, and because the tracker rejects extra dimensions, members are
-processed one at a time.
+derived from one observed, reanalysed or simulated record where a catastrophe model generates its
+events stochastically. Running the same pipeline on each member of a simulation ensemble enlarges the
+sample, one member at a time, since the tracker takes 2-D fields.
 
 Caveats
 =======
@@ -118,10 +112,9 @@ Caveats
   filter all change what counts as one event, so vary them to see how stable the quantity of
   interest is.
 * Return periods from a short record are extrapolations. A catalogue of a few dozen events
-  supports empirical rates at short durations, not a tail estimate. marEx does not fit extreme
-  value distributions.
-* Trends and decadal variability break stationarity. The shifting baseline removes the
-  mean trend from the anomaly but not changes in event frequency.
+  supports empirical rates at short durations, and a tail estimate needs an extreme value
+  distribution fitted to the catalogue.
+* Trends and decadal variability break stationarity. The shifting baseline follows the mean trend, and changes in event frequency remain.
 * ``ID_field`` is a lazy ``(time, lat, lon)`` array. The snippet computes it in memory, which
   suits small fields. For large records, compute per event or window, or use
   ``compute_mode="streaming"`` in the tracker and process the output in chunks.

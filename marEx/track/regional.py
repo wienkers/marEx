@@ -1,10 +1,9 @@
 """
 MarEx Track: Regional tracker factory.
 
-Thin convenience factory that constructs a :class:`tracker` configured for
+Convenience factory that constructs a :class:`tracker` configured for
 regional (non-global) data with ``regional_mode=True`` and explicit coordinate
-units. Kept separate so the public ``regional_tracker`` entry point has a clear
-home and the orchestrator class stays focused.
+units.
 """
 
 from typing import Literal, Optional, Union
@@ -27,9 +26,8 @@ def regional_tracker(
     """
     Create a tracker instance configured for regional (non-global) data.
 
-    This is a convenience function that automatically sets regional_mode=True
-    and requires explicit specification of coordinate units, since auto-detection
-    may fail for regional coordinate ranges.
+    Sets regional_mode=True and requires explicit coordinate units, since
+    auto-detection may fail for regional coordinate ranges.
 
     Parameters
     ----------
@@ -39,12 +37,10 @@ def regional_tracker(
         Binary mask indicating valid regions (True = valid, False = invalid). Omit it
         for a field with no invalid region and every cell is treated as valid.
     coordinate_units : {'degrees', 'radians'}
-        Units of the coordinate system. Required for regional data -- auto-detection
-        is unreliable over a partial coordinate range, which is why this wrapper
-        exists. It carries a signature default only so ``mask`` can be omitted.
+        Units of the coordinate system. Required, as auto-detection is unreliable
+        over a partial coordinate range.
     R_fill : int or float
-        Radius for filling holes/gaps in spatial domain (in grid cells). Required;
-        the signature default exists only so ``mask`` can be omitted.
+        Radius for filling holes/gaps in spatial domain (in grid cells). Required.
     area_filter_quartile : float, optional
         Quantile (0-1) for filtering smallest objects (e.g., 0.25 removes smallest 25%).
         Mutually exclusive with area_filter_absolute. Default is 0.5 if neither parameter is provided.

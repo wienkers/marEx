@@ -5,27 +5,20 @@ What's New
 What's New in 5.0
 =================
 
-Version 5.0 splits the detect stage into three peer stages, each usable on its own: ``marEx.anomaly`` (climatologies and anomalies), ``marEx.extremes`` (thresholding) and the tracker. The full list of changes is in the `changelog <https://github.com/wienkers/marEx/blob/main/CHANGELOG.md>`_.
+The full list of changes is in the `changelog <https://github.com/wienkers/marEx/blob/main/CHANGELOG.md>`_.
 
-* **Any variable, any cadence.** Fields with an extra dimension such as depth or pressure level run through all four anomaly methods and both threshold methods, and a 3-D run equals the per-level 2-D runs. Monthly and sub-daily axes are supported; the within-year axis is inferred (``dayofyear``, ``month``, ``hourofyear``) or passed as ``cycle=marEx.SeasonalCycle(...)``.
+* **Three modules.** The detect step is split into ``marEx.anomaly`` (climatologies and anomalies) and ``marEx.extremes`` (thresholds), alongside the tracker. Each runs on its own, and ``preprocess_data`` chains the first two.
+* **Larger than memory.** ``compute_mode="streaming"`` keeps intermediates on disk for detection and tracking, so far less data is pinned in worker memory. Write your output, then call ``marEx.clear_staging(ds)``.
+* **Any variable, any cadence.** Fields with an extra dimension such as depth or pressure level run through every anomaly and threshold method. Monthly and sub-daily axes are supported, with the cycle inferred (``dayofyear``, ``month``, ``hourofyear``) or passed as ``cycle=marEx.SeasonalCycle(...)``.
 * **Lower tail.** ``tail="lower"`` flags cold spells, droughts and other low-side extremes. ``threshold_percentile=5, tail="lower"`` is the coldest 5 %.
-* **Data-derived histogram range.** For the approximate percentile path, ``precision`` alone sets the bin width and the binned range follows the data, so the same call works for temperature, wind or precipitation. If a threshold reaches the edge of the range, the range is regrown and the thresholds recomputed.
-* **Streaming compute mode.** ``compute_mode="streaming"`` keeps intermediates on disk instead of pinning them in worker memory, for detect and for the tracker. It cuts pinned bytes. Peak memory falls only where pinned data dominated, as on the long gridded track. Measured on the gridded tracker (3804 days), ``persist`` was OOM-killed in a 24 GiB allocation while ``streaming`` completed in the same allocation. Write your output, then call ``marEx.clear_staging(ds)``.
-* **Chunk-independent detect.** Detect output no longer depends on how the input is chunked in time or space. This is verified on the test fixtures for every anomaly and threshold method.
-* **Tracker.** ``prefilter_min_cells`` drops small objects before the morphology step; ``mask`` is optional; merge and parent records are 64 wide (were 20 and 10); the unstructured tracker's events no longer depend on the time chunking, except for equidistant tie-breaks.
-* **Zarr 3.** zarr-python 2 (``>=2.18``) and 3 are both supported, along with current xarray releases. Dask is un-pinned (``>=2025.9.0``).
-* **Resource monitor.** ``marEx.helper.ResourceMonitor`` reports wall time and memory per pipeline stage.
-* **Licence.** From 5.0, marEx is released under the GNU Affero General Public License v3.0 or later. Earlier releases keep their original terms.
-
-Already in 4.1.x
-----------------
-
-Two fixes were released as 4.1.1 and 4.1.2 and are not new in 5.0: the ``fill_holes`` fix at the periodic-longitude seam in the tracker, and the ``to_netcdf`` fix for tuple-valued attributes.
+* **Data-derived histogram range.** ``precision`` alone sets the bin width and the binned range follows the data, so the same call works for temperature, wind or precipitation.
+* **Tracker.** ``prefilter_min_cells`` drops small objects before the morphology step, ``mask`` is optional, and merge and parent records are 64 wide (were 20 and 10).
+* **Dependencies and monitoring.** zarr-python 2 (``>=2.18``) and 3 are both supported, dask is ``>=2025.9.0``, and ``marEx.helper.ResourceMonitor`` reports wall time and memory per stage.
 
 Migrating from 4.x
 ==================
 
-There are no compatibility shims. Old names raise rather than warn, except ``max_anomaly`` and ``n_bins``, which still work with a ``FutureWarning``.
+Old names raise an error, except ``max_anomaly`` and ``n_bins``, which still work with a ``FutureWarning``.
 
 Paths and Entry Points
 ----------------------
@@ -51,7 +44,7 @@ Paths and Entry Points
    * - ``marEx.helper.checkpoint_to_zarr``, ``marEx.helper.fix_dask_tuple_array``
      - Removed, with no replacement (checkpointing is no longer needed).
    * - ``marEx.helper`` (module)
-     - A package. ``configure_dask``, ``start_local_cluster``, ``start_distributed_cluster`` and ``get_cluster_info`` keep their names; ``ResourceMonitor`` is new.
+     - A package. ``configure_dask``, ``start_local_cluster``, ``start_distributed_cluster`` and ``get_cluster_info`` keep their names. ``ResourceMonitor`` is new.
    * - ``marEx.track``, ``marEx.regional_tracker``, ``marEx.plotX``
      - Same top-level names. ``track`` is now a package.
    * - (none)
@@ -85,7 +78,7 @@ Methods and Parameters
    * - ``use_temp_checkpoints``
      - Removed.
    * - ``precision=0.01``, ``max_anomaly=5.0`` (defaults)
-     - ``precision=None``; the range is derived from the data. ``max_anomaly`` and ``n_bins`` are deprecated; use ``precision``.
+     - ``precision=None``. The range is derived from the data. ``max_anomaly`` and ``n_bins`` are deprecated. Use ``precision``.
    * - (none)
      - ``tail``, ``compute_mode``, ``scratch_dir``, ``validate``, ``cycle``
    * - tracker: ``mask`` required
@@ -93,7 +86,7 @@ Methods and Parameters
    * - (none)
      - tracker ``compute_mode``, ``prefilter_min_cells``
    * - ``tracker(..., checkpoint=)``
-     - Still present; ``checkpoint="save"`` or ``"load"`` now requires ``temp_dir``.
+     - Still present. ``checkpoint="save"`` or ``"load"`` now requires ``temp_dir``.
 
 Output Attributes and Variables
 -------------------------------
@@ -109,7 +102,7 @@ Output Attributes and Variables
    * - attrs ``window_year_baseline``, ``smooth_days_baseline``, ``std_normalise``, ``window_days_hobday``
      - ``window_years``, ``smooth_days``, ``standardise``, ``window_days``
    * - attr ``window_spatial_hobday``
-     - ``window_spatial`` (the effective value; omitted on the exact path)
+     - ``window_spatial`` (the effective value, omitted on the exact path)
    * - (none)
      - attr ``tail``. The streaming staging directory is on ``ds.encoding["marex_staging_dir"]``, not in attrs.
    * - boolean and ``None`` attrs
@@ -123,52 +116,17 @@ Output Attributes and Variables
    * - Tracker variables ``ID_field``, ``global_ID``, ``area``, ``centroid``, ``presence``, ``time_start``, ``time_end``, ``merge_ledger``
      - Same names.
 
-Changed Defaults
-----------------
+Rerunning a 4.x Analysis
+========================
 
-* ``fixed_baseline`` and ``detrend_fixed_baseline`` smooth their day-of-year climatology with a 21-day circular moving average. ``smooth_days=1`` restores the unsmoothed climatology.
-* The approximate percentile range and bin width come from the data (about 3000 bins over the tail's range) instead of a fixed ``precision=0.01`` and ``max_anomaly=5.0``.
-* Tracker merge and parent limits: 64 and 64 (were 20 and 10).
-* ``dask`` is ``>=2025.9.0`` (was ``==2025.3.0``); ``zarr>=2.18`` is declared.
-* ``window_spatial`` is omitted from the output for ``method_percentile="exact"``, where it was never used.
-* On the exact path, an upper-tail threshold at or below zero is nudged to the smallest positive
-  normal float32, and a lower-tail threshold at or above zero to its negative.
+Some outputs differ from 4.x. Expect small differences when you rerun an old analysis, mainly from these changes:
 
-Now Raises
-----------
+* **Chunk-independent detection.** Anomalies from ``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline`` used to move with the time chunking. They now depend only on the data.
+* **Smoothed fixed baselines.** ``fixed_baseline`` and ``detrend_fixed_baseline`` smooth their day-of-year climatology with a 21-day circular moving average. ``smooth_days=1`` restores the unsmoothed climatology.
+* **Data-derived bins.** The approximate percentile range and bin width come from the data (about 3000 bins over the tail's range), so thresholds shift by a fraction of a bin and a small fraction of events flip.
+* **Leap years.** The day-366 climatology pools every year's 31 December, so anomalies change on that day and thresholds move near the year end.
+* **Sub-daily shifting baseline.** ``shifting_baseline`` smooths each time of day across days, which removes the diurnal cycle from the anomaly.
+* **Tracker.** Closing and opening use an exact Euclidean disk, and the periodic-longitude seam is padded to the full reach. The first object in raster order at the first timestep, previously dropped on gridded and regional tracks, is kept. Unstructured events are independent of the time chunking up to exactly equidistant cells. Events change slightly.
+* **New errors.** Several inputs now raise, among them ``detrend_harmonic`` on sub-daily data, ``compute_mode="lazy"`` on the tracker, a second ``tracker.run()`` and ``checkpoint="save"`` without ``temp_dir``.
 
-* A threshold reaching the outermost bin of a range you pinned with ``max_anomaly``: ``ConfigurationError`` (was a warning). With a derived range the range is regrown, or a ``UserWarning`` is issued.
-* A ``precision`` that gives more than 65000 bins on a derived range (more than 10000 warns), and any geometry whose bin edges realise more than 65535 bins.
-* ``shifting_baseline`` on a sub-daily axis whose timestamps sit off its regular grid. The message names the rounding that fixes it.
-* ``smooth_days`` spanning the whole cycle.
-* ``detrend_harmonic`` on sub-daily data, which previously left the diurnal cycle in the anomaly silently.
-* A ``dimensions`` mapping that names ``y`` or any non-time dimension without ``x``.
-* An empty anomaly series (a ``ZeroDivisionError`` on the exact path before).
-* ``compute_mode="lazy"`` on the tracker.
-* Calling ``tracker.run()`` twice, and ``checkpoint="save"`` without ``temp_dir``.
-* A ``NaT`` in the time axis, in the decimal-year step.
-
-Results That Change on Purpose
-==============================
-
-Some outputs differ from 4.x because the earlier behaviour was wrong, depended on chunking, or depended on a library release. Each is listed in the changelog. Expect small differences when you rerun an old analysis.
-
-* **Chunk-independent detect.** Anomalies from ``shifting_baseline``, ``fixed_baseline`` and ``detrend_fixed_baseline`` used to move with the time chunking. They no longer do.
-* **Rolling means on the NumPy path.** The optional ``bottleneck`` running sum drifts with series length and chunking, and current xarray no longer uses it by default. marEx now always uses the NumPy path.
-* **Smoothed fixed baselines.** ``fixed_baseline`` and ``detrend_fixed_baseline`` anomalies change by default (see above).
-* **Approximate global quantile.** The 1-D quantile interpolates within the containing bin, values beyond the range count in the outermost bin instead of being dropped (thresholds can only move up), and cells valid for part of the year keep a threshold.
-* **Data-derived range.** Default bins are no longer 0.01 in the data's units, so thresholds shift by a fraction of a bin and a small fraction of events flip.
-* **Exact percentiles on degenerate cells.** Cells with no variance, such as permanent sea ice, no longer flag every timestep.
-* **Histogram counts** no longer wrap at 65535 samples per (cell, slot, bin).
-* **Leap years.** The day-of-year 366 climatology pools every year's 31 December instead of the leap years' alone, in all three baselines, so day 366 no longer needs a leap year in the window and a leap year's 31 December no longer inherits years of trend. Anomalies change on that day, and thresholds move near the year end.
-* **Tracker morphology.** Closing and opening use an exact Euclidean disk, and the periodic-longitude seam is padded to the full reach. This changes events slightly near the seam.
-* **Tracker first object.** The first object in raster order at the first timestep was dropped on every gridded and regional track.
-* **Tracker area-filter ties and edges.** Objects exactly at the area cutoff are kept on both grid types; latitude no longer wraps in the morphology padding; the antimeridian margin scales with the grid.
-* **Unstructured tracker.** Events used to depend on the time chunking and worker layout. They no longer do, except for cells exactly equidistant between candidate parents.
-* **Merge loop.** Events fused by an ID-range overrun now stay separate.
-* **Gridded slices with no background.** A time slice where every cell is foreground keeps its object, so events that pass through it now merge across it.
-* **Unstructured merge ties and areas.** Objects that overlap a newly split piece by exactly ``overlap_threshold`` are followed, as every other overlap test already did, and merge areas are summed in float64. A merge decision within rounding of ``overlap_threshold`` can change.
-* **Sub-daily shifting baseline.** ``shifting_baseline`` smooths each time of day across days, so the diurnal cycle is removed from the anomaly instead of left in it. Sub-daily ``shifting_baseline`` values change.
-* **Gaps in the shifting baseline.** Up to ``smooth_max_missing`` (default 0.1) of a smoothing window may be missing before the window is invalid. On gappy input this moves smoothed climatology values on every cadence, and ``smooth_max_missing=0`` restores the earlier behaviour.
-* **Seasonal window in cycle slots.** ``window_days`` counts cycle slots, so thresholds change where one slot is not one step (multi-day and monthly data, and sub-daily steps that do not divide a day).
-* **Regional edge thresholds.** ``window_spatial`` pooling no longer wraps longitude on a regional box, so thresholds in its outermost ``window_spatial // 2`` columns change. Global grids are unchanged, and a 1-D numeric x that is not a global longitude (projected metres, an index) also stops wrapping.
+The changelog lists every change, with the remaining edge cases.

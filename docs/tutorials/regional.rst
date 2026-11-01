@@ -3,8 +3,8 @@ Regional Data
 =============
 
 The gridded workflow on a spatially bounded European domain at 0.05° resolution.
-:func:`marEx.regional_tracker` handles a domain that does not wrap around in
-longitude, along with its coordinate units. Work through the notebooks in order.
+:func:`marEx.regional_tracker` handles the non-periodic edges of the domain and
+its coordinate units. Work through the notebooks in order.
 
 .. toctree::
    :maxdepth: 1

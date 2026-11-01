@@ -2,15 +2,10 @@
 Public entry point for anomaly computation.
 
 :func:`compute` turns a raw time series into anomalies about a climatological
-baseline. It is a peer of :func:`marEx.extremes.identify`, not a stage of it:
-nothing here knows what a threshold is, and the returned dataset is a complete,
-saveable product for callers who want a climatology and anomalies and nothing
-else.
+baseline and returns a complete, saveable dataset.
 
-The materialisation policy (``compute_mode``) lives here rather than in the
-caller. Anchoring the anomaly is what makes the larger-than-memory modes work,
-and a consumer that anchored it from outside would leave every lazy expression
-built on the original graph.
+The materialisation policy (``compute_mode``) is resolved here, because anchoring
+the anomaly is what makes the larger-than-memory modes work.
 """
 
 import logging
@@ -334,12 +329,9 @@ def compute(
     """
     Compute anomalies about a climatological baseline.
 
-    This is a complete product in its own right. Use it when you want a smoothed
-    climatology, detrended anomalies, or standardised anomalies, and have no
-    interest in extreme-event detection -- there is no threshold parameter here.
-
-    Works on any gridded or unstructured field with a time dimension: ocean,
-    atmosphere, land surface, or biogeochemistry.
+    Use it for a smoothed climatology, detrended anomalies, or standardised
+    anomalies on any gridded or unstructured field with a time dimension (ocean,
+    atmosphere, land surface, or biogeochemistry).
 
     Parameters
     ----------
@@ -348,35 +340,34 @@ def compute(
     method
         Baseline method.
 
-        * ``'shifting_baseline'`` (default) -- rolling climatology over the
-          preceding ``window_years`` years. Most defensible, but shortens the
+        * ``'shifting_baseline'`` (default): rolling climatology over the
+          preceding ``window_years`` years. Shortens the
           series by ``window_years``.
-        * ``'detrend_harmonic'`` -- polynomial trend plus harmonic seasonal
-          cycle. Efficient, keeps the full series, biases the statistics.
-        * ``'fixed_baseline'`` -- daily climatology over the whole series. Does
-          *not* remove a climate trend.
-        * ``'detrend_fixed_baseline'`` -- polynomial detrending then a fixed
-          daily climatology. Keeps the full series but does not account for
-          trends in the timing of seasonal transitions.
+        * ``'detrend_harmonic'``: polynomial trend plus harmonic seasonal
+          cycle. Efficient, keeps the full series.
+        * ``'fixed_baseline'``: daily climatology over the whole series. Any
+          climate trend stays in the anomalies.
+        * ``'detrend_fixed_baseline'``: polynomial detrending then a fixed
+          daily climatology. Keeps the full series, but treats the timing of
+          seasonal transitions as fixed.
     window_years
         Number of preceding years in the rolling climatology
         (``shifting_baseline`` only).
     smooth_days
-        Width of the centred smoothing window applied to the climatology, in
+        Width of the centred smoothing window, in
         days (``shifting_baseline``, ``fixed_baseline`` and
         ``detrend_fixed_baseline``). The fixed baselines smooth their
         day-of-year climatology with a moving average that wraps the year, as
-        in Hobday et al. (2016); ``smooth_days=1`` disables it.
+        in Hobday et al. (2016). ``smooth_days=1`` disables it.
     smooth_max_missing
         Fraction of each ``shifting_baseline`` smoothing window that may be missing (NaN, or a
-        timestep absent from a sub-daily axis) before the smoothed value is NaN; the mean is
-        otherwise over the valid samples. Windows reaching past either end of the record stay
+        timestep absent from a sub-daily axis) before the smoothed value is NaN. Otherwise the
+        mean is over the valid samples. Windows reaching past either end of the record are
         NaN. ``0`` requires complete windows (``shifting_baseline`` only).
     detrend_orders
-        Polynomial orders to remove, e.g. ``[1]`` for a linear trend
-        (harmonic methods only). Defaults to ``[1]``.
+        Polynomial orders for both detrending methods, e.g. ``[1]`` for a linear trend. Defaults to ``[1]``.
     force_zero_mean
-        Force the detrended anomaly to have zero mean (harmonic methods only).
+        Set the detrended field to zero mean (both detrending methods).
     standardise
         Also divide by a 30-day rolling standard deviation, adding ``dat_stn``
         and ``STD`` to the output. Requires ``method='detrend_harmonic'``.
@@ -385,28 +376,28 @@ def compute(
         period. Anomalies are still returned for the full series. Supported for
         the two fixed-baseline methods only.
     dask_chunks
-        Output chunking. Only the time entry is honoured; horizontal dimensions
+        Output chunking. Only the time entry is honoured. Horizontal dimensions
         are made whole, and extra dimensions (depth, level) are chunked one level
-        at a time on a large grid, stacked on a small one. Defaults to
+        at a time on a large grid and stacked on a small one. Defaults to
         ``{"time": 25}``.
-        An integer time entry is a step count, and with one, extra dimensions on
-        time-indexed variables are sized so a chunk stays within 50 million
+        An integer time entry is a step count, and extra dimensions on
+        time-indexed variables are then sized to keep a chunk within 50 million
         elements where one level allows it. ``"auto"`` hands the time chunk to
         dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
-        default), not elements: a 1-byte boolean variable gets more elements per
-        chunk than a float32 one, and can exceed 50 million. A seasonal
-        threshold's cycle axis (``dayofyear``, ``month``, ``hourofyear``) is
-        chunked from the same entry, capped at the cycle length, and is not held
-        to the element budget.
+        default), so a 1-byte boolean variable gets more elements per chunk
+        than a float32 one and can exceed 50 million. A seasonal threshold's
+        cycle axis (``dayofyear``, ``month``, ``hourofyear``) is chunked from
+        the same entry, capped at the cycle length, and exempt from the element
+        budget.
     compute_mode
-        Materialisation policy. ``'persist'`` holds the anomaly in cluster
-        memory (fastest, needs it to fit); ``'lazy'`` holds nothing and accepts
-        recompute; ``'streaming'`` stages to Zarr under ``scratch_dir``, which is
-        what makes genuinely larger-than-memory input work.
+        Materialisation policy. ``'persist'`` keeps the anomaly in cluster
+        memory (needs it to fit). ``'lazy'`` keeps nothing and
+        recomputes as needed. ``'streaming'`` keeps intermediates on disk as
+        Zarr under ``scratch_dir``, so far less is pinned in worker memory.
     scratch_dir
         Staging directory, required by ``compute_mode='streaming'``. The
-        directory outlives this call, since the returned dataset reads from it
-        lazily. Write your output, then call :func:`marEx.clear_staging`.
+        returned dataset reads from it lazily, so it outlives this call. Write
+        your output, then call :func:`marEx.clear_staging`.
     validate
         Check that all unmasked values are finite before computing.
     dimensions, coordinates

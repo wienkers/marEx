@@ -4,15 +4,12 @@ Anomalies (:mod:`marEx.anomaly`)
 
 .. currentmodule:: marEx.anomaly
 
-Climatology, detrending, and anomaly computation. A complete, standalone stage:
-nothing in this module takes a threshold, and its output is a finished product
-for anyone who wants a climatology and anomalies and nothing further.
-
-Works on any field with a time dimension (ocean, atmosphere, land surface or
+Climatology, detrending and anomaly computation. The module runs on its own, and
+its climatologies and anomalies are a complete result. It works on any field with a time dimension (ocean, atmosphere, land surface or
 biogeochemistry) on regular grids and unstructured meshes alike.
 
-All entry points accept a ``cycle=`` override for the within-year axis the climatology
-is resolved on; it is otherwise inferred from the time coordinate's cadence. See
+The within-year axis the climatology is resolved on is inferred from the time
+coordinate's cadence, and every entry point accepts a ``cycle=`` override. See
 :doc:`../guide/anomalies` for method-selection guidance, worked examples, and the
 time-resolution table.
 

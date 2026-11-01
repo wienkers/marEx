@@ -2,8 +2,8 @@
 Rolling-climatology computation for the shifting-baseline anomaly method.
 
 Provides :func:`rolling_climatology` and :func:`smoothed_rolling_climatology`,
-both public entry points re-exported at the marEx top level. These use flox
-cohorts to efficiently compute multi-year rolling day-of-year climatologies.
+both exported from :mod:`marEx.anomaly`. They use flox to compute
+multi-year rolling day-of-year climatologies.
 """
 
 from dataclasses import replace
@@ -74,9 +74,10 @@ def rolling_climatology(
     cycle: Optional[SeasonalCycle] = None,
 ) -> xr.DataArray:
     """
-    Compute rolling climatology efficiently using flox cohorts.
-    Uses the previous `window_years` years of data and reassemble it to match the original data structure.
-    Years without enough previous data will be filled with NaN.
+    Compute a rolling climatology with flox.
+
+    Each year's climatology uses the previous `window_years` years of data and is reassembled to
+    match the input's structure. Years without enough previous data are NaN.
 
     Parameters
     ----------
@@ -130,7 +131,7 @@ def rolling_climatology(
     >>> icon_sst = xr.open_dataset('icon_sst.nc', chunks={}).to.chunk({'time': 25})
     >>> icon_climatology = marEx.anomaly.rolling_climatology(
     ...     icon_sst,
-    ...     dimensions={"time": "time", "x": "ncells"}
+    ...     dimensions={"time": "time", "x": "ncells"},
     ...     coordinates={"time": "time", "x": "lon", "y": "lat"}
     ... )
     >>> print(icon_climatology.dims)
@@ -580,9 +581,10 @@ def smoothed_rolling_climatology(
     smooth_max_missing: float = 0.1,
 ) -> xr.DataArray:
     """
-    Compute a smoothed rolling climatology using the previous `window_years` years of data
-    and reassemble it to match the original data structure.
-    Years without enough previous data will be filled with NaN.
+    Compute a smoothed rolling climatology.
+
+    Each year's climatology uses the previous `window_years` years of data and is reassembled to
+    match the input's structure. Years without enough previous data are NaN.
 
     Parameters
     ----------
@@ -601,9 +603,9 @@ def smoothed_rolling_climatology(
         coordinate's cadence when omitted.
     smooth_max_missing : float, default=0.1
         Fraction of each smoothing window that may be missing (NaN, or a timestep absent from a
-        sub-daily axis) before the smoothed value is NaN; otherwise it is the mean of the valid
-        samples. Windows that reach past either end of the record stay NaN, and a missing step
-        adds nothing to the climatology itself. ``0`` requires complete windows.
+        sub-daily axis) before the smoothed value is NaN. Otherwise it is the mean of the valid
+        samples. Windows that reach past either end of the record are NaN, and a missing step
+        is excluded from the climatology itself. ``0`` requires complete windows.
 
     Returns
     -------

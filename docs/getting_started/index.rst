@@ -2,7 +2,7 @@
 Getting Started
 ===============
 
-Install marEx, then run the quickstart: anomalies, extremes and a tracked event on a small synthetic dataset, in three steps that each work on their own.
+Install marEx, then run the quickstart: anomalies, extremes and a tracked event on a small synthetic dataset, in three steps.
 
 .. toctree::
    :maxdepth: 2

@@ -18,11 +18,13 @@ marEx: Weather & Climate Extremes Detection & Tracking
    :target: https://doi.org/10.5281/zenodo.16922881
    :alt: DOI
 
-**marEx** detects and tracks climate extremes on any grid, in datasets larger
-than memory. It has three stages, each usable on its own: anomalies, extremes
-and event tracking. It runs on lat/lon grids and unstructured meshes, on daily,
-monthly or sub-daily data, on 2-D fields and fields with an extra dimension such
-as depth, and on either tail of the distribution.
+**marEx** computes climatologies and anomalies, identifies extremes, and tracks
+the resulting events through space and time in geospatial time series. Each of
+its three modules has several methods for different applications and domains,
+runs on data larger than memory, and scales with Dask from a laptop to a
+distributed supercomputer. The same calls detect marine and atmospheric
+heatwaves, cold spells, droughts and subsurface ocean extremes, on lat/lon grids
+and unstructured meshes alike.
 
 .. grid:: 1 1 2 2
    :gutter: 3
@@ -38,7 +40,7 @@ as depth, and on either tail of the distribution.
       :link: tutorials/index
       :link-type: doc
 
-      End-to-end notebooks for gridded, regional and unstructured data.
+      End-to-end notebooks on real data.
 
    .. grid-item-card:: :octicon:`globe;1.5em;sd-mr-1` Applications
       :link: applications/index
@@ -64,7 +66,7 @@ as depth, and on either tail of the distribution.
       :link: whats_new
       :link-type: doc
 
-      Changes since 4.1 and the migration table from the old names.
+      Changes since 4.1 and how to migrate from 4.x.
 
 Quick example
 =============
@@ -99,26 +101,22 @@ Quick example
        marEx.PlotConfig(var_units="Event Frequency", cmap="hot_r", cperc=[0, 96])
    )
 
-Each stage also runs alone. ``marEx.anomaly.compute`` returns anomalies with no
-threshold anywhere, and ``marEx.extremes.identify`` thresholds anomalies from
-any source.
+The three modules are ``marEx.anomaly``, ``marEx.extremes`` and
+``marEx.tracker``, and each also runs on its own. ``preprocess_data`` chains the
+first two.
 
 Why marEx?
 ==========
 
-* **Stages that stand alone**: use the anomaly stage, the extreme stage or the
-  tracker independently.
+* **Larger than memory**: ``compute_mode="streaming"`` stages intermediates on
+  disk, so the events in 20 years of 6-hourly global SST (a 91 GB ``ID_field``)
+  are tracked inside a 32 GiB job.
+* **Overlap-based tracking**: merges and splits are decided by area overlap and
+  recorded in ``merge_ledger``, so events that only touch keep their own
+  identities.
 * **Any grid, cadence and tail**: one API for lat/lon grids and unstructured
-  meshes, extra dimensions, monthly and sub-daily data, and ``tail="lower"``.
-* **Larger than memory**: ``compute_mode="streaming"`` keeps intermediates on
-  disk. In a measured case, ``persist`` was OOM-killed in a 24 GiB allocation
-  while ``streaming`` completed in the same allocation.
-* **Overlap-based tracking**: merges and splits require overlap and are recorded
-  in ``merge_ledger``, which avoids the spurious "mega-events" of naive 3-D
-  connected-component labelling.
-* **Chunking-independent results**: detection output does not depend on the
-  input chunking, verified on the test fixtures for every anomaly and threshold
-  method.
+  meshes, fields with an extra dimension such as depth, daily, monthly and
+  sub-daily data, and either tail of the distribution.
 
 See :doc:`why_marex` for each point in detail.
 

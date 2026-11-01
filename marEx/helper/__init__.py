@@ -3,19 +3,16 @@ HPC Dask Helper: Utilities for High-Performance Computing with Dask
 --------------------------------------------------------------------
 
 This package provides utilities for setting up and managing Dask clusters
-in HPC environments, with specific support for the DKRZ Levante Supercomputer.
+in HPC environments, including SLURM-based supercomputers. Its submodules:
 
-The implementation is split across submodules:
-
-- :mod:`marEx.helper.dask_config` — Dask configuration (:func:`configure_dask`)
-- :mod:`marEx.helper.cluster` — cluster management
+- :mod:`marEx.helper.dask_config`: Dask configuration (:func:`configure_dask`)
+- :mod:`marEx.helper.cluster`: cluster management
   (:func:`start_local_cluster`, :func:`start_distributed_cluster`,
   :func:`get_cluster_info`)
-- :mod:`marEx.helper.resources` — wall time and memory per stage
+- :mod:`marEx.helper.resources`: wall time and memory per stage
   (:class:`ResourceMonitor`)
 
-All public functions are re-exported here so that ``marEx.helper`` continues
-to behave exactly as the previous single-module implementation did.
+All public functions are re-exported as ``marEx.helper.<name>``.
 """
 
 from .cluster import get_cluster_info, start_distributed_cluster, start_local_cluster

@@ -1,8 +1,8 @@
 # Larger-than-Memory Detection and Tracking
 
-`larger_than_memory.ipynb` measures marEx's `compute_mode="streaming"` on a record that does not fit in memory: 6-hourly
+`larger_than_memory.ipynb` measures marEx's `compute_mode="streaming"` on a record larger than memory: 6-hourly
 global SST on a 0.25° grid (721 x 1440) from the EERIE IFS-FESOM2-SR control run, detected and tracked inside one 32 GiB
-batch job with a Dask cluster of 3 workers x 2 threads x 9 GB. The record grows rung by rung while the job stays the same.
+batch job with a Dask cluster of 3 workers x 2 threads x 9 GB. Each rung lengthens the record with the same job configuration.
 
 | stage | record | data | data / job | peak memory (anon) | wall |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -11,10 +11,7 @@ batch job with a Dask cluster of 3 workers x 2 threads x 9 GB. The record grows 
 | track | 5 y of extremes | 30.3 GB event field | 0.9 | 9.4 GiB | 57 min |
 | track | 15 y of extremes | 91.0 GB event field | 2.6 | 9.4 GiB | 139 min |
 
-Peak memory is flat in record length, and the length shows up in wall time and in what Dask spills to disk. The notebook
-also runs `compute_mode="persist"` in the same job. Detect completed at both lengths with the same extremes, spilling more
-(161 GB against 138 GB at 20 years) and running 15 % longer. The 20-year track was killed by the kernel after 86 minutes:
-its workers stayed under their limits while the client grew to 14.6 GB and the job reached 32 GiB.
+Peak memory is flat in record length, and a longer record adds wall time (and, for detect, spill to disk). The notebook also compares `compute_mode="persist"` with the same job configuration. With `persist`, detection counted the same extremes at both lengths, but at 20 years it spilled more and ran 15 % longer. Only `streaming` completed the 15-year track.
 
 ## Files
 
@@ -35,9 +32,9 @@ SMOKE=1 python ltm_run.py detect --years 2    # one latitude band, minutes: chec
 The tracker reads the detect output of the same length, so run detect first. Detection uses a 5-year shifting baseline, so a
 10-year detect rung gives the tracker 5 years of extremes.
 
-Memory is read from the job's cgroup v2 counters, not from Dask: `anon` covers the client, the workers and everything else in
-the job, and the page cache is excluded because the kernel reclaims it on demand. The summary is written before the work
-starts and again at the end, so a killed run still leaves a record. `--stall-minutes N` ends a run whose scheduler makes no
+Memory is read from the job's cgroup v2 counters. `anon` covers the client, the workers and everything else in the job,
+and excludes the page cache, which the kernel reclaims on demand. The summary is written before the work starts and again
+at the end, so an interrupted run still leaves a record. `--stall-minutes N` ends a run whose scheduler makes no
 progress for N minutes and records it as `stalled`. Keep it at 0 for the tracker, whose merge loop runs on the client.
 
 ## Adapting to Another System
@@ -48,7 +45,7 @@ progress for N minutes and records it as `stalled`. Keep it at 0 for the tracker
 | outputs, staging, spill | `--out-dir` | `$MAREX_SCRATCH/marEx/ltm` |
 | Python | `MAREX_PYTHON` | `python` on `PATH` |
 
-Always pass `--memory-limit`. A Dask `LocalCluster` sizes itself from the machine's memory, not the batch job's, so without
-it the limit never binds and the run says nothing about the job's memory. `ltm_run.py` writes the limit each worker reports
+Always pass `--memory-limit`, so the workers are sized to the job. A Dask `LocalCluster` otherwise sizes itself from the
+whole machine's memory. `ltm_run.py` writes the limit each worker reports
 into the summary. Leave room for staging and spill on the output file system: at 20 years detect spilled 138 GB with
 `streaming` and 161 GB with `persist`.

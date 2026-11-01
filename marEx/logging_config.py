@@ -2,8 +2,7 @@
 MarEx Logging Configuration Module
 ==================================
 
-The logger is designed to be efficient and non-intrusive, with minimal
-performance impact on computations.
+Logging for marEx.
 """
 
 import functools
@@ -436,8 +435,8 @@ def log_progress(
         operation: Description of the operation
         frequency: Log every N percent (default: 10%)
         start_time: Optional ``time.perf_counter()`` value captured at the start of
-            the operation. When given, a throughput rate is reported from the elapsed
-            delta; without it, no (meaningless absolute-clock) rate is shown.
+            the operation. When given, a throughput rate is also reported from the
+            elapsed time.
     """
     if is_quiet_mode():
         return
