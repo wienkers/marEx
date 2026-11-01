@@ -1,69 +1,93 @@
-<img src="https://github.com/user-attachments/assets/55eab465-9aca-4754-a981-e26a36f7d045" alt="marEx_animated" width="100%">
+<img src="media/logo.png" alt="marEx logo" width="100%">
 
-[![CI](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg)](https://github.com/wienkers/marEx/actions/workflows/ci.yml)
+[![CI](https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wienkers/marEx/actions/workflows/ci.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg)](https://codecov.io/gh/wienkers/marEx)
 [![PyPI version](https://badge.fury.io/py/marEx.svg)](https://badge.fury.io/py/marEx)
 [![Documentation Status](https://readthedocs.org/projects/marex/badge/?version=latest)](https://marex.readthedocs.io/en/latest/)
 [![PyPI Downloads](https://static.pepy.tech/badge/marex)](https://pepy.tech/projects/marex)
 [![DOI](https://zenodo.org/badge/945834123.svg)](https://doi.org/10.5281/zenodo.16922881)
 
-# Marine Extremes Detection and Tracking
+# Weather & Climate Extremes Detection and Tracking
 
-**Efficient & scalable marine extremes detection, identification, & tracking for exascale climate data.**
+**Efficient & scalable climatologies, anomalies, extreme detection, & event tracking for exascale climate data.**
 
-marEx is a high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets. Built on advanced statistical methods and distributed computing, it processes decades of daily-resolution global ocean data with unprecedented efficiency and scalability.
+marEx computes climatologies and anomalies, identifies extremes, and tracks the resulting events through space and time in geospatial time series. The same calls detect marine and atmospheric heatwaves, cold spells, droughts and subsurface ocean extremes.
+
+**[Full documentation on ReadTheDocs](https://marex.readthedocs.io/)**
+
+---
+
+<!-- pypi-video-thumbnail: media/film_thumbnail.jpg -->
+https://github.com/user-attachments/assets/845b6269-972c-4d77-bbdb-eb0d80c84958
+
+<sub>Tracked marine heatwaves (white outlines) and atmospheric heatwaves in 2 m air temperature (cyan) through 2016, over the daily sea surface temperature anomaly. OSTIA SST and ERA5.</sub>
 
 ---
 
 ## Key Features
 
-- **⚡ Extreme Performance**: Process 100+ years of high-resolution daily global data in minutes
-- **🌐 Universal Grid Support**: Native support for both regular (lat/lon) grids and unstructured ocean models
-- **📈 Advanced Event Tracking**: Handles coherent object splitting, merging, and evolution
-- **📊 Multiple Detection Methods**: Scientifically rigorous algorithms for robust extreme event identification
-- **☁️ Cloud-Native Scaling**: Identical codebase scales from laptop to supercomputer using up to 1024+ cores
-- **🧠 Memory Efficient**: Intelligent chunking and lazy evaluation for datasets larger than memory
-
-
----
-
-https://github.com/user-attachments/assets/501537ff-5adb-4e13-ba08-6a333bac2a02
-
-![marEx_front](https://github.com/user-attachments/assets/939fceee-8990-46fb-b3f8-30e803b6c802)
+- **High Performance**: Process 100+ years of high-resolution daily global data in minutes.
+- **Multiple Detection Methods**: Hobday et al. (2016) and its generalisations, with four anomaly baselines and seasonal or constant-in-time percentile thresholds, on either tail, at daily, sub-daily or monthly cadence.
+- **Larger-than-Memory**: Intelligent chunking, lazy evaluation and on-disk staging compute the global climatologies, percentile thresholds and event tracks of datasets much larger than memory.
+- **Cloud-Native Scaling**: Identical code scales from a laptop to a supercomputer using 1024+ cores.
+- **Advanced Event Tracking**: Follows coherent events as they evolve, split and merge, keeping each event's identity and merge history.
+- **Universal Grid Support**: Regular lat/lon grids and unstructured meshes (FESOM, ICON, MPAS) through one API, with depth or level as an extra dimension in detection.
 
 ---
 
-## Quick Start
+## Core Modules
+
+| Step | Returns | Methods |
+| --- | --- | --- |
+| **1. Anomaly**<br>`marEx.anomaly.compute` | The anomaly field, i.e. the input minus its seasonal climatology (`dat_anomaly`).<br>With `detrend_harmonic`, also standardised anomalies and their rolling standard deviation. `marEx.anomaly.smoothed_rolling_climatology` returns the shifting-baseline climatology itself. | `shifting_baseline`, `fixed_baseline`, `detrend_harmonic`, `detrend_fixed_baseline` |
+| **2. Extremes**<br>`marEx.extremes.identify` | A boolean field flagging every extreme cell and time (`extreme_events`).<br>Also: the percentile threshold of every cell, resolved through the year when seasonal (`thresholds`). | `seasonal_percentile` or `global_percentile`, upper or lower tail, exact or histogram percentiles |
+| **3. Tracking**<br>`marEx.tracker(...).run()` | An event-ID field labelling each tracked event in space and time (`ID_field`).<br>Also: each event's area and centroid through time, its start and end, and the full merge history. | overlap-based merging and splitting, gap filling, area filtering |
+
+`marEx.preprocess_data` runs steps 1 and 2 in one call. Chained together, from daily SST to tracked marine heatwaves:
 
 ```python
 import xarray as xr
 import marEx
 
-# Load sea surface temperature data
-sst = xr.open_dataset('sst_data.nc', chunks={'time': 30}).sst
+# In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
+client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="8GB")
 
-# Identify extreme events
-extreme_events_ds = marEx.preprocess_data(
-    sst,
-    threshold_percentile=95,
-    method_anomaly='shifting_baseline',
-    method_extreme='hobday_extreme'
-)
+sst = xr.open_dataset("sst_data.nc", chunks={"time": 25}).sst
 
-# Track events through time
-events_ds = marEx.tracker(
-    extreme_events_ds.extreme_events,
-    extreme_events_ds.mask,
+anomalies = marEx.anomaly.compute(sst, method="shifting_baseline")
+extremes = marEx.extremes.identify(anomalies, method="seasonal_percentile", threshold_percentile=95)
+
+events = marEx.tracker(
+    extremes.extreme_events,
+    extremes.mask,
     R_fill=8,
     area_filter_absolute=100,
-    allow_merging=True
+    allow_merging=True,
 ).run()
 
-# Visualise results
-fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(
-    marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96])
+fig, ax, im = (events.ID_field > 0).mean("time").plotX.single_plot(
+    marEx.PlotConfig(var_units="Event Frequency", cmap="hot_r", cperc=[0, 96])
 )
 ```
+
+<a href="media/mhw_family.png"><img src="media/mhw_family.png" alt="Seven tracked North Atlantic marine heatwaves, 2017-18: four map snapshots above a timeline of each event's area and its contacts with the others" width="100%"></a>
+
+<sub>A family of seven tracked marine heatwaves in the North Atlantic, October 2017 to August 2018 (95th percentile, OSTIA SST). Each colour is one event, and ribbon thickness is its area. Grey bands mark when two events touch. The tracker resolves merges and splits there, and each event keeps its identity.</sub>
+
+---
+
+## Performance
+
+| Stage | Data | Size | Wall-time |
+| --- | --- | ---: | ---: |
+| Detect | ICON SST, 14.9 M cells, 30 yr daily | **1.3 TB** | 37 min |
+| Detect | Global SST 0.25°, 20 yr 6-hourly | **243 GB** | 166 min |
+| Detect | Global SST 0.25°, 40 yr daily | **122 GB** | 61 min |
+| Track | Global 0.25°, 20 yr 6-hourly | **91 GB** | 139 min |
+| Track | ICON, 14.9 M cells, 3 yr daily | **66 GB** | 70 min |
+| Track | Global 0.25°, 10 yr daily | **16 GB** | 27 min |
+
+Sizing guidance is in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).
 
 ---
 
@@ -73,114 +97,38 @@ fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(
 pip install marEx[full,hpc]
 ```
 
-For detailed installation instructions, including HPC environments and optional dependencies, see the **[Installation Guide](https://marex.readthedocs.io/en/latest/installation.html)**.
-
----
-
-## Core Workflow
-
-marEx follows a three-stage pipeline:
-
-```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│  1. Detect      │  →   │  2. Track       │  →   │  3. Visualise   │
-│    Extremes     │      │    Events       │      │     & Analyse   │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
-        ↓                        ↓                        ↓
-preprocess_data()           tracker()                  plotX()
-        ↓                        ↓                        ↓
-Binary extreme map        Tracked objects          Maps, animations,
-                            with unique IDs           & statistics
-```
-
-**Learn more**: [Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html) | [User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)
+For HPC environments and optional dependencies, see the **[Installation Guide](https://marex.readthedocs.io/en/latest/installation.html)**.
 
 ---
 
 ## Documentation
 
-For detailed guides, tutorials, and API reference, visit the full documentation:
-
-### 📚 **[marEx Documentation on ReadTheDocs](https://marex.readthedocs.io/)**
-
-**Quick Links:**
-- **[Quickstart Guide](https://marex.readthedocs.io/en/latest/quickstart.html)** - Get started in 5 minutes
-- **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** - Learn about the unique capabilities
-- **[Core Concepts](https://marex.readthedocs.io/en/latest/concepts.html)** - Understanding marEx's design and workflow
-- **[User Guide](https://marex.readthedocs.io/en/latest/user_guide.html)** - Comprehensive usage guide with method selection, parameter tuning, and performance optimisation
-- **[API Reference](https://marex.readthedocs.io/en/latest/api.html)** - Complete function documentation
-- **[Examples](https://marex.readthedocs.io/en/latest/examples.html)** - Jupyter notebooks for gridded, regional, and unstructured data
-- **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** - Common issues and solutions
+| Section | What's there |
+| --- | --- |
+| **[Getting Started](https://marex.readthedocs.io/en/latest/getting_started/index.html)** | Installation and a five-minute quickstart |
+| **[Tutorials](https://marex.readthedocs.io/en/latest/tutorials/index.html)** | End-to-end notebooks for gridded, regional and unstructured data |
+| **[Applications](https://marex.readthedocs.io/en/latest/applications/index.html)** | Marine and atmospheric heatwaves, wind and precipitation droughts, subsurface ocean extremes and event catalogues |
+| **[User Guide](https://marex.readthedocs.io/en/latest/guide/index.html)** | [Anomalies](https://marex.readthedocs.io/en/latest/guide/anomalies.html), [extremes](https://marex.readthedocs.io/en/latest/guide/extremes.html), [dimensions and time](https://marex.readthedocs.io/en/latest/guide/dimensions_and_time.html), tracking, performance, [validation](https://marex.readthedocs.io/en/latest/guide/validation.html) |
+| **[What's New](https://marex.readthedocs.io/en/latest/whats_new.html)** | Changes in 5.0 and the migration table for renamed methods and parameters |
+| **[Why marEx?](https://marex.readthedocs.io/en/latest/why_marex.html)** | The design choices, with a tracking-comparison video |
+| **[API Reference](https://marex.readthedocs.io/en/latest/api/index.html)** | Every public function and class |
+| **[Troubleshooting](https://marex.readthedocs.io/en/latest/troubleshooting.html)** | Common issues and solutions |
 
 ---
 
-## Examples
+## Development and Validation
 
-Explore complete workflows in the [example notebooks](https://github.com/wienkers/marEx/tree/main/examples):
-
-- **Gridded Data**: Standard analysis for regular lat/lon grids (satellite data, CMIP6 models)
-- **Regional Data**: Regional analysis with boundary handling (EURO-CORDEX)
-- **Unstructured Data**: Analysis for irregular meshes (FESOM, ICON-O, MPAS-Ocean)
-
-Each example demonstrates the full pipeline from preprocessing to visualisation.
-
----
-
-## Key Capabilities
-
-### Detection Methods
-
-marEx provides multiple scientifically rigorous methods for anomaly calculation and extreme identification:
-
-**Anomaly Detection:**
-- **Shifting Baseline**: Rolling climatology (most accurate, research standard)
-- **Detrend Fixed Baseline**: Polynomial detrending + fixed climatology (preserves full time series)
-- **Fixed Baseline**: Simple daily climatology (trend-inclusive)
-- **Harmonic Detrending**: Fast polynomial + harmonic model (efficient screening)
-
-**Extreme Identification:**
-- **Hobday Method**: Day-of-year specific thresholds with spatial window extension (literature standard, Hobday et al. 2016)
-- **Global Method**: Single threshold across time (fast, exploratory analysis)
-
-**[→ Learn more about method selection](https://marex.readthedocs.io/en/latest/user_guide.html#method-selection-guide)**
-
-### Advanced Tracking
-
-- **Morphological Operations**: Fill spatial gaps and smooth event boundaries
-- **Temporal Gap Filling**: Maintain event continuity across short interruptions
-- **Merge/Split Handling**: Track event genealogy with improved nearest-neighbor partitioning
-- **Area Filtering**: Remove spurious small events with percentile or absolute thresholds
-
-**[→ Explore tracking algorithms](https://marex.readthedocs.io/en/latest/modules/track.html)**
-
-### Performance & Scalability
-
-- **Dask-First Architecture**: Parallel computation with automatic memory management
-- **JAX Acceleration**: Optional GPU/TPU support for 10-50× speedup
-- **HPC Integration**: SLURM cluster support for supercomputing environments
-- **Memory Optimisation**: Process datasets 100-1000× larger than available RAM
-
-**[→ Performance tuning guide](https://marex.readthedocs.io/en/latest/user_guide.html#performance-optimisation)**
+I developed the scientific methodology and the implementation of marEx by hand up to and including v4.1 (April 2026), and have since used Claude Code as an aide to help optimise, generalise and test it. Since mid-2026 every change has been checked against reference outputs to round-off precision. The [validation page](https://marex.readthedocs.io/en/latest/guide/validation.html) describes what is tested.
 
 ---
 
 ## Getting Help
 
-### Support Channels
+- **[Documentation](https://marex.readthedocs.io/)**: guides, tutorials and API reference
+- **[GitHub Issues](https://github.com/wienkers/marEx/issues)**: bug reports and feature requests
+- **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)**: questions, ideas and community support
 
-- **[Documentation](https://marex.readthedocs.io/)** - Detailed guides and API reference
-- **[GitHub Issues](https://github.com/wienkers/marEx/issues)** - Bug reports and feature requests
-- **[GitHub Discussions](https://github.com/wienkers/marEx/discussions)** - Questions, ideas, and community support
-- **[Example Notebooks](https://github.com/wienkers/marEx/tree/main/examples)** - Complete workflow demonstrations
-
-### Reporting Issues
-
-When reporting issues, please include:
-- marEx version (`marEx.__version__`)
-- Python version and operating system
-- Dependency status (`marEx.print_dependency_status()`)
-- Minimal reproducible example
-- Full error traceback
+When reporting an issue, include `marEx.__version__`, the Python version and OS, `marEx.print_dependency_status()`, a minimal reproducible example and the full traceback.
 
 ---
 
@@ -193,9 +141,15 @@ When using marEx in publications, please cite:
 
 ---
 
-## Funding
+## License
 
-This project has received funding through:
+marEx is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). You can use, study, modify and share it freely. If you distribute a modified version, or run one as a network service, you must release your changes under the same licence. Keep the [NOTICE](NOTICE) and cite marEx in published work.
+
+The code and documentation are reserved from text and data mining, including AI model training (Art. 4(3) of the EU Directive 2019/790). For other licensing terms, [get in touch](mailto:aaron.wienkers@gmail.com).
+
+---
+
+## Funding
 
 * The [EERIE](https://eerie-project.eu) (European Eddy-Rich ESMs) Project
 * The European Union's Horizon Europe research and innovation programme under Grant Agreement No. 101081383

@@ -1,14 +1,16 @@
 # Contributing to marEx
 
-Thank you for your interest in contributing to marEx! This document provides guidelines for contributing to the Marine Extremes Detection and Tracking package.
+Thank you for your interest in contributing to marEx. This guide covers the development setup, the test commands, and the conventions the code base follows.
 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
 - [Development Environment Setup](#development-environment-setup)
 - [Contribution Workflow](#contribution-workflow)
+  - [Contributor License Agreement](#contributor-license-agreement)
 - [Code Style Guidelines](#code-style-guidelines)
 - [Testing Requirements](#testing-requirements)
+- [Continuous Integration](#continuous-integration)
 - [Documentation Guidelines](#documentation-guidelines)
 - [Release Process](#release-process)
 - [Getting Help](#getting-help)
@@ -17,356 +19,205 @@ Thank you for your interest in contributing to marEx! This document provides gui
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.10 to 3.13
 - Git
-- Familiarity with oceanographic data analysis (helpful but not required)
-- Basic understanding of xarray, Dask, and scientific Python ecosystem
+- Familiarity with xarray, Dask, and the scientific Python ecosystem
 
 ### Types of Contributions
 
-We welcome various types of contributions:
-
-- **Bug fixes**: Fix issues in existing code
-- **Feature enhancements**: Improve existing functionality
-- **New features**: Add new capabilities for marine extreme detection/tracking
-- **Documentation**: Improve documentation, tutorials, or examples
-- **Performance improvements**: Optimise algorithms or memory usage
-- **Testing**: Add or improve test coverage
-- **Examples**: Create/Share new example notebooks or workflows
+- **Bug fixes**: reports with a minimal reproducible example are the most useful starting point
+- **Features**: new anomaly or threshold methods, grid support, tracker options
+- **Documentation**: guides, application pages, tutorials, docstrings
+- **Performance**: memory or wall-time improvements, ideally with a measurement
+- **Tests and examples**: extra coverage, notebooks, new datasets
 
 ## Development Environment Setup
 
 ### 1. Fork and Clone the Repository
 
 ```bash
-# Fork the repository on GitHub, then clone your fork
 git clone https://github.com/YOUR_USERNAME/marEx.git
 cd marEx
-
-# Add the upstream repository as a remote
 git remote add upstream https://github.com/wienkers/marEx.git
 ```
 
 ### 2. Create a Development Environment
 
-We recommend using conda or mamba for managing dependencies:
-
 ```bash
-# Create a new environment
-conda create -n marex-dev python=3.10
+conda create -n marex-dev python=3.11
 conda activate marex-dev
-
-# Install the package in development mode with all dependencies
 pip install -e ".[dev,full]"
 ```
 
-Alternative with pip and virtual environment:
+Or with a virtual environment:
 
 ```bash
-# Create and activate virtual environment
 python -m venv marex-dev
-source marex-dev/bin/activate  # On Windows: marex-dev\Scripts\activate
-
-# Install development dependencies
+source marex-dev/bin/activate
 pip install -e ".[dev,full]"
 ```
 
 ### 3. Install Pre-commit Hooks
 
-Pre-commit hooks ensure code quality and consistency:
-
 ```bash
-# Install pre-commit hooks
 pre-commit install
-
-# Run pre-commit on all files to check setup
 pre-commit run --all-files
 ```
 
-### 4. Verify Installation
+### 4. Verify the Installation
 
 ```bash
-# Run tests to ensure everything works
-pytest
-
-# Check code formatting
-black --check marEx/
-flake8 marEx/
-
-# Verify imports work
 python -c "import marEx; print(marEx.__version__)"
+pytest tests/test_api.py -q
 ```
 
 ## Contribution Workflow
 
-### 1. Create a Feature Branch
+1. Update your fork and branch from `main`:
+   ```bash
+   git checkout main
+   git pull upstream main
+   git checkout -b feature/your-feature-name
+   ```
+2. Make focused changes, with tests for new behaviour and docstrings for new public functions.
+3. Run the relevant tests (see [Testing Requirements](#testing-requirements)) and the pre-commit hooks.
+4. Commit, push to your fork, and open a pull request against `main`. Describe the motivation and what you tested.
+5. Agree to the [Contributor License Agreement](CLA.md) by ticking its box in the pull request template. It is needed once, before your first contribution is merged.
 
-```bash
-# Ensure your main branch is up to date
-git checkout main
-git pull upstream main
+### Contributor License Agreement
 
-# Create a new branch for your feature/fix
-git checkout -b feature/your-feature-name
-# or
-git checkout -b fix/issue-number-description
-```
-
-### 2. Make Your Changes
-
-- Follow the [code style guidelines](#code-style-guidelines)
-- Write tests for new functionality
-- Update documentation as needed
-- Keep commits focused and atomic
-
-### 3. Test Your Changes
-
-```bash
-# Run the full test suite
-pytest
-
-# Run specific test categories
-pytest -m "not slow"  # Skip slow tests during development
-pytest tests/test_gridded_preprocessing.py -v  # Run specific test file
-
-# Check code coverage
-coverage run -m pytest
-coverage report -m
-```
-
-### 4. Update Documentation
-
-- Add docstrings to new functions/classes
-- Update relevant documentation files
-- Add examples if introducing new features
-
-### 5. Commit Your Changes
-
-```bash
-# Stage your changes
-git add .
-
-# Pre-commit hooks will run automatically
-git commit -m "Add feature: brief description of changes"
-
-# If pre-commit hooks modify files, stage and commit again
-git add .
-git commit -m "Apply pre-commit hook fixes"
-```
-
-### 6. Push and Create Pull Request
-
-```bash
-# Push your branch to your fork
-git push origin feature/your-feature-name
-
-# Create a pull request on GitHub
-# Fill out the pull request template completely
-```
+marEx is released under the GNU Affero General Public License v3.0 or later. You keep the copyright in your contributions. The [CLA](CLA.md) grants the maintainer a licence to distribute them under the AGPL and under other terms, which keeps the option of commercial licences open. If your employer has rights in your work, make sure you have its permission before contributing.
 
 ## Code Style Guidelines
 
-### Code Quality Standards
-
-- **Functions must accept Dask arrays**: All processing functions should validate `is_dask_collection(da.data)` and raise informative errors for non-Dask arrays
-- **Memory efficiency**: Strategically use `.persist()` and `wait()` to manage the dask task graph and memory
-- **Grid type support**: Ideally, support both structured (3D: time, lat, lon) and unstructured (2D: time, cell) grids; however, focus on structured grids for initial development
-
-### Documentation Standards
-
-- **Docstrings**: All public functions/classes should have comprehensive docstrings
-- **Type hints**: Add type hints where practical
-- **Examples**: Include usage examples in docstrings for complex functions
-- **Parameter documentation**: Document all parameters, their types, and expected values
-
+- Formatting and linting: `ruff check` and `ruff format` (configured in `pyproject.toml`), run by pre-commit and CI.
+- Public functions take Dask-backed arrays and raise an informative `DataValidationError` otherwise.
+- Support both gridded `(time, lat, lon)` and unstructured `(time, cell)` data wherever the algorithm allows. Fields with an extra dimension such as depth are supported by the anomaly and extremes stages and rejected by the tracker.
+- Keep memory bounded. Intermediate results go through the `compute_mode` machinery (`persist`, `lazy`, `streaming`) rather than ad hoc `.persist()` calls.
+- Chunking differs by stage: the detect stages need no particular spatial chunking on a lat/lon grid (chunk space on a large unstructured mesh), whereas the tracker needs the spatial dimension whole and is chunked in time.
+- Docstrings use NumPy style and name the public import path (`marEx.anomaly.compute`, `marEx.extremes.identify`, `marEx.helper.start_local_cluster`).
+- British spelling throughout (visualise, standardise, centred).
 
 ## Testing Requirements
 
-### Test Structure
+Tests use pytest. The files group by area:
 
-marEx uses pytest with the following test organisation:
-
-```
-tests/
-├── __init__.py
-├── conftest.py                    # Shared fixtures and configuration
-├── test_gridded_preprocessing.py  # Gridded data preprocessing tests
-├── test_gridded_tracking.py       # Gridded data tracking tests
-├── test_unstructured_preprocessing.py  # Unstructured data tests
-├── test_plotx.py                  # Plotting functionality tests
-├── test_integration.py            # Integration tests
-└── data/                          # Test data files
-```
-
-### Test Categories
-
-Tests are organised using pytest markers:
-
-- `@pytest.mark.slow`: Computationally expensive tests (skip with `-m "not slow"`)
-- `@pytest.mark.integration`: End-to-end workflow tests
-
-### Writing Tests
-
-#### Test Requirements
-
-1. **Test new functionality**: All new features must have corresponding tests
-2. **Test edge cases**: Include tests for boundary conditions and error cases
-3. **Test with both grid types**: Test structured and unstructured data where applicable
-4. **Use fixtures**: Leverage existing fixtures for common test data
-5. **Mock external dependencies**: Use mocking for expensive operations or external services
-
+| Area | Files |
+|---|---|
+| Anomaly stage | `tests/anomaly/` |
+| Extremes stage | `tests/extremes/` |
+| Full detect pipeline | `tests/detect/` (`test_pipeline_golden.py`, `test_method_matrix.py`, `test_extra_dim.py`) |
+| Chunking and compute modes | `tests/detect/test_chunk_layout.py`, `tests/detect/test_compute_modes.py`, `tests/detect/test_compute_mode_equivalence.py`, `tests/track/test_track_compute_mode.py` |
+| Tracking | `tests/track/` (`test_tracker_outputs.py` holds the golden run) |
+| Plotting | `tests/plotting/` |
+| Public API | `tests/test_api.py` |
+| End to end (detect, write, track) | `tests/test_end_to_end.py` |
+| Errors, logging, clusters | `tests/test_errors.py`, `tests/test_logging.py`, `tests/test_cluster.py` |
+| Larger than memory | `tests/test_larger_than_memory.py` |
 
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest
-
-# Run specific test suites (as in CI)
-pytest tests/test_gridded_preprocessing.py -v --tb=short
-pytest tests/test_unstructured_preprocessing.py -v --tb=short
-pytest tests/test_gridded_tracking.py -v --tb=short
+# Quick check of one area
+pytest tests/anomaly -q
 
 # Skip slow tests during development
 pytest -m "not slow"
 
-# Run only integration tests
-pytest -m integration
+# Parallel run on a workstation (small worker counts; each test may start a Dask cluster)
+pytest -n 2
 
-# Run with coverage
-coverage run -m pytest
-coverage report -m
-coverage html  # Generate HTML coverage report
+# The fast end-to-end subset that CI runs against the built wheel
+pytest -m smoke
+
+# Streaming detect and track on inputs larger than the test cluster's memory
+pytest -m larger_than_memory
+
+# Coverage
+pytest -n 2 --cov=marEx --cov-report=term
 ```
 
-### Test Data
+A plain `pytest` deselects the `larger_than_memory` tests (`addopts` in `pyproject.toml`), and an explicit `-m` on the command line replaces that filter. Each of those tests starts its own one-worker cluster with a fixed memory limit, sized so the governed input exceeds it by at least 1.1x.
 
-Use the existing test fixtures in `conftest.py`:
+The other tests share a Dask cluster whose per-worker `memory_limit` is 60 % of the usable memory (the smallest of physical RAM, the cgroup limit and `SLURM_MEM_PER_NODE`), divided between every worker of every xdist process. Dask does not see a cgroup or SLURM cap by itself, so this keeps the limit honest on a batch node. Set `MAREX_TEST_WORKER_MEMORY` (bytes, or a Dask string such as `2.5GB`) to override it.
 
-```python
-def test_my_function(dask_client, sample_sst_data):
-    """Test using shared fixtures."""
-    with dask_client:
-        result = my_function(sample_sst_data)
-        assert result is not None
+Avoid `pytest -n auto` on a shared or memory-limited machine: several tests start a Dask cluster, and one worker per core can exhaust memory.
+
+### Equivalence Tests
+
+Changes to numerics must keep the reference-output tests (`tests/detect/test_pipeline_golden.py`, `tests/track/test_tracker_outputs.py`) passing at zero tolerance for integer and label outputs. Changes that alter results on purpose need a changelog entry and an explicit update of the references, never a loosened tolerance. Performance work should also keep the chunking- and compute-mode-invariance tests green, and assert chunk structure as well as values, because identical numbers do not rule out an expensive task graph.
+
+### Both Zarr Majors
+
+marEx supports `zarr>=2.18`, which includes zarr-python 2 and 3. Tests that write stores should pass on both. To check the other major locally:
+
+```bash
+pip install "zarr<3"   # zarr 2
+pytest tests/test_end_to_end.py -q
+pip install "zarr>=3"  # zarr 3
+pytest tests/test_end_to_end.py -q
 ```
+
+### Writing Tests
+
+1. Test new behaviour, boundary conditions and error cases.
+2. Cover both grid types where the feature applies.
+3. Use the shared fixtures in `tests/conftest.py`.
+4. Mark expensive tests `@pytest.mark.slow`; end-to-end workflows use `@pytest.mark.integration`.
+5. Add `@pytest.mark.smoke` only to a fast test that needs nothing beyond the installed wheel, since the smoke jobs run it on macOS and Windows from the wheel alone.
+
+## Continuous Integration
+
+GitHub Actions runs four workflows.
+
+| Workflow | Runs on | What it does |
+|---|---|---|
+| `ci.yml` | pushes to `main` and the development branches (`v4D_beta`, `ci/**`), pull requests against `main`, manual dispatch | Lint (pre-commit and the release-check unit tests), the full suite at `-n 2` on Python 3.12, the larger-than-memory tests, a wheel and sdist build, smoke tests of the installed wheel (Ubuntu with Python 3.10 and 3.13, macOS and Windows with 3.12), and the Sphinx build with warnings as errors. The `CI OK` job passes only when all of them do. |
+| `coverage.yml` | pushes to `main`, weekly, manual dispatch | The suite under `pytest-cov` with the numba JIT on (`@jit` functions are excluded from the report), uploaded to Codecov. Informational: it never blocks a merge. Takes about 40 min on a GitHub runner. |
+| `compat.yml` | weekly, manual dispatch | The suite at the declared dependency floors (`ci/requirements-minimum.txt`, Python 3.10, zarr 2), and at the newest releases on Python 3.14 with deprecation warnings shown. |
+| `release.yml` | a pushed `v*` tag, manual dispatch | The release pipeline below. |
+
+Dependabot keeps the Actions versions current, once a month.
 
 ## Documentation Guidelines
 
-### Documentation Structure
-
-marEx documentation is built with Sphinx and includes:
-
-- **API documentation**: Auto-generated from docstrings
-- **User guides**: Step-by-step tutorials
-- **Examples**: Jupyter notebooks demonstrating workflows
-- **Development documentation**: This file and related developer resources
-
-### Building Documentation
+The documentation is built with Sphinx and hosted on ReadTheDocs. CI builds it with `-W`, so a new Sphinx warning fails the pull request.
 
 ```bash
 cd docs/
-make html  # Build HTML documentation
-make clean  # Clean build artifacts
-
-# View documentation
-open _build/html/index.html  # macOS
-xdg-open _build/html/index.html  # Linux
+make html
+xdg-open _build/html/index.html   # `open` on macOS
 ```
 
-### Documentation Standards
-
-1. **Docstring format**: Use NumPy-style docstrings
-2. **Examples in docstrings**: Include working code examples
-3. **Cross-references**: Use Sphinx cross-references for linking
-4. **Jupyter notebooks**: Keep example notebooks clean and well-documented
-5. **User-focused**: Write documentation from the user's perspective
-
-### Adding New Documentation
-
-1. **API changes**: Docstrings are automatically included
-2. **New features**: Add examples to relevant user guide sections
-3. **Tutorials**: Create new Jupyter notebooks in `docs/tutorials/`
+- API pages are generated from docstrings, so a new public function needs a docstring and an entry in the matching page under `docs/api/`.
+- Guides explain choices and worked examples; keep numbers tied to a stated scale and hardware, and describe them as measured on that setup.
+- Example notebooks live under `examples/` and are rendered into the tutorials.
 
 ## Release Process
 
-### Version Management
+marEx uses `setuptools_scm`, so versions come from git tags, and a pushed tag is the whole release.
 
-marEx uses `setuptools_scm` for automatic versioning based on git tags:
-
-- Development versions: `0.2.0.dev10+g1234567` (based on commits since last tag)
-- Release versions: `0.2.0` (based on git tags)
-
-### Release Workflow
-
-1. **Prepare release**:
+1. Add a `## [X.Y.Z]` section to `CHANGELOG.md` and merge it to `main`. That section opens the GitHub release notes, above the list of changes GitHub generates. Without it the release still goes out, with a one-line placeholder.
+2. Wait for `CI OK` to pass on that `main` commit.
+3. Tag the commit and push the tag:
    ```bash
-   # Update CHANGELOG.md with new version
-   # Ensure all tests pass
-   pytest
-
-   # Check documentation builds
-   cd docs/ && make html
+   git tag -a vX.Y.Z -m "Release X.Y.Z" <sha>
+   git push origin vX.Y.Z
    ```
 
-2. **Create release**:
-   ```bash
-   # Tag the release
-   git tag -a v0.2.0 -m "Release version 0.2.0"
-   git push upstream v0.2.0
-   ```
+`release.yml` then checks that the tag is a valid release version, waits up to 90 min for a successful `ci.yml` push run on `main` for the tagged commit, builds the wheel and sdist and checks their version against the tag, installs the wheel on Linux, macOS and Windows, publishes to PyPI by trusted publishing (environment `pypi`), and creates the GitHub release. A pre-release tag such as `v5.1.0rc1` is marked as one on GitHub. A tag on a commit that never passed CI on `main` stops at the CI check, before anything is built.
 
-3. **Build and distribute**:
-   ```bash
-   # Build package
-   python -m build
+To exercise the version check and the CI check without publishing, dispatch a dry run:
 
-   # Upload to PyPI (maintainers only)
-   twine upload dist/*
-   ```
-
-### Release Checklist
-
-- [ ] All tests pass on all supported Python versions
-- [ ] Documentation builds without warnings
-- [ ] Version tag created and pushed
-- [ ] GitHub release created with release notes
-- [ ] Package uploaded to PyPI
+```bash
+gh workflow run release.yml --ref <branch> -f sha=<40-character sha> -f version=X.Y.Z
+```
 
 ## Getting Help
 
-### Resources
+- Documentation: https://marex.readthedocs.io/
+- GitHub Issues: bugs and feature requests, with a minimal reproducible example, the Python, xarray, dask and zarr versions, and the full traceback
+- GitHub Discussions: questions and ideas
+- Email the maintainer for anything sensitive
 
-- **Documentation**: https://marex.readthedocs.io/
-- **GitHub Issues**: Report bugs or request features
-- **GitHub Discussions**: Ask questions or discuss ideas
-- **Email**: Contact maintainers for sensitive issues
-
-### Issue Reporting
-
-When reporting issues:
-
-1. Use the provided issue templates
-2. Include minimal reproducible examples
-3. Provide environment information (Python version, OS, package versions)
-4. Include full error messages and tracebacks
-
-### Feature Requests
-
-When requesting features:
-
-1. Describe the scientific use case
-2. Explain why existing functionality doesn't meet your needs
-3. Provide examples of the desired API
-4. Consider contributing the implementation
-
-## Recognition
-
-Contributors are recognised in:
-
-- GitHub contributors list
-- Release notes
-- Documentation acknowledgments
-- Academic publications (for significant contributions)
-
-Thank you for contributing to marEx!
+Contributors are recognised in the GitHub contributors list and the release notes.

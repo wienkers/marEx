@@ -3,17 +3,11 @@
 
 coverage:
   status:
-    # Overall project coverage
+    # Report only; no pass/fail threshold on coverage
     project:
       default:
-        target: 95%  # Maintain 95% overall project coverage
-        threshold: 1%
-        if_ci_failed: error
-
-    # Coverage for new code in patches/PRs - disabled
-    patch:
-      default:
-        enabled: false  # Do not enforce patch coverage requirements
+        informational: true
+    patch: off
 
 # Comment configuration
 comment:

@@ -1,8 +1,8 @@
 """
 Unstructured data visualisation module for irregular meshes.
 
-Provides specialised plotting capabilities for irregular oceanographic data
-on triangular grids (2D arrays: time, cell) with triangulation support.
+Plotting for irregular oceanographic data on triangular grids
+(2D arrays: time, cell), using the grid triangulation.
 """
 
 from pathlib import Path
@@ -18,8 +18,6 @@ try:
     from matplotlib.collections import QuadMesh, TriMesh
     from matplotlib.colors import BoundaryNorm, Normalize
     from matplotlib.tri import Triangulation
-
-    HAS_PLOTTING_DEPS = True
 except ImportError:
     # These will be checked in the base class
     ccrs = None
@@ -29,7 +27,6 @@ except ImportError:
     BoundaryNorm = None
     Normalize = None
     Triangulation = None
-    HAS_PLOTTING_DEPS = False
 
 from ..exceptions import DataValidationError, VisualisationError
 from .base import PlotterBase
@@ -51,12 +48,13 @@ def _load_triangulation(fpath_tgrid: Union[str, Path]) -> Triangulation:
     """Load and cache triangulation data globally."""
     fpath_tgrid = str(fpath_tgrid)  # Convert Path to string for dict key
     if fpath_tgrid not in _GRID_CACHE["triangulation"]:
-        # Only load required variables
-        grid_data = xr.open_dataset(
-            fpath_tgrid,
-            chunks={},
-            drop_variables=[v for v in xr.open_dataset(fpath_tgrid).variables if v not in ["vertex_of_cell", "clon", "clat"]],
-        )
+        # Only load required variables. Open the file once to discover which variables to
+        # drop: the previous form opened it a second time inside the comprehension and
+        # never closed that handle.
+        keep = {"vertex_of_cell", "clon", "clat"}
+        with xr.open_dataset(fpath_tgrid) as probe:
+            drop = [v for v in probe.variables if v not in keep]
+        grid_data = xr.open_dataset(fpath_tgrid, chunks={}, drop_variables=drop)
 
         if "vertex_of_cell" not in grid_data.variables or "clon" not in grid_data.variables or "clat" not in grid_data.variables:
             raise DataValidationError(
@@ -129,6 +127,9 @@ class UnstructuredPlotter(PlotterBase):
 
         self.fpath_tgrid: Optional[Path] = _fpath_tgrid
         self.fpath_ckdtree: Optional[Path] = _fpath_ckdtree
+        # Resolution (degrees) of the pre-computed ckdtree grid. Single knob shared with
+        # PlotConfig.ckdtree_res; callers may override before plotting/animating.
+        self.ckdtree_res: float = 0.3
 
     def specify_grid(
         self,
@@ -149,7 +150,8 @@ class UnstructuredPlotter(PlotterBase):
         """Implement plotting for unstructured data."""
         if self.fpath_ckdtree is not None:
             # Interpolate using pre-computed KDTree indices
-            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=0.3)
+            res = getattr(self, "ckdtree_res", 0.3)
+            grid_lon, grid_lat, grid_data = self._interpolate_with_ckdtree(self.da.values, res=res)
 
             plot_kwargs = {
                 "transform": ccrs.PlateCarree(),

@@ -1,0 +1,39 @@
+{
+  "_source": "DERIVED from runs_real_ci_overhaul_branch: id 41052242346 on main (failed jobs: jobs_rerun_attempt2_failed at attempt 1) plus newer green pull_request and ci/overhaul push runs at the same sha",
+  "total_count": 3,
+  "workflow_runs": [
+    {
+      "id": 41052242348,
+      "run_number": 142,
+      "run_attempt": 1,
+      "event": "push",
+      "head_branch": "ci/overhaul",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242348"
+    },
+    {
+      "id": 41052242347,
+      "run_number": 141,
+      "run_attempt": 1,
+      "event": "pull_request",
+      "head_branch": "ci/overhaul",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242347"
+    },
+    {
+      "id": 41052242346,
+      "run_number": 140,
+      "run_attempt": 1,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242346"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+=====================
+Ocean Extremes in 3-D
+=====================
+
+Detection on a field with a depth axis. A century of daily potential temperature from
+the EERIE IFS-FESOM2-SR control run, on seven levels from the surface to 1415 m over the
+North Atlantic, goes through the same :func:`marEx.preprocess_data` call as the surface
+examples, with a shifting baseline and the day-of-year threshold. The notebook then looks
+at extremes level by level, in depth-time sections and as vertical profiles. See
+:ref:`extra-dimensions` for the rules.
+
+.. toctree::
+   :maxdepth: 1
+
+   1 · Detect extremes at depth <3d/01_preprocess_extremes>

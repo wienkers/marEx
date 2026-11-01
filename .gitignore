@@ -10,3 +10,34 @@ build/
 
 # Environment variables
 .env
+
+# Local-only files
+CLAUDE.md
+backup/
+docs/superpowers/
+container/
+
+# Sphinx build artefacts and generated sources
+docs/_build/
+docs/_autosummary/
+docs/generated/
+# Example notebooks copied into the docs tree at build time (see docs/conf.py)
+docs/tutorials/gridded/
+docs/tutorials/regional/
+docs/tutorials/unstructured/
+docs/tutorials/applications/
+docs/tutorials/3d/
+.claude/
+NEXT.md
+DONE.md
+DECISIONS.md
+QUESTIONS.md
+LEDGER.md
+docs/runs/
+
+# Local working/review docs
+REPORT_*.md
+ASTRA_*.md
+
+# SLURM job output (archived under /work/bk1377/b382615/marex_fable/logs/; see SLURM_LOG_DIR)
+slurm-*.out

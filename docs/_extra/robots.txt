@@ -1,0 +1,26 @@
+# AI training crawlers: marEx reserves text and data mining (see NOTICE).
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: anthropic-ai
+User-agent: CCBot
+User-agent: Applebot-Extended
+User-agent: Meta-ExternalAgent
+User-agent: Bytespider
+User-agent: cohere-training-data-crawler
+User-agent: Diffbot
+User-agent: Omgilibot
+Disallow: /
+
+# AI assistants and AI search reading the docs on a user's behalf are welcome.
+User-agent: ChatGPT-User
+User-agent: OAI-SearchBot
+User-agent: Claude-User
+User-agent: Claude-SearchBot
+User-agent: Perplexity-User
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: *
+Allow: /
+
+Sitemap: https://marex.readthedocs.io/sitemap.xml

@@ -1,0 +1,94 @@
+# Global daily OSTIA SST on a 0.25° lat/lon grid: the settings of gridded/01_preprocess_extremes.ipynb and
+# gridded/02_id_track_events.ipynb. Copy this file and edit it for your own data.
+#
+# Strings may use environment variables and `~`. Here MAREX_SCRATCH is your large scratch area
+# (on Levante: export MAREX_SCRATCH=/scratch/${USER:0:1}/$USER).
+
+output_dir: ${MAREX_SCRATCH}/marEx/examples/gridded   # detect writes here, track reads and writes here
+scratch_dir: ${MAREX_SCRATCH}/marEx/batch             # Dask spill (dask/) and streaming staging (staging/)
+
+dask_config:
+  distributed.admin.large-graph-warning-threshold: 1GB   # graphs of a few hundred MB are expected at this scale
+
+input:
+  path: ${MAREX_SCRATCH}/marEx_data/input/ostia/ostia.zarr   # zarr store, or a netCDF file / glob
+  variable: sst
+  time: [1982-01-01, 2022-05-31]
+  chunks: {time: 30, lat: -1, lon: -1}   # lat/lon: keep space whole, chunk time
+
+dimensions: {time: time, x: lon, y: lat}   # a "y" dimension tells marEx this is a lat/lon grid
+
+detect:
+  # Workers run as short SLURM jobs on the compute partition: single-threaded, 32 per 256 GB node, 256 in all.
+  # The walls must cover the whole run: workers are neither retired early nor replaced.
+  cluster:
+    type: slurm
+    n_workers: 256
+    workers_per_node: 32
+    node_memory: 256   # GB per node
+    runtime: 119       # minutes per worker job
+    # account: my_project   # default: $SLURM_ACCOUNT
+  runs:
+    - name: shifting_hobday
+      output: extremes_shifting_hobday.zarr
+      kwargs:   # passed to marEx.preprocess_data unchanged
+        method_anomaly: shifting_baseline     # backward-looking climatology of the previous `window_years`
+        method_extreme: seasonal_percentile   # day-of-year threshold (Hobday et al., 2016)
+        threshold_percentile: 95
+        window_years: 15
+        smooth_days: 21
+        window_days: 11
+        dask_chunks: {time: 25}               # output chunking
+    - name: harmonic_global
+      output: extremes_harmonic_global.zarr
+      kwargs:
+        method_anomaly: detrend_harmonic      # removes the mean, annual & semi-annual harmonics and the trend
+        method_extreme: global_percentile     # one threshold per cell, over all days
+        threshold_percentile: 95
+        detrend_orders: [1, 2]
+        dask_chunks: {time: 25}
+
+track:
+  input: extremes_shifting_hobday.zarr   # a detect output in output_dir
+  chunks: {time: 25, lat: -1, lon: -1}   # the tracker needs space whole
+  mask_lat: [-90, 85]                     # mask out the pole, where the grid's anisotropy biases the tracking
+  # One whole node: 16 workers x 8 threads x 14 GB
+  cluster:
+    type: local
+    n_workers: 16
+    threads_per_worker: 8
+    memory_limit: 14GB
+  runs:
+    - name: merged
+      output: events_merged.zarr
+      merges: events_merged_merges.nc     # omit for a tracker run without merge records
+      kwargs:   # passed to marEx.tracker unchanged (compute_mode defaults to "streaming" in run_track.py)
+        grid_resolution: 0.25
+        area_filter_absolute: 600
+        R_fill: 12
+        T_fill: 4
+        allow_merging: true
+        overlap_threshold: 0.25
+        nn_partitioning: true
+    - name: basic
+      output: events_basic.zarr
+      kwargs:
+        area_filter_absolute: 600
+        R_fill: 12
+        T_fill: 0
+        allow_merging: false
+
+# Merged over the rest of the file by --smoke: checks the plumbing in a few minutes
+smoke:
+  output_dir: ${MAREX_SCRATCH}/marEx/examples/gridded_smoke
+  input: {time: [1982-01-01, 1986-12-31]}
+  detect:
+    cluster: {type: local, n_workers: 8, threads_per_worker: 1, memory_limit: 7GB}
+    runs:
+      - name: shifting_hobday
+        output: extremes_shifting_hobday.zarr
+        kwargs: {method_anomaly: shifting_baseline, method_extreme: seasonal_percentile, threshold_percentile: 95,
+                 window_years: 2, smooth_days: 21, window_days: 11, dask_chunks: {time: 25}}
+  track:
+    time: [1984-01-01, 1984-12-31]
+    cluster: {n_workers: 2, threads_per_worker: 2, memory_limit: 3GB}

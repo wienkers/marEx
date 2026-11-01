@@ -1,0 +1,28 @@
+"""
+HPC Dask Helper: Utilities for High-Performance Computing with Dask
+--------------------------------------------------------------------
+
+This package provides utilities for setting up and managing Dask clusters
+in HPC environments, including SLURM-based supercomputers. Its submodules:
+
+- :mod:`marEx.helper.dask_config`: Dask configuration (:func:`configure_dask`)
+- :mod:`marEx.helper.cluster`: cluster management
+  (:func:`start_local_cluster`, :func:`start_distributed_cluster`,
+  :func:`get_cluster_info`)
+- :mod:`marEx.helper.resources`: wall time and memory per stage
+  (:class:`ResourceMonitor`)
+
+All public functions are re-exported as ``marEx.helper.<name>``.
+"""
+
+from .cluster import get_cluster_info, start_distributed_cluster, start_local_cluster
+from .dask_config import configure_dask
+from .resources import ResourceMonitor
+
+__all__ = [
+    "configure_dask",
+    "start_local_cluster",
+    "start_distributed_cluster",
+    "get_cluster_info",
+    "ResourceMonitor",
+]

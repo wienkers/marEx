@@ -1,0 +1,393 @@
+"""
+Public entry point for extreme-event identification.
+
+:func:`identify` turns anomalies into a boolean extreme-event field plus the
+percentile thresholds that defined it. It accepts anomalies from any source,
+including datasets produced outside marEx. For thresholds on a standardised
+series, call it again with that series.
+"""
+
+import logging
+from typing import Dict, List, Literal, Optional, Union
+
+import xarray as xr
+
+from ..core.compute_mode import Materialiser, create_staging_dir
+from ..core.dimensions import resolve_dims
+from ..core.finalise import finalise_dataset, split_large_chunks
+from ..core.time_axis import SeasonalCycle, cadence_index_name
+from ..core.validation import _infer_dims_coords
+from ..exceptions import ConfigurationError, create_data_validation_error
+from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
+from .base import identify_extremes, reject_empty_series, resolve_window_spatial
+
+# Get module logger
+logger = get_logger(__name__)
+
+METHODS = ("seasonal_percentile", "global_percentile")
+
+
+# How each within-year index reads in `preprocessing_steps`. "Day-of-year" is the
+# daily-only wording and must stay exactly that, because it is what every daily run
+# ever recorded and what `tests/test_stage_helpers.py` pins.
+_CADENCE_LABELS = {
+    "month": "Monthly",
+    "dayofyear": "Day-of-year",
+    "hourofyear": "Hour-of-year",
+}
+
+
+def _extreme_steps(
+    method: str,
+    window_days: int,
+    window_spatial: Optional[int],
+    index_name: str = "dayofyear",
+    tail: str = "upper",
+) -> List[str]:
+    """Describe the extremes stage for ``ds.attrs["preprocessing_steps"]``.
+
+    ``index_name`` and ``tail`` default to the historical behaviour, so a daily
+    upper-tail run produces the identical string it always has -- character for
+    character. Only a non-daily cadence or a lower tail changes the wording, and
+    those runs previously described themselves wrongly ("Day-of-year thresholds" on a
+    monthly axis, no mention of the tail at all).
+    """
+    steps: List[str] = []
+    tail_phrase = "lower-tail " if tail == "lower" else ""
+
+    if method == "global_percentile":
+        # `global_percentile` resolves no cycle, so "days" is only defensible on a
+        # daily axis; anywhere else the threshold is applied to every time STEP.
+        span = "days" if index_name == "dayofyear" else "steps"
+        steps.append(f"Global {tail_phrase}percentile threshold applied to all {span}")
+    elif method == "seasonal_percentile":
+        label = _CADENCE_LABELS.get(index_name, _CADENCE_LABELS["dayofyear"])
+        # `window_days` stays a duration in DAYS on every cadence (spec 7.2), so the
+        # window half of the sentence is cadence-independent.
+        window = f"{label} {tail_phrase}thresholds with {window_days} day window"
+        if window_spatial is not None:
+            window += f" & {window_spatial} spatial neighbours"
+        steps.append(window)
+
+    return steps
+
+
+def _effective_window_spatial(
+    method: str,
+    window_spatial: Optional[int],
+    dimensions: Dict[str, str],
+    ds_or_da,
+    method_percentile: str = "approximate",
+) -> Optional[int]:
+    """
+    Resolve the spatial window actually used.
+
+    ``identify_extremes`` silently defaults a gridded seasonal run to a 5x5 window
+    when the caller leaves it ``None``, so the recorded attributes and steps must
+    reflect that rather than the raw ``None``. Delegates to
+    :func:`marEx.extremes.base.resolve_window_spatial`, which owns that rule.
+    """
+    return resolve_window_spatial(ds_or_da, dimensions, method, method_percentile, window_spatial)
+
+
+def _extremes_core(
+    anomalies: xr.DataArray,
+    method: str,
+    threshold_percentile: float,
+    window_days: int,
+    window_spatial: Optional[int],
+    method_percentile: str,
+    precision: Optional[float],
+    max_anomaly: Optional[float],
+    n_bins: Optional[int],
+    dimensions: Dict[str, str],
+    coordinates: Dict[str, str],
+    materialiser: Materialiser,
+    threshold_label: str = "thresholds",
+    cycle: Optional[SeasonalCycle] = None,
+    tail: str = "upper",
+):
+    """
+    Identify extremes, up to but not including output finalisation.
+
+    Shared by :func:`identify` and by :func:`marEx.preprocess_data`.
+
+    ``threshold_label`` names the materialiser staging slot. It is a parameter
+    rather than a constant because a caller may run this stage twice on two
+    different series (raw and standardised anomalies), and ``Materialiser``
+    labels are single-owner: reusing one would raise.
+
+    Returns ``(extremes, thresholds, bin_spec)``. The bin geometry comes back
+    because it may have been DERIVED from the data, and the caller records what was
+    actually used in the output attributes. It is resolved per series, not once per
+    run: a standardised series is in units of sigma and has no reason to share a
+    range with the raw anomaly.
+    """
+    if method not in METHODS:
+        raise ConfigurationError(
+            f"Unknown extreme method '{method}'",
+            details=f"Supported methods are: {', '.join(METHODS)}",
+            suggestions=[f"Use method='{METHODS[0]}' (the default)"],
+        )
+
+    # Checked here rather than only inside `identify_extremes`'s bin derivation, which the
+    # exact path skips: an empty series otherwise reached a bare ZeroDivisionError there.
+    # `identify_extremes` resolves the bin geometry once (a fused pass over the anomaly when
+    # it is derived), regrows it if a threshold reached its edge, and hands back what it used.
+    reject_empty_series(anomalies)
+    used_spec: list = []
+
+    with log_timing(
+        logger,
+        f"Extreme event identification using {method} method",
+        log_memory=True,
+        show_progress=True,
+    ):
+        logger.debug(
+            f"Identifying extremes with parameters: method={method}, "
+            f"percentile={threshold_percentile}%, method_percentile={method_percentile}"
+        )
+        extremes, thresholds = identify_extremes(
+            anomalies,
+            method,
+            threshold_percentile,
+            dimensions,
+            coordinates,
+            window_days,
+            window_spatial,
+            method_percentile,
+            precision,
+            max_anomaly,
+            n_bins=n_bins,
+            materialiser=materialiser,
+            threshold_label=threshold_label,
+            cycle=cycle,
+            tail=tail,
+            bin_spec_out=used_spec,
+        )
+        log_memory_usage(logger, "After extreme identification", logging.DEBUG)
+
+    # `thresholds` was already anchored inside the method module (before the comparison
+    # that builds `extremes` was constructed on top of it), so this pin only covers
+    # `extremes` itself in persist mode.
+    extremes, thresholds = materialiser.pin(extremes, thresholds)
+    extremes.attrs = {}  # not the input's attrs, whatever xarray's keep_attrs default (see clear_inherited_attrs)
+    spec = used_spec[0] if used_spec else None
+    bin_spec = (None, None) if spec is None else (spec.precision, spec.max_anomaly)
+    return extremes, thresholds, bin_spec
+
+
+def _log_extreme_summary(ds: xr.Dataset, materialiser: Materialiser) -> None:
+    """
+    Report the event count, but only when it is free to do so.
+
+    This sum is a pass over the whole field. Only pay for it when the INFO line
+    will actually be emitted AND the field is already materialised -- in
+    lazy/streaming mode it would execute the entire graph, silently defeating the
+    point of the mode for any INFO-level user.
+    """
+    if logger.isEnabledFor(logging.INFO) and materialiser.mode == "persist":
+        extreme_count = ds.extreme_events.sum()
+        if hasattr(extreme_count, "compute"):
+            extreme_count = extreme_count.compute()
+        logger.info(f"Extreme identification completed - {extreme_count} extreme events identified")
+    else:
+        logger.info(f"Extreme identification graph constructed (compute_mode='{materialiser.mode}')")
+
+
+def identify(
+    data: Union[xr.DataArray, xr.Dataset],
+    method: Literal["seasonal_percentile", "global_percentile"] = "seasonal_percentile",
+    *,
+    threshold_percentile: float = 95,
+    tail: Literal["upper", "lower"] = "upper",
+    window_days: int = 11,
+    window_spatial: Optional[int] = None,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
+    precision: Optional[float] = None,
+    max_anomaly: Optional[float] = None,
+    n_bins: Optional[int] = None,
+    dask_chunks: Optional[Dict[str, int]] = None,
+    compute_mode: Literal["persist", "lazy", "streaming"] = "persist",
+    scratch_dir: Optional[str] = None,
+    dimensions: Optional[Dict[str, str]] = None,
+    coordinates: Optional[Dict[str, str]] = None,
+    cycle: Optional[SeasonalCycle] = None,
+    verbose: Optional[bool] = None,
+    quiet: Optional[bool] = None,
+) -> xr.Dataset:
+    """
+    Identify extreme events using a percentile threshold.
+
+    Parameters
+    ----------
+    data
+        Anomalies to threshold: a ``DataArray``, or a ``Dataset`` with a
+        ``dat_anomaly`` variable, such as the output of
+        :func:`marEx.anomaly.compute`.
+    method
+        Thresholding method.
+
+        * ``'seasonal_percentile'`` (default): thresholds per cycle slot computed over a rolling day window, optionally pooled over
+          spatial neighbours. Follows the Hobday et al. (2016) definition.
+        * ``'global_percentile'``: one constant-in-time threshold per cell.
+    threshold_percentile
+        Percentile defining an extreme, e.g. ``95``.
+    tail
+        Which side of the distribution counts as extreme. ``'upper'`` (default)
+        flags ``data >= threshold``, and ``'lower'`` flags ``data <= threshold``
+        for cold spells, drought, or any low-side extreme. The threshold is the
+        ``threshold_percentile``-th percentile in both cases, so the coldest 5 %
+        is ``threshold_percentile=5, tail='lower'``.
+    window_days
+        Width of the seasonal window in days
+        (``seasonal_percentile`` only).
+    window_spatial
+        Width in cells (odd) of the square spatial pooling window
+        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
+        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
+        on that path and to no pooling elsewhere. Passing a value raises an
+        error on unstructured meshes, with ``global_percentile``, and with
+        ``method_percentile='exact'``.
+    method_percentile
+        ``'approximate'`` (default) uses a histogram-based quantile. ``'exact'`` computes a true quantile and needs
+        the full series of each cell in memory.
+    precision
+        Histogram bin width for ``method_percentile='approximate'``, in the variable's
+        units. The binned range is derived from the data, so the default works for any
+        variable and units. The requested tail's own extreme caps the range, a per-cell
+        normal estimate of the largest threshold (``3 x max(mean + z_p std)``) lowers it
+        when that extreme is an outlier, and a threshold that reaches the edge regrows the
+        range and is recomputed. Without ``precision``, the range is split into 3000 bins.
+        Given a ``precision``, the bin count follows, with a warning above 10000 bins and an
+        error above 65000.
+    max_anomaly, n_bins
+        Deprecated (``FutureWarning``). ``max_anomaly`` pins the range (a saturated
+        threshold then raises), and ``n_bins`` replaces the 3000-bin target.
+    dask_chunks
+        Output chunking. Defaults to ``{"time": 25}``.
+        An integer time entry is a step count, and extra dimensions on
+        time-indexed variables are then sized to keep a chunk within 50 million
+        elements where one level allows it. ``"auto"`` hands the time chunk to
+        dask, whose budget is in bytes (``array.chunk-size``, 128 MiB by
+        default), so a 1-byte boolean variable gets more elements per chunk
+        than a float32 one and can exceed 50 million. A seasonal threshold's
+        cycle axis (``dayofyear``, ``month``, ``hourofyear``) is chunked from
+        the same entry, capped at the cycle length, and exempt from the element
+        budget.
+    compute_mode
+        Materialisation policy: ``'persist'``, ``'lazy'`` or ``'streaming'``.
+    scratch_dir
+        Staging directory, required by ``compute_mode='streaming'``.
+    dimensions, coordinates
+        Name mappings. Inferred when omitted.
+    cycle
+        Within-year axis the thresholds are resolved on, as a
+        :class:`~marEx.SeasonalCycle`. Inferred from the median spacing of the
+        time coordinate when omitted: ``dayofyear`` for daily data, ``month``
+        for monthly, ``hourofyear`` for sub-daily.
+    verbose, quiet
+        Logging verbosity overrides.
+
+    Returns
+    -------
+    xr.Dataset
+        ``extreme_events`` (boolean) and ``thresholds``. When given a Dataset,
+        its existing variables are kept.
+
+    Examples
+    --------
+    >>> import marEx
+    >>> anomalies = marEx.anomaly.compute(t2m)
+    >>> events = marEx.extremes.identify(anomalies, threshold_percentile=90)
+    """
+    if dask_chunks is None:
+        dask_chunks = {"time": 25}
+
+    if verbose is not None or quiet is not None:
+        configure_logging(verbose=verbose, quiet=quiet)
+
+    if isinstance(data, xr.Dataset):
+        if "dat_anomaly" not in data.data_vars:
+            raise create_data_validation_error(
+                "Dataset has no 'dat_anomaly' variable",
+                details="identify() accepts a DataArray of anomalies, or a Dataset carrying 'dat_anomaly'",
+                suggestions=[
+                    "Pass the anomaly DataArray directly, or",
+                    "Use the output of marEx.anomaly.compute()",
+                ],
+                data_info={"available_variables": list(data.data_vars)},
+            )
+        ds = data
+        anomalies = data.dat_anomaly
+    else:
+        anomalies = data
+        ds = xr.Dataset({"dat_anomaly": anomalies})
+
+    logger.info(f"Identifying extremes - method: {method}, percentile: {threshold_percentile}%")
+
+    dimensions, coordinates = _infer_dims_coords(anomalies, dimensions, coordinates)
+
+    # Resolve the dimension contract (see marEx.anomaly.compute for the rationale).
+    dims = resolve_dims(anomalies, dimensions, coordinates)
+    if dims.extra:
+        logger.info(f"Extra (non-horizontal) dimensions detected and carried through: {list(dims.extra)}")
+
+    # NOT resolved here. `identify_extremes` resolves it inside the seasonal branch and
+    # `_identify_extremes_seasonal` resolves it again for its own use; both are cheap and
+    # deterministic from the same coordinate. Resolving eagerly would run `infer_cycle`
+    # -- which raises on a mixed-cadence axis -- on the `global_percentile` path, which
+    # needs no within-year cycle and must keep working there.
+
+    staging_dir = create_staging_dir(scratch_dir) if compute_mode == "streaming" and scratch_dir else None
+    materialiser = Materialiser(compute_mode, staging_dir)
+
+    with split_large_chunks():
+        extremes, thresholds, (used_precision, used_max_anomaly) = _extremes_core(
+            anomalies,
+            method,
+            threshold_percentile,
+            window_days,
+            window_spatial,
+            method_percentile,
+            precision,
+            max_anomaly,
+            n_bins,
+            dimensions,
+            coordinates,
+            materialiser,
+            cycle=cycle,
+            tail=tail,
+        )
+        ds = ds.copy()
+        ds["extreme_events"] = extremes
+        ds["thresholds"] = thresholds
+
+        # `method_percentile` is threaded rather than left to the helper's own default:
+        # the exact path ignores `window_spatial` entirely, so defaulting it there would
+        # record a 5x5 window the run never used.
+        effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds, method_percentile)
+        ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile, "tail": tail})
+        ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
+            method,
+            window_days,
+            effective_window_spatial,
+            # `cadence_index_name`, not `resolve_cycle`: it never raises, so wording an
+            # attribute cannot fail a `global_percentile` run on a mixed-cadence axis.
+            cadence_index_name(anomalies, coordinates["time"], cycle),
+            tail,
+        )
+        if method == "seasonal_percentile":
+            ds.attrs.update({"window_days": window_days})
+            if effective_window_spatial is not None:
+                ds.attrs.update({"window_spatial": effective_window_spatial})
+        # The RESOLVED geometry, not what the caller passed: with both left unset these
+        # were derived from the data, and the output has to say which bins produced it.
+        ds.attrs.update({"method_percentile": method_percentile, "precision": used_precision, "max_anomaly": used_max_anomaly})
+
+        ds = finalise_dataset(ds, dimensions, coordinates, dask_chunks, materialiser, staging_dir, extra_dims=dims.extra)
+
+    # After finalisation, so that in persist mode the count reads the materialised
+    # field rather than re-walking the graph that built it.
+    _log_extreme_summary(ds, materialiser)
+    return ds

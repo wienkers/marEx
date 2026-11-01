@@ -1,0 +1,456 @@
+"""
+Time-axis helpers shared across marEx.
+
+Provides calendar detection and :func:`add_decimal_year`, the continuous-time
+coordinate used by polynomial and harmonic detrending. This module is a leaf in
+the dependency graph and imports only third-party libraries and the package
+logger.
+"""
+
+from dataclasses import dataclass, replace
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
+
+# Get module logger
+logger = get_logger(__name__)
+
+# Number of day-of-year slots the daily cycle is resolved on. 366 rather than 365 so a
+# leap day is a group of its own rather than colliding with 1 March.
+_DAYS_PER_YEAR = 366
+
+# Days in a year of each fixed-length cftime calendar; every other calendar averages 365.25.
+_DAYS_PER_CALENDAR_YEAR = {"360_day": 360.0, "noleap": 365.0, "365_day": 365.0, "all_leap": 366.0, "366_day": 366.0}
+
+
+@dataclass(frozen=True)
+class SeasonalCycle:
+    """The repeating within-year axis a climatology or seasonal threshold is resolved on.
+
+    For daily data the axis is ``dayofyear`` with 366 slots. Monthly and sub-daily
+    series use the same code paths with a ``month`` or ``hourofyear`` axis.
+
+    Attributes
+    ----------
+    index_name : str
+        Name of the cycle dimension/coordinate: ``"dayofyear"``, ``"month"`` or
+        ``"hourofyear"``. It also labels the output dimension, and is
+        ``"dayofyear"`` for daily data.
+    length : int
+        Number of slots in one cycle (366 daily, 12 monthly, ``366 * steps_per_day``
+        sub-daily).
+    step_days : float
+        Median spacing of the time axis, in days. ``1.0`` for daily data.
+    """
+
+    index_name: str
+    length: int
+    step_days: float
+
+    @property
+    def labels(self) -> np.ndarray:
+        """1-based cycle labels, ``[1, ..., length]`` (the ``expected_groups`` axis)."""
+        return np.arange(1, self.length + 1, dtype=np.int32)
+
+    @property
+    def is_daily(self) -> bool:
+        """Whether this cycle is the daily (``dayofyear``) index."""
+        return self.index_name == "dayofyear"
+
+    @property
+    def is_subdaily(self) -> bool:
+        """Whether this cycle is the sub-daily (``hourofyear``) index."""
+        return self.index_name == "hourofyear"
+
+    @property
+    def steps_per_day(self) -> int:
+        """Cycle slots per calendar day (1 for daily, 24 for hourly, 0 for monthly)."""
+        if self.is_subdaily:
+            return max(1, self.length // _DAYS_PER_YEAR)
+        return 1 if self.is_daily else 0
+
+    @property
+    def slot_days(self) -> float:
+        """Width of one cycle slot in days. :attr:`step_days` is the data cadence.
+
+        The two differ when the data is coarser than the cycle it is grouped on (5-day data
+        is grouped on the 366-slot ``dayofyear`` cycle, one slot per day). Operations along
+        the cycle axis itself (smoothing a climatology) count in slots.
+        """
+        if self.is_subdaily:
+            return 1.0 / self.steps_per_day
+        if self.is_daily:
+            return 1.0
+        return 365.25 / self.length
+
+    def index_of(self, time_coord: xr.DataArray) -> xr.DataArray:
+        """Map a time coordinate onto this cycle's 1-based index.
+
+        The returned DataArray is *named* :attr:`index_name`, because flox and
+        ``groupby`` take the output dimension's name from the grouper.
+        """
+        if self.index_name == "month":
+            index = time_coord.dt.month
+        elif self.index_name == "dayofyear":
+            index = time_coord.dt.dayofyear
+        else:
+            steps_per_day = self.steps_per_day
+            day_fraction = (time_coord.dt.hour * 3600 + time_coord.dt.minute * 60 + time_coord.dt.second) / 86400.0
+            within_day = np.floor(day_fraction * steps_per_day).astype(np.int32)
+            index = (time_coord.dt.dayofyear - 1) * steps_per_day + within_day + 1
+        return index.rename(self.index_name)
+
+    def steps_for_days(self, days: float, *, odd: bool = False, name: str = "window") -> int:
+        """Convert a physical duration in days into a whole number of cycle steps.
+
+        ``window_days`` and ``smooth_days`` are physical durations. On daily data the
+        conversion is the identity.
+
+        Parameters
+        ----------
+        days : float
+            Requested duration in days.
+        odd : bool, default False
+            Force the result odd, for a window symmetric about a centre step (the
+            seasonal-percentile window). The climatology smoothing and standardisation
+            windows accept an even step count.
+        name : str, default "window"
+            Parameter name used in the clamp warning.
+        """
+        step_days = self.step_days if self.step_days > 0 else 1.0
+        steps = int(round(days / step_days))
+        if odd and steps % 2 == 0:
+            steps += 1
+        steps = max(1, steps)
+        realised = steps * step_days
+        if abs(realised - days) > 0.5 * step_days:
+            logger.warning(
+                f"{name}={days} days cannot be represented on a {step_days:g}-day time axis: "
+                f"using {steps} step(s) = {realised:g} days. "
+                f"The realised {name} differs from the request by {abs(realised - days):g} days."
+            )
+        return steps
+
+    def window_steps(self, days: float, name: str = "window_days") -> int:
+        """:meth:`steps_for_days` with the result forced odd (symmetric windows)."""
+        return self.steps_for_days(days, odd=True, name=name)
+
+    def window_slots(self, days: float, calendar: str = "standard", name: str = "window_days") -> int:
+        """Count an odd window of ``days`` in cycle slots, for a window applied along the cycle axis.
+
+        The seasonal-percentile window pools neighbouring slots and is measured in
+        :attr:`slot_days`, so 11 days of 5-day data spans 11 ``dayofyear`` slots. Where a slot
+        is one step (daily, evenly sub-daily) this equals :meth:`window_steps`. A month is the
+        mean month of ``calendar`` (the time coordinate's ``.dt.calendar``), i.e. 30 days on a
+        360-day calendar, whatever the data's own cadence.
+        """
+        slot_days = self.slot_days
+        if self.index_name == "month":
+            slot_days = _DAYS_PER_CALENDAR_YEAR.get(calendar, 365.25) / self.length
+        return replace(self, step_days=slot_days).window_steps(days, name=name)
+
+
+#: The daily cycle -- marEx's historical, and still overwhelmingly common, resolution.
+DAILY_CYCLE = SeasonalCycle("dayofyear", _DAYS_PER_YEAR, 1.0)
+
+
+def _step_days(time_coord: xr.DataArray) -> Optional[np.ndarray]:
+    """Spacings of ``time_coord`` in days, or ``None`` if they cannot be derived.
+
+    ``NaT`` spacings are DROPPED, and the masking has to happen while the array is still
+    ``timedelta64``. ``NaT`` is the ``int64`` minimum, and nothing about the cast to float
+    turns it into a ``NaN``: ``np.timedelta64("NaT").astype(np.float64) / 86400`` is
+    ``-1.0675e14``, a finite, plainly negative number that then survives every ``isfinite``
+    guard downstream and reads as sub-daily. So a single missing timestamp used to answer
+    "finer than daily" for a daily axis. Masking on ``np.isnat`` before the cast lets the
+    axis be described by the spacings it does have; an axis with nothing left is reported
+    as unmeasurable by the callers' own ``size == 0`` branches, which is the documented
+    daily fallback. ``np.nanmedian`` would NOT fix this -- there is no NaN to ignore.
+    """
+    values = np.asarray(time_coord.values).reshape(-1)
+    if values.size < 2:
+        return None
+    if np.issubdtype(values.dtype, np.datetime64):
+        diffs = np.diff(values.astype("datetime64[ns]")).astype("timedelta64[s]")
+        return diffs[~np.isnat(diffs)].astype(np.float64) / 86400.0
+    if values.dtype == np.dtype("O"):
+        try:
+            return np.array([(b - a).total_seconds() for a, b in zip(values[:-1], values[1:])], dtype=np.float64) / 86400.0
+        except (AttributeError, TypeError):
+            return None
+    return None
+
+
+def infer_cycle(time_coord: xr.DataArray, dim: str = "time") -> SeasonalCycle:
+    """Infer the :class:`SeasonalCycle` a time axis should be resolved on.
+
+    ``step_days >= 28`` gives a monthly cycle, ``>= 1`` the daily cycle, and anything
+    finer a sub-daily ``hourofyear`` cycle of ``366 * round(1 / step_days)`` slots.
+
+    The cadence is the median spacing, so a single gap (a missing file, a concat seam)
+    leaves the cycle unchanged. A few ``NaT`` timestamps among many leave it unchanged
+    too, and give the same result as the axis with those timestamps dropped. An
+    irregular axis, one whose interquartile spread of spacings exceeds half the median,
+    raises :class:`~marEx.exceptions.ConfigurationError`. Pass ``cycle=`` to override
+    the inference. An axis too short to measure (fewer than two timesteps), or one that
+    is not datetime-like, falls back to :data:`DAILY_CYCLE`.
+
+    **Sub-daily ceiling.** The histogram path labels its groups as ``uint16``, so a
+    cycle is limited to 65535 slots. This is exceeded at ``steps_per_day > 179``, i.e.
+    finer than roughly 8-minute data. Hourly (8784 slots) and 15-minute (35136) data are within the
+    limit. Exceeding it raises :class:`~marEx.exceptions.ConfigurationError`.
+    """
+    diffs = _step_days(time_coord)
+    if diffs is None or diffs.size == 0:
+        logger.debug("Cannot infer time cadence from '%s'; assuming daily.", dim)
+        return DAILY_CYCLE
+
+    step_days = float(np.median(diffs))
+    if step_days <= 0:
+        raise ConfigurationError(
+            f"Time axis '{dim}' has a non-positive median spacing ({step_days} days)",
+            details="marEx needs a monotonically increasing time axis to infer the seasonal cycle.",
+            suggestions=[f"Sort the data along '{dim}'", "Remove duplicate timesteps"],
+            context={"median_step_days": step_days},
+        )
+
+    # Irregularity guard. The IQR is used rather than the range so that a handful of
+    # gaps (leap-day omissions, a missing month, a concat seam) do not trip it, while a
+    # genuinely mixed-cadence axis does: gaps live in the tails and leave the middle
+    # half untouched, whereas two interleaved cadences push the quartiles apart.
+    #
+    # The threshold is HALF the median, not the median. A plain `iqr > median` test is
+    # very nearly unfireable: for a two-valued spacing distribution the IQR is bounded
+    # by `max - min`, which is below the median whenever the larger spacing holds at
+    # least half the mass -- so the case this guard exists for (a daily series concatenated
+    # with a monthly one) slips straight through. Half the median fires on that while
+    # leaving every regular axis far outside: a monthly axis, the most ragged regular
+    # case, has spacings of 28-31 days, an IQR of ~1 against a threshold of ~15.
+    if diffs.size >= 4:
+        q75, q25 = np.percentile(diffs, [75, 25])
+        iqr = float(q75 - q25)
+        if iqr > 0.5 * step_days:
+            raise ConfigurationError(
+                f"Time axis '{dim}' is too irregular to infer a seasonal cycle",
+                details=(
+                    f"The interquartile spread of the timestep spacings ({iqr:g} days) exceeds half the "
+                    f"median spacing ({step_days:g} days), so no single cadence describes the axis."
+                ),
+                suggestions=[
+                    "Resample the data onto a regular time axis",
+                    "Pass an explicit cycle=marEx.SeasonalCycle(...) to override the inference",
+                ],
+                context={"median_step_days": step_days, "iqr_step_days": iqr},
+            )
+
+    if step_days >= 28:
+        cycle = SeasonalCycle("month", 12, step_days)
+    elif step_days >= 1:
+        cycle = SeasonalCycle("dayofyear", _DAYS_PER_YEAR, step_days)
+    else:
+        steps_per_day = max(1, int(round(1.0 / step_days)))
+        if _DAYS_PER_YEAR * steps_per_day > np.iinfo(np.uint16).max:
+            raise ConfigurationError(
+                f"Time axis '{dim}' is too finely resolved for a seasonal cycle",
+                details=(
+                    f"A median spacing of {step_days:g} days is {steps_per_day} steps per day, giving a cycle of "
+                    f"{_DAYS_PER_YEAR * steps_per_day} slots. The histogram path labels its groups as uint16, so "
+                    f"cycles above {np.iinfo(np.uint16).max} slots would wrap silently."
+                ),
+                suggestions=[
+                    "Coarsen the time axis before calling marEx (e.g. resample to hourly)",
+                    "Use method_extreme='global_percentile', which needs no within-year cycle",
+                ],
+                context={"step_days": step_days, "steps_per_day": steps_per_day},
+            )
+        cycle = SeasonalCycle("hourofyear", _DAYS_PER_YEAR * steps_per_day, step_days)
+
+    logger.debug(
+        "Inferred seasonal cycle '%s' (%d slots) from a median spacing of %g days.",
+        cycle.index_name,
+        cycle.length,
+        step_days,
+    )
+    return cycle
+
+
+def _median_step_days(time_coord: xr.DataArray) -> float:
+    """Median spacing of a time axis in days, defaulting to 1.0 when unmeasurable."""
+    diffs = _step_days(time_coord)
+    if diffs is None or diffs.size == 0:
+        return 1.0
+    return float(np.median(diffs))
+
+
+def is_subdaily_axis(da: xr.DataArray, coord_name: str, cycle: Optional[SeasonalCycle] = None) -> bool:
+    """Whether a time axis is finer than daily, without demanding a full cycle.
+
+    Deliberately does **not** go through :func:`infer_cycle`: that raises on a
+    mixed-cadence axis, and a caller only asking "is this sub-daily?" must not be made
+    to fail on an axis it could otherwise process. An axis too short or too irregular to
+    describe is reported as not sub-daily -- the conservative answer, since the guards
+    built on this reject work rather than accepting it.
+    """
+    if cycle is not None:
+        return cycle.is_subdaily
+    return bool(_median_step_days(da[coord_name]) < 1.0)
+
+
+def cadence_index_name(da: xr.DataArray, coord_name: str, cycle: Optional[SeasonalCycle] = None) -> str:
+    """Name the within-year index an axis groups on, for a coordinate that exists.
+
+    Same reasoning as :func:`is_subdaily_axis`, and for the same reason it does not go
+    through :func:`infer_cycle`: this exists to WORD an output attribute, and metadata
+    wording must never be the thing that fails a run which would otherwise succeed.
+    ``global_percentile`` uses no within-year cycle at all, so it can be handed an axis
+    ``infer_cycle`` would reject.
+
+    The guarantee is bounded, and the bound is the honest one: **it does not raise for a
+    coordinate that exists on** ``da``. A missing ``coord_name`` still raises ``KeyError``,
+    because that is a caller bug rather than a data condition, and by the time it could
+    bite here every reduction upstream has already indexed the same coordinate.
+
+    An axis whose spacing is unmeasurable -- one step, or a non-positive median, which is
+    what a DECREASING axis produces -- is reported as daily. That is what every
+    daily-only run recorded, and it is the conservative answer: :func:`infer_cycle`
+    rejects a non-positive median outright, so guessing a cycle from one would be worse
+    than saying the thing the code has always said.
+
+    Returns one of ``"month"``, ``"dayofyear"`` or ``"hourofyear"``.
+    """
+    if cycle is not None:
+        return cycle.index_name
+    step_days = _median_step_days(da[coord_name])
+    # A non-positive median is now only what a DECREASING axis produces: `_step_days`
+    # masks the `NaT` spacings that used to land here as -1.07e14. The guard stays because
+    # that case is real and unmasked -- an axis sorted the wrong way has genuine negative
+    # spacings -- and because wording an output must not be the thing that fails a run.
+    if not np.isfinite(step_days) or step_days <= 0:
+        return "dayofyear"
+    if step_days >= 28:
+        return "month"
+    if step_days >= 1:
+        return "dayofyear"
+    return "hourofyear"
+
+
+def resolve_cycle(da: xr.DataArray, coord_name: str, cycle: Optional[SeasonalCycle] = None) -> SeasonalCycle:
+    """Return ``cycle`` if the caller supplied one, otherwise infer it from ``da``."""
+    if cycle is not None:
+        return cycle
+    return infer_cycle(da[coord_name], coord_name)
+
+
+def _is_cftime_coord(time_coord: xr.DataArray) -> bool:
+    """Return True if ``time_coord`` holds cftime datetime objects.
+
+    Only genuine cftime coordinates (object dtype containing ``cftime.datetime``
+    instances) take the calendar-aware branch in :func:`add_decimal_year`; plain
+    numeric or numpy-datetime64 coordinates fall through to the legacy path.
+    """
+    values = np.asarray(time_coord.values)
+    if values.dtype != np.dtype("O") or values.size == 0:
+        return False
+    try:
+        import cftime
+    except ImportError:  # pragma: no cover - cftime ships with netcdf4
+        return False
+    return isinstance(values.reshape(-1)[0], cftime.datetime)
+
+
+def add_decimal_year(
+    da: xr.DataArray, dim: str = "time", coord: Optional[str] = None, subdaily: Optional[bool] = None
+) -> xr.DataArray:
+    """
+    Add decimal year coordinate to DataArray for trend analysis.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data with datetime coordinate
+    dim : str, optional
+        Name of the time dimension
+    coord : str, optional
+        Name of the time coordinate (if different from dimension name)
+    subdaily : bool, optional
+        Whether to resolve the within-year fraction to sub-day precision. ``None``
+        (the default) infers it: sub-day resolution is used only when the axis is
+        finer than daily.
+
+        **This conditional is load-bearing and must not be made unconditional.**
+        Timestamps are routinely stamped away from midnight (marEx's own gridded
+        fixture sits at 12:00:00 and the unstructured one at 23:59:59), so adding a
+        sub-day term on daily data shifts ``decimal_year`` by up to a day, changes
+        the harmonic design matrix, and moves every detrended result.
+
+    Returns
+    -------
+    xarray.DataArray
+        Input data with added 'decimal_year' coordinate
+    """
+    # Use coordinate name if provided, otherwise use dimension name
+    coord_name = coord if coord is not None else dim
+    time_coord = da[coord_name]
+
+    # A NaT is rejected HERE, and only here, because this is the one function that cannot
+    # proceed: the legacy branch below builds `time.year.astype(str) + "-01-01"`, and a
+    # NaT makes `.year` float, so the string is "2000.0-01-01" and pandas raises
+    # `DateParseError` -- an unhandled third-party exception with no suggestion attached.
+    # `infer_cycle` deliberately does NOT reject: its cadence is a median and it gives the
+    # right answer on a NaT-bearing axis. `pd.isna` is used rather than `np.isnat` so the
+    # object-dtype (cftime) branch is covered too; a cftime array can carry a `pd.NaT`.
+    if bool(pd.isna(np.asarray(time_coord.values).reshape(-1)).any()):
+        n_nat = int(pd.isna(np.asarray(time_coord.values).reshape(-1)).sum())
+        raise ConfigurationError(
+            f"Time axis '{coord_name}' contains {n_nat} NaT timestamp(s)",
+            details="A decimal year cannot be derived for a missing timestamp.",
+            suggestions=[
+                f"Drop the missing timestamps, e.g. da.sel({{'{coord_name}': da['{coord_name}'].notnull()}})",
+                f"Reindex '{coord_name}' onto a complete regular axis",
+            ],
+            context={"n_nat": n_nat, "n_time": int(np.asarray(time_coord.values).size)},
+        )
+
+    if subdaily is None:
+        diffs = _step_days(time_coord)
+        subdaily = bool(diffs is not None and diffs.size > 0 and float(np.median(diffs)) < 1.0)
+
+    if _is_cftime_coord(time_coord):
+        # cftime / non-standard calendars (noleap, 360_day, ...): pd.to_datetime
+        # cannot parse these. Derive the decimal year from day-of-year directly,
+        # using a calendar-aware days-in-year so the fraction is correct. Matches the
+        # legacy path's definition: year + (dayofyear - 1) / days_in_year.
+        year = time_coord.dt.year
+        dayofyear = time_coord.dt.dayofyear
+        fixed_length = {"360_day": 360, "noleap": 365, "365_day": 365, "all_leap": 366, "366_day": 366}
+        calendar = getattr(time_coord.dt, "calendar", "standard")
+        if calendar in fixed_length:
+            days_in_year = xr.full_like(year, fixed_length[calendar], dtype=float)
+        else:
+            # Calendars with real leap years (standard/gregorian/julian/proleptic_gregorian)
+            days_in_year = 365.0 + time_coord.dt.is_leap_year.astype(float)
+        # Sub-day term threaded through this branch identically to the datetime64 one:
+        # a calendar-dependent split here would make the anomaly depend on the calendar
+        # attribute rather than on the cadence.
+        elapsed = dayofyear - 1
+        if subdaily:
+            elapsed = elapsed + (time_coord.dt.hour * 3600 + time_coord.dt.minute * 60 + time_coord.dt.second) / 86400.0
+        decimal_year = np.asarray((year + elapsed / days_in_year).values)
+    else:
+        # Legacy path (unchanged; bit-identical for datetime64 and numeric coordinates).
+        time = pd.to_datetime(time_coord)
+        start_of_year = pd.to_datetime(time.year.astype(str) + "-01-01")
+        start_of_next_year = pd.to_datetime((time.year + 1).astype(str) + "-01-01")
+        if subdaily:
+            year_elapsed = (time - start_of_year).total_seconds() / 86400.0
+        else:
+            year_elapsed = (time - start_of_year).days
+        year_duration = (start_of_next_year - start_of_year).days
+        decimal_year = time.year + year_elapsed / year_duration
+
+    return da.assign_coords(decimal_year=(dim, decimal_year))

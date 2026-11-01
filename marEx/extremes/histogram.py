@@ -1,0 +1,1513 @@
+"""
+Histogram-based quantile estimation kernels for extreme detection.
+
+Provides approximate quantile computation from precomputed histograms, used by
+the ``approximate`` percentile branches of both the global and seasonal extreme
+methods. Contains a pure NumPy stride-tricks kernel plus 1-D and 2-D
+(day-of-year resolved) histogram-quantile drivers. This module is a leaf in the
+detect package dependency graph (it imports only package-level helpers and
+logging).
+"""
+
+import warnings
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
+
+import dask
+import dask.array
+import flox.xarray
+import numpy as np
+import xarray as xr
+from numba import njit
+from numpy.lib.stride_tricks import sliding_window_view
+from numpy.typing import NDArray
+from xhistogram.xarray import histogram
+
+from ..core.compute_mode import Materialiser
+from ..core.dimensions import check_tile_fit, extra_dim_chunks, horizontal_dims, spatial_dims
+from ..core.time_axis import DAILY_CYCLE, SeasonalCycle
+from ..exceptions import ConfigurationError
+from ..logging_config import get_logger
+
+# Get module logger
+logger = get_logger(__name__)
+
+# Target number of array elements per histogram task. Tiling the spatial dimensions
+# to roughly this many elements keeps each task's working set bounded (~200 MB for
+# float32) regardless of field resolution or input chunking, which is what allows the
+# histogram-quantile path to run at full resolution without exhausting worker memory.
+_HISTOGRAM_TASK_ELEMENTS = 50_000_000
+
+# Most cells one slab-engine task holds. The slab kernel works one cell at a time (~1 ms per
+# cell-year on a daily record), so the element budget alone made tasks of 100k+ cells: 4 tasks on
+# a 0.5 M-cell mesh, most of a node idle for most of the stage. A fixed cap keeps the task count
+# linear in the mesh and bounds a task's wall, whatever cluster later runs the graph.
+_SLAB_TILE_CELLS = 4096
+
+
+def _symmetric_bin_edges(precision: float, max_anomaly: float, dtype: type = np.float64) -> NDArray[np.floating]:
+    """Finite histogram bins, symmetric about zero, resolving BOTH tails.
+
+    The legacy binning was ``[-inf, -precision, 0, precision, ..., max_anomaly]``:
+    a single bin holding every negative value, which makes a low-tail percentile
+    unresolvable by construction. These edges keep the positive half unchanged and
+    mirror it, so an upper-tail threshold moves only where the old scheme's one
+    negative bin actually mattered.
+
+    Two construction details are load-bearing:
+
+    * **The positive half is built from the legacy ``arange`` expression**, not from
+      ``precision * arange(-n, n + 1)``. ``arange`` evaluates ``start + i * step``,
+      and ``-precision + i * precision`` is not the same float as
+      ``precision * (i - 1)``: measured, the two differ by up to 8.9e-16 in float64
+      and 4.8e-7 in float32. A float32 edge shifted by 5e-7 moves a float32
+      threshold by a ULP, which flips ``>=`` at cells sitting exactly on it. Keeping
+      the old edges bit-for-bit is what lets the symmetric-bin change be attributed
+      to the bins alone.
+    * **No trailing ``+inf``.** Both drivers derive their end clip as the midpoint of
+      the outermost bin, so an infinite edge would make that clip a no-op, let
+      out-of-range samples land in an infinitely wide bin, and give the outermost
+      bin an infinite centre. The correct symmetrisation drops the LEADING ``-inf``
+      and keeps finite edges at both ends.
+    """
+    legacy = np.arange(-precision, max_anomaly + precision, precision, dtype=dtype)
+    positive = legacy[1:]  # 0, precision, ..., max_anomaly
+    negative = -positive[:0:-1]  # -max_anomaly, ..., -precision
+    return np.concatenate([negative, positive]).astype(dtype)
+
+
+def _zero_bin_edges(bin_edges: NDArray[np.floating]) -> tuple:
+    """Return the guard rails: the outer edges of the bins flanking zero.
+
+    A cell whose anomaly is constant at zero must never be "extreme", in either
+    tail, so a threshold is clamped away from zero by one bin. Expressed as an
+    edge lookup rather than as ``+/- precision`` so that it is **exactly** the value
+    the legacy code used: ``bin_edges[3]`` on the old asymmetric edges is the upper
+    edge of the bin containing zero, which is what ``searchsorted`` returns here,
+    and on symmetric edges it is the same ``arange`` element. That equality is what
+    makes the clamped cells keep their clamped VALUES across the bin change, not
+    just their identity as a set.
+    """
+    k = int(np.searchsorted(bin_edges, 0.0, side="right"))
+    upper = bin_edges[min(k, len(bin_edges) - 1)]
+    lower = bin_edges[max(k - 2, 0)]
+    return float(upper), float(lower)
+
+
+def _clamp_exact_threshold(threshold: xr.DataArray, tail: Literal["upper", "lower"]) -> xr.DataArray:
+    """Keep an exact threshold strictly on its own side of zero, so a constant anomaly never flags.
+
+    The exact path's counterpart of the approximate path's guard rail.
+    A cell whose anomaly is (near-)constant -- sea ice -- has an exact threshold EQUAL to that
+    constant, and the inclusive comparison (``>=`` / ``<=``) then flags every tie: 9.8 % of all
+    cell-days at L1 instead of ~3 %, almost all poleward of 60 degrees. The approximate path never
+    does this because it clamps a threshold on the zero bin pair to one bin width. The exact
+    path has no bins, so the guard is the smallest NORMAL float32 past zero: an upper threshold
+    ``<= 0`` becomes ``+finfo(float32).tiny`` (1.18e-38), a lower one ``>= 0`` becomes its
+    negative. An anomaly at or below zero is then never an upper-tail extreme (and mirrored),
+    and every threshold already strictly past zero is untouched. Normal, not subnormal
+    (``nextafter``), so the guard survives a flush-to-zero/denormals-are-zero process (a library
+    built with fast-math sets that process-wide) and a float64 -> float32 cast of the output.
+
+    Lazy (a ``where``), with no ``.any()`` probe and no warning: on an unstaged exact threshold
+    that probe would re-run the whole reduction. NaN thresholds (land) stay NaN.
+    """
+    tiny = np.asarray(np.finfo(np.float32).tiny, dtype=threshold.dtype)
+    if tail == "upper":
+        keep = (threshold > 0) | threshold.isnull()
+        guard = tiny
+    else:
+        keep = (threshold < 0) | threshold.isnull()
+        guard = -tiny
+    return threshold.where(keep, guard)
+
+
+class _RangeSaturated(Exception):
+    """A threshold reached the end bin of an ESTIMATED range: regrow the bins and recompute.
+
+    Internal control flow between :func:`_apply_threshold_bounds` and
+    ``marEx.extremes.base``'s dispatch; never reaches a user.
+    """
+
+    def __init__(self, reached: float):
+        super().__init__(f"threshold reached the estimated histogram range ({reached:.4g})")
+        self.reached = reached
+
+
+def _end_clips(bin_edges: NDArray[np.floating]) -> tuple:
+    """Midpoints of the outermost bins, used to clip out-of-range samples inwards.
+
+    Values beyond the outermost edge are otherwise dropped by the histogram, which
+    renormalises the CDF over a truncated total and biases the threshold inwards.
+    The bottom clip is ``-inf`` (a no-op) on the legacy edges, so it costs nothing
+    there and is only real once the bottom of the range is finite.
+    """
+    bottom = (bin_edges[0] + bin_edges[1]) / 2
+    top = (bin_edges[-2] + bin_edges[-1]) / 2
+    return bottom, top
+
+
+def _apply_threshold_bounds(
+    threshold: xr.DataArray,
+    bin_edges: NDArray[np.floating],
+    max_anomaly: float,
+    tail: Literal["upper", "lower"],
+    guard_notnull: bool,
+    clamp: Optional[Callable[[xr.DataArray], xr.DataArray]] = None,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
+    saturation_bounds: Optional[Tuple[float, float]] = None,
+) -> xr.DataArray:
+    """Handle out-of-range thresholds by ``range_mode``; warn on and clamp them off the zero guard rail.
+
+    A threshold in the outermost bin raises when the caller pinned the range (``'pinned'``),
+    raises :class:`_RangeSaturated` for the caller to regrow the bins when the range was a
+    per-cell estimate below the data's extreme (``'estimated'``), and only warns when the
+    range is the data's own extreme on the tail's side (``'data'``), where nothing was clipped.
+
+    ``saturation_bounds`` is ``(upper, lower)``: past it a threshold was interpolated from the
+    outermost bin, the one holding clipped samples. It defaults to the inner edges of the
+    outermost bins, which is right for the 1-D path (it interpolates between EDGES). The 2-D
+    path interpolates between bin CENTRES, so a crossing in the outermost bin can land up to
+    half a bin inside its inner edge; it passes the second and second-to-last centres, and
+    only the ``'estimated'`` check uses them. Below that bound every
+    cumulative count the threshold reads is the same integer whatever the range.
+
+    Both bounds are sign-aware. For ``tail='upper'`` the threshold may not exceed
+    the top bin (the range check) nor fall below ``+one bin`` (the guard); for
+    ``tail='lower'`` both are mirrored. The two checks keep their original wording
+    per direction, so the upper-tail messages -- the ones existing tests match on --
+    are unchanged.
+
+    One fused ``dask.compute`` for all four reductions, as before: they share their
+    upstream, so computing them together costs a single pass instead of one
+    traversal per predicate over a graph that re-executes the whole anomaly
+    whenever it is not pinned.
+
+    ``guard_notnull`` reproduces a pre-existing difference between the two drivers:
+    the 1-D path ANDs its predicates with ``notnull()`` and the 2-D path does not.
+    ``clamp`` lets the 1-D path pin the clamped result, which only it does.
+    """
+    if tail == "upper":
+        range_bound, guard = float(bin_edges[-2]), _zero_bin_edges(bin_edges)[0]
+    else:
+        range_bound, guard = float(bin_edges[1]), _zero_bin_edges(bin_edges)[1]
+
+    # `out_of_range` is "past the end of the binned range"; `on_guard` is "inside the
+    # bin pair flanking zero". Which comparison is which flips with the tail.
+    if tail == "upper":
+        out_of_range = threshold > range_bound
+        on_guard = threshold < guard
+    else:
+        out_of_range = threshold < range_bound
+        on_guard = threshold > guard
+    if guard_notnull:
+        out_of_range = out_of_range & threshold.notnull()
+        on_guard = on_guard & threshold.notnull()
+
+    reductions = [out_of_range.any(), on_guard.any(), threshold.max(), threshold.min(), on_guard.sum(), threshold.notnull().sum()]
+    if range_mode == "estimated":
+        upper_bound, lower_bound = saturation_bounds if saturation_bounds is not None else (bin_edges[-2], bin_edges[1])
+        saturated = threshold > float(upper_bound) if tail == "upper" else threshold < float(lower_bound)
+        reductions.append((saturated & threshold.notnull()).any())
+    computed = dask.compute(*reductions)
+    any_range, any_guard, thr_max, thr_min, n_guard, n_valid = computed[:6]
+
+    # A threshold inside the outermost bin is not a threshold when samples were clipped there:
+    # every sample beyond the range sits in that bin, so the true quantile could be anywhere
+    # past it. With a caller-pinned range, fail rather than return a saturated field that looks
+    # plausible; with an estimated range, hand back to the caller to regrow it.
+    # When the range IS the data's own extreme on the tail's side, nothing on that side was
+    # clipped; reaching the outermost bin then means too few samples per window resolve this
+    # percentile in the cell holding the extreme, which is worth saying but not fatal.
+    if range_mode == "estimated" and bool(computed[6]):
+        raise _RangeSaturated(float(thr_max) if tail == "upper" else float(thr_min))
+    if bool(any_range):
+        if tail == "upper":
+            reached = f"max={float(thr_max):.4f} > {range_bound:.4f}, inside the top histogram bin"
+            percentile_remedy = "Use a lower threshold_percentile"
+            phrase = "exceed"
+        else:
+            reached = f"min={float(thr_min):.4f} < {range_bound:.4f}, inside the bottom histogram bin"
+            percentile_remedy = "Use a higher threshold_percentile"
+            phrase = "below"
+        if range_mode == "pinned":
+            raise ConfigurationError(
+                f"Quantile values {phrase} expected range: {reached} at max_anomaly={max_anomaly:.4g}",
+                details=(
+                    "The threshold saturated at the edge of the binned range you set, so it is set by "
+                    "max_anomaly, not by the data. Samples beyond the range are clipped into the outermost bin."
+                ),
+                suggestions=[
+                    "Increase max_anomaly (or precision), or omit both so the range is derived from the data",
+                    percentile_remedy,
+                    "Use method_percentile='exact', which builds no histogram",
+                ],
+                context={"max_anomaly": max_anomaly, "range_bound": range_bound, "tail": tail},
+            )
+        warnings.warn(
+            f"Quantile values {phrase} expected range: {reached} of the range derived from the data "
+            f"(max_anomaly={max_anomaly:.4g}, the data's own extreme on this side). Nothing was clipped: the "
+            "window holding the most extreme sample has too few samples to resolve this percentile. "
+            f"{percentile_remedy}, a longer series or window (window_days, window_spatial), or "
+            "method_percentile='exact'.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if bool(any_guard):
+        # Expected wherever the anomaly is (near-)constant, e.g. sea ice held at the freezing
+        # point: the percentile of a flat-zero series is zero. Clamping is the designed outcome,
+        # so this is reported, not warned about.
+        extreme = f"min={float(thr_min):.4f}" if tail == "upper" else f"max={float(thr_max):.4f}"
+        logger.info(
+            f"{int(n_guard)} of {int(n_valid)} threshold values ({extreme}) lie on the wrong side of zero anomaly, "
+            f"typically where the anomaly is constant (e.g. sea ice at the freezing point). They are set to "
+            f"{guard:.4f}, one histogram bin from zero, so a constant anomaly is never extreme."
+        )
+        # Clamp onto the guard rail so a constant-zero anomaly is never "extreme".
+        threshold = threshold.where(~on_guard, guard)
+        if clamp is not None:
+            threshold = clamp(threshold)
+
+    return threshold
+
+
+def _chunk_spatial_for_histogram(
+    da: xr.DataArray,
+    dim: str,
+    target_elements: int = _HISTOGRAM_TASK_ELEMENTS,
+    output_elements_per_cell: int = 1,
+    horizontal: Optional[Sequence[str]] = None,
+) -> xr.DataArray:
+    """Tile the non-reduced dimensions of ``da`` for memory-safe histogram reduction.
+
+    The histogram-quantile kernels reduce over ``dim`` (typically time), which must stay
+    in a single chunk per task. The remaining (spatial) dimensions are tiled so that the
+    per-task element count stays near ``target_elements`` -- independent of the caller's
+    chunking or the field resolution. This is a pure rechunk: every spatial cell's reduced
+    axis lies wholly within one tile, so it changes only task granularity, never values.
+
+    Both sides of the reduction are budgeted. A task reads ``ntime x tile_area`` elements
+    and writes ``output_elements_per_cell x tile_area``; the tile is sized against whichever
+    is larger, so neither exceeds ``target_elements``.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input array to be reduced along ``dim``.
+    dim : str
+        Name of the dimension that is reduced (kept unchunked).
+    target_elements : int, optional
+        Approximate number of array elements per spatial tile.
+    output_elements_per_cell : int, optional
+        Elements the reduction produces per spatial cell -- ``n_bins`` for a histogram,
+        ``366`` for a per-day-of-year percentile. Defaults to 1 (output no larger than the
+        input), which reproduces the previous, input-only budget.
+    horizontal : sequence of str, optional
+        The horizontal dimension names. When given, every other non-reduced dim (depth,
+        level) is chunked at 1 and the budget's root is taken over the horizontal dims
+        only, so each level gets exactly its 2-D slice's tiling at any extra-dim length
+        -- the layout ``_histogram_tile_chunks`` uses. Spreading the budget over
+        depth too shrank the horizontal side to a cube root: a depth-1 field on a
+        720x1440 grid got 19x19 tiles (2888 tasks) where its 2-D slice got 85x85 (153).
+        Once a whole horizontal slice fits, the leftover budget stacks levels
+        (:func:`~marEx.core.dimensions.extra_dim_chunks`). ``None``, or a
+        mapping missing one of ``da``'s horizontal dims, keeps the old every-dim root.
+
+    Returns
+    -------
+    xarray.DataArray
+        ``da`` rechunked with ``dim`` unchunked and the spatial dimensions tiled.
+    """
+    spatial_dims = [d for d in da.dims if d != dim]
+    if not spatial_dims:
+        return da.chunk({dim: -1})
+
+    ntime = max(int(da.sizes[dim]), 1)
+
+    # Budget against BOTH the array consumed and the array produced.
+    #
+    # The reduction reads an `ntime x tile_area` slab and writes an
+    # `output_elements_per_cell x tile_area` result (n_bins for the 1-D histogram path, 366
+    # for the per-day-of-year percentile path). Sizing on `ntime` alone bounds only the
+    # slab, and because `tile_area = target // ntime` the OUTPUT is then
+    # `target * output_elements_per_cell / ntime` elements -- over budget exactly when
+    # `ntime < output_elements_per_cell`, and growing without bound as the series gets
+    # shorter. That is backwards: a shorter run would silently allocate a bigger task.
+    #
+    # Taking the max bounds both sides by `target_elements`. For the long series this path
+    # is normally used on (ntime >> n_bins) the tiling is unchanged.
+    #
+    # Pure rechunk: every cell's reduced axis stays wholly inside one tile, so this changes
+    # task granularity only, never values.
+    divisor = max(ntime, max(1, int(output_elements_per_cell)))
+    tile_area = max(1, target_elements // divisor)
+    # Per level only when EVERY horizontal dim is on `da`: a mapping that names just one
+    # of them would give that one a 1-D root side and chunk the other at 1 (720 x 1).
+    per_level = bool(horizontal) and set(horizontal) <= set(spatial_dims)
+    tiled = [d for d in spatial_dims if d in horizontal] if per_level else spatial_dims
+    side = max(1, int(round(tile_area ** (1.0 / len(tiled)))))
+
+    chunks = {d: min(int(da.sizes[d]), side) for d in tiled}
+    if per_level:
+        chunks.update(
+            extra_dim_chunks(
+                da.sizes,
+                [d for d in spatial_dims if d not in tiled],
+                horizontal_tile_cells=int(np.prod([chunks[d] for d in tiled])),
+                horizontal_cells=int(np.prod([da.sizes[d] for d in tiled])),
+                budget_cells=tile_area,
+            )
+        )
+    chunks[dim] = -1
+    # No spatial-window floor on this path, so the only way the budget goes unmet is a
+    # single cell costing more than the whole of it -- which a caller-supplied
+    # `target_elements` can produce even though the default never does.
+    check_tile_fit(
+        chunks,
+        spatial_dims,
+        divisor,
+        target_elements,
+        stage="Histogram spatial tiling",
+        itemsize=da.dtype.itemsize,
+    )
+    return da.chunk(chunks)
+
+
+def _histogram_tile_chunks(
+    da: xr.DataArray,
+    dimensions: Dict[str, str],
+    n_bins: int,
+    window_spatial: Optional[int],
+    cycle_length: int = 366,
+) -> Dict[str, int]:
+    """Spatial tiling for the day-of-year resolved histogram, plus a whole time axis.
+
+    Sized from the histogram OUTPUT budget rather than a hardcoded 16 cells. Each
+    spatial cell yields a ``(cycle_length, n_bins)`` histogram -- 366 slots on daily
+    data, 12 monthly, ``366 * steps_per_day`` sub-daily -- so the cells per tile are
+    capped to keep the per-task output near the element budget. On a gridded field
+    this reproduces the previous ~16x16 tiling; on an unstructured (x-only) grid it
+    uses ~256 cells/chunk instead of 16, avoiding the task-graph explosion behind
+    the "seasonal scheduler OOM on unstructured" failure.
+
+    Both sides of the reduction are budgeted, as ``_chunk_spatial_for_histogram``
+    does. The output side is ``cycle_length x n_bins`` per cell; the INPUT side is ``ntime``
+    per cell, because time is held whole. Sizing on the output alone would leave the
+    slab a task reads growing with the length of the series. Taking the max makes the
+    per-task working set constant in the spatial extent and in the number of
+    timesteps. For any realistic series this is a no-op: ``366 * n_bins`` is ~183k at
+    the default daily binning, so ``ntime`` only binds beyond ~500 years of daily data.
+    A sub-daily cycle multiplies the output side by ``steps_per_day``, which shrinks the
+    tile in proportion -- expensive, but bounded, which is the point.
+
+    Extra dims (depth, level) are chunked at 1 and the horizontal side is the
+    root of the cell budget over the HORIZONTAL dims only, so each level of a 3-D
+    field gets exactly the tiling its 2-D slice would, whatever the extra dim's
+    length. Only once a whole horizontal slice fits the budget does the leftover
+    stack levels (:func:`~marEx.core.dimensions.extra_dim_chunks`). The
+    spatial window never rolls over an extra dim, so a level needs nothing from its
+    neighbours. Spreading the budget over depth as well (the
+    previous rank-th root) gave (3, 5, 5) tiles on a depth-3 field and peaked at
+    ~1.8x the RSS of the per-level (1, 12, 12) layout on a crop (n=3), and on the
+    full slice_3d oracle sat at the node's memory cap where this layout peaked
+    3.2x lower (n=1), values bit-identical (the
+    mechanism was not isolated; depth-1 5x5 tiles were NOT the cost). The
+    ``window_spatial`` floor applies to the horizontal dims alone.
+    """
+    spatial_dims_present = list(spatial_dims(da, dimensions))
+    horizontal_present = set(horizontal_dims(dimensions))
+    n_horizontal = sum(1 for dim in spatial_dims_present if dim in horizontal_present)
+    ntime = max(1, int(da.sizes[dimensions["time"]]))
+    cells_per_tile = max(1, _HISTOGRAM_TASK_ELEMENTS // max(ntime, cycle_length * max(1, n_bins)))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, n_horizontal)))))
+
+    chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    floor_bound: List[str] = []
+    for dim in spatial_dims_present:
+        if dim not in horizontal_present:
+            continue
+        side = tile_side
+        if window_spatial is not None and window_spatial > 1:
+            side = max(side, int(window_spatial))
+        chunk_dict[dim] = min(int(da.sizes[dim]), side)
+        if side > tile_side and chunk_dict[dim] > tile_side:
+            floor_bound.append(dim)
+    horizontal_tiled = [dim for dim in spatial_dims_present if dim in horizontal_present]
+    chunk_dict.update(
+        extra_dim_chunks(
+            da.sizes,
+            [dim for dim in spatial_dims_present if dim not in horizontal_present],
+            horizontal_tile_cells=int(np.prod([chunk_dict[dim] for dim in horizontal_tiled])),
+            horizontal_cells=int(np.prod([da.sizes[dim] for dim in horizontal_tiled])),
+            budget_cells=cells_per_tile,
+        )
+    )
+
+    # A sub-daily cycle shrinks the cell budget in proportion while `window_spatial`
+    # does not move, so this is the one shipped path where the window can force a tile
+    # the budget cannot pay for. Warn; never resize.
+    check_tile_fit(
+        chunk_dict,
+        spatial_dims_present,
+        max(ntime, cycle_length * max(1, n_bins)),
+        _HISTOGRAM_TASK_ELEMENTS,
+        floor_bound_dims=floor_bound,
+        floor=int(window_spatial) if window_spatial else 1,
+        stage="Day-of-year histogram tiling",
+        itemsize=da.dtype.itemsize,
+    )
+    return chunk_dict
+
+
+def _x_is_periodic(da: xr.DataArray, x_dim: Optional[str]) -> bool:
+    """Whether the spatial window should wrap ``x``: only when the grid spans the globe in it.
+
+    The x coordinate is read as longitude, in degrees unless its ``units`` attribute names
+    radians. It closes on itself when its columns at the median step make a full turn to within
+    half a step, counted either way a global grid is stored: ``n`` steps (0 to 360 - dx) or
+    ``n - 1`` (a repeated seam column, 0 to 360). The step is taken across the seam too, so a
+    global grid rolled to start mid-way (e.g. 180..359, 0..179) still wraps. A regional box does
+    not, and its edge columns then pool only real neighbours, as the y edges always have.
+
+    Without a 1-D numeric coordinate there is no span to measure (a bare dimension, or the 2-D
+    coordinates of a curvilinear grid), so ``x`` keeps wrapping as it did before this check existed.
+    """
+    if x_dim is None or x_dim not in da.coords:
+        return True
+    coord = da.coords[x_dim]
+    if coord.ndim != 1 or coord.size < 2 or coord.dtype.kind not in "iuf":
+        return True
+    # Units are read from the attribute, never guessed from the range: a 25-column 0.25 degree
+    # box spans 6.25, within half a step of a full turn in radians.
+    full_turn = 2 * np.pi if "rad" in str(coord.attrs.get("units", "")).lower() else 360.0
+    step = np.abs(np.diff(np.asarray(coord.values, dtype=np.float64)))
+    step = float(np.median(np.minimum(step, full_turn - np.mod(step, full_turn))))
+    return step > 0 and any(abs(n * step - full_turn) <= 0.5 * step for n in (coord.size, coord.size - 1))
+
+
+def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
+    """Centred window sum along ``dim`` that preserves the input's integer dtype.
+
+    Equivalent to ``da.rolling({dim: window}, center=True, min_periods=1).sum()`` -- with a
+    wrap-pad first when ``periodic`` -- for odd ``window``, but built from shifted views so
+    the counts never leave their integer dtype. bottleneck's rolling sum promotes to float64
+    and allocates a halo, which on the bin-resolved histogram is the dominant memory spike.
+
+    Zero padding is what makes the non-periodic case exact: summing a full window over a
+    zero-padded array is the same number as summing the partial window ``min_periods=1``
+    admits at the edges.
+    """
+    left, right = (window - 1) // 2, window // 2
+
+    # Each shifted slice starts at a different offset, so its chunk boundaries are offset
+    # too. Adding them straight up makes dask unify_chunks to the common refinement of all
+    # `window` boundary sets, which shreds the tiling into width-1 slivers (measured: at
+    # window=5 over two spatial dims, 2654 tasks and 1783 rechunk keys where the tiled
+    # input had 6 chunks, output chunks (1,1,16,1,1,...)). That all-to-all rechunk is what
+    # OOM-killed the full-scale gridded seasonal run. Putting every slice back on the input's
+    # own boundaries first keeps each add chunk-aligned: the shift becomes a local overlap
+    # (each output chunk draws on at most two input chunks) and the tiling survives
+    # -- 274 tasks / 104 rechunk keys for the same window=5 case, values bit-identical.
+    target_chunks = None
+    if da.chunks is not None:
+        target_chunks = da.chunks[da.dims.index(dim)]
+
+    if periodic:
+        padded = da.pad({dim: (left, right)}, mode="wrap")
+    else:
+        padded = da.pad({dim: (left, right)}, mode="constant", constant_values=0)
+
+    # Drop the padded dimension coordinate so the shifted slices add positionally rather
+    # than aligning on (now meaningless) padded labels; restore the original afterwards.
+    coord = da.coords[dim] if dim in da.coords else None
+    padded = padded.drop_vars(dim, errors="ignore")
+
+    n = da.sizes[dim]
+
+    def _slice(offset: int) -> xr.DataArray:
+        window_slice = padded.isel({dim: slice(offset, offset + n)})
+        return window_slice if target_chunks is None else window_slice.chunk({dim: target_chunks})
+
+    total = _slice(0)
+    for offset in range(1, window):
+        total = total + _slice(offset)
+
+    if coord is not None:
+        total = total.assign_coords({dim: coord})
+    return total
+
+
+def _rolling_histogram_quantile(
+    hist_chunk: NDArray[np.int32],
+    window_steps: int,
+    q: float,
+    bin_centers: NDArray[np.float64],
+) -> NDArray[np.float32]:
+    """
+    Efficiently compute quantile thresholds from histogram data using vectorised numpy operations.
+    Improved robust interpolation handles sparse histograms, especially in the tails.
+
+    Parameters
+    ----------
+    hist_chunk : numpy.ndarray
+        Histogram data with shape (cycle index, da_bin)
+    window_steps : int
+        Rolling window size, in cycle steps (11 for an 11-day window on daily data)
+    q : float
+        Quantile to compute (0-1)
+    bin_centers : numpy.ndarray
+        Bin centre values for interpolation
+
+    Returns
+    -------
+    numpy.ndarray
+        Quantile thresholds with shape (cycle index,)
+    """
+    n_doy, n_bins = hist_chunk.shape
+    eps = 1e-10
+
+    # Pad histogram with wrap mode for cycling across the year boundary.
+    #
+    # The `pad_size == 0` branch is load-bearing, not defensive. `hist_chunk[-0:]` is
+    # `hist_chunk[0:]` -- the WHOLE array, not an empty one -- so the naive concatenate
+    # would triple-count the first copy and return 2 x n_slots rows, which then fails to
+    # broadcast against `doy_indices`. A one-step window is unreachable on daily data
+    # (`window_days` is validated odd and >= 1, so `pad_size >= 1` whenever the window
+    # exceeds one day), but it is the NORMAL case on a monthly axis, where any
+    # `window_days` under ~45 clamps to a single month.
+    #
+    # A window wider than the cycle would revisit slots (and a pad wider than the cycle would
+    # not even give one row per slot); it pools every slot once instead, as the exact path does,
+    # so each row sums the whole cycle.
+    pad_size = window_steps // 2
+    if window_steps > n_doy:
+        window_steps = n_doy
+        hist_pad = np.concatenate([hist_chunk, hist_chunk[: n_doy - 1]], axis=0)
+    elif pad_size > 0:
+        hist_pad = np.concatenate([hist_chunk[-pad_size:], hist_chunk, hist_chunk[:pad_size]], axis=0)
+    else:
+        hist_pad = hist_chunk
+
+    # Apply rolling sum using stride tricks FTW
+    windowed_view = sliding_window_view(hist_pad, window_steps, axis=0)
+    hist_windowed = np.sum(windowed_view, axis=-1)
+
+    # Apply gaussian smoothing along bin dimension
+    # sigma = 2
+    # hist_smoothed = gaussian_filter1d(
+    #     hist_windowed.astype(np.float32), sigma=sigma, axis=1, mode="constant", cval=0.0  # Along bin dimension
+    # ).astype(np.float32)
+
+    # Count-based interpolation (rather than interpolating CDF in probability space)
+    # Calculate cumulative counts (not normalized CDF)
+    cumsum = np.cumsum(hist_windowed, axis=1, dtype=np.int32)
+    total_counts = cumsum[:, -1]  # Total count for each day
+
+    # Calculate the exact position where the quantile should be
+    # For n samples, the q-th quantile is at position q*(n-1)
+    # It is q*n here since we're working with cumulative counts
+    quantile_position = q * total_counts
+
+    # Vectorised search for the bins containing the quantile position.
+    # ``searchsorted(row, v, side="right")`` on a non-decreasing row is exactly the count
+    # of entries <= v, so the whole per-slot Python loop of searchsorted calls (run
+    # once per cell inside an apply_ufunc(vectorize=True)) collapses to one comparison
+    # against the broadcast quantile positions.
+    idx_upper = (cumsum <= quantile_position[:, None]).sum(axis=1).astype(np.int32)
+    # Days with no data keep index 0 rather than the all-zero row's full-width count.
+    idx_upper[total_counts <= 0] = 0
+
+    # Clip to valid range
+    idx_upper = np.clip(idx_upper, 0, n_bins - 1)
+    idx_lower = np.maximum(0, idx_upper - 1)
+
+    # Extract values for vectorised interpolation
+    doy_indices = np.arange(n_doy, dtype=np.int32)
+
+    # Get cumulative counts at the boundaries
+    count_lower = np.where(idx_lower >= 0, cumsum[doy_indices, idx_lower], 0)
+    count_upper = cumsum[doy_indices, idx_upper]
+
+    # Bin CENTRES for interpolation -- deliberately not the bin edges used by the 1D path
+    # (_compute_histogram_quantile_1d). Cumulative counts formally correspond to bin upper
+    # edges, so edge-based interpolation looks like the "correct" inverse CDF, and for the 1D
+    # path it is: that path pools the whole time series into these same ~500 bins, so the bins
+    # around the quantile hold many samples, the interpolation fraction is meaningful, and
+    # edge interpolation tracks np.percentile to ~1/5 of a bin.
+    #
+    # This 2D path pools only a per-day-of-year window (tens to a few hundred samples) over the
+    # same bins, so those bins are empty or hold a single sample. The fraction then degenerates
+    # to 0 or 1 and edge interpolation snaps to a bin boundary, adding a systematic half-bin
+    # bias. Switching this path to edges was measured to shift every threshold up by exactly
+    # +precision/2 (uniformly across 11/21/41-day windows) and moved the 41-day result from
+    # 0.0006 to 0.0044 away from the analytic 90th percentile. Keep centres here.
+    bin_lower = bin_centers[idx_lower]
+    bin_upper = bin_centers[idx_upper]
+
+    # Compute interpolation fraction based on counts
+    count_diff = count_upper - count_lower
+    safe_diff = np.where(count_diff > eps, count_diff, 1.0)
+    frac = np.where(count_diff > eps, (quantile_position - count_lower) / safe_diff, 0.5)  # If no difference, use midpoint
+
+    # Linear interpolation between bin centers
+    threshold = bin_lower + frac * (bin_upper - bin_lower)
+
+    # Handle edge cases
+    # If total_counts is 0, return NaN
+    threshold = np.where(total_counts > 0, threshold, np.nan)
+
+    # If at the first bin (all data is negative), use the first bin center
+    threshold = np.where((idx_upper == 0) & (total_counts > 0), bin_centers[0], threshold)
+
+    return threshold.astype(np.float32)
+
+
+def _histogram_quantile_block(
+    hist_block: NDArray[np.integer],
+    bin_edges: NDArray[np.float64],
+    q: float,
+) -> NDArray[np.float64]:
+    """Interpolate the q-th quantile from per-cell histogram counts.
+
+    ``hist_block`` has the bin axis last (``apply_ufunc`` moves core dimensions there) and
+    any number of leading spatial axes. Fully vectorised over those leading axes -- no
+    ``np.vectorize`` loop -- so this stays a single numpy pass per task.
+
+    A transcription of the two-phase dask expression it replaces, kept to the same
+    arithmetic in the same order and the same dtypes: ``hist_block`` is integer, so the PDF
+    and its cumulative sum are float64, ``bin_edges`` is float64, and the result is float64
+    (unlike the 2-D path, this one never casts down to float32). Doing the interpolation
+    per-cell removes the ``space x n_bins`` CDF that the two-phase version had to
+    materialise in order to index it with a concrete ``idx_upper``.
+    """
+    eps = 1e-10
+    total = hist_block.sum(axis=-1, keepdims=True)
+    # Normalise-then-cumulate is load-bearing for golden A. It makes the CDF, and so a
+    # threshold, depend at float64 ULP level (~1e-15) on how the samples below it are split
+    # across bins, i.e. on the binned range: cumulating integer counts first fails golden A,
+    # so a regrown range reproduces a run over the cap to ULP here, not bit for bit.
+    pdf = hist_block / (total + eps)
+    cdf = np.cumsum(pdf, axis=-1)
+
+    # First bin whose cumulative CDF reaches q. ``cdf[i]`` is the fraction of samples <=
+    # the UPPER edge of bin i, so the quantile is interpolated WITHIN that bin between its
+    # histogram edges -- on edges, not bin centres, which removes a systematic
+    # half-bin-width low bias. argmax on an all-False row yields 0, which the clamp below
+    # maps to 1, exactly as the dask expression did.
+    n_bins = len(bin_edges) - 1
+    idx_upper = np.argmax(cdf >= (q - eps), axis=-1)
+    # Clamp so idx_upper-1 >= 0 and idx_upper+1 indexes a valid (finite) upper edge.
+    idx_upper = np.clip(idx_upper, 1, n_bins - 1)
+    idx_lower = idx_upper - 1
+
+    cdf_lower = np.take_along_axis(cdf, idx_lower[..., None], axis=-1)[..., 0]
+    cdf_upper = np.take_along_axis(cdf, idx_upper[..., None], axis=-1)[..., 0]
+    edge_lower = bin_edges[idx_upper]
+    edge_upper = bin_edges[idx_upper + 1]
+
+    # idx_upper is the FIRST bin to reach q, so cdf_upper >= q > cdf_lower and the
+    # denominator is strictly positive (guarded for degenerate all-NaN/constant cells,
+    # which are NaN-masked below anyway).
+    denom = cdf_upper - cdf_lower
+    frac = (q - cdf_lower) / np.where(denom > eps, denom, 1.0)
+    threshold = edge_lower + frac * (edge_upper - edge_lower)
+
+    # A zero total is exactly "NaN at every timestep": the histogram drops NaN and counts
+    # every finite sample (out-of-range-high values are clipped in by the caller). Cells
+    # valid for only part of the year still get a real threshold.
+    return np.where(total[..., 0] == 0, np.nan, threshold)
+
+
+def _slab_tile_chunks(
+    da: xr.DataArray,
+    dimensions: Dict[str, str],
+    window_spatial: Optional[int],
+    cycle_length: int,
+) -> Dict[str, int]:
+    """Spatial tiling for the slab engine, plus a whole time axis.
+
+    A slab task holds its ``ntime x cells`` uint16 bin indices and writes ``cycle_length x
+    cells`` thresholds; the ``cycle_length x n_bins`` counts exist for ONE cell at a time.
+    So the tile is budgeted on what the task reads and writes, never on ``n_bins``, and a
+    sub-daily cycle no longer shrinks it (``_histogram_tile_chunks`` divides by
+    ``cycle_length x n_bins``). Extra dims and the ``window_spatial`` floor follow
+    ``_histogram_tile_chunks``.
+
+    The tile is also capped at ``_SLAB_TILE_CELLS`` cells, before the extra dims stack, so the
+    task count grows with the mesh. Each horizontal side is then cut from the input's own
+    spatial chunks (:func:`_align_tile_side`), so the transpose to time-whole tiles splits or
+    merges input chunks and never makes a tile straddle two of them.
+    """
+    spatial_dims_present = list(spatial_dims(da, dimensions))
+    horizontal_present = set(horizontal_dims(dimensions))
+    n_horizontal = sum(1 for dim in spatial_dims_present if dim in horizontal_present)
+    ntime = max(1, int(da.sizes[dimensions["time"]]))
+    per_cell = max(ntime, int(cycle_length))
+    cells_per_tile = max(1, min(_HISTOGRAM_TASK_ELEMENTS // per_cell, _SLAB_TILE_CELLS))
+    tile_side = max(1, int(round(cells_per_tile ** (1.0 / max(1, n_horizontal)))))
+
+    chunk_dict: Dict[str, int] = {dimensions["time"]: -1}
+    floor_bound: List[str] = []
+    for dim in spatial_dims_present:
+        if dim not in horizontal_present:
+            continue
+        side = tile_side
+        floor = int(window_spatial) if window_spatial is not None and window_spatial > 1 else 1
+        side = max(side, floor)
+        input_chunks = da.chunks[da.get_axis_num(dim)] if da.chunks is not None else None
+        chunk_dict[dim] = min(int(da.sizes[dim]), _align_tile_side(side, input_chunks, int(da.sizes[dim]), floor))
+        if side > tile_side and chunk_dict[dim] > tile_side:
+            floor_bound.append(dim)
+    horizontal_tiled = [dim for dim in spatial_dims_present if dim in horizontal_present]
+    chunk_dict.update(
+        extra_dim_chunks(
+            da.sizes,
+            [dim for dim in spatial_dims_present if dim not in horizontal_present],
+            horizontal_tile_cells=int(np.prod([chunk_dict[dim] for dim in horizontal_tiled])),
+            horizontal_cells=int(np.prod([da.sizes[dim] for dim in horizontal_tiled])),
+            budget_cells=cells_per_tile,
+        )
+    )
+    check_tile_fit(
+        chunk_dict,
+        spatial_dims_present,
+        per_cell,
+        _HISTOGRAM_TASK_ELEMENTS,
+        floor_bound_dims=floor_bound,
+        floor=int(window_spatial) if window_spatial else 1,
+        stage="Day-of-year histogram tiling",
+        itemsize=2,
+    )
+    return chunk_dict
+
+
+def _align_tile_side(side: int, input_chunks: Optional[Sequence[int]], size: int, floor: int) -> int:
+    """Return the largest tile side ``<= side`` that the input's chunks split or merge evenly.
+
+    A divisor of the input chunk when the tile is narrower, a multiple when it is wider, so
+    every tile boundary is an input boundary or falls inside one input chunk. Only a regular
+    chunking (all equal but the trailing one) has such a side; anything else, or a chunk with
+    no divisor in ``[max(floor, side // 2), side]``, keeps ``side`` as it is. Values never
+    depend on the tile, only the rechunk's shard count does.
+    """
+    if input_chunks is None:
+        chunk = size
+    else:
+        body = tuple(input_chunks[:-1]) or tuple(input_chunks)
+        if len(set(body)) != 1 or input_chunks[-1] > body[0]:
+            return side
+        chunk = int(body[0])
+    if side >= chunk:
+        multiple = chunk * (side // chunk)
+        return multiple if multiple >= floor else side
+    divisor = max(d for d in range(1, side + 1) if chunk % d == 0)
+    return divisor if divisor >= max(floor, side // 2) else side
+
+
+# Not cache=True: numba then needs a writable cache location at import, and a read-only install
+# without one could not import marEx at all. A process compiles the kernel once, in about a second.
+@njit(nogil=True)
+def _slab_cells_kernel(
+    columns, origins, window, slots, n_slots, n_bins, pad_index, window_steps, q, trim_top, mirror, bin_centers, out, widths
+):  # pragma: no cover
+    """Each core cell's thresholds from its pooled bin indices, cell by cell, in one compiled pass.
+
+    ``columns`` is ``(positions, time)``: one row of bin indices per spatial position of the block.
+    Core cell ``c`` pools the positions ``origins[c] + window``, one shared offset list, so the
+    pooling costs ``cells + window`` integers rather than a table of every cell's neighbourhood.
+    The cell's samples are bucketed by slot, and the rolling window over ``pad_index`` (the
+    wrap-padded slot order) is kept as one histogram that gains the entering slot's samples and
+    loses the leaving one's, so a step costs its samples, not ``n_bins``. Each row then follows
+    ``_rolling_histogram_quantile`` operation for operation: int32 cumulative counts, the count of
+    entries ``<= q * total`` (the first entry above it, the counts being non-negative), the clip,
+    and the interpolation in float64 on the float32 centres, cast to float32 last.
+    """
+    ntime = columns.shape[1]
+    n_cells = origins.shape[0]
+    n_pooled = window.shape[0]
+    values = np.empty(ntime * n_pooled, np.int64)
+    value_slots = np.empty(ntime * n_pooled, np.int64)
+    by_slot = np.empty(ntime * n_pooled, np.int64)
+    slot_start = np.zeros(n_slots + 1, np.int64)
+    fill = np.zeros(n_slots, np.int64)
+    rolling = np.zeros(n_bins, np.int64)
+    for c in range(n_cells):
+        n = 0
+        lo = n_bins
+        hi = -1
+        for j in range(n_pooled):
+            column = columns[origins[c] + window[j]]
+            for t in range(ntime):
+                slot = slots[t]
+                if slot < 1:
+                    continue
+                v = np.int64(column[t])
+                if v >= n_bins:
+                    continue
+                if mirror:
+                    v = (n_bins - 1) - v
+                values[n] = v
+                value_slots[n] = slot - 1
+                n += 1
+                lo = min(lo, v)
+                hi = max(hi, v)
+        if n == 0:
+            lo = 0
+            hi = 0
+        start = lo - 1 if lo > 0 else 0
+        stop = hi + 1 if trim_top else n_bins
+        width = stop - start
+        widths[c] = width
+
+        slot_start[:] = 0
+        for i in range(n):
+            slot_start[value_slots[i] + 1] += 1
+        for slot in range(n_slots):
+            slot_start[slot + 1] += slot_start[slot]
+            fill[slot] = slot_start[slot]
+        for i in range(n):
+            slot = value_slots[i]
+            by_slot[fill[slot]] = values[i] - start
+            fill[slot] += 1
+
+        rolling[:width] = 0
+        for j in range(window_steps):
+            slot = pad_index[j]
+            for i in range(slot_start[slot], slot_start[slot + 1]):
+                rolling[by_slot[i]] += 1
+        for row in range(n_slots):
+            if row > 0:
+                slot = pad_index[row - 1]
+                for i in range(slot_start[slot], slot_start[slot + 1]):
+                    rolling[by_slot[i]] -= 1
+                slot = pad_index[row + window_steps - 1]
+                for i in range(slot_start[slot], slot_start[slot + 1]):
+                    rolling[by_slot[i]] += 1
+
+            total = np.int32(0)
+            for b in range(width):
+                total = np.int32(total + np.int32(rolling[b]))
+            position = q * np.float64(total)
+            upper = width
+            run = np.int32(0)
+            below = np.int32(0)
+            if total > 0:
+                for b in range(width):
+                    below = run
+                    run = np.int32(run + np.int32(rolling[b]))
+                    if run > position:
+                        upper = b
+                        break
+            else:
+                upper = 0
+            if upper >= width:
+                upper = width - 1
+                count_upper = total
+                count_lower = np.int32(total - np.int32(rolling[width - 1])) if width > 1 else total
+            elif upper == 0:
+                count_upper = np.int32(rolling[0])
+                count_lower = count_upper
+            else:
+                count_upper = run
+                count_lower = below
+            lower = upper - 1 if upper > 0 else 0
+
+            centre_lower = bin_centers[start + lower]
+            centre_upper = bin_centers[start + upper]
+            count_diff = count_upper - count_lower
+            frac = (position - count_lower) / count_diff if count_diff > 1e-10 else 0.5
+            threshold = np.float64(centre_lower) + frac * np.float64(centre_upper - centre_lower)
+            if not total > 0:
+                threshold = np.nan
+            elif upper == 0:
+                threshold = np.float64(bin_centers[start])
+            result = np.float32(threshold)
+            out[c, row] = -result if mirror else result
+
+
+def _slab_quantile_cells(
+    block: NDArray[np.unsignedinteger],
+    slots: NDArray[np.int64],
+    n_slots: int,
+    n_bins: int,
+    halo: Sequence[int],
+    window_steps: int,
+    q: float,
+    q_mirror: float,
+    mirror: bool,
+    bin_centers: NDArray[np.float32],
+) -> Tuple[NDArray[np.float32], NDArray[np.int64]]:
+    """``_slab_quantile_block``'s thresholds, plus the bin span each core cell's counts covered."""
+    core_shape = tuple(block.shape[i + 1] - 2 * h for i, h in enumerate(halo))
+    # The compiled kernel does not bounds-check: refuse what would index outside its arrays.
+    if any(n < 1 for n in core_shape):
+        raise ValueError(f"A block of spatial shape {block.shape[1:]} has no core cells inside a halo of {tuple(halo)}")
+    if slots.size and int(slots.max()) > n_slots:
+        raise ValueError(f"Slot {int(slots.max())} is beyond the {n_slots}-slot cycle")
+    if len(bin_centers) < n_bins:
+        raise ValueError(f"{len(bin_centers)} bin centres for {n_bins} bins")
+    q_used = q_mirror if mirror else q
+    # q * total < total for every count an int32 cumsum holds once q sits this far below 1.
+    trim_top = q_used < 1.0 - 1e-6
+    # The wrap-padded slot order, built exactly as the estimator pads its rows (a window wider
+    # than the cycle pools every slot once).
+    pad_size = window_steps // 2
+    order = np.arange(n_slots, dtype=np.int64)
+    if window_steps > n_slots:
+        window_steps = n_slots
+        pad_index = np.concatenate([order, order[: n_slots - 1]])
+    else:
+        pad_index = np.concatenate([order[-pad_size:], order, order[:pad_size]]) if pad_size > 0 else order
+    if len(pad_index) - window_steps + 1 != n_slots:
+        raise ValueError(f"A {window_steps}-step window does not give one row per slot of a {n_slots}-slot cycle")
+
+    n_pooled = int(np.prod([2 * h + 1 for h in halo]))
+    # The int32 cumulative counts never wrap while a cell pools fewer samples than int32 holds,
+    # which is what lets the kernel stop at the first count above q * total.
+    if block.shape[0] * n_pooled > np.iinfo(np.int32).max:
+        raise ValueError(f"{block.shape[0]} steps x {n_pooled} pooled cells exceed the int32 cumulative counts")
+    # A core cell's window starts at its own index in the haloed block, so its pooled positions are
+    # its flat origin plus the flat offsets of a window anchored at the corner.
+    positions = np.arange(int(np.prod(block.shape[1:])), dtype=np.int64).reshape(block.shape[1:])
+    origins = np.ascontiguousarray(positions[tuple(slice(0, n) for n in core_shape)].ravel())
+    window = np.ascontiguousarray(positions[tuple(slice(0, 2 * h + 1) for h in halo)].ravel())
+    n_cells = origins.size
+    columns = np.ascontiguousarray(block.reshape(block.shape[0], -1).T)
+    out = np.empty((n_cells, n_slots), dtype=np.float32)
+    widths = np.zeros(n_cells, dtype=np.int64)
+    _slab_cells_kernel(
+        columns,
+        origins,
+        window,
+        np.ascontiguousarray(slots, dtype=np.int64),
+        int(n_slots),
+        int(n_bins),
+        pad_index,
+        int(window_steps),
+        float(q_used),
+        bool(trim_top),
+        bool(mirror),
+        np.ascontiguousarray(bin_centers),
+        out,
+        widths,
+    )
+    return out.reshape(core_shape + (n_slots,)), widths
+
+
+def _slab_quantile_block(
+    block: NDArray[np.unsignedinteger],
+    slots: NDArray[np.int64],
+    n_slots: int,
+    n_bins: int,
+    halo: Sequence[int],
+    window_steps: int,
+    q: float,
+    q_mirror: float,
+    mirror: bool,
+    bin_centers: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Thresholds for one ``(time, *spatial)`` block of bin indices, cell by cell.
+
+    ``halo[i]`` cells border the block on spatial axis ``i`` (``window_spatial // 2`` on the
+    horizontal axes, 0 elsewhere); a core cell pools every sample in its ``2 h + 1`` window,
+    which is the spatial window sum of the dense path (periodic in x on a global grid, nothing
+    beyond the other edges: the caller pads a periodic x by wrapping and every other edge with
+    the out-of-range index ``n_bins``).
+    Indices ``>= n_bins`` are NaN samples and slot 0 marks a step outside the cycle (NaT, or
+    day 366 under a 365-slot cycle); both are dropped, as flox's expected groups drop them.
+    Each cell's counts go through the estimator of ``_rolling_histogram_quantile`` exactly as
+    the dense engine's do, compiled (``_slab_cells_kernel``), so the result is the dense result.
+
+    The counts span only the cell's occupied bins. A row's cumulative count is 0 below the
+    lowest occupied bin and the row total above the highest, so the estimator's search over
+    the full width returns the trimmed search shifted by the trim start, provided two bins
+    stay: the empty bin just below the span (the interpolation's lower neighbour when the
+    quantile falls in the first occupied bin) and, when ``q * total`` can round to ``total``,
+    every bin above it. The lower tail trims in the reversed index the estimator sees. At the
+    3000 data-derived bins of a real ICON record a cell occupies a median ~400.
+    """
+    return _slab_quantile_cells(block, slots, n_slots, n_bins, halo, window_steps, q, q_mirror, mirror, bin_centers)[0]
+
+
+def _slab_seasonal_threshold(
+    da: xr.DataArray,
+    bin_edges: NDArray[np.floating],
+    bin_centers: NDArray[np.float32],
+    dimensions: Dict[str, str],
+    cycle: SeasonalCycle,
+    window_steps: int,
+    window_spatial: Optional[int],
+    q: float,
+    q_mirror: float,
+    tail: Literal["upper", "lower"],
+) -> xr.DataArray:
+    """Per-cycle-slot thresholds without the dense histogram.
+
+    Digitizes exactly as the dense engine does, moves the uint16 bin index to time-whole
+    spatial tiles (the one transpose any per-cell rank statistic needs), and builds each
+    cell's counts inside the task. Peak memory per task is the uint16 slab plus one cell's
+    ``cycle x n_bins`` counts, independent of the tile and of ``n_bins`` per cell of tile.
+    """
+    time_dim = dimensions["time"]
+    cycle_dim = cycle.index_name
+    n_bins = len(bin_edges) - 1
+    # The input's own order (spatial_dims() lists horizontal dims first): the dense engine's output
+    # keeps da's dim order, and so must this one.
+    spatial_set = set(spatial_dims(da, dimensions))
+    spatial_dims_present = [dim for dim in da.dims if dim in spatial_set]
+    bottom_clip, top_clip = _end_clips(bin_edges)
+    chunk_dict = _slab_tile_chunks(da, dimensions, window_spatial, cycle.length)
+
+    # Identical digitization to the dense engine (clip, edge side per tail, cast before the
+    # rechunk); time first so the block kernel can index cells on the trailing axes.
+    da_bin = (
+        xr.DataArray(
+            np.digitize(
+                np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip),
+                bin_edges,
+                right=tail == "lower",
+            )
+            - 1,
+            dims=da.dims,
+            coords=da.coords,
+            name="da_bin",
+        )
+        .astype(np.uint16)
+        # The edge pad is the dropped index n_bins, which uint16 cannot hold when float32 edge
+        # rounding realises 65536 bins; widen only then, after the uint16 cast the dense
+        # engine applies, so every sample keeps the index it gets there.
+        .astype(np.uint16 if n_bins <= np.iinfo(np.uint16).max else np.uint32)
+        .transpose(time_dim, *spatial_dims_present)
+        .chunk(chunk_dict)
+    )
+    # A step whose slot is NaN (NaT time), fractional or beyond the cycle is outside flox's
+    # expected groups, so the dense engine drops it; slot 0 makes the kernel drop it too.
+    raw_slots = np.asarray(da_bin[cycle_dim].values, dtype=np.float64)
+    in_cycle = np.isfinite(raw_slots) & (raw_slots == np.round(raw_slots)) & (raw_slots >= 1) & (raw_slots <= cycle.length)
+    slots = np.where(in_cycle, raw_slots, 0).astype(np.int64)
+
+    half = int(window_spatial) // 2 if window_spatial is not None and window_spatial > 1 else 0
+    x_dim, y_dim = dimensions.get("x"), dimensions.get("y")
+    # overlap refuses a depth beyond the array. A y axis narrower than the halo is one chunk, and a
+    # depth of its size already reaches every real row from every cell, so the window is unchanged.
+    # A non-global x is clamped the same way.
+    x_periodic = _x_is_periodic(da, x_dim)
+    halo = [
+        half if dim == x_dim and x_periodic else min(half, int(da.sizes[dim])) if dim in (x_dim, y_dim) else 0
+        for dim in spatial_dims_present
+    ]
+    data = da_bin.data
+    if any(halo):
+        # Wrap a global x (the dense path pads it periodically), pad every other edge with the
+        # dropped index n_bins (the dense path's zero-padded window sum).
+        data = dask.array.overlap.overlap(
+            data,
+            depth={0: 0, **{i + 1: h for i, h in enumerate(halo)}},
+            boundary={
+                0: "none",
+                **{i + 1: ("periodic" if dim == x_dim and x_periodic else n_bins) for i, dim in enumerate(spatial_dims_present)},
+            },
+        )
+
+    # Declare the blocks overlap actually built: it merges a trailing chunk narrower than the
+    # halo into its neighbour, so da_bin's chunks can disagree with the blocks the kernel sees.
+    out_chunks = tuple(tuple(c - 2 * h for c in data.chunks[i + 1]) for i, h in enumerate(halo)) + ((cycle.length,),)
+    thresholds = dask.array.map_blocks(
+        _slab_quantile_block,
+        data,
+        slots=slots,
+        n_slots=cycle.length,
+        n_bins=n_bins,
+        halo=halo,
+        window_steps=window_steps,
+        q=q,
+        q_mirror=q_mirror,
+        mirror=tail == "lower",
+        bin_centers=bin_centers,
+        chunks=out_chunks,
+        drop_axis=0,
+        new_axis=len(spatial_dims_present),
+        dtype=np.float32,
+    )
+    coords = {name: coord for name, coord in da.coords.items() if time_dim not in coord.dims and cycle_dim not in coord.dims}
+    coords[cycle_dim] = np.arange(1, cycle.length + 1, dtype=np.uint16)
+    result = xr.DataArray(thresholds, dims=spatial_dims_present + [cycle_dim], coords=coords)
+    # xarray names a DataArray after its dask key when no name is given; the dense engine's is None.
+    result.name = None
+    return result
+
+
+def _compute_histogram_quantile_2d(
+    da: xr.DataArray,
+    q: float,
+    window_steps: int = 11,
+    window_spatial: Optional[int] = None,
+    bin_edges: Optional[NDArray[np.float64]] = None,
+    dimensions: Optional[Dict[str, str]] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
+    cycle: Optional[SeasonalCycle] = None,
+    tail: Literal["upper", "lower"] = "upper",
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
+    engine: Literal["slab", "dense"] = "slab",
+) -> xr.DataArray:
+    """
+    Efficiently compute quantiles using binned histograms optimised for extreme values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array
+    q : float
+        Quantile to compute (0-1)
+    window_steps : int, default=11
+        Rolling window size along the cycle axis, in timesteps
+    window_spatial : int, default=None
+        Spatial window size for the per-cycle-slot quantiles
+    bin_edges : numpy.ndarray, optional
+        Custom bin edges for histogram computation
+    dimensions : dict, optional
+        Dimension mapping dictionary
+    precision : float, default=0.01
+        Precision for positive anomaly bins
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for binnin
+    cycle : SeasonalCycle, optional
+        Within-year axis the histogram is resolved on. Defaults to the daily cycle,
+        which is what the caller's ``dayofyear`` coordinate implies.
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. The quantile is ``q`` either way; the lower
+        tail is evaluated as the mirror of the upper-tail estimator (see below), and
+        the guard rail and range check are sign-aware.
+    engine : {'slab', 'dense'}, default='slab'
+        How the per-cell counts are built. Both give identical thresholds. ``'dense'``
+        is the flox histogram over a whole tile, kept as the reference the equivalence
+        tests pin ``'slab'`` against, and used for even ``window_spatial``.
+
+    Returns
+    -------
+    xarray.DataArray
+        Computed quantile value for each spatial location
+    """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+    if cycle is None:
+        cycle = DAILY_CYCLE
+    cycle_dim = cycle.index_name
+
+    if bin_edges is None:
+        # Bins symmetric about zero, in float32 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float32)
+
+    bin_centers_array = (bin_edges[1:] + bin_edges[:-1]) / 2
+    if not np.isfinite(bin_centers_array[0]):
+        # Legacy asymmetric edges open at -inf, so the first "centre" is -inf and
+        # would poison the interpolation below. Symmetric edges are finite at both
+        # ends and their first centre (-max_anomaly + precision/2) is already the
+        # right answer, so nothing is substituted there.
+        bin_centers_array[0] = 0.0
+    bottom_clip, top_clip = _end_clips(bin_edges)
+
+    bin_centers = xr.DataArray(
+        bin_centers_array.astype(np.float32),
+        dims=["da_bin"],
+        coords={"da_bin": np.arange(len(bin_centers_array), dtype=np.uint16)},
+        name="bin_centers",
+    )
+
+    n_bins = len(bin_centers_array)
+
+    # The estimator pairs each bin centre with the count THROUGH that bin, so it is not
+    # mirror-equivariant: run directly on the lower tail it sits one bin colder than the
+    # mirror of the upper tail and under-flags (-27 % events vs exact at 15 yr).
+    # Evaluate the lower tail on the reversed histogram at 1 - q and negate, which is the
+    # upper-tail estimator on -x exactly. The upper tail is untouched. Needs bin centres
+    # symmetric about zero; the legacy asymmetric edges cannot resolve a low tail anyway.
+    mirror = tail == "lower"
+    if mirror and not np.array_equal(bin_centers_array, -bin_centers_array[::-1]):
+        raise ValueError("tail='lower' on the histogram path needs bin edges symmetric about zero")
+
+    # `1.0 - q` is an ulp off `(100 - p) / 100` for some percentiles (p = 7, 32, 34, ...),
+    # which flips the kernel's `cumsum <= q * N` ties. Rebuild the percentile first so the
+    # complement is the one an upper-tail caller asking for 100 - p would get.
+    q_mirror = (100.0 - round(q * 100.0, 10)) / 100.0
+
+    # Two engines, one estimator. Both hand `_rolling_histogram_quantile` the same integer
+    # (cycle x n_bins) counts per cell, so they return the same thresholds bit for bit.
+    # "slab" (default) holds time whole per spatial tile and builds one cell's counts at a
+    # time; "dense" builds every cell's counts for a whole tile with flox, a
+    # (tile x cycle x n_bins) int64 block per task (843 MB for 12x12 cells at 366 x 1000)
+    # that sets the tile, the memory peak and the sub-daily cliff. Even spatial windows keep
+    # the dense path, whose centre alignment the rolling sum defines.
+    even_window = window_spatial is not None and window_spatial > 1 and window_spatial % 2 == 0
+    if engine == "dense" or even_window:
+        spatial_dims_present = list(spatial_dims(da, dimensions))
+        chunk_dict = _histogram_tile_chunks(da, dimensions, n_bins, window_spatial, cycle.length)
+
+        da_bin = (
+            xr.DataArray(
+                # Clip finite data into the outermost bins (at their centres) before
+                # digitizing so out-of-range values are counted there rather than silently
+                # dropped by the flox expected_groups (which biased every approximate
+                # threshold inwards). Clipping the data (not the index) preserves NaN, which
+                # still digitizes out of range and is correctly dropped. The bottom clip is
+                # -inf, hence skipped, on the legacy asymmetric edges. The lower tail closes
+                # bins on the right, so a sample exactly on an edge lands in the mirror of the
+                # bin -x would; the clip keeps every value off the outermost edges.
+                np.digitize(
+                    np.clip(da.data, bottom_clip if np.isfinite(bottom_clip) else None, top_clip),
+                    bin_edges,
+                    right=tail == "lower",
+                )
+                - 1,
+                dims=da.dims,
+                coords=da.coords,
+                name="da_bin",
+            )
+            # Cast BEFORE the rechunk. np.digitize returns int64, and the rechunk below is the
+            # all-to-all shuffle of the seasonal path, so casting afterwards moved 4x the bytes
+            # it needed to (~77 GB vs ~19 GB at 9282x720x1440). Values are unchanged: the bin
+            # indices are small non-negative integers.
+            .astype(np.uint16)
+            .chunk(chunk_dict)
+        )
+
+        # Construct 2D histogram using flox (in doy & anomaly)
+        hist_raw = flox.xarray.xarray_reduce(
+            da_bin,
+            da_bin[cycle_dim],
+            da_bin,
+            dim=[dimensions["time"]],
+            func="count",
+            expected_groups=(np.arange(1, cycle.length + 1, dtype=np.uint16), np.arange(len(bin_edges) - 1, dtype=np.uint16)),
+            isbin=(False, False),
+            # uint32, not uint16: a (cell, slot, bin) can hold more than 65535 samples (an hourly
+            # series under a monthly cycle, or a near-constant field), and a uint16 count wraps
+            # there, where the slab engine's int64 bincount does not.
+            dtype=np.uint32,
+            fill_value=0,
+        )
+        hist_raw.name = None
+
+        # Apply spatial-kernel smoothing to the histogram
+        if window_spatial is not None and window_spatial > 1:
+            pad_size = window_spatial // 2
+            lon_dim, lat_dim = dimensions.get("x"), dimensions.get("y")
+
+            # Integer-preserving window sums. xarray's .rolling().sum() goes through
+            # bottleneck, which promotes these integer chunks to float64 and carries a halo
+            # overlap -- ~0.4-0.8 GB transient per task over the (y, x, 366, ~502) histogram,
+            # the dominant memory spike of the default gridded seasonal path (review finding
+            # 3.6). Summing explicit shifted views keeps the counts in an integer dtype and
+            # is exactly equal to the rolling sum for odd windows: a zero-padded full window
+            # equals a min_periods=1 partial window, and a wrap-padded one equals the periodic
+            # case. Even windows keep the old path, whose centre alignment they depend on.
+            use_integer_window = window_spatial % 2 == 1
+            hist_rolled = hist_raw
+
+            # Longitude wraps only on a grid that spans the globe; a regional box is edged like latitude
+            if lon_dim in hist_raw.dims:
+                lon_periodic = _x_is_periodic(da, lon_dim)
+                if use_integer_window:
+                    hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=lon_periodic)
+                elif lon_periodic:
+                    hist_rolled = hist_rolled.pad({lon_dim: pad_size}, mode="wrap")
+                    hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
+                    hist_rolled = hist_rolled.isel({lon_dim: slice(pad_size, pad_size + hist_raw.sizes[lon_dim])})
+                else:
+                    hist_rolled = hist_rolled.rolling({lon_dim: window_spatial}, center=True, min_periods=1).sum()
+
+            # Standard rolling in latitude
+            if lat_dim in hist_raw.dims:
+                if use_integer_window:
+                    hist_rolled = _shifted_window_sum(hist_rolled, lat_dim, window_spatial, periodic=False)
+                else:
+                    hist_rolled = hist_rolled.rolling({lat_dim: window_spatial}, center=True, min_periods=1).sum()
+
+            hist_raw = hist_rolled
+
+        def _compute_quantile_with_params(hist_chunk, bin_centers_chunk):
+            if mirror:
+                return -_rolling_histogram_quantile(hist_chunk[:, ::-1], window_steps, q_mirror, bin_centers_chunk)
+            return _rolling_histogram_quantile(hist_chunk, window_steps, q, bin_centers_chunk)
+
+        # Rechunk histogram so core dimensions are unchunked for apply_ufunc
+        # Create chunk dict for hist_raw that preserves spatial chunks but drops time
+        hist_chunk_dict = {cycle_dim: -1, "da_bin": -1}
+        for d in spatial_dims_present:
+            hist_chunk_dict[d] = chunk_dict.get(d, 16)
+
+        hist_raw = hist_raw.chunk(hist_chunk_dict)
+
+        # Apply the optimised computation using apply_ufunc
+        threshold = xr.apply_ufunc(
+            _compute_quantile_with_params,
+            hist_raw,
+            bin_centers,
+            input_core_dims=[[cycle_dim, "da_bin"], ["da_bin"]],
+            output_core_dims=[[cycle_dim]],
+            dask="parallelized",
+            vectorize=True,
+            output_dtypes=[np.float32],
+            dask_gufunc_kwargs={"output_sizes": {cycle_dim: cycle.length}},
+            keep_attrs=True,
+        )
+    else:
+        threshold = _slab_seasonal_threshold(
+            da,
+            bin_edges,
+            bin_centers_array.astype(np.float32),
+            dimensions,
+            cycle,
+            window_steps,
+            window_spatial,
+            q,
+            q_mirror,
+            tail,
+        )
+
+    # Drop time coordinate to avoid conflicts when comparing with data grouped by cycle slot
+    if dimensions["time"] in threshold.coords:
+        threshold = threshold.drop_vars(dimensions["time"])
+
+    # Set threshold to NaN only for spatial points that are NaN at *every* timestep.
+    # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
+    # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
+    nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
+    # Pin BEFORE the bounds check computes on it, in streaming mode too: the threshold is
+    # bounded by cycle x space, not by time. `pin_one` (a no-op in streaming) left that
+    # eager compute running the whole histogram graph, and the caller's `stage` running it
+    # again. Writing it to zarr here instead still crashed at 731 x 120 x 1440 on
+    # 16 x 14 GB (2/2), where persisting the same graph completed 2/2.
+    threshold = materialiser.pin_bounded(threshold.where(~nan_mask))
+
+    # Validate threshold values against the sign-aware bounds. One scheduler round-trip
+    # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.
+    # The predicates there deliberately lack the ``& notnull()`` guard the 1D path
+    # carries: NaN comparisons are False either way, but adding it would alter the
+    # clamp mask.
+    # Centres, not edges, bound the 'estimated' check here: this path interpolates between centres.
+    centres32 = bin_centers_array.astype(np.float32)
+    threshold = _apply_threshold_bounds(
+        threshold,
+        bin_edges,
+        max_anomaly,
+        tail,
+        guard_notnull=False,
+        range_mode=range_mode,
+        saturation_bounds=(float(centres32[-2]), float(centres32[1])),
+    )
+
+    return threshold
+
+
+def _compute_histogram_quantile_1d(
+    da: xr.DataArray,
+    q: float,
+    dim: str = "time",
+    bin_edges: Optional[NDArray[np.float64]] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
+    tail: Literal["upper", "lower"] = "upper",
+    horizontal: Optional[Sequence[str]] = None,
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
+) -> xr.DataArray:
+    """
+    Efficiently compute quantiles using binned histograms optimised for extreme values.
+    Uses fine-grained bins symmetric about zero, so both tails are resolvable.
+    Improved robust interpolation handles empty bins in the tails.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Input data array
+    q : float
+        Quantile to compute (0-1)
+    dim : str, optional
+        Dimension along which to compute quantile
+    bin_edges : numpy.ndarray, optional
+        Custom bin edges for histogram computation
+    precision : float, default=0.01
+        Precision for positive anomaly bins
+    max_anomaly : float, default=5.0
+        Maximum anomaly value for binning
+    tail : {'upper', 'lower'}, default='upper'
+        Which tail the threshold guards. Only the sign of the guard rail and of the
+        range check depend on it -- the quantile itself is ``q`` either way.
+    horizontal : sequence of str, optional
+        Horizontal dimension names, passed to ``_chunk_spatial_for_histogram`` so an
+        extra dim tiles per level.
+
+    Returns
+    -------
+    xarray.DataArray
+        Computed quantile value for each spatial location
+    """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
+    if bin_edges is None:
+        # Bins symmetric about zero, in float64 as this path has always used.
+        bin_edges = _symmetric_bin_edges(precision, max_anomaly, np.float64)
+
+    # Tile the non-reduced (spatial) dimensions so each histogram task processes a
+    # bounded working set, independent of how the caller chunked the input. Without
+    # this, a spatially-unchunked full-resolution field (e.g. a single 720x1440 chunk)
+    # forces one task to hold the entire (time x space) array plus the per-bin working
+    # memory, which exhausts worker memory at scale. Because every spatial cell's
+    # time series lies wholly within its own tile (time stays unchunked), the per-cell
+    # histogram counts -- and therefore the resulting quantiles -- are independent of
+    # this tiling: the operation is bit-for-bit identical to the unchunked computation.
+    # Each cell yields n_bins counts, so budget the tile against that as well as against
+    # the time slab -- otherwise a series shorter than n_bins produces a tile whose
+    # histogram is larger than the budget it was sized by.
+    da = _chunk_spatial_for_histogram(da, dim, output_elements_per_cell=len(bin_edges) - 1, horizontal=horizontal)
+
+    # Clip finite data into the outermost bins (at their centres) so out-of-range values
+    # are counted there instead of being dropped by xhistogram, which renormalised the
+    # CDF over a truncated total and biased the threshold inwards. NaN is preserved by
+    # clip and is still dropped by the histogram, so the mask below is unaffected. The
+    # bottom clip is -inf on the legacy asymmetric edges, where it is skipped entirely so
+    # the graph is unchanged there.
+    bottom_clip, top_clip = (float(v) for v in _end_clips(bin_edges))
+
+    # Compute histogram
+    da_clipped = da.clip(min=bottom_clip, max=top_clip) if np.isfinite(bottom_clip) else da.clip(max=top_clip)
+    hist = histogram(da_clipped, bins=[bin_edges], dim=[dim])
+
+    # Interpolate the quantile inside a single apply_ufunc over the bin dimension rather
+    # than materialising the CDF and indexing it with a concrete idx_upper. The CDF is
+    # space x n_bins -- ~30 GB on the 14.9 M-cell ICON mesh and independent of n_time --
+    # so the old two-phase shape put a space-scaled ceiling under every compute_mode, and
+    # forced a scheduler round-trip mid-function. The 2-D path in this module has always
+    # had this shape; this converges the 1-D path onto it. The NaN mask is folded into the
+    # kernel, so `hist` is traversed exactly once (review findings 3.7, 3.8).
+    threshold = xr.apply_ufunc(
+        _histogram_quantile_block,
+        hist,
+        kwargs={"bin_edges": bin_edges, "q": q},
+        input_core_dims=[[f"{da.name}_bin"]],
+        output_core_dims=[[]],
+        dask="parallelized",
+        output_dtypes=[np.float64],
+        keep_attrs=True,
+    )
+    if f"{da.name}_bin" in threshold.coords:
+        threshold = threshold.drop_vars(f"{da.name}_bin")
+    # Pin before the bounds check -- see the matching comment in the 2D path.
+    threshold = materialiser.pin_bounded(threshold)
+
+    # Validate threshold against the sign-aware bounds -- one fused round-trip, shared
+    # with the 2D path.
+    threshold = _apply_threshold_bounds(
+        threshold, bin_edges, max_anomaly, tail, guard_notnull=True, clamp=materialiser.pin_one, range_mode=range_mode
+    )
+
+    return threshold

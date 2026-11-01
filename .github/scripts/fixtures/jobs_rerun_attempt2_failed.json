@@ -1,0 +1,76 @@
+{
+  "_source": "DERIVED from jobs_real_green_attempt1: attempt 2, 'Larger than memory' and 'CI OK' -> failure",
+  "total_count": 10,
+  "jobs": [
+    {
+      "id": 124050890720,
+      "name": "Build",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050891095,
+      "name": "Lint",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050891133,
+      "name": "Test",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050891241,
+      "name": "Docs",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050891267,
+      "name": "Larger than memory",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure"
+    },
+    {
+      "id": 124051152407,
+      "name": "Smoke (macos-latest, py3.12)",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051152426,
+      "name": "Smoke (ubuntu-latest, py3.10)",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051152482,
+      "name": "Smoke (windows-latest, py3.12)",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051152489,
+      "name": "Smoke (ubuntu-latest, py3.13)",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124061151179,
+      "name": "CI OK",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure"
+    }
+  ]
+}

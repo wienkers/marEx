@@ -1,156 +1,154 @@
-==================================
-marEx: Marine Extremes Detection and Tracking
-==================================
+======================================================
+marEx: Weather & Climate Extremes Detection & Tracking
+======================================================
 
 .. image:: https://github.com/wienkers/marEx/actions/workflows/ci.yml/badge.svg
    :target: https://github.com/wienkers/marEx/actions/workflows/ci.yml
    :alt: CI
-
 .. image:: https://codecov.io/gh/wienkers/marEx/branch/main/graph/badge.svg
    :target: https://codecov.io/gh/wienkers/marEx
    :alt: codecov
-
 .. image:: https://badge.fury.io/py/marEx.svg
    :target: https://badge.fury.io/py/marEx
    :alt: PyPI version
-
 .. image:: https://static.pepy.tech/badge/marex
    :target: https://pepy.tech/projects/marex
    :alt: PyPI Downloads
-
 .. image:: https://zenodo.org/badge/945834123.svg
    :target: https://doi.org/10.5281/zenodo.16922881
    :alt: DOI
 
-**marEx** is a Python package for efficient identification and tracking of marine extremes
-(e.g., Marine Heatwaves) in oceanographic data. It provides a complete pipeline from raw data
-preprocessing to tracked event visualisation, supporting both structured and unstructured grids.
+**marEx** computes climatologies and anomalies, identifies extremes, and tracks
+the resulting events through space and time in geospatial time series. Each of
+its three modules has several methods for different applications and domains,
+runs on data larger than memory, and scales with Dask from a laptop to a
+distributed supercomputer. The same calls detect marine and atmospheric
+heatwaves, cold spells, droughts and subsurface ocean extremes, on lat/lon grids
+and unstructured meshes alike.
 
-Key Features
-============
+.. grid:: 1 1 2 2
+   :gutter: 3
+   :margin: 4 0 0 0
 
-* **Comprehensive Marine Extreme Detection**: Advanced algorithms for identifying marine heatwaves, cold spells, and other extreme events
-* **Flexible Grid Support**: Works with both structured (regular lat/lon) and unstructured (irregular mesh) grids
-* **Parallel Processing**: Built on Dask for efficient memory management and parallel computation
-* **Advanced Tracking**: Sophisticated event tracking through time with merge/split handling
-* **Rich Visualisation**: Comprehensive plotting system with automatic grid detection
-* **HPC Ready**: Optimised for supercomputing environments with SLURM integration
+   .. grid-item-card:: :octicon:`rocket;1.5em;sd-mr-1` Get started
+      :link: getting_started/index
+      :link-type: doc
 
-Quick Start
-===========
+      Install marEx and run a first anomaly, detection and tracking workflow.
 
-Installation
-------------
+   .. grid-item-card:: :octicon:`book;1.5em;sd-mr-1` Tutorials
+      :link: tutorials/index
+      :link-type: doc
 
-Install marEx using pip:
+      End-to-end notebooks on real data.
 
-.. code-block:: bash
+   .. grid-item-card:: :octicon:`globe;1.5em;sd-mr-1` Applications
+      :link: applications/index
+      :link-type: doc
 
-   pip install marEx
+      Marine and atmospheric heatwaves, wind and precipitation drought,
+      subsurface ocean extremes and event catalogues.
 
-For the full installation with optional dependencies (JAX acceleration, HPC support):
+   .. grid-item-card:: :octicon:`mortar-board;1.5em;sd-mr-1` User Guide
+      :link: guide/index
+      :link-type: doc
 
-.. code-block:: bash
+      Anomalies, extremes, dimensions and time, tracking, performance and
+      validation.
 
-   pip install marEx[full]
+   .. grid-item-card:: :octicon:`code;1.5em;sd-mr-1` API Reference
+      :link: api/index
+      :link-type: doc
 
-For development:
+      Every public function and class.
 
-.. code-block:: bash
+   .. grid-item-card:: :octicon:`megaphone;1.5em;sd-mr-1` What's new in 5.0
+      :link: whats_new
+      :link-type: doc
 
-   pip install marEx[dev]
+      Changes since 4.1 and how to migrate from 4.x.
 
-Basic Usage
------------
-
-Here's a simple example of detecting and tracking marine heatwaves:
+Quick example
+=============
 
 .. code-block:: python
 
    import xarray as xr
    import marEx
 
-   # Load your sea surface temperature data
-   sst = xr.open_dataset('sst_data.nc', chunks={}).sst
+   # In a script, run this under `if __name__ == "__main__":` (its worker processes re-import the script).
+   client = marEx.helper.start_local_cluster(n_workers=4, memory_limit="8GB")
 
-   # Preprocess data to identify extreme events
-   extreme_events_ds = marEx.preprocess_data(
+   # Load sea surface temperature (Dask-backed)
+   sst = xr.open_dataset("sst_data.nc", chunks={"time": 25}).sst
+
+   # 1 + 2. Anomalies, then extremes above the seasonal 95th percentile
+   extremes = marEx.preprocess_data(
        sst,
-       threshold_percentile=95
+       method_anomaly="shifting_baseline",
+       method_extreme="seasonal_percentile",
+       threshold_percentile=95,
    )
 
-   # Track events through time
-   events_ds = marEx.tracker(
-       extreme_events_ds.extreme_events,
-       extreme_events_ds.mask,
-       R_fill=8,
-       area_filter_quartile=0.5
+   # 3. Track events through time
+   events = marEx.tracker(
+       extremes.extreme_events, extremes.mask,
+       R_fill=8, area_filter_quartile=0.5, allow_merging=True,
    ).run()
 
-   # Visualise results
-   fig, ax, im = (events_ds.ID_field > 0).mean("time").plotX.single_plot(marEx.PlotConfig(var_units="MHW Frequency", cmap="hot_r", cperc=[0, 96]))
+   # Visualise
+   fig, ax, im = (events.ID_field > 0).mean("time").plotX.single_plot(
+       marEx.PlotConfig(var_units="Event Frequency", cmap="hot_r", cperc=[0, 96])
+   )
 
-Core Architecture
-=================
+The three modules are ``marEx.anomaly``, ``marEx.extremes`` and
+``marEx.tracker``, and each also runs on its own. ``preprocess_data`` chains the
+first two.
 
-marEx follows a modular architecture with three main components:
+Why marEx?
+==========
 
-1. **Data Preprocessing** (:mod:`marEx.detect`): Raw data preprocessing, detrending, anomaly detection, and extreme event identification
-2. **Event Tracking** (:mod:`marEx.track`): Coherent binary object identification, labelling, and tracking through time with merge/split handling
-3. **Visualisation** (:mod:`marEx.plotX`): Polymorphic plotting system supporting both gridded and unstructured data
+* **Larger than memory**: ``compute_mode="streaming"`` stages intermediates on
+  disk, so the events in 20 years of 6-hourly global SST (a 91 GB ``ID_field``)
+  are tracked inside a 32 GiB job.
+* **Overlap-based tracking**: merges and splits are decided by area overlap and
+  recorded in ``merge_ledger``, so events that only touch keep their own
+  identities.
+* **Any grid, cadence and tail**: one API for lat/lon grids and unstructured
+  meshes, fields with an extra dimension such as depth, daily, monthly and
+  sub-daily data, and either tail of the distribution.
 
-Data Flow Pipeline
-------------------
-
-.. code-block:: text
-
-   Raw Data → detect.py (preprocessing) → track.py (tracking) → plotX (visualisation)
-
-The package processes chunked xarray DataArrays through:
-
-1. Detrending and anomaly computation
-2. Percentile-based extreme event identification
-3. Binary object labeling and temporal tracking
-4. Statistical analysis and visualisation
-
-Documentation Contents
-======================
+See :doc:`why_marex` for each point in detail.
 
 .. toctree::
-   :maxdepth: 2
+   :hidden:
    :caption: Getting Started
 
-   installation
+   getting_started/index
+
+.. toctree::
+   :hidden:
+   :caption: Tutorials
+
+   tutorials/index
+
+.. toctree::
+   :hidden:
+   :caption: Applications
+
+   applications/index
+
+.. toctree::
+   :hidden:
+   :caption: User Guide
+
+   guide/index
+
+.. toctree::
+   :hidden:
+   :caption: Reference
+
+   whats_new
    why_marex
-   quickstart
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Understanding marEx
-
-   concepts
-   user_guide
-   examples
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Advanced Usage
-
+   api/index
    troubleshooting
-
-.. toctree::
-   :maxdepth: 2
-   :caption: API Reference
-
-   api
-   modules/detect
-   modules/track
-   modules/plotx
-   modules/helper
-
-Indices and Tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`

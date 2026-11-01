@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "MarEx: Marine Extremes Detection and Tracking"
-abstract: "Efficient & scalable Marine Extremes detection, identification, & tracking for Exascale Climate Data. A high-performance Python framework for identifying and tracking extreme oceanographic events (such as Marine Heatwaves or Acidity Extremes) in massive climate datasets."
+title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
+abstract: "A Python framework to detect and track weather and climate extremes at scale, on regular grids and unstructured meshes. It has three stages, each usable on its own: climatologies and anomalies, percentile-based extreme identification, and event tracking through time with merging and splitting. It applies to ocean, atmosphere, land surface and biogeochemical variables on regular grids and unstructured meshes."
 authors:
   - family-names: "Wienkers"
     given-names: "Aaron"
@@ -16,21 +16,25 @@ identifiers:
     value: "10.5281/zenodo.16922881"
     description: "DOI for this software"
 keywords:
-  - "marine heatwaves"
+  - "climate extremes"
+  - "weather extremes"
   - "extreme events"
-  - "oceanography"
+  - "anomalies"
+  - "climatology"
+  - "detrending"
   - "extremes tracking"
-  - "ocean extremes"
-  - "marine extremes"
+  - "heatwaves"
+  - "marine heatwaves"
+  - "drought"
   - "climate data"
   - "distributed computing"
   - "dask"
   - "python"
-version: "3.1"
-date-released: "2025-08-22"
+version: "5.0.0"
+license: AGPL-3.0-or-later
 preferred-citation:
   type: software
-  title: "MarEx: Marine Extremes Detection and Tracking"
+  title: "marEx: Scalable Detection and Tracking of Weather & Climate Extremes"
   authors:
     - family-names: "Wienkers"
       given-names: "Aaron"
@@ -38,8 +42,8 @@ preferred-citation:
       orcid: "https://orcid.org/0000-0002-8464-3139"
   doi: "10.5281/zenodo.16922881"
   url: "https://github.com/wienkers/marEx"
-  version: "3.1"
-  year: 2025
+  version: "5.0.0"
+  year: 2026
 funding:
   - agency: "European Commission"
     program: "Horizon Europe"

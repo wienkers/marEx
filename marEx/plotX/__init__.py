@@ -1,17 +1,16 @@
 """
 MarEx-PlotX: Marine Extremes Visualisation Module
 
-Comprehensive visualisation module for marine extreme events supporting both
-structured (regular grid) and unstructured oceanographic data.
-Provides automated grid detection and specialised plotting capabilities optimised
-for each data structure type.
+Visualisation of marine extreme events on structured (regular grid) and
+unstructured oceanographic data, with the grid type detected automatically and a
+plotting backend for each.
 
 Core capabilities:
 
-* Polymorphic plotting with automatic grid type detection
-* Single plot generation with customisable styling and projections
-* Multi-panel plotting for comparative analysis
-* Animation generation for temporal visualisation
+* One accessor for both grid types, with automatic grid type detection
+* Single plots with customisable styling and projections
+* Multi-panel plots
+* Animations through time
 * Memory-efficient handling of large oceanographic datasets
 
 Supported data formats:
@@ -26,7 +25,7 @@ from typing import Dict, Optional, Union
 
 import xarray as xr
 
-from ..exceptions import ConfigurationError
+from ..exceptions import ConfigurationError, VisualisationError
 from ..logging_config import get_logger
 from .base import PlotConfig
 from .gridded import GriddedPlotter
@@ -124,6 +123,45 @@ class PlotXAccessor:
 
         logger.debug(f"Creating {final_type} plotter")
 
+        # When the grid is (auto-)detected as unstructured but the user passed no
+        # dimensions, the gridded default {"y": "lat", "x": "lon"} would fail validation
+        # (for unstructured data lat/lon are coordinates, not dimensions). Build a sensible
+        # unstructured default from the actual data dimensions instead.
+        if final_type == "unstructured" and dimensions is None:
+            obj_dims = list(self._obj.dims)
+            time_dim = "time" if "time" in obj_dims else None
+            spatial_dims = [d for d in obj_dims if d != time_dim]
+            dimensions = {}
+            if time_dim is not None:
+                dimensions["time"] = time_dim
+            if spatial_dims:
+                # Unstructured data carries a single horizontal (cell) dimension, but it
+                # need not be the first non-time dim -- a (time, depth, ncells) field puts
+                # depth there, and binding depth as cells would silently plot nonsense.
+                # Take the dimension the x coordinate is actually defined on.
+                x_coord = (coordinates or {}).get("x", "lon")
+                cell_dim = None
+                if x_coord in self._obj.coords:
+                    coord_dims = [str(d) for d in self._obj[x_coord].dims]
+                    cell_dim = next((d for d in coord_dims if d in spatial_dims), None)
+                if cell_dim is None:
+                    if len(spatial_dims) == 1:
+                        cell_dim = spatial_dims[0]
+                    else:
+                        raise VisualisationError(
+                            "Cannot determine which dimension holds the unstructured cells",
+                            details=(
+                                f"Coordinate '{x_coord}' is not defined on any of the spatial "
+                                f"dimensions {spatial_dims}, so the cell dimension is ambiguous"
+                            ),
+                            suggestions=[
+                                "Pass dimensions explicitly, e.g. dimensions={'time': 'time', 'x': 'ncells'}",
+                                "Select the extra dimensions first, e.g. da.isel(depth=0)",
+                            ],
+                            context={"spatial_dims": spatial_dims, "x_coord": x_coord},
+                        )
+                dimensions["x"] = cell_dim
+
         # Create appropriate plotter
         plotter_class = UnstructuredPlotter if final_type.lower() == "unstructured" else GriddedPlotter
         plotter = plotter_class(self._obj, dimensions, coordinates)
@@ -160,12 +198,11 @@ def specify_grid(
     fpath_ckdtree: Optional[Union[str, Path]] = None,
 ) -> None:
     """
-    Set the global grid specification that will be used by all plotters.
+    Set the global grid specification used by all plotters.
 
     Args:
-        grid_type: str, either 'gridded' or 'unstructured'.
-                  If specified, this will be used as the primary method
-                  to determine grid type.
+        grid_type: str, either 'gridded' or 'unstructured'. If specified, it takes precedence over
+            automatic grid type detection.
         fpath_tgrid: Path to the triangulation grid file
         fpath_ckdtree: Path to the pre-computed KDTree indices directory
 

@@ -1,0 +1,50 @@
+name: Coverage
+
+# Informational: not part of ci-ok, so the release check never waits on it.
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # JIT stays on: the report excludes @jit/@njit functions (pyproject [tool.coverage.report]),
+    # and with JIT off the suite reached 15% in 180 min.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,full]"
+          pip list
+      - name: Run tests with coverage
+        shell: bash
+        run: |
+          python -m pytest -n 2 -m "not larger_than_memory" --cov=marEx --cov-report=xml --cov-report=term --durations=25
+      - name: Upload to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false

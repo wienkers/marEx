@@ -1,0 +1,138 @@
+"""
+Global (constant-in-time) extreme identification.
+
+Provides :func:`_identify_extremes_constant`, which applies a single
+time-invariant percentile threshold to identify extreme events. This backs the
+``global_percentile`` extreme-detection method.
+"""
+
+from typing import Dict, Literal, Optional, Tuple
+
+import numpy as np
+import xarray as xr
+
+from ..core.compute_mode import Materialiser
+from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_chunks, spatial_dims
+from ..logging_config import get_logger
+from .histogram import _clamp_exact_threshold, _compute_histogram_quantile_1d
+
+# Get module logger
+logger = get_logger(__name__)
+
+
+def _identify_extremes_constant(
+    da: xr.DataArray,
+    threshold_percentile: float = 95,
+    method_percentile: Literal["exact", "approximate"] = "approximate",
+    dimensions: Optional[Dict[str, str]] = None,
+    precision: float = 0.01,
+    max_anomaly: float = 5.0,
+    materialiser: Optional[Materialiser] = None,
+    threshold_label: str = "thresholds",
+    tail: Literal["upper", "lower"] = "upper",
+    range_mode: Literal["pinned", "estimated", "data"] = "pinned",
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    """
+    Identify extreme events beyond a constant (in time) percentile threshold.
+    i.e. There is 1 threshold for each spatial point, computed across all time.
+
+    ``tail`` selects which side of the distribution counts as extreme. The
+    threshold is the ``threshold_percentile``-th percentile either way -- the tail
+    changes only the comparison, so ``threshold_percentile=5, tail='lower'`` gives
+    the coldest 5 %. The lower tail is NOT implemented by negating the data: that
+    would add a full-size lazy op and make the returned thresholds mean something
+    other than what the caller asked for.
+
+    Returns both the extreme events boolean mask and the thresholds used.
+    """
+    # A None materialiser means "default to persist mode", which keeps every existing
+    # caller, doctest and test working unchanged.
+    if materialiser is None:
+        materialiser = Materialiser("persist")
+
+    if method_percentile == "exact":  # Compute exact percentile (memory-intensive)
+        # Determine appropriate chunk size based on data dimensions
+        if "y" in dimensions:
+            rechunk_size = "auto"
+        else:
+            # For small unstructured grids (< ~4445 cells) the rounded expression is 0, an
+            # invalid zero-size chunk. Clamping it to 1 is also wrong: a one-cell chunk means
+            # one task per cell, which is precisely the task explosion warned about below.
+            # Floor at 100 cells instead (or the whole grid, if it is smaller than that).
+            # The exact quantile is a per-cell reduction over time, so chunking along cells
+            # cannot change the result -- only the task count.
+            n_cells = da[dimensions["x"]].size
+            rechunk_size = max(min(n_cells, 100), 100 * int(np.sqrt(n_cells) * 1.5 / 100))
+            # Each cell brings its whole series, so cap the tile at the element budget over
+            # the series length: sized from n_cells alone, a task grew linearly with n_time
+            # (5700 cells x 262,980 hourly steps = 6 GB float32 on ICON R02B09). The
+            # 100-cell floor still bounds the task count on very long series.
+            n_time = max(1, int(da.sizes[dimensions["time"]]))
+            rechunk_size = min(rechunk_size, max(min(n_cells, 100), TASK_ELEMENTS // n_time))
+        # N.B.: If this rechunk_size is too small, then dask will be overwhelmed by the number of tasks
+        # Gridded: "auto" on every spatial dim, extra dims included -- dask bounds the bytes per
+        # chunk, measured at 3.3e7 elements per task at depth 50 on 720x1440. On a mesh the
+        # cells take `rechunk_size` and extra dims (depth, level) go one level per chunk until a
+        # whole mesh fits, then stack with the leftover: sizing depth like the cell axis
+        # put up to `rechunk_size` levels in one task, 1.16e9 elements at depth 50 on 5e6 cells
+        # vs 2.3e7 in 2-D. The exact quantile is a per-cell reduction over time, so how the
+        # spatial axes are split cannot change the result, only the task layout.
+        if "y" in dimensions:
+            chunk_dict = {dim: rechunk_size for dim in spatial_dims(da, dimensions)}
+        else:
+            cell_dim = dimensions["x"]
+            chunk_dict = {cell_dim: rechunk_size}
+            chunk_dict.update(
+                extra_dim_chunks(
+                    da.sizes,
+                    [d for d in spatial_dims(da, dimensions) if d != cell_dim],
+                    horizontal_tile_cells=min(n_cells, rechunk_size),
+                    horizontal_cells=n_cells,
+                    # Each cell holds its whole series, so the element budget over the
+                    # series length -- not `rechunk_size`, which on a tiny mesh is the mesh.
+                    budget_cells=max(rechunk_size, TASK_ELEMENTS // max(1, int(da.sizes[dimensions["time"]]))),
+                )
+            )
+        chunk_dict[dimensions["time"]] = -1
+        da_rechunk = da.chunk(chunk_dict)
+
+        # Calculate threshold
+        threshold = da_rechunk.quantile(threshold_percentile / 100.0, dim=dimensions["time"])
+        threshold = _clamp_exact_threshold(threshold, tail)
+
+    else:  # Use an efficient histogram-based method with specified accuracy
+        threshold = _compute_histogram_quantile_1d(
+            da,
+            threshold_percentile / 100.0,
+            dim=dimensions["time"],
+            precision=precision,
+            max_anomaly=max_anomaly,
+            materialiser=materialiser,
+            tail=tail,
+            horizontal=horizontal_dims(dimensions),
+            range_mode=range_mode,
+        )
+
+    # Clean up coordinates if needed
+    if "quantile" in threshold.coords:
+        threshold = threshold.drop_vars("quantile")
+
+    # Ensure spatial dimensions are fully loaded for efficient comparison.
+    # Rechunk only -- whether the threshold is materialised at all is the materialiser's
+    # decision, not this function's. An unconditional persist here forced materialisation
+    # on callers who only wanted to stream the result to zarr.
+    threshold = threshold.chunk(spatial_chunks(threshold, dimensions))
+
+    # Create boolean mask for values exceeding threshold
+    # Anchor the threshold before the comparison builds on it -- see the matching
+    # comment in the seasonal path.
+    threshold = materialiser.stage(threshold, threshold_label)
+    extremes = (da >= threshold) if tail == "upper" else (da <= threshold)
+
+    # Clean up coordinates if needed
+    if "quantile" in extremes.coords:
+        extremes = extremes.drop_vars("quantile")
+
+    extremes = extremes.astype(bool).chunk(dict(zip(da.dims, da.chunks)))
+
+    return extremes, threshold

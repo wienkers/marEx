@@ -1,0 +1,17 @@
+{
+  "_source": "DERIVED from runs_green_on_main: run_attempt -> 2, conclusion -> failure (attempt 1 was green)",
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 41052242346,
+      "run_number": 140,
+      "run_attempt": 2,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "73ed4575a0c290eefe6202b02771fa4e25c32e86",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/wienkers/marEx/actions/runs/41052242346"
+    }
+  ]
+}

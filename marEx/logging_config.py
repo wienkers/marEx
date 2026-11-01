@@ -2,8 +2,7 @@
 MarEx Logging Configuration Module
 ==================================
 
-The logger is designed to be efficient and non-intrusive, with minimal
-performance impact on computations.
+Logging for marEx.
 """
 
 import functools
@@ -56,14 +55,13 @@ def get_logger(name: str = "marEx") -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    global _logger_configured
-
     logger = logging.getLogger(name)
 
-    # Configure the root marEx logger only once
-    if not _logger_configured and name == "marEx":
-        configure_logging()
-        _logger_configured = True
+    # Lazily configure the root marEx logger the first time any marEx logger is
+    # requested. Internal modules call get_logger("marEx.<module>"), never the bare
+    # "marEx", so this must match on the prefix or auto-configuration never fires.
+    if not _logger_configured and name.startswith("marEx"):
+        configure_logging()  # sets _logger_configured
 
     return logger
 
@@ -91,7 +89,7 @@ def configure_logging(
         verbose: Enable verbose mode (detailed logging with DEBUG level)
         quiet: Enable quiet mode (minimal logging with WARNING level)
     """
-    global _current_verbosity_level
+    global _current_verbosity_level, _logger_configured
 
     # Handle verbose/quiet mode precedence
     if verbose is None:
@@ -179,6 +177,10 @@ def configure_logging(
     if log_file:
         root_logger.info(f"Logging to file: {log_file}")
 
+    # Mark configured so lazy get_logger() auto-config does not later re-run with
+    # defaults and silently wipe an explicit configuration the user just set.
+    _logger_configured = True
+
 
 def set_verbose_mode(verbose: bool = True) -> None:
     """
@@ -241,6 +243,11 @@ def _configure_external_loggers() -> None:
 
     for logger_name in external_loggers:
         logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+    # `distributed.worker` is silenced above, but its memory children carry the
+    # "worker exceeded 95% memory budget" warnings that explain a killed worker.
+    for logger_name in ("distributed.worker.memory", "distributed.nanny.memory"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def get_memory_usage() -> Dict[str, float]:
@@ -329,7 +336,7 @@ def log_timing(
 
         # More detailed timing in verbose mode
         if is_verbose_mode():
-            logger.debug(f"Completed {operation} - Duration: {duration:.3f}s, " f"Performance: {1/duration:.2f} ops/sec")
+            logger.debug(f"Completed {operation} - Duration: {duration:.3f}s, Performance: {1 / duration:.2f} ops/sec")
         else:
             logger.log(level, f"Completed {operation} in {duration:.2f}s")
 
@@ -416,6 +423,7 @@ def log_progress(
     total: int,
     operation: str = "Processing",
     frequency: int = 10,
+    start_time: Optional[float] = None,
 ) -> None:
     """
     Log progress information without using progress bars.
@@ -426,6 +434,9 @@ def log_progress(
         total: Total count
         operation: Description of the operation
         frequency: Log every N percent (default: 10%)
+        start_time: Optional ``time.perf_counter()`` value captured at the start of
+            the operation. When given, a throughput rate is also reported from the
+            elapsed time.
     """
     if is_quiet_mode():
         return
@@ -435,12 +446,21 @@ def log_progress(
 
     percentage = (current / total) * 100
 
-    # Log at frequency intervals
-    if percentage % frequency == 0 or current == total:
+    # Integer-bucket the percentage: fire once when the current step is the first to
+    # enter a new `frequency`-wide bucket. The old `percentage % frequency == 0` test
+    # used a float and so virtually never matched.
+    current_bucket = int(percentage // frequency)
+    prev_percentage = ((current - 1) / total) * 100 if current > 0 else -1.0
+    prev_bucket = int(prev_percentage // frequency)
+
+    if current_bucket != prev_bucket or current == total:
         if is_verbose_mode():
-            logger.debug(
-                f"{operation}: {current}/{total} ({percentage:.1f}%) - " f"Rate: {current/(time.perf_counter()):.2f} items/sec"
-            )
+            if start_time is not None:
+                elapsed = time.perf_counter() - start_time
+                rate = current / elapsed if elapsed > 0 else float("nan")
+                logger.debug(f"{operation}: {current}/{total} ({percentage:.1f}%) - Rate: {rate:.2f} items/sec")
+            else:
+                logger.debug(f"{operation}: {current}/{total} ({percentage:.1f}%)")
         else:
             logger.info(f"{operation}: {percentage:.0f}% complete ({current}/{total})")
 
@@ -472,11 +492,11 @@ def log_function_call(logger: Optional[logging.Logger] = None, level: int = logg
             # Create parameter summary (limit length for readability)
             args_repr = [repr(arg) for arg in args[:3]]  # First 3 args only
             if len(args) > 3:
-                args_repr.append(f"... +{len(args)-3} more")
+                args_repr.append(f"... +{len(args) - 3} more")
 
             kwargs_repr = [f"{k}={repr(v)}" for k, v in list(kwargs.items())[:3]]
             if len(kwargs) > 3:
-                kwargs_repr.append(f"... +{len(kwargs)-3} more")
+                kwargs_repr.append(f"... +{len(kwargs) - 3} more")
 
             params = ", ".join(args_repr + kwargs_repr)
             if len(params) > 200:
@@ -526,7 +546,7 @@ def log_dask_info(
 
             nbytes = da_or_ds.nbytes if hasattr(da_or_ds, "nbytes") else "unknown"
 
-            log_msg = f"Dask object - Shape: {da_or_ds.shape}, " f"Chunks: {chunks_info}, " f"Size: {nbytes}"
+            log_msg = f"Dask object - Shape: {da_or_ds.shape}, Chunks: {chunks_info}, Size: {nbytes}"
 
             if message:
                 log_msg = f"{message} - {log_msg}"

@@ -1,0 +1,76 @@
+{
+  "_source": "REAL, trimmed: gh api 'repos/wienkers/marEx/actions/runs/41052242346/attempts/1/jobs?per_page=100' (2026-10-30)",
+  "total_count": 10,
+  "jobs": [
+    {
+      "id": 124050889720,
+      "name": "Build",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050890095,
+      "name": "Lint",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050890133,
+      "name": "Test",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050890241,
+      "name": "Docs",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124050890267,
+      "name": "Larger than memory",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051151407,
+      "name": "Smoke (macos-latest, py3.12)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051151426,
+      "name": "Smoke (ubuntu-latest, py3.10)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051151482,
+      "name": "Smoke (windows-latest, py3.12)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124051151489,
+      "name": "Smoke (ubuntu-latest, py3.13)",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 124061150179,
+      "name": "CI OK",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

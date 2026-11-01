@@ -1,0 +1,34 @@
+marEx: Scalable Detection and Tracking of Weather & Climate Extremes
+Copyright (C) 2024-2026 Aaron Wienkers
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+details. You should have received a copy of it in the file LICENSE; if not,
+see <https://www.gnu.org/licenses/>.
+
+This licence applies from version 5.0. Earlier releases remain available
+under the terms they were distributed with.
+
+Citation
+--------
+If you use marEx in published work, please cite it: DOI 10.5281/zenodo.16922881
+(see CITATION.cff). Any copy or derivative must keep this notice and the
+copyright notices in the source files.
+
+Text and data mining / AI training
+----------------------------------
+The rightsholder expressly reserves the use of this software, its source code
+and its documentation for text and data mining, including the training of
+machine-learning and generative AI models, within the meaning of Article 4(3)
+of Directive (EU) 2019/790. This reservation does not restrict running,
+studying, modifying or redistributing marEx under the AGPL.
+
+Commercial licensing
+--------------------
+For use under terms other than the AGPL, contact aaron.wienkers@gmail.com.

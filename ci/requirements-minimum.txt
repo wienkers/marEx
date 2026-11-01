@@ -1,0 +1,10 @@
+# Constraints for compat.yml's `minimum` leg (py3.10): the oldest versions marEx is tested against.
+# Used as `pip install -c ci/requirements-minimum.txt -e ".[test]"`.
+dask==2025.9.0
+distributed==2025.9.0
+zarr==2.18.*
+flox==0.10.1
+xarray==2025.6.1
+numpy==2.2.6
+pandas==2.3.3
+numba==0.62.1

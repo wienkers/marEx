@@ -10,10 +10,7 @@ from typing import Any, Dict, List, Optional, Type
 
 class MarExError(Exception):
     """
-    Base exception class for all MarEx-specific errors.
-
-    This is the root of the MarEx exception hierarchy and provides
-    common functionality for all marEx exceptions including:
+    Base exception class for all marEx errors. All marEx exceptions share:
 
     * Structured error context
     * Exception chaining support
@@ -83,7 +80,7 @@ class MarExError(Exception):
 
 class DataValidationError(MarExError):
     """
-    Raise exception for input data validation issues.
+    Exception for input data validation issues.
 
     This exception covers problems with input data structure, format,
     content, or compatibility with marEx processing requirements.
@@ -121,7 +118,7 @@ class DataValidationError(MarExError):
 
 class CoordinateError(MarExError):
     """
-    Raise exception for coordinate system problems.
+    Exception for coordinate system problems.
 
     This exception handles issues with geographic coordinates including
     unit mismatches, invalid ranges, missing coordinate information,
@@ -150,7 +147,7 @@ class CoordinateError(MarExError):
 
 class ProcessingError(MarExError):
     """
-    Raise exception for computational and algorithmic issues.
+    Exception for computational and algorithmic issues.
 
     This exception covers problems that occur during data processing,
     including numerical computation errors, algorithm convergence issues,
@@ -179,7 +176,7 @@ class ProcessingError(MarExError):
 
 class ConfigurationError(MarExError):
     """
-    Raise exception for parameter and setup issues.
+    Exception for parameter and setup issues.
 
     This exception handles problems with function parameters, configuration
     settings, and setup requirements that prevent proper operation.
@@ -216,7 +213,7 @@ class ConfigurationError(MarExError):
 
 class DependencyError(MarExError):
     """
-    Raise exception for missing or incompatible dependencies.
+    Exception for missing or incompatible dependencies.
 
     This exception handles issues with optional or required dependencies
     that are missing, incompatible, or incorrectly configured.
@@ -254,7 +251,7 @@ class DependencyError(MarExError):
 
 class TrackingError(MarExError):
     """
-    Raise exception for object tracking and identification issues.
+    Exception for object tracking and identification issues.
 
     This exception covers problems specific to the tracking module
     including binary object identification, temporal linking,
@@ -294,7 +291,7 @@ class TrackingError(MarExError):
 
 class VisualisationError(MarExError):
     """
-    Raise exception for plotting and visualisation problems.
+    Exception for plotting and visualisation problems.
 
     This exception handles issues with the plotX visualisation system
     including matplotlib configuration, cartopy projections,
@@ -438,10 +435,6 @@ def wrap_exception(
 ) -> MarExError:
     """
     Wrap a generic exception in an appropriate MarEx exception.
-
-    This function helps maintain backward compatibility while migrating
-    to the new exception hierarchy by wrapping generic exceptions in
-    appropriate MarEx-specific exceptions.
 
     Parameters
     ----------
