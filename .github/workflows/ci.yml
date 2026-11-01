@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, v4D_beta, "ci/**"]
+    branches: [main, "ci/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:

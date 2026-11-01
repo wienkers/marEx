@@ -172,7 +172,7 @@ GitHub Actions runs four workflows.
 
 | Workflow | Runs on | What it does |
 |---|---|---|
-| `ci.yml` | pushes to `main` and the development branches (`v4D_beta`, `ci/**`), pull requests against `main`, manual dispatch | Lint (pre-commit and the release-check unit tests), the full suite at `-n 2` on Python 3.12, the larger-than-memory tests, a wheel and sdist build, smoke tests of the installed wheel (Ubuntu with Python 3.10 and 3.13, macOS and Windows with 3.12), and the Sphinx build with warnings as errors. The `CI OK` job passes only when all of them do. |
+| `ci.yml` | pushes to `main` and `ci/**` branches, pull requests against `main`, manual dispatch | Lint (pre-commit and the release-check unit tests), the full suite at `-n 2` on Python 3.12, the larger-than-memory tests, a wheel and sdist build, smoke tests of the installed wheel (Ubuntu with Python 3.10 and 3.13, macOS and Windows with 3.12), and the Sphinx build with warnings as errors. The `CI OK` job passes only when all of them do. |
 | `coverage.yml` | pushes to `main`, weekly, manual dispatch | The suite under `pytest-cov` with the numba JIT on (`@jit` functions are excluded from the report), uploaded to Codecov. Informational: it never blocks a merge. Takes about 40 min on a GitHub runner. |
 | `compat.yml` | weekly, manual dispatch | The suite at the declared dependency floors (`ci/requirements-minimum.txt`, Python 3.10, zarr 2), and at the newest releases on Python 3.14 with deprecation warnings shown. |
 | `release.yml` | a pushed `v*` tag, manual dispatch | The release pipeline below. |
