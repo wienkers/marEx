@@ -782,3 +782,21 @@ def test_validate_unstructured_chunking():
         neighbours_out, cell_areas_out = validate_unstructured_chunking(single_nb, single_ca, "ncells")
     assert len(neighbours_out.chunksizes["ncells"]) == 1
     assert len(cell_areas_out.chunksizes["ncells"]) == 1
+
+
+def test_tracker_signature_shows_the_constructor_arguments():
+    """``__new__`` dispatches on ``*args, **kwargs``; help(), Shift-Tab and autodoc must still show ``__init__``."""
+    from marEx.track.volumetric.tracker4d import VolumetricTracker
+
+    two_d = inspect.signature(marEx.tracker).parameters
+    assert list(two_d)[:2] == ["data_bin", "mask"]
+    assert "self" not in two_d and "area_filter_quartile" in two_d
+
+    four_d = inspect.signature(VolumetricTracker).parameters
+    assert "volume_filter_quartile" in four_d and "self" not in four_d
+
+    class Custom(marEx.tracker):
+        def __init__(self, data_bin, extra):
+            super().__init__(data_bin)
+
+    assert list(inspect.signature(Custom).parameters) == ["data_bin", "extra"]

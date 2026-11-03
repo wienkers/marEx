@@ -305,10 +305,10 @@ def _chunk_spatial_for_histogram(
     horizontal : sequence of str, optional
         The horizontal dimension names. When given, every other non-reduced dim (depth,
         level) is chunked at 1 and the budget's root is taken over the horizontal dims
-        only, so each level gets exactly its 2-D slice's tiling at any extra-dim length
+        only, so each level gets exactly its 3-D slice's tiling at any extra-dim length
         -- the layout ``_histogram_tile_chunks`` uses. Spreading the budget over
         depth too shrank the horizontal side to a cube root: a depth-1 field on a
-        720x1440 grid got 19x19 tiles (2888 tasks) where its 2-D slice got 85x85 (153).
+        720x1440 grid got 19x19 tiles (2888 tasks) where its 3-D slice got 85x85 (153).
         Once a whole horizontal slice fits, the leftover budget stacks levels
         (:func:`~marEx.core.dimensions.extra_dim_chunks`). ``None``, or a
         mapping missing one of ``da``'s horizontal dims, keeps the old every-dim root.
@@ -401,8 +401,8 @@ def _histogram_tile_chunks(
     tile in proportion -- expensive, but bounded, which is the point.
 
     Extra dims (depth, level) are chunked at 1 and the horizontal side is the
-    root of the cell budget over the HORIZONTAL dims only, so each level of a 3-D
-    field gets exactly the tiling its 2-D slice would, whatever the extra dim's
+    root of the cell budget over the HORIZONTAL dims only, so each level of a 4-D
+    field gets exactly the tiling its 3-D slice would, whatever the extra dim's
     length. Only once a whole horizontal slice fits the budget does the leftover
     stack levels (:func:`~marEx.core.dimensions.extra_dim_chunks`). The
     spatial window never rolls over an extra dim, so a level needs nothing from its

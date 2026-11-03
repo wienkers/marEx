@@ -24,6 +24,21 @@ Detailed reference
 
 .. autofunction:: specify_grid
 
+4-D events
+==========
+
+Four functions draw the output of a 4-D tracker, a ``(time, depth, lat, lon)`` events
+dataset (see :ref:`tracking-in-4d`). Each selects what it needs from the lazy ``ID_field``
+before loading it.
+
+.. autofunction:: marEx.plotX.plot_event_levels
+
+.. autofunction:: marEx.plotX.plot_event_depth_time
+
+.. autofunction:: marEx.plotX.plot_event_summary
+
+.. autofunction:: marEx.plotX.animate_event_levels
+
 Plotter backends
 ================
 

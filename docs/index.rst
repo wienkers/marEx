@@ -24,7 +24,8 @@ its three modules has several methods for different applications and domains,
 runs on data larger than memory, and scales with Dask from a laptop to a
 distributed supercomputer. The same calls detect marine and atmospheric
 heatwaves, cold spells, droughts and subsurface ocean extremes, on lat/lon grids
-and unstructured meshes alike.
+and unstructured meshes alike. On lat/lon grids, events can also be tracked as physical
+volumes in 4-D, through ``(time, depth, lat, lon)``.
 
 .. grid:: 1 1 2 2
    :gutter: 3
@@ -114,8 +115,11 @@ Why marEx?
 * **Overlap-based tracking**: merges and splits are decided by area overlap and
   recorded in ``merge_ledger``, so events that only touch keep their own
   identities.
+* **4-D spatiotemporal event tracking**: declaring depth follows events through
+  ``(time, depth, lat, lon)`` on lat/lon grids, with each event's volume in
+  m\ :sup:`3` and depth range through time.
 * **Any grid, cadence and tail**: one API for lat/lon grids and unstructured
-  meshes, fields with an extra dimension such as depth, daily, monthly and
+  meshes, 4-D fields with depth or pressure level, daily, monthly and
   sub-daily data, and either tail of the distribution.
 
 See :doc:`why_marex` for each point in detail.

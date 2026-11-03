@@ -34,12 +34,12 @@ Jupyter notebooks running the **detect → track → visualise** workflow on rea
       ERA5 wind over Europe, 1980-2024: lower-tail extremes of hub-height
       capacity factor tracked into a catalogue of low-wind spells.
 
-   .. grid-item-card:: Ocean extremes in 3-D
-      :link: 3d
+   .. grid-item-card:: Ocean extremes in 4-D
+      :link: 4d
       :link-type: doc
 
-      A century of daily North Atlantic temperature on seven levels down to
-      1415 m: marine heatwaves at every depth with a shifting baseline.
+      GLORYS12 north-east Pacific marine heatwaves, 1993-2022 on 36 levels
+      to 1150 m, tracked through time and depth as volumes.
 
 Scripts
 =======
@@ -59,4 +59,4 @@ time, is in `examples/README.md <https://github.com/wienkers/marEx/blob/main/exa
    regional
    unstructured
    wind_drought
-   3d
+   4d

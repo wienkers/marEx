@@ -83,6 +83,9 @@ def _consolidate_slice(
     ids_cur: NDArray[np.int32],
     area: NDArray[np.float32],
     overlap_threshold: float,
+    renames: Optional[List[Tuple[int, int]]] = None,
+    neighbours: Optional[NDArray[np.int32]] = None,
+    splits: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> List[int]:
     """Array-only counterpart of ``overlap.consolidate_object_ids`` for the unstructured kernel.
 
@@ -91,7 +94,9 @@ def _consolidate_slice(
     split keeps one ID per lineage. Parents are visited in ascending ID and the renames compose
     in that order, with the serial path's skip rules: a group whose first child was already
     renamed is skipped, and already-renamed children are not renamed again. ``ids_cur`` is
-    relabelled IN PLACE.
+    relabelled IN PLACE. ``renames``, when given, receives each ``(old_id, kept_id)``. ``splits``,
+    when given with the ``(nv, ncells)`` table ``neighbours``, receives ``(parent, [kept, *renamed])``
+    for each parent of which one connected piece overlaps two or more connected pieces of its children.
 
     Returns the surviving IDs whose cells grew (empty when nothing changed).
     """
@@ -123,6 +128,7 @@ def _consolidate_slice(
 
     target: Dict[int, int] = {}  # renamed child -> surviving ID
     grown: List[int] = []
+    candidates: List[Tuple[int, List[int]]] = []
     for parent in splitting:
         children = [int(c) for c in pair_child[pair_parent == parent]]
         first = children[0]
@@ -138,14 +144,103 @@ def _consolidate_slice(
             target[c] = first
         if first not in grown:
             grown.append(first)
+        candidates.append((int(parent), [first, *others]))
     grown = [g for g in grown if g not in target]
+    if renames is not None:
+        renames.extend(target.items())
     renamed_ids = np.fromiter(target.keys(), dtype=np.int64, count=len(target))
     survivors = np.fromiter(target.values(), dtype=np.int64, count=len(target))
     order = np.argsort(renamed_ids)
     renamed_ids, survivors = renamed_ids[order], survivors[order]
     cells = np.where(np.isin(ids_cur, renamed_ids))[0]
     ids_cur[cells] = survivors[np.searchsorted(renamed_ids, ids_cur[cells])].astype(ids_cur.dtype)
+    if splits is not None and neighbours is not None and candidates:
+        # One scan of each slice per consolidation, so the cost follows the objects and not the mesh.
+        kept = [target.get(children[0], children[0]) for _, children in candidates]
+        parent_cells = np.flatnonzero(np.isin(ids_prev, [parent for parent, _ in candidates]))
+        child_cells = np.flatnonzero(np.isin(ids_cur, kept))
+        for (parent, children), survivor in zip(candidates, kept):
+            if _overlap.object_separates_unstructured(
+                parent_cells[ids_prev[parent_cells] == parent], child_cells[ids_cur[child_cells] == survivor], neighbours
+            ):
+                splits.append((parent, children))
     return grown
+
+
+def _attach_renames(merge_events: xr.Dataset, renames: List[Tuple[int, int]]) -> None:
+    """Carry consolidation's ``(old_id, kept_id)`` pairs to the clusterer on the merge dataset, in place."""
+    pairs = np.asarray(renames, dtype=np.int32).reshape(-1, 2)
+    merge_events["_renamed_from"] = ("rename_ID", pairs[:, 0])
+    merge_events["_renamed_to"] = ("rename_ID", pairs[:, 1])
+
+
+def _attach_splits(merge_events: xr.Dataset, times: NDArray, splits: List[Tuple[int, int, List[int]]]) -> None:
+    """Add the split records to the merge dataset, in place, from ``(time index, parent, [kept, *renamed])`` rows."""
+    n_splits = len(splits)
+    width = max((len(children) for _, _, children in splits), default=1)
+    children = np.full((n_splits, width), -1, dtype=np.int32)
+    for i, (_, _, row) in enumerate(splits):
+        children[i, : len(row)] = row
+    merge_events["split_time"] = ("split_ID", times[np.array([t for t, _, _ in splits], dtype=int)])
+    merge_events["split_parent_IDs"] = ("split_ID", np.array([p for _, p, _ in splits], dtype=np.int32))
+    merge_events["split_child_IDs"] = (("split_ID", "split_child_idx"), children)
+    merge_events["n_split_children"] = ("split_ID", np.array([len(c) for _, _, c in splits], dtype=np.int32))
+
+
+def _add_event_ids(merge_events: xr.Dataset, id_to_event: NDArray[np.int32]) -> None:
+    """
+    Add the final event IDs to the merge dataset, in place.
+
+    Adds ``parent_event_IDs`` and ``child_event_IDs``, aligned with ``parent_IDs`` and ``child_IDs``,
+    ``n_parent_events``, the distinct events among each row's parents, and ``split_event_IDs`` when
+    the dataset holds split records. An ID consolidation renamed resolves through the ID it was renamed
+    onto. Padding, and a partition piece that received no cells so never reached the field, stay -1.
+    Removes the renames, which are not an output.
+
+    Parameters
+    ----------
+    merge_events : xarray.Dataset
+        The merge dataset; ``_renamed_from`` and ``_renamed_to`` are optional.
+    id_to_event : numpy.ndarray
+        Event ID indexed by object ID, 0 where the object is not in the final field.
+    """
+    renamed_from = renamed_to = np.zeros(0, dtype=np.int64)
+    if "_renamed_from" in merge_events:
+        renamed_from = np.asarray(merge_events["_renamed_from"].values, dtype=np.int64)
+        renamed_to = np.asarray(merge_events["_renamed_to"].values, dtype=np.int64)
+        del merge_events["_renamed_from"], merge_events["_renamed_to"]
+        order = np.argsort(renamed_from)
+        renamed_from, renamed_to = renamed_from[order], renamed_to[order]
+
+    def to_events(values: NDArray) -> NDArray[np.int32]:
+        ids = np.asarray(values, dtype=np.int64).copy()
+        # A kept ID can itself be renamed later in the same pass, so follow each chain to its end.
+        for _ in range(renamed_from.size):
+            position = np.minimum(np.searchsorted(renamed_from, ids), renamed_from.size - 1)
+            hit = renamed_from[position] == ids
+            if not hit.any():
+                break
+            ids[hit] = renamed_to[position[hit]]
+        events = np.full(ids.shape, -1, dtype=np.int32)
+        known = (ids > 0) & (ids < id_to_event.size)
+        events[known] = id_to_event[ids[known]]
+        events[events == 0] = -1
+        return events
+
+    for source, target in (
+        ("parent_IDs", "parent_event_IDs"),
+        ("child_IDs", "child_event_IDs"),
+        ("split_parent_IDs", "split_event_IDs"),
+    ):
+        if source in merge_events:
+            merge_events[target] = (merge_events[source].dims, to_events(merge_events[source].values))
+
+    if "parent_event_IDs" in merge_events:
+        parents = np.sort(merge_events["parent_event_IDs"].values, axis=1)
+        distinct = (parents > 0) & np.concatenate(
+            [np.ones((parents.shape[0], 1), dtype=bool), parents[:, 1:] != parents[:, :-1]], axis=1
+        )
+        merge_events["n_parent_events"] = ("merge_ID", distinct.sum(axis=1).astype(np.int32))
 
 
 def _anchor_field(obj, label, materialiser):
@@ -192,7 +287,8 @@ def cluster_rename_objects_and_props(
         Array of object ID pairs that indicate which objects are in the same event.
         The object in the first column precedes the second column in time.
     merge_events : xarray.Dataset
-        Information about merge events
+        Information about merge events. The final event IDs are added to it in place
+        (see :func:`_add_event_ids`).
 
     Returns
     -------
@@ -271,6 +367,8 @@ def cluster_rename_objects_and_props(
     ID_to_cluster_index_array = np.full(max_ID + 1, 0, dtype=np.int32)  # 0 = background
     for original_id, event_id in original_to_event.items():
         ID_to_cluster_index_array[original_id] = np.int32(event_id)
+
+    _add_event_ids(merge_events, ID_to_cluster_index_array)
 
     # Convert to DataArray for apply_ufunc
     #  N.B.: **Need to pass da into apply_ufunc, otherwise it doesn't manage the memory correctly
@@ -859,6 +957,9 @@ def split_and_merge_objects(
     # The result of an up-front pass was persisted and then overwritten unread.
 
     # Initialise merge tracking lists
+    renames: List[Tuple[int, int]] = []  # (old ID, kept ID) from each consolidation
+    splits: List[Tuple[int, int, List[int]]] = []  # (time index, parent, [kept, *renamed])
+    neighbours = neighbours_int.values if unstructured_grid else None
     merge_times = []  # When the merge occurred
     merge_child_ids = []  # Resulting child ID
     merge_parent_ids = []  # List of parent IDs that merged
@@ -940,6 +1041,9 @@ def split_and_merge_objects(
                     regional_mode,
                     ydim,
                     xdim,
+                    renames=renames,
+                    splits=splits,
+                    neighbours=neighbours,
                 )
 
                 # Update the chunk with consolidated data whenever t-1 is in current chunk
@@ -1157,6 +1261,9 @@ def split_and_merge_objects(
                 regional_mode,
                 ydim,
                 xdim,
+                renames=renames,
+                splits=splits,
+                neighbours=neighbours,
             )
 
             # Update the last timestep in chunk
@@ -1320,6 +1427,8 @@ def split_and_merge_objects(
         },
         attrs={"fill_value": -1},
     )
+    _attach_renames(merge_events, renames)
+    _attach_splits(merge_events, object_id_field_unique[timedim].values, splits)
 
     # Convert the O(1) store back to the ID-indexed Dataset expected by cluster_rename_objects_and_props.
     object_props = object_props.to_dataset()
@@ -1439,7 +1548,16 @@ def split_and_merge_objects_parallel(
         neighbours_int: NDArray[np.int32],
         zarr_path: str,
         region_dirty: bool,
-    ) -> Tuple[List[Tuple[int, NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]], List[int], str, str, int, bool]:
+    ) -> Tuple[
+        List[Tuple[int, NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]],
+        List[int],
+        str,
+        str,
+        int,
+        bool,
+        List[Tuple[int, int]],
+        List[Tuple[int, int, List[int]]],
+    ]:
         """Run the split-and-merge kernel over one time chunk from its pristine labels.
 
         Parameters
@@ -1496,6 +1614,8 @@ def split_and_merge_objects_parallel(
 
         merging_objects_list = [list(queue[t]) for t in range(n_t)]
         records = []
+        renames: List[Tuple[int, int]] = []
+        splits: List[Tuple[int, int, List[int]]] = []
         forwarded: List[int] = []
         changed = False
         max_parents_seen = 0
@@ -1666,7 +1786,9 @@ def split_and_merge_objects_parallel(
             # one ID per piece, and a split that rejoins is re-partitioned and logged as a merge
             # on every later day. A consolidated object is larger, so it can newly pass
             # the threshold against a child at t+1: queue those children for the parent check.
-            grown = _consolidate_slice(data_m1, data_t, area, overlap_threshold)
+            step_splits: List[Tuple[int, List[int]]] = []
+            grown = _consolidate_slice(data_m1, data_t, area, overlap_threshold, renames, neighbours_int, step_splits)
+            splits.extend((t0_abs + t, parent, children) for parent, children in step_splits)
             if grown:
                 changed = True
                 grown_cells = np.where(np.isin(data_t, grown))[0]
@@ -1683,7 +1805,7 @@ def split_and_merge_objects_parallel(
         if changed or region_dirty:
             zarr.open_group(zarr_path, mode="r+")["temp"][t0_abs : t0_abs + n_t, :] = data
         last_hash = hashlib.blake2b(data[-1].tobytes(), digest_size=16).hexdigest()
-        return records, sorted(forwarded), last_hash, boundary_hash, int(max_parents_seen), bool(changed)
+        return records, sorted(forwarded), last_hash, boundary_hash, int(max_parents_seen), bool(changed), renames, splits
 
     # -- initial queue: children with >= 2 parents on the pristine field ---------------------
     overlap_objects_list = _overlap.find_overlapping_objects(
@@ -1751,6 +1873,8 @@ def split_and_merge_objects_parallel(
 
     # -- the loop: run dirty chunks until no boundary or forwarded queue changes -------------
     records_by_chunk: Dict[int, list] = {}
+    renames_by_chunk: Dict[int, list] = {}
+    splits_by_chunk: Dict[int, list] = {}
     forwarded_by_chunk: Dict[int, List[int]] = {k: [] for k in range(n_chunks)}
     last_hash: Dict[int, str] = {}
     consumed_boundary: Dict[int, str] = {}
@@ -1805,12 +1929,14 @@ def split_and_merge_objects_parallel(
                     )
                 )
             results = dask.compute(*tasks)
-            for k, (recs, fwd, h_last, h_boundary, max_p, wrote) in zip(todo, results):
+            for k, (recs, fwd, h_last, h_boundary, max_p, wrote, chunk_renames, chunk_splits) in zip(todo, results):
                 if wrote:
                     region_written.add(k)
                 else:
                     region_written.discard(k)
                 records_by_chunk[k] = recs
+                renames_by_chunk[k] = chunk_renames
+                splits_by_chunk[k] = chunk_splits
                 forwarded_by_chunk[k] = fwd
                 last_hash[k] = h_last
                 consumed_boundary[k] = h_boundary
@@ -1867,6 +1993,17 @@ def split_and_merge_objects_parallel(
         dask.compute(*[dask.delayed(_compact_region)(int(chunk_starts[k]), int(chunk_starts[k + 1])) for k in range(n_chunks)])
         all_records = [(t, _compact(c), _compact(p), a) for t, c, p, a in all_records]
 
+    all_renames = [pair for k in range(n_chunks) for pair in renames_by_chunk.get(k, [])]
+    all_renames = np.asarray(all_renames, dtype=np.int64).reshape(-1, 2)
+    if len(temp_sorted):
+        all_renames = _compact(all_renames)
+    all_splits = [row for k in range(n_chunks) for row in splits_by_chunk.get(k, [])]
+    if len(temp_sorted):
+        all_splits = [
+            (t, int(_compact(np.array([parent]))[0]), _compact(np.asarray(children, dtype=np.int64)).tolist())
+            for t, parent, children in all_splits
+        ]
+
     object_id_field_unique = xr.open_zarr(zarr_path, chunks={timedim: chunk_sizes}).temp
     object_id_field_unique = object_id_field_unique.rename(pristine.name if pristine.name != "temp" else None)
 
@@ -1916,6 +2053,8 @@ def split_and_merge_objects_parallel(
         },
         attrs={"fill_value": -1},
     )
+    _attach_renames(merge_events, all_renames)
+    _attach_splits(merge_events, times, all_splits)
 
     object_id_field_unique = _anchor_field(object_id_field_unique, "merged_id_field", materialiser)
     object_props = _objects.calculate_object_properties(

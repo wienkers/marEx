@@ -20,6 +20,7 @@ Terminology:
 * Event: One or more objects tracked through time and identified as the same entity
 """
 
+import inspect
 import logging
 import os
 import shutil
@@ -153,6 +154,17 @@ except ImportError:
 # ============================
 # Main Tracker Class
 # ============================
+
+
+def _constructor_signature(cls: type) -> inspect.Signature:
+    """Return the signature of ``cls.__init__`` without ``self``.
+
+    ``tracker.__new__`` takes ``*args, **kwargs`` to dispatch on ``dimensions``, and ``inspect.signature``
+    reads ``__new__`` before ``__init__``: without this, ``help()``, notebook completion and the API docs
+    would show ``tracker(*args, **kwargs)``.
+    """
+    signature = inspect.signature(cls.__init__)
+    return signature.replace(parameters=list(signature.parameters.values())[1:])
 
 
 class tracker:
@@ -445,6 +457,45 @@ class tracker:
     ... )
     >>> tracked_events = tracker.run()
     """
+
+    def __init_subclass__(cls, **kwargs):
+        """Give each subclass the signature of its own constructor."""
+        super().__init_subclass__(**kwargs)
+        cls.__signature__ = _constructor_signature(cls)
+
+    def __new__(cls, *args, **kwargs):
+        """Return a :class:`VolumetricTracker` when ``dimensions`` declares a ``"z"`` entry.
+
+        ``dimensions`` is read from the keyword arguments or from its positional slot in
+        ``__init__``. 4-D-only keyword arguments without a ``"z"`` raise, naming the fix.
+        """
+        if cls is not tracker:
+            return object.__new__(cls)
+        dimensions = kwargs.get("dimensions")
+        if "dimensions" not in kwargs:
+            names = list(inspect.signature(tracker.__init__).parameters)[1:]
+            slot = names.index("dimensions")
+            if slot < len(args):
+                dimensions = args[slot]
+        if dimensions is not None and "z" in dimensions:
+            from .volumetric.tracker4d import VolumetricTracker  # lazy: it subclasses tracker
+
+            return object.__new__(VolumetricTracker)
+
+        from .volumetric.config import FOUR_D_ONLY_KWARGS
+
+        given = [name for name in FOUR_D_ONLY_KWARGS if kwargs.get(name) is not None]
+        if given:
+            raise ConfigurationError(
+                f"{given} only apply to 4-D tracking, but dimensions has no 'z' entry",
+                details="4-D (time, depth, lat, lon) tracking is selected by declaring the depth dimension",
+                suggestions=[
+                    'Declare depth as dimensions["z"], e.g. dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"}',
+                    f"Remove {given} to track a single horizontal level",
+                ],
+                context={"arguments": given},
+            )
+        return object.__new__(cls)
 
     def __init__(
         self,
@@ -1305,6 +1356,7 @@ class tracker:
             # Add merge summary attributes
             events_ds.attrs["total_merges"] = len(merges_ds.merge_ID)
             events_ds.attrs["multi_parent_merges"] = int((merges_ds.n_parents > 2).sum().item())
+            events_ds.attrs["total_splits"] = int(merges_ds.sizes.get("split_ID", 0))
 
             print(f"   Total Merging Events Recorded: {events_ds.attrs['total_merges']}")
 
@@ -1939,3 +1991,6 @@ class tracker:
             self.temp_merge_path,
             materialiser=self.materialiser,
         )
+
+
+tracker.__signature__ = _constructor_signature(tracker)

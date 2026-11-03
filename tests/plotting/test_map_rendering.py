@@ -492,6 +492,24 @@ def test_titles_name_the_slice():
     assert_no_failures(failures)
 
 
+def test_float_coordinate_titles_are_rounded_and_integer_ones_exact():
+    """A float32 depth prints as `depth=0.494`, not its full binary expansion; integer labels are never rounded."""
+    data = xr.DataArray(
+        np.zeros((3, 3, 4, 5)),
+        dims=["depth", "member", "lat", "lon"],
+        coords={
+            "depth": np.array([0.494025, 47.37369, 1062.44], dtype="f4"),
+            "member": [12345678, 2, 3],
+            "lat": np.linspace(-10, 10, 4),
+            "lon": np.linspace(0, 20, 5),
+        },
+    )
+    plotter = GriddedPlotter(data, dimensions={"time": "time", "y": "lat", "x": "lon"})
+    titles = [plotter._get_title(time_index=i, col_name="depth") for i in range(3)]
+    assert titles == ["depth=0.494", "depth=47.37", "depth=1062"], titles
+    assert plotter._get_title(time_index=0, col_name="member") == "member=12345678"
+
+
 def test_global_grid_with_seam_cell_renders():
     """A global 5-degree grid whose centres include the antimeridian cell renders in full instead of crashing in shapely."""
     lon = np.arange(0.0, 360, 5.0)

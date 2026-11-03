@@ -1,0 +1,21 @@
+=====================
+Ocean Extremes in 4-D
+=====================
+
+Marine heatwaves at depth, tracked as volumes. Thirty years of daily potential temperature
+from the 1/12° GLORYS12 reanalysis, on 36 levels from the surface to 1150 m over the
+north-east Pacific, go through the same :func:`marEx.preprocess_data` call as the surface
+examples, with a fixed 1993-2022 baseline and the day-of-year threshold. See
+:ref:`extra-dimensions` for the rules. The tracker then follows each event through
+``(time, depth, lat, lon)`` as a volume (see :ref:`tracking-in-4d`), and the last notebook
+draws the events of the 2013-16 Blob as isosurfaces, sections and movies.
+
+The first notebook downloads the input and runs in its own environment.
+
+.. toctree::
+   :maxdepth: 1
+
+   0 · Download GLORYS12 <4d/00_download_glorys12>
+   1 · Detect extremes at depth <4d/01_preprocess_extremes>
+   2 · Track 4-D events <4d/02_track_extremes_4d>
+   3 · Visualise events <4d/03_visualise_events>

@@ -103,7 +103,7 @@ A catastrophe model's hazard module is, in structure, an event set: a list of ev
 a footprint and intensity, and an annual rate. A catalogue built here has the same structure,
 derived from one observed, reanalysed or simulated record where a catastrophe model generates its
 events stochastically. Running the same pipeline on each member of a simulation ensemble enlarges the
-sample, one member at a time, since the tracker takes 2-D fields.
+sample, one member at a time, since the tracker takes no ensemble dimension.
 
 Caveats
 =======

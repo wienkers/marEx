@@ -88,7 +88,8 @@ Extra Dimensions
 
 Any dimension besides time and the horizontal ones is an extra dimension: depth, pressure
 level, ensemble member. marEx detects it automatically and treats each index along it
-independently, with no mapping entry needed.
+independently, with no mapping entry needed. These pages count time and the horizontal axes,
+so ``(time, lat, lon)`` or ``(time, cell)`` is 3-D, and adding depth or pressure level makes it 4-D.
 
 .. code-block:: python
 
@@ -106,18 +107,20 @@ independently, with no mapping entry needed.
    ds.extreme_events     # (time, depth, lat, lon)
    ds.thresholds         # (depth, lat, lon, dayofyear)
 
-* A 3-D run gives the same result as separate 2-D runs on each level.
+* A 4-D run gives the same result as separate 3-D runs on each level.
 * ``mask`` has the extra dimension, so the seabed is masked by NaN at the first timestep of
   each level.
 * ``window_spatial`` pools horizontal neighbours within each level.
 * On a large grid each output chunk contains one level, and on a small one several levels
   share a chunk.
-* The tracker and ``plotX`` take a 2-D field per timestep, so select a level with ``isel``
-  (or loop over levels) before tracking or plotting. ``multi_plot(config, col="lev")`` draws
-  one panel per level.
+* The tracker follows volumes through ``(time, depth, lat, lon)`` when depth is declared under
+  ``"z"`` in ``dimensions`` (see :ref:`tracking-in-4d`). The ``plotX`` accessor takes one
+  map per timestep, so select a level with ``isel`` before plotting.
+  ``multi_plot(config, col="lev")`` draws one panel per level, and :ref:`tracking-in-4d` lists
+  the plotting helpers for tracked volumes.
 
-The :doc:`../tutorials/3d` tutorial runs this on a century of daily ocean temperature on seven
-levels.
+The :doc:`../tutorials/4d` tutorial runs this on 30 years of daily GLORYS12 ocean temperature on
+36 levels.
 
 ``dask_chunks`` (default ``{"time": 25}``) sets the time chunk of the output, and only its
 time entry is used. An integer is a number of timesteps, and ``"auto"`` uses Dask's byte

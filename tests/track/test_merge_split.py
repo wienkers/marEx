@@ -58,6 +58,7 @@ from .conftest import (
     CHAIN_KWARGS,
     UNSTRUCTURED_KWARGS,
     UNSTRUCTURED_MERGING_KWARGS,
+    _chain_inputs,
     _track,
     _track_chain,
     assert_no_failures,
@@ -65,6 +66,7 @@ from .conftest import (
     on_client,
     open_unstructured,
     open_unstructured_merging,
+    released,
 )
 from .mre_mesh import (
     NT,
@@ -347,7 +349,7 @@ def test_kernel_record_width_guards(merge_kernel, monkeypatch, tmp_path):
     default_parents = merge_split.MAX_PARENTS
 
     monkeypatch.setattr(merge_split, "MAX_PARENTS", 2)
-    records, _, _, _, max_parents, _ = run(full_plus_reject, "a")
+    records, _, _, _, max_parents, _, _, _ = run(full_plus_reject, "a")
     assert records[0][2].tolist() == [1, 2]
     assert max_parents == 2
 
@@ -411,7 +413,7 @@ def test_merge_kernel_hand_computed_overlaps(merge_kernel, tmp_path):
 
     store = str(tmp_path / "accumulator.zarr")
     xr.DataArray(current[None, :], dims=("time", "ncells"), name="temp").to_zarr(store, mode="w")
-    records, forwarded, _, _, max_parents, wrote = merge_kernel(
+    records, forwarded, _, _, max_parents, wrote, _, _ = merge_kernel(
         current[None, :],
         previous,
         following,
@@ -972,3 +974,142 @@ def test_region_writer_rejects_bad_coverage(tmp_path):
 
         check(failures, case, rejected)
     assert_no_failures(failures)
+
+
+def test_unstructured_consolidation_reports_its_renames():
+    """Parent 1 overlaps children 2 and 3; 3 is renamed onto 2 and the pair is handed back."""
+    prev = np.array([1, 1, 1, 1, 0, 0], dtype=np.int32)
+    cur = np.array([2, 2, 3, 3, 0, 0], dtype=np.int32)
+    renames = []
+    merge_split._consolidate_slice(prev, cur, np.ones(6, dtype=np.float32), 0.5, renames)
+    assert renames == [(3, 2)]
+    np.testing.assert_array_equal(cur, [2, 2, 2, 2, 0, 0])
+
+
+def test_unstructured_loop_hands_its_renames_to_the_clusterer(client, tmp_path, monkeypatch):
+    """One object separates into two: the loop renames one child onto the other, and the clusterer receives that pair."""
+    seen = []
+    real = merge_split._add_event_ids
+
+    def spy(merge_events, id_to_event):
+        seen.append((merge_events["_renamed_from"].values.copy(), merge_events["_renamed_to"].values.copy()))
+        real(merge_events, id_to_event)
+
+    monkeypatch.setattr(merge_split, "_add_event_ids", spy)
+    rows = [[1] * 9, [1, 1, 1, 0, 0, 0, 1, 1, 1], [1, 1, 1, 0, 0, 0, 1, 1, 1]]
+    _, objects, _ = _track_chain(tmp_path, serial=False, rows=rows)
+    assert len(seen) == 1
+    renamed, kept = seen[0]
+    assert renamed.size > 0
+    final_ids = np.unique(np.asarray(objects))
+    assert not np.isin(renamed, final_ids).any()
+    assert np.isin(kept, final_ids).all()
+
+
+# --------------------------------------------------------------------------------------
+# Split records
+# --------------------------------------------------------------------------------------
+
+
+def _chain_neighbours(n):
+    """``(3, n)`` neighbour table of a chain of ``n`` cells, -1 where absent."""
+    cells = np.arange(n, dtype=np.int32)
+    left, right = cells - 1, np.where(cells == n - 1, -1, cells + 1)
+    return np.stack([left, right, np.full(n, -1, dtype=np.int32)])
+
+
+@pytest.mark.parametrize(
+    "prev, cur, expected",
+    [
+        pytest.param([1] * 8, [2, 2, 2, 2, 3, 3, 3, 3], [], id="adjacent_pieces_of_a_partition"),
+        pytest.param([1, 1, 1, 0, 0, 0, 1, 1, 1], [2, 2, 2, 0, 0, 0, 3, 3, 3], [], id="parent_holding_two_pieces"),
+        pytest.param([1, 1, 1, 1, 1, 0, 0, 0, 1, 1], [2, 2, 0, 3, 3, 0, 0, 0, 4, 4], [(1, [2, 3, 4])], id="one_piece_separates"),
+        pytest.param(
+            [6, 6, 6, 5, 5, 5, 5, 5, 5, 5], [1, 0, 2, 2, 0, 0, 0, 3, 3, 3], [(5, [2, 3]), (6, [1, 2])], id="kept_id_renamed_later"
+        ),
+    ],
+)
+def test_unstructured_split_rule(prev, cur, expected):
+    prev, cur = np.array(prev, dtype=np.int32), np.array(cur, dtype=np.int32)
+    splits = []
+    area = np.ones(prev.size, dtype=np.float32)
+    merge_split._consolidate_slice(prev, cur, area, 0.5, None, _chain_neighbours(prev.size), splits)
+    assert splits == expected
+
+
+def test_no_unstructured_split_without_the_neighbours():
+    prev, cur = np.ones(5, dtype=np.int32), np.array([2, 0, 0, 0, 3], dtype=np.int32)
+    splits = []
+    merge_split._consolidate_slice(prev, cur, np.ones(5, dtype=np.float32), 0.5, None, None, splits)
+    assert splits == []
+
+
+def test_gridded_split_rule_uses_eight_connectivity_and_the_seam():
+    parent = np.ones((3, 6), dtype=bool)
+    diagonal = np.zeros((3, 6), dtype=bool)
+    diagonal[0, 1] = diagonal[1, 2] = True
+    assert not _overlap.object_separates_gridded(parent, diagonal, False)
+
+    across_seam = np.zeros((3, 6), dtype=bool)
+    across_seam[1, 0] = across_seam[1, 5] = True
+    assert _overlap.object_separates_gridded(parent, across_seam, False)
+    assert not _overlap.object_separates_gridded(parent, across_seam, True)
+
+    two_pieces = np.zeros((3, 6), dtype=bool)
+    two_pieces[0, 0] = two_pieces[0, 3] = True
+    assert _overlap.object_separates_gridded(parent, two_pieces, True)
+    held = two_pieces.copy()
+    held[0, 1] = held[0, 2] = False
+    parent_in_two = two_pieces.copy()
+    assert not _overlap.object_separates_gridded(parent_in_two, held, True)
+    assert not _overlap.object_separates_gridded(np.zeros((3, 6), dtype=bool), np.zeros((3, 6), dtype=bool), True)
+
+
+def _chain_merges(temp_dir, serial, rows, time_chunk=None):
+    da, mask, nb, area = _chain_inputs(rows)
+    if time_chunk is not None:
+        da = da.chunk({"time": time_chunk})
+
+    def run():
+        tracker = marEx.tracker(da, mask, temp_dir=str(temp_dir), neighbours=nb, cell_areas=area, **CHAIN_KWARGS)
+        if serial:
+            tracker.split_and_merge_objects_parallel = tracker.split_and_merge_objects
+        events, merges = tracker.run(return_merges=True)
+        return events.compute(), merges.compute()
+
+    return released(run, "the tracker run")
+
+
+@pytest.mark.parametrize("serial", [False, True], ids=["parallel", "serial"])
+def test_a_split_that_persists_is_recorded_once(client, tmp_path, serial):
+    rows = [[1] * 9, [1, 1, 1, 0, 0, 0, 1, 1, 1], [1, 1, 1, 0, 0, 0, 1, 1, 1], [1, 1, 1, 0, 0, 0, 1, 1, 1]]
+    events, merges = _chain_merges(tmp_path, serial, rows)
+    assert merges.sizes["split_ID"] == 1
+    np.testing.assert_array_equal(merges["split_time"].values, events["time"].values[[1]])
+    np.testing.assert_array_equal(merges["n_split_children"].values, [2])
+    np.testing.assert_array_equal(merges["split_event_IDs"].values, [1])
+    assert merges["split_parent_IDs"].dtype == np.int32 and merges["split_child_IDs"].dtype == np.int32
+    assert events.attrs["total_splits"] == 1
+    assert "_renamed_from" not in merges
+
+
+@pytest.mark.parametrize("serial", [False, True], ids=["parallel", "serial"])
+def test_two_events_that_merge_and_separate_are_not_a_split(client, tmp_path, serial):
+    rows = [[1, 1, 1, 0, 0, 0, 1, 1, 1], [1] * 9, [1, 1, 1, 0, 0, 0, 1, 1, 1]]
+    events, merges = _chain_merges(tmp_path, serial, rows)
+    assert merges.sizes["merge_ID"] > 0
+    assert merges.sizes["split_ID"] == 0
+    assert merges["split_time"].dtype == events["time"].dtype
+    assert events.attrs["total_splits"] == 0
+
+
+@pytest.mark.parametrize("time_chunk", [1, 2, 5])
+def test_split_records_survive_chunk_reruns(client, tmp_path, time_chunk):
+    """A merge at t1 changes the next chunk's boundary, so later chunks run again: their records replace the first run's."""
+    rows = [[1, 1, 1, 0, 0, 0, 1, 1, 1], [1] * 9, [1] * 9, [1, 0, 1, 1, 0, 0, 0, 1, 1], [1, 0, 1, 1, 0, 0, 0, 1, 1]]
+    _, reference = _chain_merges(tmp_path / "whole", False, rows)
+    _, merges = _chain_merges(tmp_path / f"chunk{time_chunk}", False, rows, time_chunk=time_chunk)
+    assert reference.sizes["split_ID"] == 1
+    assert (reference["split_event_IDs"].values > 0).all(), "a minted parent ID must resolve to its event after compaction"
+    for name in ("split_time", "split_parent_IDs", "split_child_IDs", "n_split_children", "split_event_IDs"):
+        np.testing.assert_array_equal(merges[name].values, reference[name].values, err_msg=name)

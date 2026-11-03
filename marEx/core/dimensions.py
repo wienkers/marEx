@@ -113,7 +113,7 @@ def extra_dim_chunks(
     """Chunk sizes for the extra dims (depth, level, member) of one tile.
 
     One level per chunk while the horizontal tile is smaller than the whole
-    horizontal slice, so each level of a large field gets exactly its 2-D slice's
+    horizontal slice, so each level of a large field gets exactly its 3-D slice's
     tiling at any extra-dim length. Spreading the budget over depth as well
     gave tiles spanning several levels and peaked at the node's memory cap on the
     slice_3d oracle.
@@ -140,7 +140,7 @@ def extra_dim_chunks(
     Returns
     -------
     dict
-        ``{dim: chunk}`` for every extra dim present; empty for a 2-D field.
+        ``{dim: chunk}`` for every extra dim present; empty for a field with no extra dimension.
     """
     present = [d for d in extra if d in sizes]
     chunks = dict.fromkeys(present, 1)

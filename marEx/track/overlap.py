@@ -20,6 +20,9 @@ import xarray as xr
 from dask.base import is_dask_collection
 from numba import njit, prange
 from numpy.typing import NDArray
+from scipy.ndimage import label as scipy_label
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from ..logging_config import get_logger
 
@@ -279,6 +282,90 @@ def enforce_overlap_threshold(
     return overlap_objects_list_filtered
 
 
+def _a_piece_touches_two(parent_pieces: NDArray, child_pieces: NDArray) -> bool:
+    """Whether one labelled piece of the parent overlaps two or more labelled pieces of the child (0 is background)."""
+    both = (parent_pieces > 0) & (child_pieces > 0)
+    if not both.any():
+        return False
+    stride = np.int64(child_pieces.max()) + 1
+    pairs = np.unique(parent_pieces[both].astype(np.int64) * stride + child_pieces[both])
+    return bool((np.bincount(pairs // stride) >= 2).any())
+
+
+def object_separates_gridded(parent: NDArray[np.bool_], child: NDArray[np.bool_], wrap_x: bool) -> bool:
+    """
+    Whether one connected piece of ``parent`` overlaps two or more connected pieces of ``child``.
+
+    Pieces are 8-connected, as objects are at identification, and join across the periodic-longitude
+    seam when ``wrap_x``. Labelling is limited to the bounding box of the two masks, over the whole
+    ``x`` range when the seam joins.
+
+    Parameters
+    ----------
+    parent, child : numpy.ndarray
+        Boolean ``(y, x)`` masks of one object at consecutive timesteps.
+    wrap_x : bool
+        Join across the periodic-longitude seam.
+
+    Returns
+    -------
+    bool
+        True when the parent separated.
+    """
+    # Imported here to avoid a module-level overlap->objects import edge
+    from .objects import _EIGHT_CONNECTIVITY, _merge_lon_seam
+
+    occupied = np.nonzero(parent | child)
+    if occupied[0].size == 0:
+        return False
+    box = [slice(int(axis.min()), int(axis.max()) + 1) for axis in occupied]
+    if wrap_x:
+        box[1] = slice(None)
+    box = tuple(box)
+
+    def pieces(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
+        labels, n_labels = scipy_label(mask[box], structure=_EIGHT_CONNECTIVITY)
+        return _merge_lon_seam(labels, n_labels) if wrap_x else labels
+
+    return _a_piece_touches_two(pieces(parent), pieces(child))
+
+
+def _cell_pieces(cells: NDArray[np.int64], neighbours: NDArray[np.int32]) -> NDArray[np.int32]:
+    """Connected-piece label (from 1) of each of ``cells``, ascending flat indices, on a ``(nv, ncells)`` table."""
+    cols = neighbours[:, cells]  # -1 where a cell has no neighbour on that edge
+    position = np.minimum(np.searchsorted(cells, cols), cells.size - 1)
+    linked = (cols >= 0) & (cells[position] == cols)
+    rows = np.broadcast_to(np.arange(cells.size), cols.shape)
+    graph = csr_matrix(
+        (np.ones(int(linked.sum()), dtype=np.int8), (rows[linked], position[linked])), shape=(cells.size, cells.size)
+    )
+    return connected_components(graph, directed=False)[1].astype(np.int32) + 1
+
+
+def object_separates_unstructured(
+    parent_cells: NDArray[np.int64], child_cells: NDArray[np.int64], neighbours: NDArray[np.int32]
+) -> bool:
+    """
+    Whether one connected piece of a parent overlaps two or more connected pieces of a child.
+
+    Parameters
+    ----------
+    parent_cells, child_cells : numpy.ndarray
+        Ascending flat cell indices of one object at consecutive timesteps.
+    neighbours : numpy.ndarray
+        ``(nv, ncells)`` int32 neighbour table, -1 where absent.
+
+    Returns
+    -------
+    bool
+        True when the parent separated.
+    """
+    if parent_cells.size == 0 or child_cells.size == 0:
+        return False
+    _, in_parent, in_child = np.intersect1d(parent_cells, child_cells, assume_unique=True, return_indices=True)
+    return _a_piece_touches_two(_cell_pieces(parent_cells, neighbours)[in_parent], _cell_pieces(child_cells, neighbours)[in_child])
+
+
 def consolidate_object_ids(
     data_t_minus_2: xr.DataArray,
     data_t_minus_1: xr.DataArray,
@@ -293,6 +380,10 @@ def consolidate_object_ids(
     regional_mode: bool,
     ydim,
     xdim: str,
+    *,
+    renames: Optional[List[Tuple[int, int]]] = None,
+    splits: Optional[List[Tuple[int, int, List[int]]]] = None,
+    neighbours: Optional[NDArray[np.int32]] = None,
 ) -> Tuple[xr.DataArray, xr.Dataset]:
     """
     Consolidate object IDs between t-2 and t-1 to ensure consistent tracking.
@@ -311,6 +402,14 @@ def consolidate_object_ids(
         Object properties dataset (will be modified)
     timestep : int
         Current timestep number for logging purposes
+    renames : list, optional
+        Receives each ``(old_id, kept_id)``.
+    splits : list, optional
+        Receives ``(timestep, parent_id, [kept_id, *renamed_ids])`` for each parent that separated.
+        A rename is not itself a split: the pieces of one partition, or an object already in two
+        pieces, also link one parent to several children.
+    neighbours : numpy.ndarray, optional
+        ``(nv, ncells)`` neighbour table, read with ``splits`` on an unstructured grid.
 
     Returns
     -------
@@ -346,6 +445,7 @@ def consolidate_object_ids(
 
     # Track ID mappings for logging
     id_mappings = {}  # child_id -> parent_id
+    candidates: List[Tuple[int, List[int]]] = []
 
     for parent_id in splitting_parents:
         # Skip if parent doesn't exist in properties
@@ -378,6 +478,9 @@ def consolidate_object_ids(
 
                     # Track the mapping
                     id_mappings[child_id] = first_child_id
+                    if renames is not None:
+                        renames.append((child_id, first_child_id))
+                candidates.append((int(parent_id), [first_child_id, *other_children]))
 
             # Recalculate properties for the consolidated object
             consolidated_mask = data_t_minus_1 == first_child_id
@@ -406,6 +509,23 @@ def consolidate_object_ids(
                         cp["centroid"].values[0],
                         cp["centroid"].values[1],
                     )
+
+    if splits is not None:
+        for parent_id, children in candidates:
+            # A later parent can rename this parent's kept ID in turn, so follow it to the survivor.
+            survivor = children[0]
+            while survivor in id_mappings:
+                survivor = id_mappings[survivor]
+            if unstructured_grid:
+                previous, current = data_t_minus_2.values.ravel(), data_t_minus_1.values.ravel()
+                separated = object_separates_unstructured(
+                    np.flatnonzero(previous == parent_id), np.flatnonzero(current == survivor), neighbours
+                )
+            else:
+                previous, current = data_t_minus_2.transpose(ydim, xdim).values, data_t_minus_1.transpose(ydim, xdim).values
+                separated = object_separates_gridded(previous == parent_id, current == survivor, not regional_mode)
+            if separated:
+                splits.append((timestep, parent_id, children))
 
     return data_t_minus_1, object_props
 

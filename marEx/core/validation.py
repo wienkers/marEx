@@ -186,7 +186,7 @@ def _infer_dims_coords(
                     "detected automatically and carried through as broadcast axes",
                 ],
                 data_info={
-                    "data_structure": "unstructured (2D)",
+                    "data_structure": "unstructured",
                     "dimensions": dimensions,
                     "missing_coordinates": "x and y spatial coordinates",
                 },

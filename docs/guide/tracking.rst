@@ -16,7 +16,7 @@ latitude/longitude grid or an unstructured mesh, including masks from outside ma
 Why Overlap-Based Tracking
 ==========================
 
-Labelling the field as a 3-D array (time as a third spatial axis) joins any two objects that
+Labelling space and time together (time as a third spatial axis) joins any two objects that
 touch in space-time. Events that brush against each other for one day become permanently
 linked, and a few weeks later a single "event" spans the basin, with a duration, area and
 intensity that describe no physical phenomenon.
@@ -171,9 +171,10 @@ Required
 --------
 
 ``data_bin`` : :class:`xarray.DataArray`
-   Boolean, Dask-backed, with dimensions ``(time, lat, lon)`` or ``(time, cells)``. For a field
-   with an extra dimension such as depth, select one level with ``isel`` first, or loop over
-   levels.
+   Boolean, Dask-backed, with dimensions ``(time, lat, lon)`` or ``(time, cells)``. A field
+   with a depth dimension is tracked as volumes when ``dimensions`` declares it under ``"z"``
+   (see `Tracking in 4-D`_). Any other extra dimension needs one member selected with ``isel``,
+   or a loop over members.
 
 ``R_fill`` : int
    See `The Morphological Step`_. Small values (3 to 5) preserve narrow features and suit
@@ -242,7 +243,8 @@ Grid and Areas
 
 ``dimensions``, ``coordinates`` : dict
    Defaults ``{"time": "time", "x": "lon", "y": "lat"}``. Set them when your names differ. For
-   an unstructured mesh ``dimensions`` contains only the cell dimension, under ``"x"``.
+   an unstructured mesh ``dimensions`` contains only the cell dimension, under ``"x"``. A ``"z"``
+   entry selects 4-D tracking.
 
 ``grid_resolution`` : float, optional
    Grid spacing in degrees, for regular grids only. Computes spherical cell areas in
@@ -375,14 +377,33 @@ object area that survives the area filter.
 
 With ``run(return_merges=True)`` the tracker also returns a second Dataset with one entry per
 merge: ``parent_IDs``, ``child_IDs``, ``overlap_areas``, ``merge_time``, ``n_parents`` and
-``n_children``. Its IDs are the per-timestep object IDs from the identification step, whereas
-``merge_ledger`` in the main dataset uses final event IDs and is the one to use for event-level
-questions.
+``n_children``. These IDs are the per-timestep object IDs from the identification step, and a
+merge's parents are the objects of the timestep before ``merge_time``. ``parent_event_IDs`` and
+``child_event_IDs`` hold the same rows in final event IDs, and ``n_parent_events`` counts the
+distinct events among the parents. ``-1`` marks padding or an empty partition piece. Use these to
+see which events met: ``merge_ledger`` records only that an event was a parent in a merge at that
+time, and ``global_ID`` holds one object per event per timestep and none that consolidation later
+renamed, so it cannot resolve every object ID.
+
+The same Dataset records splits, one row each: ``split_time``, ``split_parent_IDs``,
+``split_child_IDs``, ``split_event_IDs`` and ``n_split_children``. A split is a connected piece of an
+object that overlaps two or more connected pieces of the object it continues into at the next
+timestep. Adjacent pieces of a partition do not count. Any overlap does count, even a single cell, so
+these rows currently overstate fission: a piece that grows onto another piece's old footprint, or a
+small crumb cut off by a neighbouring object, is recorded although the water never separated. It is
+recorded where consolidation renames the children onto one
+ID, and the children stay in the parent's event. An event can also gain pieces through a merge, with
+no split row. Two events that merge and separate again are not a split, because each keeps its own
+ID. The events carry the count as the ``total_splits`` attribute.
 
 .. code-block:: python
 
    # Call this in place of run(): a tracker instance runs only once.
    events, merges = event_tracker.run(return_merges=True)
+
+   # The merges event 12 was a parent in, and the events it met.
+   rows = merges.isel(merge_ID=(merges.parent_event_IDs == 12).any("parent_idx").values)
+   rows.parent_event_IDs
 
 Event Statistics
 ================
@@ -406,8 +427,8 @@ memory. Keep ``ID_field`` lazy.
    track = stats.centroid.sel(ID=17).where(stats.presence.sel(ID=17))
    lat_track, lon_track = track.sel(component=0), track.sel(component=1)
 
-   # Number of recorded parents at each merge of every event
-   n_parents = (stats.merge_ledger >= 0).sum("sibling_ID")
+   # The days on which each event was a parent in a merge
+   in_merge = (stats.merge_ledger >= 0).any("sibling_ID")
 
    # Footprint of event 17: every cell it ever covered (computes over time)
    footprint = (events.ID_field == 17).any("time")
@@ -433,6 +454,233 @@ Visualising Tracks
 
 Movies can overlay event outlines and centroids through the ``object_ids`` and ``centroids``
 arguments of ``animate`` (see :doc:`visualisation`).
+
+.. _tracking-in-4d:
+
+Tracking in 4-D
+===============
+
+Declare a depth dimension under ``"z"`` and ``marEx.tracker`` follows 4-D events through
+a ``(time, depth, lat, lon)`` field. A marine heatwave between 20 and 80 m under a surface
+that stays cool is then one event with a volume and a depth range. Linking, splitting and merging
+follow the 3-D tracker with volumes in place of areas, and the differences are listed below.
+
+.. code-block:: python
+
+   events = marEx.tracker(
+       extremes,                      # bool (time, depth, lat, lon), Dask-backed
+       wet_mask,                      # bool (depth, lat, lon), True where the cell is ocean
+       R_fill=8,
+       dimensions={"time": "time", "z": "depth", "y": "latitude", "x": "longitude"},
+       layer_bounds=ds.depth_bnds,    # (depth, 2) layer interfaces in metres
+       layer_thickness=e3t,           # optional (depth, lat, lon) partial cells, metres
+       grid_resolution=1 / 12,        # or cell_areas=...
+       nn_partitioning=True,          # the default in 4-D; False raises
+       compute_mode="streaming",
+       temp_dir="/path/to/scratch/marex_staging",
+   ).run()
+
+The ``"z"`` key alone selects the 4-D tracker. The depth dimension needs a
+one-dimensional numeric coordinate in metres (``units`` of ``m``, ``metre`` or ``meters``),
+increasing downwards. A coordinate with ``positive: up`` is negated internally and restored
+on output. Structured latitude/longitude grids only: ``unstructured_grid=True`` with a ``"z"``
+entry raises. A dimension beyond time, depth, latitude and longitude (an ensemble member, say)
+still raises a ``TrackingError``, so select or loop over it. The ``wet_mask`` is required
+and has the dimensions ``(depth, lat, lon)``, because a surface mask cannot describe the sea
+floor. Dry cells are never labelled and always block a vertical link.
+
+Chunk only the time
+dimension. A field chunked along depth or horizontally is rechunked once, with a warning.
+
+Vertical Geometry
+-----------------
+
+A volume needs the thickness of every layer, and thickness alone does not locate the layer
+interfaces. The tracker accepts three ways to supply the vertical geometry.
+
+``layer_bounds`` : :class:`xarray.DataArray`
+   The top and bottom interface of each layer in metres, with dimensions ``(depth, 2)`` or
+   ``(depth, lat, lon, 2)``. Pass it explicitly (for a CF dataset, ``ds["depth_bnds"]``). The
+   ``bounds`` attribute on the depth coordinate only names the bounds variable, and
+   it raises without ``layer_bounds``. Cropped depth ranges are
+   fine, since the interfaces are read and not summed.
+
+``layer_thickness`` : :class:`xarray.DataArray`, optional
+   Thickness in metres, ``(depth, lat, lon)``, for partial cells at the sea floor (GLORYS12
+   ``e3t``, for example). A partial cell keeps its top interface from ``layer_bounds`` and is
+   shortened from below, so the thickness on a wet cell must lie in ``(0, bounds thickness]``.
+   It requires ``layer_bounds``.
+
+``layer_bounds="from_centres"``
+   Reconstructs the interfaces at midpoints between the level centres. It is an explicit
+   opt-in because the result is approximate: it logs a warning and sets
+   ``attrs["vertical_geometry"] = "reconstructed_from_centres"``.
+
+The horizontal cell area comes from ``cell_areas`` (units ``m2``, ``m^2`` or ``km2``) or from
+``grid_resolution`` in degrees. Without either, 4-D tracking raises. The cell volume is the area times the layer thickness, in float64 m\ :sup:`3`,
+unless ``cell_volumes`` (m\ :sup:`3`, ``(depth, lat, lon)``) overrides the product. Interfaces
+are still needed alongside ``cell_volumes``, for the gap rule and the depth diagnostics. All
+areas use an Earth radius of 6378 km.
+
+Vertical Connectivity
+---------------------
+
+Each level is labelled with the 3-D tracker's rule (8 neighbours, joined across the longitude seam
+unless ``regional_mode`` is set). Two flagged cells in the same water column then join when
+every cell between them is wet and the intervening layers sum to no more than
+``max_vertical_gap_m``. The default of ``0.0`` connects consecutive stored levels only, so an
+event with an unoccupied level in the middle splits in two. Raise it to bridge a thin
+unoccupied layer, for example ``max_vertical_gap_m=25.0``. A dry cell resets the scan, and the
+bridged cells are not part of the event: ``ID_field`` is 0 there and the gap does not enter
+the volume.
+
+Volume Filter
+-------------
+
+``volume_filter_quartile`` and ``volume_filter_absolute`` replace ``area_filter_quartile``
+and ``area_filter_absolute``, which raise in 4-D.
+
+``volume_filter_quartile`` : float in [0, 1]
+   Drops the smallest fraction of objects, taking the quantile over the volumes of all
+   (time, object) pairs. Objects at the cut-off are kept. Default 0.5 when
+   neither filter is given.
+
+``volume_filter_absolute`` : float
+   Minimum object volume in m\ :sup:`3`. Mutually exclusive with ``volume_filter_quartile``.
+   The applied cut-off is recorded in ``attrs["volume_threshold (m^3)"]``.
+
+Two objects are linked between consecutive timesteps when the volume of their intersection
+is at least ``overlap_threshold`` of the smaller object's volume.
+
+Merges and the Partition Metric
+-------------------------------
+
+When several parents merge into one child, the child is divided among the parents by the
+nearest parent cell. Distance combines a horizontal chord on a sphere of radius 6378 km,
+divided by ``L_H``, with the difference in layer-midpoint depth, divided by ``L_Z``.
+``partition_scales=(L_H, L_Z)`` sets both in metres. By default ``L_H`` is the median of
+``sqrt(area)`` over the wet cells and ``L_Z`` the median wet-cell thickness. The values used
+are recorded in ``attrs["partition_scales_m"]``.
+
+This differs from 3-D on purpose. The 3-D partitioner caps its distance search and falls back
+to the parent centroids beyond it. The 4-D partitioner has no cap, so a lobe far from every
+parent still goes to the parent that owns its nearest cell. Ties between equidistant parents
+go to the smaller ID. The parts are disjoint and sum to the child's volume. The merge loop
+runs until no merging child remains, and raises a ``TrackingError`` naming the unresolved
+IDs if it does not converge.
+
+Parameters That Change or Raise
+-------------------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - In 4-D
+   * - ``area_filter_quartile``, ``area_filter_absolute``
+     - Raise. Use ``volume_filter_quartile`` or ``volume_filter_absolute``.
+   * - ``nn_partitioning``
+     - Defaults to ``True``. Passing ``False`` raises.
+   * - ``allow_merging``
+     - Must stay ``True``.
+   * - ``prefilter_min_cells``
+     - Raises. It counts cells in one horizontal slice and would act per level.
+   * - ``unstructured_grid=True``
+     - Raises.
+   * - ``R_fill``
+     - Closing, opening and hole filling run on each level separately.
+   * - ``T_fill``
+     - Closing in time only, as in 3-D.
+   * - ``compute_mode``
+     - ``"persist"`` or ``"streaming"``, as in 3-D.
+
+Client Memory
+-------------
+
+The merge loop runs on the client and holds whole time chunks of the ID field there. The
+tracker models the bytes it needs as
+
+.. code-block:: text
+
+   retained_chunks * time_chunk * n_voxels * 4  +  5 * n_voxels * 8
+
+where ``n_voxels = nz * ny * nx``. The first term is the int32 ID chunks, with
+``retained_chunks`` equal to 2 for ``streaming`` and 11 for ``persist``. The second is the five
+float64 arrays of vertical geometry (layer top, bottom, thickness and midpoint depth, and
+the cell volume). ``merge_loop_client_bytes`` in ``marEx.track.volumetric.merge_loop`` returns it.
+
+Treat the formula as a lower bound. On the GLORYS12 North-East Pacific box (36 x 361 x 601 =
+7.81 M voxels, 75 days, ``streaming``, 8 workers of 14 GB), the measured client memory above
+the pre-tracking baseline was 1.6 times the model at a time chunk of 5 (1.48 GiB peak in
+total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba baseline of about 0.6 GiB. The tracker warns when the model exceeds 8 GiB. A chunk of 5
+halved the client peak and ran faster (263 s versus 359 s) with identical events. The wet masks, the per-merge partition buffers and the Dask graph are not in the
+model.
+
+Output
+------
+
+``run()`` returns the 3-D variables with these changes. Depth is positive-down metres in
+every output, whatever the sign of the input coordinate.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 26 50
+
+   * - Variable
+     - Dimensions
+     - Content
+   * - ``ID_field``
+     - ``(time, depth, lat, lon)``, int32
+     - Event ID, 0 for background and bridged gap cells. Keeps the input dimension and depth order.
+   * - ``global_ID``, ``presence``, ``time_start``, ``time_end``
+     - as 3-D
+     - Same meaning as in 3-D.
+   * - ``volume``
+     - ``(time, ID)``, float64
+     - Event volume in m\ :sup:`3`.
+   * - ``footprint_area``
+     - ``(time, ID)``, float64
+     - Area of the projection onto the horizontal plane, in m\ :sup:`2`.
+   * - ``centroid``
+     - ``(component, time, ID)``
+     - Volume-weighted horizontal centroid (latitude, longitude) in degrees, correct across the longitude seam.
+   * - ``depth_centroid``
+     - ``(time, ID)``
+     - Volume-weighted mean depth of the cell midpoints, in m.
+   * - ``depth_top``, ``depth_bottom``
+     - ``(time, ID)``
+     - Top interface of the event's shallowest cell and bottom interface of its deepest, in m.
+   * - ``mean_thickness``
+     - ``(time, ID)``
+     - ``volume / footprint_area``: the event's mean thickness, gaps excluded.
+   * - ``merge_ledger``
+     - as 3-D
+     - Same meaning, with int32 ``n_parents`` and ``n_children``.
+
+The merge dataset from ``run(return_merges=True)`` carries ``overlap_volumes``
+(``(merge_ID, parent_idx)``, m\ :sup:`3`) in place of ``overlap_areas``. There is no ``area``
+variable in 4-D, because it would be ambiguous between volume and footprint. The attributes
+record the connectivity rule, ``max_vertical_gap_m``, the vertical-geometry source, the
+partition metric and scales, the overlap threshold, the volume filter and ``total_splits``.
+
+Splits are recorded as in 3-D, with pieces connected under the 4-D rule above, so a gap within
+``max_vertical_gap_m`` does not separate an object.
+
+Visualising 4-D Events
+----------------------
+
+Four helpers in :mod:`marEx.plotX` draw the output, and each selects what it needs from the lazy
+``ID_field`` before loading anything.
+
+* :func:`marEx.plotX.plot_event_levels`: map panels of the event IDs at chosen levels for one time step.
+* :func:`marEx.plotX.plot_event_depth_time`: one event's cell count or volume at each level against time.
+* :func:`marEx.plotX.plot_event_summary`: one event's volume, depth centroid, and top and bottom depth against time. The vertical lines mark where a run of merges begins and, given the merge dataset, where a run of splits begins.
+* :func:`marEx.plotX.animate_event_levels`: a movie of the depth-projected footprint, coloured by the event's shallowest depth, or one map panel per level.
+
+The notebooks in ``examples/4d/`` run this chain on the Blob, the 2013-16 marine heatwave in
+the North-East Pacific, on GLORYS12 data. ``02_track_extremes_4d.ipynb`` tracks the events and
+``03_visualise_events.ipynb`` draws them.
 
 .. _larger-than-memory-tracking:
 
@@ -521,7 +769,9 @@ Troubleshooting
    ``data_bin`` must be boolean. Compare to a threshold, or ``.astype(bool)``.
 
 ``TrackingError``: extra dimension
-   The tracker is 2-D in space. Select a level (``isel(depth=0)``) or loop over levels.
+   A depth dimension is tracked only when declared: pass ``dimensions={..., "z": "depth"}`` (see
+   `Tracking in 4-D`_), or select a level with ``isel(depth=0)``. Any other extra dimension needs
+   one member selected, or a loop over members.
 
 ``TrackingError``: the area filter removed every object
    ``area_filter_absolute`` is larger than the largest object. Lower it.

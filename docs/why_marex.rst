@@ -30,7 +30,7 @@ the job's allocation. See :doc:`guide/performance` for sizing.
 2. Overlap-Based Tracking
 =========================
 
-Basic 3-D connected-component labelling treats time as one more spatial
+Basic space-time connected-component labelling treats time as one more spatial
 dimension, so any two objects that touch anywhere in space-time are joined.
 Events that touch briefly become permanently linked, and the result is a
 basin-spanning 'mega-event' made of many independent phenomena, whose
@@ -70,8 +70,9 @@ See :doc:`guide/tracking`.
   the ``plotX`` accessor detects the grid type and draws maps, panels and
   animations for both.
 * **Dimensions**: a field may have an extra dimension such as depth or
-  pressure level, which detection treats as a broadcast axis, so a 3-D run
-  equals the per-level 2-D runs. Select one level for the tracker and ``plotX``.
+  pressure level, which detection treats as a broadcast axis, so a 4-D run
+  equals the per-level 3-D runs. With depth declared, the tracker follows 4-D events as
+  volumes (m\ :sup:`3`) through ``(time, depth, lat, lon)``, while ``plotX`` takes one level at a time.
 * **Cadence**: daily, monthly and sub-daily time axes are inferred, or passed as
   a :class:`marEx.SeasonalCycle`.
 * **Tail**: ``tail="lower"`` flags the coldest or driest values, for cold

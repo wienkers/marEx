@@ -2,6 +2,21 @@
 
 All notable changes to marEx are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- 4-D event tracking: declare depth as `dimensions["z"]` and `marEx.tracker` follows events through `(time, depth, lat, lon)` fields on structured lat/lon grids, with physical volumes in m^3. Layer interfaces come from `layer_bounds` (optionally with `layer_thickness` for partial cells, or `cell_volumes`), `max_vertical_gap_m` sets how much unoccupied water may separate two parts of one event in a column, `volume_filter_quartile` and `volume_filter_absolute` replace the area filters, and `partition_scales` sets the nearest-cell metric used to split merged volumes. Outputs add `volume`, `footprint_area`, `depth_centroid`, `depth_top`, `depth_bottom` and `mean_thickness`. A wet mask `(depth, lat, lon)` is required, `nn_partitioning` defaults to `True` in 4D, and `False` raises. See "Tracking in 4D" in the tracking guide.
+- `marEx.plotX.plot_event_levels`, `plot_event_depth_time`, `plot_event_summary` and `animate_event_levels` for 4-D events.
+- The merge dataset from `run(return_merges=True)` names events: `parent_event_IDs` and `child_event_IDs`, aligned with `parent_IDs` and `child_IDs`, and `n_parent_events`. Existing variables are unchanged.
+- The merge dataset records splits on every tracker (`split_time`, `split_parent_IDs`, `split_child_IDs`, `split_event_IDs`, `n_split_children`), the events carry a `total_splits` attribute, and `plot_event_summary` marks splits when given the merge dataset.
+- A 4-D example, `examples/4d/`, on GLORYS12 data for the North-East Pacific "Blob": `00_download_glorys12`, `01_preprocess_extremes`, `02_track_extremes_4d` and `03_visualise_events`.
+
+### Fixed
+
+- `multi_plot` panel titles round a float coordinate to 4 significant figures (`depth=0.494`, not `depth=0.49402499198913574`).
+- `detrend_fixed_baseline` and `fixed_baseline` no longer split the input onto a small climatology tile, which made the task count grow with the square of the record length on long, spatially chunked records. Values are unchanged.
+
 ## [5.0.0]
 
 ### Added

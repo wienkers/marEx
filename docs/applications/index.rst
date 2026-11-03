@@ -21,7 +21,7 @@ marEx handles any scalar field on a regular or unstructured grid, so the same th
      - Lower-tail monthly precipitation. Extent and duration of dry spells for hydropower
        catchments and growing regions.
    * - :doc:`subsurface_ocean`
-     - Three-dimensional (time, depth, lat, lon) anomalies with per-level thresholds,
+     - 4-D (time, depth, lat, lon) anomalies with per-level thresholds,
        for fisheries and aquaculture at depth.
    * - :doc:`climatologies_only`
      - The anomaly module alone, on datasets larger than memory.

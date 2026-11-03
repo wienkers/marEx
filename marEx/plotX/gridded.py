@@ -2,7 +2,7 @@
 Gridded data visualisation module for regular rectangular grids.
 
 Plotting for structured oceanographic data with lat/lon coordinates on regular
-grids (3D arrays: time, lat, lon).
+grids (arrays with dimensions time, lat, lon).
 """
 
 from typing import Any, Dict, Optional, Tuple, Union

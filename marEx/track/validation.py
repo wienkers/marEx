@@ -30,8 +30,8 @@ def validate_rank(
 ) -> None:
     """Reject a field carrying a dimension beyond time and the horizontal ones.
 
-    Tracking operates on a single horizontal level: connected-component labelling,
-    the dilation matrix and the merge ledger are all defined on one 2-D field per
+    The 3-D tracker operates on a single horizontal level: connected-component labelling,
+    the dilation matrix and the merge ledger are all defined on one horizontal field per
     timestep. A field with an extra dimension -- depth, level, member -- is a stack
     of independent tracking problems, not one.
 
@@ -61,6 +61,7 @@ def validate_rank(
         ),
         suggestions=[
             f"Select one level first, e.g. ds.isel({unexpected[0]}=0)",
+            'Declare depth as dimensions["z"] to track 4-D events',
             "Loop over the extra dimension and track each level separately",
             "Check the dimension mapping passed to the tracker",
         ],
@@ -138,7 +139,7 @@ def validate_inputs(
             except Exception:
                 raise create_data_validation_error(
                     "Invalid dimensions for unstructured data",
-                    details=f"Expected 2D array with dimensions ({timedim}, {xdim}), got {list(data_bin.dims)}",
+                    details=f"Expected dimensions ({timedim}, {xdim}), got {list(data_bin.dims)}",
                     suggestions=[
                         "Ensure data has time and cell dimensions only",
                         "Check dimension mapping in function call",
@@ -156,7 +157,7 @@ def validate_inputs(
             except Exception:
                 raise create_data_validation_error(
                     "Invalid dimensions for gridded data",
-                    details=(f"Expected 3D array with dimensions ({timedim}, {ydim}, {xdim}), got {list(data_bin.dims)}"),
+                    details=(f"Expected dimensions ({timedim}, {ydim}, {xdim}), got {list(data_bin.dims)}"),
                     suggestions=[
                         "Ensure data has time, latitude, and longitude dimensions",
                         "Check dimension mapping and coordinate names",

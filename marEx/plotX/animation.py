@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import dask
 import numpy as np
@@ -210,6 +210,76 @@ def _materialise_dask_coords(da: xr.DataArray, time_dim: str) -> xr.DataArray:
     return da.assign_coords({name: (coord.dims, arr) for (name, coord), arr in zip(targets.items(), persisted_arrays)})
 
 
+def _write_movie(
+    plot_dir: Union[str, Path],
+    file_name: str,
+    framerate: int,
+    render_frames: Callable[[Path], None],
+    stacklevel: int = 3,
+) -> Optional[str]:
+    """Encode frames into an h264 movie and return its path, or ``None`` when ffmpeg is missing.
+
+    ``render_frames`` receives a scratch directory and must write the frames there as
+    ``time_0000.jpg``, ``time_0001.jpg`` and so on, all with identical pixel dimensions. The scratch
+    directory is always removed afterwards, even if rendering or encoding raises.
+    """
+    if shutil.which("ffmpeg") is None:
+        warnings.warn(
+            "ffmpeg executable not found in system PATH. Cannot create animation.\n"
+            "Please install ffmpeg using one of the following methods:\n"
+            "  - Linux: sudo apt install ffmpeg (Ubuntu/Debian) or sudo yum install ffmpeg (CentOS/RHEL)\n"
+            "  - Conda: conda install -c conda-forge ffmpeg\n"
+            "Alternatively, use matplotlib for animation in Jupyter notebooks.",
+            stacklevel=stacklevel,
+        )
+        return None
+
+    plot_dir = Path(plot_dir)
+    plot_dir.mkdir(exist_ok=True)
+    # Only append the extension when it is missing (avoids ``movie_<name>.mp4.mp4``).
+    output_file = plot_dir / (file_name if file_name.endswith(".mp4") else f"{file_name}.mp4")
+
+    # Use dask's scratch directory for temporary frames
+    dask_temp = dask.config.get("temporary-directory", default=None)
+    if dask_temp is None:
+        dask_temp = tempfile.gettempdir()
+    temp_dir = Path(tempfile.mkdtemp(prefix="marex_animate_", dir=dask_temp))
+    try:
+        render_frames(temp_dir)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",  # ffmpeg's encoder banner and its full-range-JPEG input notice are not failures
+                "-y",
+                "-threads",
+                "0",
+                "-framerate",
+                str(framerate),
+                "-i",
+                str(temp_dir / "time_%04d.jpg"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "22",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(output_file),
+            ],
+            check=True,
+        )
+        return str(output_file)
+    finally:
+        # Always clean up the temporary frames directory, even if frame generation or ffmpeg
+        # raised (a mid-run error would otherwise leave potentially GBs of JPEGs behind).
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def _animate(
     plotter,
     config,
@@ -233,116 +303,90 @@ def _animate(
 
     require_dependencies(["pillow"], "Animation functionality")
 
-    # Check if ffmpeg is installed
-    if shutil.which("ffmpeg") is None:
-        warnings.warn(
-            "ffmpeg executable not found in system PATH. Cannot create animation.\n"
-            "Please install ffmpeg using one of the following methods:\n"
-            "  - Linux: sudo apt install ffmpeg (Ubuntu/Debian) or sudo yum install ffmpeg (CentOS/RHEL)\n"
-            "  - Conda: conda install -c conda-forge ffmpeg\n"
-            "Alternatively, use matplotlib for animation in Jupyter notebooks.",
-            stacklevel=2,
-        )
-        return None
-
-    plot_dir = Path(plot_dir)
-    plot_dir.mkdir(exist_ok=True)
-
-    # Use dask's scratch directory for temporary frames
-    dask_temp = dask.config.get("temporary-directory", default=None)
-    if dask_temp is None:
-        dask_temp = tempfile.gettempdir()
-    temp_dir = Path(tempfile.mkdtemp(prefix="marex_animate_", dir=dask_temp))
-
     if not file_name:
         file_name = f"movie_{plotter.da.name}.mp4"
-    # Only append the extension when it is missing (avoids ``movie_<name>.mp4.mp4``).
-    if not file_name.endswith(".mp4"):
-        file_name = f"{file_name}.mp4"
 
-    output_file = plot_dir / file_name
+    def render_frames(temp_dir: Path) -> None:
+        # Set up plotting parameters
+        cmap, norm, clim, var_units, extend = plotter._setup_common_params(config)
 
-    # Set up plotting parameters
-    cmap, norm, clim, var_units, extend = plotter._setup_common_params(config)
+        # Resolve dimension/coordinate mappings from the plotter (the validated, data-consistent
+        # source of truth) so that a custom-dims plotter is not clobbered by a default config.
+        dims_map = getattr(plotter, "dimensions", None) or config.dimensions or {}
+        coords_map = getattr(plotter, "coordinates", None) or config.coordinates or {}
+        time_dim = dims_map.get("time", "time")
+        time_coord = coords_map.get("time", time_dim)
+        x_coord = coords_map.get("x", "lon")
+        y_coord = coords_map.get("y", "lat")
 
-    # Resolve dimension/coordinate mappings from the plotter (the validated, data-consistent
-    # source of truth) so that a custom-dims plotter is not clobbered by a default config.
-    dims_map = getattr(plotter, "dimensions", None) or config.dimensions or {}
-    coords_map = getattr(plotter, "coordinates", None) or config.coordinates or {}
-    time_dim = dims_map.get("time", "time")
-    time_coord = coords_map.get("time", time_dim)
-    x_coord = coords_map.get("x", "lon")
-    y_coord = coords_map.get("y", "lat")
+        # Every non-time-varying coordinate is shared, unchanged, by every per-frame delayed task
+        # below -- exactly the shape that trips the dask/xarray/distributed "lost dependencies"
+        # bug (see _materialise_dask_coords). Do this once, up front, not per frame.
+        da = _materialise_dask_coords(plotter.da, time_dim)
 
-    # Every non-time-varying coordinate is shared, unchanged, by every per-frame delayed task
-    # below -- exactly the shape that trips the dask/xarray/distributed "lost dependencies"
-    # bug (see _materialise_dask_coords). Do this once, up front, not per frame.
-    da = _materialise_dask_coords(plotter.da, time_dim)
-
-    plot_params = {
-        "cmap": cmap,
-        "norm": norm,
-        "clim": clim,
-        "var_units": var_units,
-        "extend": extend,
-        "show_colorbar": config.show_colorbar,
-        "grid_labels": config.grid_labels,
-        "projection": config.projection,
-        "x_coord": x_coord,
-        "y_coord": y_coord,
-        "plot_IDs": config.plot_IDs,
-    }
-
-    # Size the canvas once, from the domain, and reuse it for every frame. Computed here
-    # rather than in ``make_frame`` precisely so that all frames share one value -- deriving
-    # it per frame would reintroduce the varying-dimension problem that h264 rejects.
-    plot_params["figsize"] = _domain_figsize(
-        plot_params["projection"] or ccrs.Robinson(),
-        da[x_coord].values if x_coord in da.coords else None,
-        da[y_coord].values if y_coord in da.coords else None,
-        bool(config.show_colorbar),
-    )
-
-    # Set up grid information if needed. The unstructured plotter always carries
-    # ``fpath_tgrid``/``fpath_ckdtree`` attributes (possibly None), so only treat the data as
-    # unstructured when a grid path is actually set; otherwise fail early with an informative
-    # error rather than an UnboundLocalError deep inside frame rendering.
-    grid_info = None
-    is_unstructured = hasattr(plotter, "fpath_tgrid") or hasattr(plotter, "fpath_ckdtree")
-    tgrid_path = getattr(plotter, "fpath_tgrid", None)
-    ckdtree_path = getattr(plotter, "fpath_ckdtree", None)
-    if tgrid_path is not None or ckdtree_path is not None:
-        grid_info = {
-            "type": "unstructured",
-            "tgrid_path": tgrid_path,
-            "ckdtree_path": ckdtree_path,
-            "res": getattr(config, "ckdtree_res", 0.3),
+        plot_params = {
+            "cmap": cmap,
+            "norm": norm,
+            "clim": clim,
+            "var_units": var_units,
+            "extend": extend,
+            "show_colorbar": config.show_colorbar,
+            "grid_labels": config.grid_labels,
+            "projection": config.projection,
+            "x_coord": x_coord,
+            "y_coord": y_coord,
+            "plot_IDs": config.plot_IDs,
         }
-    elif is_unstructured:
-        raise VisualisationError(
-            "Missing grid specification for unstructured animation",
-            details="Unstructured animation requires either triangulation or ckdtree data",
-            suggestions=[
-                "Provide fpath_tgrid for triangulation-based plotting",
-                "Provide fpath_ckdtree for interpolated regular grid plotting",
-                "Use specify_grid() to set global grid paths before animating",
-            ],
+
+        # Size the canvas once, from the domain, and reuse it for every frame. Computed here
+        # rather than in ``make_frame`` precisely so that all frames share one value -- deriving
+        # it per frame would reintroduce the varying-dimension problem that h264 rejects.
+        plot_params["figsize"] = _domain_figsize(
+            plot_params["projection"] or ccrs.Robinson(),
+            da[x_coord].values if x_coord in da.coords else None,
+            da[y_coord].values if y_coord in da.coords else None,
+            bool(config.show_colorbar),
         )
 
-    # For gridded plotters, wrap the periodic longitude boundary (avoids a dateline gap in
-    # global animations). ``wrap_lon`` is only defined on the gridded plotter, so its presence
-    # doubles as the gridded/unstructured discriminator.
-    wrap_fn = getattr(plotter, "wrap_lon", None)
+        # Set up grid information if needed. The unstructured plotter always carries
+        # ``fpath_tgrid``/``fpath_ckdtree`` attributes (possibly None), so only treat the data as
+        # unstructured when a grid path is actually set; otherwise fail early with an informative
+        # error rather than an UnboundLocalError deep inside frame rendering.
+        grid_info = None
+        is_unstructured = hasattr(plotter, "fpath_tgrid") or hasattr(plotter, "fpath_ckdtree")
+        tgrid_path = getattr(plotter, "fpath_tgrid", None)
+        ckdtree_path = getattr(plotter, "fpath_ckdtree", None)
+        if tgrid_path is not None or ckdtree_path is not None:
+            grid_info = {
+                "type": "unstructured",
+                "tgrid_path": tgrid_path,
+                "ckdtree_path": ckdtree_path,
+                "res": getattr(config, "ckdtree_res", 0.3),
+            }
+        elif is_unstructured:
+            raise VisualisationError(
+                "Missing grid specification for unstructured animation",
+                details="Unstructured animation requires either triangulation or ckdtree data",
+                suggestions=[
+                    "Provide fpath_tgrid for triangulation-based plotting",
+                    "Provide fpath_ckdtree for interpolated regular grid plotting",
+                    "Use specify_grid() to set global grid paths before animating",
+                ],
+            )
 
-    # Use provided centroids or None if not provided. Materialised for the same reason as
-    # `da` above: centroids/object_ids are separate DataArrays, each isel'd per frame into
-    # its own delayed task, and are just as exposed to the "lost dependencies" bug if either
-    # carries a dask-backed, non-time-varying coordinate (reproduced with a fixed `da` but
-    # an unfixed `object_ids`).
-    centroid_data = _materialise_dask_coords(centroids, time_dim) if centroids is not None else None
-    object_ids_data = _materialise_dask_coords(object_ids, time_dim) if object_ids is not None else None
+        # For gridded plotters, wrap the periodic longitude boundary (avoids a dateline gap in
+        # global animations). ``wrap_lon`` is only defined on the gridded plotter, so its presence
+        # doubles as the gridded/unstructured discriminator.
+        wrap_fn = getattr(plotter, "wrap_lon", None)
 
-    try:
+        # Use provided centroids or None if not provided. Materialised for the same reason as
+        # `da` above: centroids/object_ids are separate DataArrays, each isel'd per frame into
+        # its own delayed task, and are just as exposed to the "lost dependencies" bug if either
+        # carries a dask-backed, non-time-varying coordinate (reproduced with a fixed `da` but
+        # an unfixed `object_ids`).
+        centroid_data = _materialise_dask_coords(centroids, time_dim) if centroids is not None else None
+        object_ids_data = _materialise_dask_coords(object_ids, time_dim) if object_ids is not None else None
+
         # Generate frames using dask for parallel processing
         delayed_tasks = []
         for time_ind in range(len(da[time_dim])):
@@ -390,40 +434,7 @@ def _animate(
 
         filenames = sorted(filenames, key=lambda x: int(x.split("_")[-1].split(".")[0]))
 
-        # Create movie using ffmpeg
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",  # ffmpeg's encoder banner and its full-range-JPEG input notice are not failures
-                "-y",
-                "-threads",
-                "0",
-                "-framerate",
-                str(config.framerate),
-                "-i",
-                str(temp_dir / "time_%04d.jpg"),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "22",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                str(output_file),
-            ],
-            check=True,
-        )
-
-        return str(output_file)
-    finally:
-        # Always clean up the temporary frames directory, even if frame generation or ffmpeg
-        # raised (a mid-run error would otherwise leave potentially GBs of JPEGs behind).
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    return _write_movie(plot_dir, file_name, config.framerate, render_frames)
 
 
 def _frame_centroids(centroids: xr.DataArray, id_field: Optional[np.ndarray]) -> List[Tuple[float, float]]:

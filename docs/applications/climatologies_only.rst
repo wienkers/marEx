@@ -16,8 +16,8 @@ Why marEx Fits
 * The climatology is computed lazily on a Dask array, so the input is read chunk by chunk.
   With ``compute_mode="streaming"`` the intermediate fields are staged in a Zarr store in
   ``scratch_dir``, so far less data is pinned in cluster memory.
-* The same code handles gridded and unstructured grids, 3-D fields with an extra
-  dimension, and non-daily cadences.
+* The same code handles gridded and unstructured grids, 4-D fields and non-daily
+  cadences.
 
 Configuration
 =============

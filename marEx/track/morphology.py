@@ -278,6 +278,9 @@ def fill_time_gaps(
     if ydim is None:
         # Unstructured grid has only 1 additional dimension
         time_kernel = time_kernel[:, np.newaxis]
+    elif data_bin.ndim == 4:
+        # Volumetric (time, z, y, x): closing along time only
+        time_kernel = time_kernel[:, np.newaxis, np.newaxis, np.newaxis]
     else:
         time_kernel = time_kernel[:, np.newaxis, np.newaxis]
 

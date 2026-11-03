@@ -96,7 +96,7 @@ def finalise_dataset(
         Passed in rather than derived from ``ds``, because ``ds.dims`` is the union
         over every variable: on the unstructured path it also carries ``neighbours``'
         own ``nv`` axis, which is not a spatial dimension of the field and must not
-        be rechunked here. Empty for a 2-D field, which is what makes this site
+        be rechunked here. Empty for a field with no extra dimension, which is what makes this site
         produce exactly the chunk dict it always did.
 
     Returns

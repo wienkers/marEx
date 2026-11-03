@@ -15,8 +15,8 @@ Core capabilities:
 
 Supported data formats:
 
-* Structured data: 3D arrays (time, lat, lon) for regular rectangular grids
-* Unstructured data: 2D arrays (time, cell) for irregular triangular meshes
+* Structured data: (time, lat, lon) arrays for regular rectangular grids
+* Unstructured data: (time, cell) arrays for irregular triangular meshes
 """
 
 import warnings
@@ -30,6 +30,7 @@ from ..logging_config import get_logger
 from .base import PlotConfig
 from .gridded import GriddedPlotter
 from .unstructured import UnstructuredPlotter
+from .volumetric import animate_event_levels, plot_event_depth_time, plot_event_levels, plot_event_summary
 
 # Get module logger
 logger = get_logger(__name__)

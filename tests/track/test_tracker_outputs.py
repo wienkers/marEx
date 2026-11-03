@@ -42,6 +42,19 @@ from .conftest import (
 )
 
 EVENT_VARS = {"ID_field", "global_ID", "area", "centroid", "presence", "time_start", "time_end", "merge_ledger"}
+# Added to the merges dataset after the golden baseline was written. The baseline is never regenerated,
+# so these are compared by the event-ID tests below and everything else stays bit-pinned.
+MERGE_VARS_NEWER_THAN_GOLDEN = [
+    "parent_event_IDs",
+    "child_event_IDs",
+    "n_parent_events",
+    "split_time",
+    "split_parent_IDs",
+    "split_child_IDs",
+    "split_event_IDs",
+    "n_split_children",
+]
+EVENT_ATTRS_NEWER_THAN_GOLDEN = ["total_splits"]
 
 
 def _open_golden():
@@ -72,8 +85,15 @@ def test_outputs_identical_to_golden(golden_run):
     events, merges = golden_run
     golden_events, golden_merges = _open_golden()
     failures = []
-    check(failures, "events dataset", lambda: xr.testing.assert_identical(events, golden_events))
-    check(failures, "merges dataset", lambda: xr.testing.assert_identical(merges, golden_merges))
+    # The baseline predates these attributes, and their values are pinned by the split tests below.
+    trimmed_events = events.copy()
+    trimmed_events.attrs = {k: v for k, v in events.attrs.items() if k not in EVENT_ATTRS_NEWER_THAN_GOLDEN}
+    check(failures, "events dataset", lambda: xr.testing.assert_identical(trimmed_events, golden_events))
+    check(
+        failures,
+        "merges dataset",
+        lambda: xr.testing.assert_identical(merges.drop_vars(MERGE_VARS_NEWER_THAN_GOLDEN), golden_merges),
+    )
     for name in ("ID_field", "global_ID", "presence", "area", "centroid", "merge_ledger"):
         check(
             failures,
@@ -101,6 +121,27 @@ def test_outputs_identical_to_golden(golden_run):
                 assert actual == expected, f"Attribute '{key}' differs: {actual!r} != {expected!r}"
 
     check(failures, "attrs", attrs)
+    assert_no_failures(failures)
+
+
+def test_outputs_dtypes_match_golden(golden_run):
+    """Every data variable and coordinate of events and merges keeps the golden dtype.
+
+    ``assert_identical`` compares values, not dtypes, so a silent int32 -> int64 or float32 -> float64 change
+    would pass the identity test. A name present on only one side is itself a failure."""
+    events, merges = golden_run
+    golden_events, golden_merges = _open_golden()
+    failures = []
+    merges = merges.drop_vars(MERGE_VARS_NEWER_THAN_GOLDEN)
+    for label, run, golden in (("events", events, golden_events), ("merges", merges, golden_merges)):
+        for name in sorted(set(run.variables) | set(golden.variables)):
+
+            def same_dtype(run=run, golden=golden, name=name):
+                assert name in golden.variables, f"{name} is not in the golden dataset"
+                assert name in run.variables, f"{name} is missing from the run"
+                assert run[name].dtype == golden[name].dtype, f"{run[name].dtype} != golden {golden[name].dtype}"
+
+            check(failures, f"{label} {name}", same_dtype)
     assert_no_failures(failures)
 
 
@@ -619,3 +660,57 @@ def test_omitted_mask_is_an_all_true_mask(client):
     half = half.chunk(dict(zip(half.dims, [-1] * half.ndim)))
     masked = marEx.tracker(events, half, **kwargs).run()
     assert int(masked.ID_field.sum()) != int(omitted.ID_field.sum()), "a half-domain mask changed nothing"
+
+
+def _assert_merge_event_ids_hold(events, merges):
+    """Every parent event is in the merge ledger at that time, every child event is present, and no ID is unresolved."""
+    assert merges.sizes["merge_ID"] > 0
+    parents, children = merges["parent_event_IDs"].values, merges["child_event_IDs"].values
+    assert parents.dtype == np.int32 and children.dtype == np.int32
+    assert parents.shape == merges["parent_IDs"].shape and children.shape == merges["child_IDs"].shape
+    np.testing.assert_array_equal(parents > 0, merges["parent_IDs"].values > 0)
+    # These configurations drop no partition piece, so a renamed child resolves or this fails.
+    np.testing.assert_array_equal(children > 0, merges["child_IDs"].values > 0)
+    ledger = events["merge_ledger"].transpose("time", "ID", "sibling_ID")
+    presence = events["presence"].transpose("time", "ID")
+    time_index = {value: i for i, value in enumerate(events["time"].values)}
+    id_index = {int(value): i for i, value in enumerate(events["ID"].values)}
+    for row, when in enumerate(merges["merge_time"].values):
+        t = time_index[when]
+        for event in parents[row][parents[row] > 0]:
+            assert (ledger.values[t, id_index[int(event)]] >= 0).any(), (row, event)
+            assert presence.values[t - 1, id_index[int(event)]], (row, event)
+        for event in children[row][children[row] > 0]:
+            assert presence.values[t, id_index[int(event)]], (row, event)
+        assert merges["n_parent_events"].values[row] == len(set(parents[row][parents[row] > 0].tolist()))
+    assert events.attrs["total_splits"] == merges.sizes["split_ID"]
+    split_events = merges["split_event_IDs"].values
+    assert split_events.dtype == np.int32 and (split_events > 0).all()
+    np.testing.assert_array_equal(merges["n_split_children"].values, (merges["split_child_IDs"].values > 0).sum(axis=1))
+    assert (merges["n_split_children"].values >= 2).all()
+    for when, event in zip(merges["split_time"].values, split_events):
+        assert events["presence"].sel(time=when, ID=int(event)).item(), (when, event)
+
+
+def test_merge_event_ids_gridded(golden_run):
+    _assert_merge_event_ids_hold(*golden_run)
+
+
+def test_gridded_golden_run_records_its_splits(golden_run):
+    """Pins the gridded consolidation hook: the count has no golden baseline to be compared with."""
+    _, merges = golden_run
+    assert merges["split_parent_IDs"].values.tolist() == [1, 245]
+
+
+def test_merge_event_ids_unstructured(client, tmp_path):
+    data = open_unstructured_merging()
+    tracker = marEx.tracker(
+        data.extreme_events,
+        data.mask,
+        temp_dir=str(tmp_path / "merging"),
+        neighbours=data.neighbours,
+        cell_areas=data.cell_areas,
+        **UNSTRUCTURED_MERGING_KWARGS,
+    )
+    events, merges = tracker.run(return_merges=True)
+    _assert_merge_event_ids_hold(events.compute(), merges.compute())

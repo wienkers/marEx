@@ -7,6 +7,7 @@ pinned as an exact off switch against an independent unsmoothed reference.
 
 import logging
 
+import dask.array as dsa
 import numpy as np
 import pandas as pd
 import pytest
@@ -403,3 +404,121 @@ def test_mask_attrs_are_its_own():
 
         check(failures, method, row)
     assert_no_failures(failures)
+
+
+def _chunked_field(n_days=1461, shape=(4, 24, 36), chunks=None):
+    time = pd.date_range("2000-01-01", periods=n_days, freq="D")
+    rng = np.random.default_rng(0)
+    values = rng.normal(size=(n_days, *shape)).astype(np.float32)
+    field = xr.DataArray(
+        values,
+        dims=("time", "depth", "lat", "lon"),
+        coords={"time": time, "depth": np.arange(shape[0]), "lat": np.arange(shape[1]), "lon": np.arange(shape[2])},
+    )
+    return field.chunk(chunks or {"time": 10, "depth": 2, "lat": 12, "lon": 18})
+
+
+def test_circular_smoothing_keeps_the_spatial_chunks():
+    """A window of 31 must not split a tile: tasks scale with tiles, so a split multiplies the whole stage."""
+    clim = _chunked_field(366, chunks={"time": -1, "depth": 2, "lat": 12, "lon": 18}).rename(time="dayofyear")
+    clim = clim.assign_coords(dayofyear=np.arange(1, 367))
+    smoothed = _smooth_climatology_circular(clim, DAILY_CYCLE, 31)
+    assert smoothed.chunksizes["depth"] == clim.chunksizes["depth"]
+    assert smoothed.chunksizes["lat"] == clim.chunksizes["lat"]
+    assert smoothed.chunksizes["lon"] == clim.chunksizes["lon"]
+
+
+def test_circular_smoothing_values_do_not_depend_on_the_tile():
+    clim = _chunked_field(366, chunks={"time": -1, "depth": 2, "lat": 12, "lon": 18}).rename(time="dayofyear")
+    clim = clim.assign_coords(dayofyear=np.arange(1, 367))
+    clim = clim.where(clim.lat != 3)  # a NaN column
+    tiled = _smooth_climatology_circular(clim, DAILY_CYCLE, 31).compute()
+    whole = _smooth_climatology_circular(clim.chunk({"depth": -1, "lat": -1, "lon": -1}), DAILY_CYCLE, 31).compute()
+    assert tiled.dtype == whole.dtype
+    assert tiled.values.tobytes() == whole.values.tobytes()
+
+
+@pytest.mark.parametrize("n_days", [1461, 7305])
+def test_subtraction_keeps_the_input_spatial_chunks(n_days):
+    """The climatology's tile must not reach the anomaly, or tasks grow as record length squared."""
+    field = _chunked_field(n_days)
+    result = _compute_anomaly_fixed_baseline(
+        field,
+        dimensions={"time": "time", "x": "lon", "y": "lat"},
+        coordinates={"time": "time", "x": "lon", "y": "lat"},
+        smooth_days=31,
+    )
+    anomaly = result["dat_anomaly"]
+    assert anomaly.chunksizes["depth"] == field.chunksizes["depth"]
+    assert anomaly.chunksizes["lat"] == field.chunksizes["lat"]
+    assert anomaly.chunksizes["lon"] == field.chunksizes["lon"]
+
+
+def test_climatology_alignment_is_bounded_for_a_spatially_whole_input():
+    """A spatially whole input must not put the whole climatology in one task."""
+    from marEx.anomaly.fixed_baseline import _align_climatology_to_input
+
+    clim = xr.DataArray(
+        dsa.zeros((366, 36, 361, 601), chunks=(366, 9, 23, 22), dtype="f4"), dims=("dayofyear", "depth", "lat", "lon")
+    )
+    whole = xr.DataArray(dsa.zeros((10, 36, 361, 601), chunks=(10, 36, 361, 601), dtype="f4"), dims=("time", "depth", "lat", "lon"))
+    tiled = whole.chunk({"depth": 9, "lat": 181, "lon": 301})
+    assert _align_climatology_to_input(clim, whole, "dayofyear").chunksizes["lat"] == clim.chunksizes["lat"]
+    assert _align_climatology_to_input(clim, tiled, "dayofyear").chunksizes["lat"] == tiled.chunksizes["lat"]
+
+
+def _sparse_clim(length=366, n_x=6, seed=1):
+    """One finite day, all NaN, isolated finite days, a NaN season, and two complete cells."""
+    data = np.random.default_rng(seed).normal(size=(length, n_x)).astype(np.float32)
+    data[:, 0] = np.nan
+    data[100, 0] = 2.5
+    data[:, 1] = np.nan
+    isolated = np.ones(length, dtype=bool)
+    isolated[::40] = False
+    data[isolated, 2] = np.nan
+    data[150:250, 3] = np.nan
+    return xr.DataArray(data, dims=("dayofyear", "x"), coords={"dayofyear": np.arange(1, length + 1)})
+
+
+@pytest.mark.parametrize("smooth_days", [5, 30, 31])
+def test_the_tile_keeping_kernel_matches_the_numpy_kernel_bit_for_bit(smooth_days):
+    """A window needs only one finite day: the numpy path is xarray's own min_periods=1 rolling mean."""
+    clim = _sparse_clim()
+    from_numpy = _smooth_climatology_circular(clim, DAILY_CYCLE, smooth_days)
+    from_dask = _smooth_climatology_circular(clim.chunk({"dayofyear": -1, "x": 2}), DAILY_CYCLE, smooth_days).compute()
+    assert from_dask.dtype == from_numpy.dtype
+    assert from_dask.values.tobytes() == from_numpy.values.tobytes()
+
+
+def test_a_finer_climatology_tile_does_not_reach_the_anomaly(monkeypatch):
+    """Short records do not shred the tile on their own, so force the fine tile the long records get."""
+    import marEx.anomaly.fixed_baseline as fixed_baseline
+
+    smooth = fixed_baseline._smooth_climatology_circular
+    monkeypatch.setattr(
+        fixed_baseline,
+        "_smooth_climatology_circular",
+        lambda clim, cycle, smooth_days: smooth(clim, cycle, smooth_days).chunk({"depth": 1, "lat": 3, "lon": 3}),
+    )
+    field = _chunked_field(731)
+    anomaly = _compute_anomaly_fixed_baseline(
+        field,
+        dimensions={"time": "time", "x": "lon", "y": "lat"},
+        coordinates={"time": "time", "x": "lon", "y": "lat"},
+        smooth_days=31,
+    )["dat_anomaly"]
+    assert anomaly.chunksizes["depth"] == field.chunksizes["depth"]
+    assert anomaly.chunksizes["lat"] == field.chunksizes["lat"]
+    assert anomaly.chunksizes["lon"] == field.chunksizes["lon"]
+
+
+def test_climatology_alignment_ignores_a_differently_chunked_coordinate():
+    from marEx.anomaly.fixed_baseline import _align_climatology_to_input
+
+    field = xr.DataArray(
+        dsa.zeros((10, 4, 6), chunks=(10, 2, 3), dtype="f4"),
+        dims=("time", "lat", "lon"),
+        coords={"area": (("lat", "lon"), dsa.ones((4, 6), chunks=(4, 6)))},
+    )
+    clim = xr.DataArray(dsa.zeros((366, 4, 6), chunks=(366, 1, 1), dtype="f4"), dims=("dayofyear", "lat", "lon"))
+    assert _align_climatology_to_input(clim, field, "dayofyear").chunks[1:] == field.chunks[1:]

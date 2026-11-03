@@ -44,7 +44,7 @@ Chunk-Invariance Tests
   gave identical tracked events across time chunks of 5 and 15 steps and across ``persist`` and
   ``streaming``.
 * **Dimensions.** ``tests/detect/test_extra_dim.py`` includes a slice-equivalence check: a run on a
-  three-dimensional field must equal the runs on each level separately.
+  4-D field must equal the runs on each level separately.
 
 The performance tests also assert chunk layouts, because an expensive all-to-all re-chunk can still
 give identical values.
@@ -113,7 +113,7 @@ Development Note
 
 The scientific methods in marEx, and the implementation up to and including v4.1 in April 2026,
 were developed by hand. From v4.1 onward I have used Claude Code, an AI coding assistant, to help me
-optimise, generalise and test the package. That covers the work on three-dimensional fields,
+optimise, generalise and test the package. That covers the work on 4-D fields,
 non-daily cadences, the lower tail, the larger-than-memory modes and the test suite described above.
 
 I do not take the output of that work on trust. The tracker's reference-output tests date from June

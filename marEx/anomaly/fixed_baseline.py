@@ -15,13 +15,13 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import spatial_dims
+from ..core.dimensions import KEEP_INPUT_CHUNK_FACTOR, TASK_ELEMENTS, spatial_dims
 from ..core.numerics import rolling_numerics
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
-from .climatology import last_day_pool
+from .climatology import _rolling_mean_keep_tiles, last_day_pool
 from .harmonic import _compute_anomaly_detrended
 
 # Get module logger
@@ -78,10 +78,15 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     # NaN-preserving: average the finite rows in each window, then re-mask rows that
     # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
     # instead of losing half a window at each edge of its NaN season.
-    with rolling_numerics():
-        smoothed = (
-            padded.rolling({"_row": window}, center=True, min_periods=1).mean().isel({"_row": slice(window, window + n_rows)})
-        )
+    if padded.chunks is None:
+        with rolling_numerics():
+            smoothed = padded.rolling({"_row": window}, center=True, min_periods=1).mean()
+    else:
+        # Tasks scale with the number of tiles, so a window must not split them. Any one finite
+        # row in the window is enough, as with min_periods=1 above.
+        with rolling_numerics():
+            smoothed = _rolling_mean_keep_tiles(padded, "_row", window, max_missing=(window - 1) / window)
+    smoothed = smoothed.isel({"_row": slice(window, window + n_rows)})
     smoothed = smoothed.where(rows.notnull())
     other = [d for d in dims if d != cycle_dim]
     smoothed = smoothed.transpose("_row", "_step", *other)
@@ -90,6 +95,23 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
         folded, dims=(cycle_dim, *other), coords={cycle_dim: labels, **{k: v for k, v in clim.coords.items() if k != cycle_dim}}
     )
     return out.transpose(*dims).astype(np.float32).chunk({cycle_dim: -1})
+
+
+def _align_climatology_to_input(clim: xr.DataArray, da: xr.DataArray, cycle_dim: str) -> xr.DataArray:
+    """Put the climatology on the input's spatial chunks, unless that makes one task too large.
+
+    The subtraction runs on the finer of the two layouts in each dimension, so a climatology on
+    a small tile forces every year of the input onto that tile, and the task count then grows
+    with the square of the record length.
+    """
+    if clim.chunks is None or da.chunks is None:
+        return clim
+    input_chunks = dict(zip(da.dims, da.chunks))  # the data's own; `chunksizes` also checks the coordinates
+    spatial = {dim: input_chunks[dim] for dim in clim.dims if dim != cycle_dim and dim in input_chunks}
+    largest_chunk = clim.sizes[cycle_dim] * int(np.prod([max(sizes) for sizes in spatial.values()], dtype=np.int64))
+    if largest_chunk > KEEP_INPUT_CHUNK_FACTOR * TASK_ELEMENTS:
+        return clim
+    return clim.chunk(spatial)
 
 
 def _compute_anomaly_fixed_baseline(
@@ -208,6 +230,7 @@ def _compute_anomaly_fixed_baseline(
         daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
     )
     daily_climatology = _smooth_climatology_circular(daily_climatology, cycle, smooth_days)
+    daily_climatology = _align_climatology_to_input(daily_climatology, da, cycle_dim)
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")

@@ -185,8 +185,8 @@ marEx checks its arguments before any compute starts. The table lists the common
      - The tracker stages to ``temp_dir``.
      - Pass a directory with enough free space. Budget about 14 bytes per cell-timestep.
    * - ``TrackingError`` about extra dimensions
-     - The tracker and the plotting accessor are 2-D only.
-     - Select one level, for example ``da.isel(depth=0)``, or loop over levels.
+     - A depth dimension was not declared, or the field has a dimension beyond time, depth and horizontal space.
+     - To track volumes, declare depth with ``dimensions={..., "z": "depth"}`` (see :ref:`tracking-in-4d`). Otherwise select one level, for example ``da.isel(depth=0)``, or loop over levels. The ``plotX`` accessor takes one level at a time.
    * - ``TrackingError`` on a second ``run()``
      - A tracker instance is single use.
      - Construct a new tracker.

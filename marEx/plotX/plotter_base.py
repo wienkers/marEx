@@ -241,7 +241,10 @@ class PlotterBase:
         if col_name == dimensions["time"]:
             time_coord = self.coordinates.get("time", "time")
             return f"{self.da[time_coord].isel({col_name: time_index}).dt.strftime('%Y-%m-%d').values}"
-        return f"{col_name}={self.da[col_name].isel({col_name: time_index}).values}"
+        value = self.da[col_name].isel({col_name: time_index}).values
+        if np.issubdtype(value.dtype, np.floating):
+            return f"{col_name}={float(value):.4g}"
+        return f"{col_name}={value}"
 
     def single_plot(self, config: PlotConfig, ax: Optional[Axes] = None) -> Tuple[Figure, Axes, Any]:
         """Make a single plot with given configuration"""

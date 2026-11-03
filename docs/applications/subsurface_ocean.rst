@@ -21,7 +21,8 @@ Configuration
 =============
 
 The snippet builds a four-level temperature field with a warm anomaly confined to 25 and 50 m.
-It runs detection on all levels at once, then selects one level for tracking.
+It runs detection on all levels at once, then selects one level for a 3-D track. Tracking the
+anomaly as a 4-D event is covered in `Tracking in 4-D`_.
 
 .. code-block:: python
 
@@ -53,7 +54,7 @@ It runs detection on all levels at once, then selects one level for tracking.
                                   threshold_percentile=95)
        print(ds.dat_anomaly.dims, ds.thresholds.dims, ds.mask.dims)
 
-       # Per-level exceedance days. The tracker and plotX are 2-D, so select a level first
+       # Per-level exceedance days. A 3-D track and plotX take one level, so select it first
        days = ds.extreme_events.sum("time").compute()
        print(days.mean(["lat", "lon"]).values)
 
@@ -76,14 +77,44 @@ Output
 
 The detection outputs keep the depth axis: ``dat_anomaly`` and ``extreme_events`` are
 ``(time, depth, lat, lon)``, ``mask`` is ``(depth, lat, lon)`` and ``thresholds`` is
-``(depth, lat, lon, dayofyear)``. The tracker and the ``plotX`` accessor work on 2-D fields, so
-select a level with ``.sel`` or loop over levels.
+``(depth, lat, lon, dayofyear)``. The ``plotX`` accessor takes one map at a time, so select a level
+with ``.sel`` or loop over levels. The tracker works on either: a selected level gives 3-D
+events, and the whole field with depth declared gives 4-D events.
+
+Tracking in 4-D
+===============
+
+A warm anomaly that spans 25 to 50 m should be one event. Declare depth
+under ``"z"`` in ``dimensions`` and pass the layer interfaces, and the tracker links
+``extreme_events`` through ``(time, depth, lat, lon)`` with a volume in m\ :sup:`3` for every
+event and timestep, plus its depth centroid and its top and bottom depth. The tracker also needs
+a boolean wet mask ``(depth, lat, lon)`` that is ``True`` in the ocean, and either
+``grid_resolution`` or ``cell_areas``:
+
+.. code-block:: python
+
+   events = marEx.tracker(
+       ds.extreme_events,
+       ds.mask,
+       R_fill=2,
+       dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+       layer_bounds=layer_bounds,       # (depth, 2) interfaces in metres
+       grid_resolution=15.0,
+       nn_partitioning=True,
+       volume_filter_quartile=0.5,
+       compute_mode="streaming",
+       temp_dir="/path/to/scratch/marex_staging",
+   ).run()
+
+The guide covers the vertical geometry, the gap rule and the memory model in :ref:`tracking-in-4d`.
+For a worked run on a 36-level ocean reanalysis, see the notebooks in ``examples/4d/``
+(:doc:`../tutorials/4d`).
 
 Caveats
 =======
 
-* Events are tracked within a level, so a warm anomaly spanning several levels appears as
-  one event per level, and matching them across depth is left to the application.
+* Tracking a selected level gives one event per level. Declare depth under ``"z"`` to track the
+  anomaly as a single 4-D event.
 * Detection needs finite values at every unmasked cell and time, so interpolate or mask
   data gaps first.
 * The mask is taken from the first time step. A cell that is NaN there is treated as land or
