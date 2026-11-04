@@ -38,7 +38,7 @@ Jupyter notebooks running the **detect → track → visualise** workflow on rea
       :link: 4d
       :link-type: doc
 
-      GLORYS12 north-east Pacific marine heatwaves, 1993-2022 on 36 levels
+      GLORYS12 northeast Pacific marine heatwaves, 1993-2022 on 36 levels
       to 1150 m, tracked through time and depth as volumes.
 
 Scripts

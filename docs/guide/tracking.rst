@@ -379,22 +379,26 @@ With ``run(return_merges=True)`` the tracker also returns a second Dataset with 
 merge: ``parent_IDs``, ``child_IDs``, ``overlap_areas``, ``merge_time``, ``n_parents`` and
 ``n_children``. These IDs are the per-timestep object IDs from the identification step, and a
 merge's parents are the objects of the timestep before ``merge_time``. ``parent_event_IDs`` and
-``child_event_IDs`` hold the same rows in final event IDs, and ``n_parent_events`` counts the
+``child_event_IDs`` contain the same rows in final event IDs, and ``n_parent_events`` counts the
 distinct events among the parents. ``-1`` marks padding or an empty partition piece. Use these to
-see which events met: ``merge_ledger`` records only that an event was a parent in a merge at that
-time, and ``global_ID`` holds one object per event per timestep and none that consolidation later
-renamed, so it cannot resolve every object ID.
+see which events merged. ``merge_ledger`` records only that an event was a parent in a merge at
+that time. ``global_ID`` contains one object per event per timestep and none that consolidation
+later renamed, so it cannot resolve every object ID.
 
 The same Dataset records splits, one row each: ``split_time``, ``split_parent_IDs``,
 ``split_child_IDs``, ``split_event_IDs`` and ``n_split_children``. A split is a connected piece of an
 object that overlaps two or more connected pieces of the object it continues into at the next
-timestep. Adjacent pieces of a partition do not count. Any overlap does count, even a single cell, so
-these rows currently overstate fission: a piece that grows onto another piece's old footprint, or a
-small crumb cut off by a neighbouring object, is recorded although the water never separated. It is
-recorded where consolidation renames the children onto one
-ID, and the children stay in the parent's event. An event can also gain pieces through a merge, with
-no split row. Two events that merge and separate again are not a split, because each keeps its own
-ID. The events carry the count as the ``total_splits`` attribute.
+timestep, with those pieces in different connected components of all objects' cells at that timestep,
+after filling and filtering. Pieces joined through another object's cells do not count, nor do
+adjacent pieces of a partition, while extreme cells removed by the filter join nothing. Splits are
+recorded only where consolidation renames the children onto one ID, which needs an overlap of at
+least ``overlap_threshold``. The children normally stay in the parent's event, but a merge at that
+timestep can take them into another. The rule adds no size
+threshold of its own, so one shared cell can be enough, and a piece that grows onto another piece's
+old footprint can be recorded even though nothing broke apart. About a quarter of the split rows in a
+60-day ICON R02B09 track are one-cell cases. An event can also gain pieces through a merge, with no
+split row. Two events that merge and separate again are not a split, because
+each keeps its own ID. The ``total_splits`` attribute on the events gives the count.
 
 .. code-block:: python
 
@@ -501,8 +505,8 @@ interfaces. The tracker accepts three ways to supply the vertical geometry.
 ``layer_bounds`` : :class:`xarray.DataArray`
    The top and bottom interface of each layer in metres, with dimensions ``(depth, 2)`` or
    ``(depth, lat, lon, 2)``. Pass it explicitly (for a CF dataset, ``ds["depth_bnds"]``). The
-   ``bounds`` attribute on the depth coordinate only names the bounds variable, and
-   it raises without ``layer_bounds``. Cropped depth ranges are
+   ``bounds`` attribute on the depth coordinate only names the bounds variable, so a coordinate
+   with that attribute still raises without ``layer_bounds``. Cropped depth ranges are
    fine, since the interfaces are read and not summed.
 
 ``layer_thickness`` : :class:`xarray.DataArray`, optional
@@ -598,7 +602,7 @@ Parameters That Change or Raise
 Client Memory
 -------------
 
-The merge loop runs on the client and holds whole time chunks of the ID field there. The
+The merge loop runs on the client and keeps whole time chunks of the ID field there. The
 tracker models the bytes it needs as
 
 .. code-block:: text
@@ -610,12 +614,13 @@ where ``n_voxels = nz * ny * nx``. The first term is the int32 ID chunks, with
 float64 arrays of vertical geometry (layer top, bottom, thickness and midpoint depth, and
 the cell volume). ``merge_loop_client_bytes`` in ``marEx.track.volumetric.merge_loop`` returns it.
 
-Treat the formula as a lower bound. On the GLORYS12 North-East Pacific box (36 x 361 x 601 =
+Treat the formula as a lower bound. The wet masks, the per-merge partition buffers and the Dask
+graph are not in the model. On the GLORYS12 northeast Pacific box (36 x 361 x 601 =
 7.81 M voxels, 75 days, ``streaming``, 8 workers of 14 GB), the measured client memory above
 the pre-tracking baseline was 1.6 times the model at a time chunk of 5 (1.48 GiB peak in
-total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba baseline of about 0.6 GiB. The tracker warns when the model exceeds 8 GiB. A chunk of 5
-halved the client peak and ran faster (263 s versus 359 s) with identical events. The wet masks, the per-merge partition buffers and the Dask graph are not in the
-model.
+total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba
+baseline of about 0.6 GiB. The tracker warns when the model exceeds 8 GiB. A chunk of 5
+halved the client peak and ran faster (263 s versus 359 s) with identical events.
 
 Output
 ------
@@ -664,6 +669,12 @@ variable in 4-D, because it would be ambiguous between volume and footprint. The
 record the connectivity rule, ``max_vertical_gap_m``, the vertical-geometry source, the
 partition metric and scales, the overlap threshold, the volume filter and ``total_splits``.
 
+Merges at one timestep resolve in repeated passes. A later pass can split a recorded child again
+and keep its ID for a lower-ID parent, so an earlier row's ``child_event_IDs`` can name an event
+outside that row's parents (22 of the 4,617 rows in the GLORYS12 example). To follow a parent, read
+the last row that names it at that ``merge_time``, where the child in the parent's position
+continues its event.
+
 Splits are recorded as in 3-D, with pieces connected under the 4-D rule above, so a gap within
 ``max_vertical_gap_m`` does not separate an object.
 
@@ -673,13 +684,13 @@ Visualising 4-D Events
 Four helpers in :mod:`marEx.plotX` draw the output, and each selects what it needs from the lazy
 ``ID_field`` before loading anything.
 
-* :func:`marEx.plotX.plot_event_levels`: map panels of the event IDs at chosen levels for one time step.
-* :func:`marEx.plotX.plot_event_depth_time`: one event's cell count or volume at each level against time.
+* :func:`marEx.plotX.plot_event_levels`: map panels of the event IDs at chosen levels for one time step. ``extent`` zooms the maps and ``zoom_to_event`` zooms onto the highlighted event.
+* :func:`marEx.plotX.plot_event_depth_time`: one event's cell count or volume at each level against time. ``depth_scale="sqrt"`` gives the thin upper levels more room.
 * :func:`marEx.plotX.plot_event_summary`: one event's volume, depth centroid, and top and bottom depth against time. The vertical lines mark where a run of merges begins and, given the merge dataset, where a run of splits begins.
-* :func:`marEx.plotX.animate_event_levels`: a movie of the depth-projected footprint, coloured by the event's shallowest depth, or one map panel per level.
+* :func:`marEx.plotX.animate_event_levels`: a movie of the depth-projected footprint, coloured by the event's shallowest depth, or one map panel per level. ``extent`` frames the movie on the events and ``theme="dark"`` draws it for dark figures.
 
-The notebooks in ``examples/4d/`` run this chain on the Blob, the 2013-16 marine heatwave in
-the North-East Pacific, on GLORYS12 data. ``02_track_extremes_4d.ipynb`` tracks the events and
+The notebooks in ``examples/4d/`` run this chain on GLORYS12 data for the Blob, the 2013-16 marine
+heatwave in the northeast Pacific. ``02_track_extremes_4d.ipynb`` tracks the events and
 ``03_visualise_events.ipynb`` draws them.
 
 .. _larger-than-memory-tracking:

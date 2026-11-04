@@ -150,7 +150,7 @@ class MergeLedger:
 @dataclass(frozen=True)
 class SplitGeometry:
     """
-    What deciding a split needs to label an object's connected pieces.
+    What deciding a split needs to label connected pieces.
 
     Attributes
     ----------
@@ -169,17 +169,43 @@ class SplitGeometry:
     max_gap_m: float
     wrap_x: bool
 
-    def separates(self, parent: NDArray[np.bool_], child: NDArray[np.bool_]) -> bool:
+    def water_pieces(self, active: NDArray[np.bool_]) -> NDArray[np.int32]:
         """
-        Whether one connected piece of ``parent`` overlaps two or more connected pieces of ``child``.
+        Label the connected pieces of all active water at one timestep, over the whole domain.
 
-        Labelling is limited to the bounding box of the two masks, over the whole ``x`` range when
-        the seam joins, so its cost follows the object rather than the domain.
+        A bounding box would cut the links outside it and invent separations, so this labels every
+        voxel. One labelling serves every candidate of a timestep, because renames leave the active
+        voxels unchanged.
+
+        Parameters
+        ----------
+        active : numpy.ndarray
+            Boolean mask of every object's voxels, flat or ``(z, y, x)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            int32 labels, ``(z, y, x)``, 0 on background.
+        """
+        return label_volume(active.reshape(self.wet.shape), self.wet, self.thickness, self.max_gap_m, self.wrap_x)[0]
+
+    def separates(self, parent: NDArray[np.bool_], child: NDArray[np.bool_], water: NDArray[np.int32]) -> bool:
+        """
+        Whether one connected piece of ``parent`` overlaps ``child`` in two or more pieces of ``water``.
+
+        A connected piece of the child lies in one piece of water, so this counts the same thing as
+        the child's pieces in different water and needs no labelling of the child. Pieces joined only
+        by another object's voxels share a piece of water and do not count.
+
+        The parent's labelling is limited to its bounding box, over the whole ``x`` range when the
+        seam joins, so its cost follows the object rather than the domain.
 
         Parameters
         ----------
         parent, child : numpy.ndarray
             Boolean masks, flat or ``(z, y, x)``.
+        water : numpy.ndarray
+            Labels from :meth:`water_pieces` at the child's timestep.
 
         Returns
         -------
@@ -188,18 +214,19 @@ class SplitGeometry:
         """
         shape = self.wet.shape
         parent, child = parent.reshape(shape), child.reshape(shape)
-        occupied = np.nonzero(parent | child)
+        occupied = np.nonzero(parent)
         if occupied[0].size == 0:
             return False
         box = [slice(int(axis.min()), int(axis.max()) + 1) for axis in occupied]
         if self.wrap_x:
             box[2] = slice(None)
         box = tuple(box)
-        wet, thickness = self.wet[box], self.thickness[box]
-        parent_pieces, _ = label_volume(parent[box], wet, thickness, self.max_gap_m, self.wrap_x)
-        child_pieces, _ = label_volume(child[box], wet, thickness, self.max_gap_m, self.wrap_x)
-        both = (parent_pieces > 0) & (child_pieces > 0)
-        pairs = np.unique(np.c_[parent_pieces[both], child_pieces[both]], axis=0)
+        overlap = child[box] & (water[box] > 0)
+        if np.unique(water[box][overlap]).size < 2:
+            return False
+        parent_pieces, _ = label_volume(parent[box], self.wet[box], self.thickness[box], self.max_gap_m, self.wrap_x)
+        overlap &= parent_pieces > 0
+        pairs = np.unique(np.c_[parent_pieces[overlap], water[box][overlap]], axis=0)
         return pairs.shape[0] > 0 and bool((np.bincount(pairs[:, 0]) >= 2).any())
 
 
@@ -319,13 +346,14 @@ def consolidate_volumes(
                 candidates.append((parent, [first, *others]))
         kept.append(first)
 
-    if ledger is not None and split_geometry is not None:
+    if ledger is not None and split_geometry is not None and candidates:
+        water = split_geometry.water_pieces(out != 0)
         for parent, children in candidates:
             # A later parent can rename this parent's kept ID in turn, so follow it to the survivor.
             survivor = children[0]
             while survivor in renamed_onto:
                 survivor = renamed_onto[survivor]
-            if split_geometry.separates(prev2 == parent, out == survivor):
+            if split_geometry.separates(prev2 == parent, out == survivor, water):
                 ledger.record_split(time_value, parent, children)
 
     # Recompute the kept objects' volumes from the consolidated slice, with the store's own

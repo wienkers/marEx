@@ -5,8 +5,8 @@ What's New
 Unreleased
 ==========
 
-* **4-D spatiotemporal event tracking.** Declaring depth as ``dimensions["z"]`` follows events through ``(time, depth, lat, lon)`` on lat/lon grids, with volumes in m\ :sup:`3`. See :ref:`tracking-in-4d` and the :doc:`GLORYS12 notebooks <tutorials/4d>`.
-* **Merge log in event IDs.** The merge dataset gains ``parent_event_IDs`` and ``child_event_IDs``, so a merge names the events that met. The 4-D merge dataset also records splits, which :func:`marEx.plotX.plot_event_summary` marks.
+* **4-D spatiotemporal event tracking.** Declare depth as ``dimensions["z"]`` and the tracker follows events through ``(time, depth, lat, lon)`` on lat/lon grids, with volumes in m\ :sup:`3`. See :ref:`tracking-in-4d` and the :doc:`GLORYS12 notebooks <tutorials/4d>`.
+* **Merge log in event IDs.** The merge dataset gains ``parent_event_IDs`` and ``child_event_IDs``, so each merge row lists the events involved. The merge dataset also records splits, which :func:`marEx.plotX.plot_event_summary` marks.
 
 What's New in 5.0
 =================

@@ -16,9 +16,9 @@ the input, detect at depth, track the events in 4-D as volumes and visualise the
 | `unstructured/` | `01_preprocess_extremes` | ICON-O R02B09 (14.9 M cells), 1985-2014 | 48 SLURM workers × 31 GB | 36.6 min shifting baseline + Hobday |
 | | `02_id_track_events` | output of 01, year 2014 | 1 node, 8 workers × 28 GB | 38.7 min nearest-neighbour partitioning, 31.4 min centroid |
 | | `03_visualise_events` | outputs of 01-02 | 1 node, 32 workers × 7 GB | 2.5-2.8 min per movie |
-| `4d/` | `00_download_glorys12` | GLORYS12V1 daily thetao, 1/12°, North-East Pacific (30-60°N, 170-120°W), 36 levels to 1150 m, 1993-2022 | 8 CPUs × 12 GB, own environment | about 16 min per year |
+| `4d/` | `00_download_glorys12` | GLORYS12V1 daily thetao, 1/12°, northeast Pacific (30-60°N, 170-120°W), 36 levels to 1150 m, 1993-2022 | 8 CPUs × 12 GB, own environment | about 16 min per year |
 | | `01_preprocess_extremes` | output of 00, kept 2013-16 | 256 SLURM workers × 7.8 GB | 26.9 min fixed baseline + Hobday |
-| | `02_track_extremes_4d` | output of 01 | 1 node, 8 workers × 6 GB (the timing is from 8 × 8 GB) | 74.7 min tracking with merging |
+| | `02_track_extremes_4d` | output of 01 | 1 node, 8 workers × 6 GB (the timing is from 8 × 8 GB) | 79.6 min tracking with merging |
 | | `03_visualise_events` | outputs of 01-02 | 1 node, 16 workers × 14 GB | 3.1 min isosurface movie, 0.2 min footprint movie |
 | `applications/` | `wind_drought_europe` | ERA5 daily wind capacity factor over Europe, 1980-2024 | 8 workers × 6 GB | 1.6 min detect (lower tail), 4.5 min regional tracking |
 | `larger-than-memory/` | `larger_than_memory` | IFS-FESOM2-SR 6-hourly SST, 0.25° global, 10 and 20 years | 32 GiB job, 3 workers × 9 GB | 63-192 min detect, 57-139 min track per batch run (the notebook reads their summaries) |

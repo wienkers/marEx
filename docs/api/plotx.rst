@@ -29,7 +29,8 @@ Detailed reference
 
 Four functions draw the output of a 4-D tracker, a ``(time, depth, lat, lon)`` events
 dataset (see :ref:`tracking-in-4d`). Each selects what it needs from the lazy ``ID_field``
-before loading it.
+before loading it. The two map functions take an ``extent`` in degrees to frame the events,
+and ``plot_event_depth_time`` can draw depth on a square-root scale.
 
 .. autofunction:: marEx.plotX.plot_event_levels
 

@@ -4,7 +4,7 @@ Ocean Extremes in 4-D
 
 Marine heatwaves at depth, tracked as volumes. Thirty years of daily potential temperature
 from the 1/12° GLORYS12 reanalysis, on 36 levels from the surface to 1150 m over the
-north-east Pacific, go through the same :func:`marEx.preprocess_data` call as the surface
+northeast Pacific, go through the same :func:`marEx.preprocess_data` call as the surface
 examples, with a fixed 1993-2022 baseline and the day-of-year threshold. See
 :ref:`extra-dimensions` for the rules. The tracker then follows each event through
 ``(time, depth, lat, lon)`` as a volume (see :ref:`tracking-in-4d`), and the last notebook

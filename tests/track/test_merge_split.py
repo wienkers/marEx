@@ -50,6 +50,7 @@ from marEx.exceptions import TrackingError
 from marEx.track import merge_split
 from marEx.track import overlap as _overlap
 from marEx.track.merge_split import _area_sum, _overlap_fraction
+from marEx.track.objects import ObjectPropsStore, calculate_object_properties
 from marEx.track.partitioning import partition_centroid_unstructured, partition_nn_unstructured_optimised
 from marEx.track.region_writer import ObjectIDRegionWriter
 from marEx.track.tracker import tracker as _Tracker
@@ -1044,25 +1045,179 @@ def test_no_unstructured_split_without_the_neighbours():
     assert splits == []
 
 
+def _gridded_separates(parent, child, wrap_x, active=None):
+    active = child if active is None else active
+    return _overlap.object_separates_gridded(parent, child, _overlap.water_pieces_gridded(active, wrap_x), wrap_x)
+
+
 def test_gridded_split_rule_uses_eight_connectivity_and_the_seam():
     parent = np.ones((3, 6), dtype=bool)
     diagonal = np.zeros((3, 6), dtype=bool)
     diagonal[0, 1] = diagonal[1, 2] = True
-    assert not _overlap.object_separates_gridded(parent, diagonal, False)
+    assert not _gridded_separates(parent, diagonal, False)
 
     across_seam = np.zeros((3, 6), dtype=bool)
     across_seam[1, 0] = across_seam[1, 5] = True
-    assert _overlap.object_separates_gridded(parent, across_seam, False)
-    assert not _overlap.object_separates_gridded(parent, across_seam, True)
+    assert _gridded_separates(parent, across_seam, False)
+    assert not _gridded_separates(parent, across_seam, True)
 
     two_pieces = np.zeros((3, 6), dtype=bool)
     two_pieces[0, 0] = two_pieces[0, 3] = True
-    assert _overlap.object_separates_gridded(parent, two_pieces, True)
+    assert _gridded_separates(parent, two_pieces, True)
     held = two_pieces.copy()
-    held[0, 1] = held[0, 2] = False
     parent_in_two = two_pieces.copy()
-    assert not _overlap.object_separates_gridded(parent_in_two, held, True)
-    assert not _overlap.object_separates_gridded(np.zeros((3, 6), dtype=bool), np.zeros((3, 6), dtype=bool), True)
+    assert not _gridded_separates(parent_in_two, held, True)
+    assert not _gridded_separates(np.zeros((3, 6), dtype=bool), np.zeros((3, 6), dtype=bool), True)
+
+
+def test_gridded_pieces_joined_by_another_object_are_not_a_split():
+    """The other object's row lies outside the parent's and the child's bounding box."""
+    parent = np.zeros((3, 6), dtype=bool)
+    parent[0] = True
+    child = np.zeros((3, 6), dtype=bool)
+    child[0, 0] = child[0, 5] = True
+    active = child.copy()
+    active[1] = True
+    assert not _gridded_separates(parent, child, False, active)
+    assert _gridded_separates(parent, child, False)
+
+
+def test_gridded_box_does_not_wrap_a_parent_away_from_the_seam():
+    parent = np.zeros((1, 20), dtype=bool)
+    parent[0, [5, 6, 9, 10]] = True
+    assert not _gridded_separates(parent, parent, True)
+
+
+def test_consolidation_labels_gridded_water_once(monkeypatch):
+    """Two parents separate in one slice; the water is labelled from all active cells, once."""
+    ids = np.array([[[1, 1, 1, 1, 1, 0, 4, 4, 4, 4, 4]], [[2, 2, 0, 3, 3, 0, 5, 5, 0, 6, 6]]], dtype=np.int32)
+    coords = {"lat": [0.0], "lon": np.arange(11.0)}
+    prev, cur = (xr.DataArray(ids[t], dims=("lat", "lon"), coords=coords) for t in range(2))
+    calls = []
+    water_pieces = _overlap.water_pieces_gridded
+    monkeypatch.setattr(
+        _overlap, "water_pieces_gridded", lambda active, wrap_x: calls.append(active.sum()) or water_pieces(active, wrap_x)
+    )
+    cell_area = xr.ones_like(cur, dtype=np.float64)
+    kwargs = dict(
+        unstructured_grid=False,
+        lat=cur.lat,
+        lon=cur.lon,
+        cell_area=cell_area,
+        timedim="time",
+        regional_mode=True,
+        ydim="lat",
+        xdim="lon",
+    )
+    props = [calculate_object_properties(field, properties=["area", "centroid"], **kwargs) for field in (prev, cur)]
+    store = ObjectPropsStore.from_dataset(xr.concat(props, dim="ID"))
+    splits = []
+    _overlap.consolidate_object_ids(
+        prev, cur, store, 7, False, cell_area, 0.5, cur.lat, cur.lon, "time", True, "lat", "lon", splits=splits
+    )
+    assert [(t, p) for t, p, _ in splits] == [(7, 1), (7, 4)]
+    assert calls == [8]
+
+
+def _consolidate_row(prev_row, cur_row, regional, threshold=0.5):
+    """``consolidate_object_ids`` on one row of cells, returning its split records."""
+    ids = np.array([[prev_row], [cur_row]], dtype=np.int32)
+    coords = {"lat": [0.0], "lon": np.arange(float(len(prev_row)))}
+    prev, cur = (xr.DataArray(ids[t], dims=("lat", "lon"), coords=coords) for t in range(2))
+    cell_area = xr.ones_like(cur, dtype=np.float64)
+    kwargs = dict(
+        unstructured_grid=False,
+        lat=cur.lat,
+        lon=cur.lon,
+        cell_area=cell_area,
+        timedim="time",
+        regional_mode=regional,
+        ydim="lat",
+        xdim="lon",
+    )
+    props = [calculate_object_properties(field, properties=["area", "centroid"], **kwargs) for field in (prev, cur)]
+    store = ObjectPropsStore.from_dataset(xr.concat(props, dim="ID"))
+    splits = []
+    _overlap.consolidate_object_ids(
+        prev, cur, store, 7, False, cell_area, threshold, cur.lat, cur.lon, "time", regional, "lat", "lon", splits=splits
+    )
+    return splits
+
+
+WATER_ACROSS_SEAM = ([1] * 20, [2] * 9 + [0] + [3] * 10)
+PARENT_ACROSS_SEAM = ([1, 1, 1] + [0] * 15 + [1, 1], [0, 2, 2] + [0] * 15 + [3, 3])
+
+
+@pytest.mark.parametrize(
+    "rows, regional, expected",
+    [
+        (WATER_ACROSS_SEAM, False, []),
+        (WATER_ACROSS_SEAM, True, [(7, 1, [2, 3])]),
+        (PARENT_ACROSS_SEAM, False, [(7, 1, [2, 3])]),
+        (PARENT_ACROSS_SEAM, True, []),
+    ],
+    ids=["water-wrapped", "water-regional", "parent-wrapped", "parent-regional"],
+)
+def test_consolidation_applies_the_seam_to_water_and_parent(rows, regional, expected):
+    """A global grid joins both the water and the parent across the seam; a regional grid joins neither."""
+    assert _consolidate_row(*rows, regional) == expected
+
+
+def test_gridded_parent_piece_uses_eight_connectivity():
+    """The parent's two runs touch only at a corner, and each child cell lies under a different run."""
+    parent = np.zeros((2, 6), dtype=bool)
+    parent[0, [0, 1]] = parent[1, [2, 3]] = True
+    child = np.zeros((2, 6), dtype=bool)
+    child[0, 0] = child[1, 3] = True
+    assert _gridded_separates(parent, child, False)
+
+
+def test_consolidation_follows_a_kept_id_renamed_through_two_later_parents():
+    """Parent 1 keeps child 4, parent 2 renames 4 onto 5, parent 3 renames 5 onto 6: the test of parent 1 must reach 6."""
+    prev = [3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1]
+    cur = [4, 4, 4, 0, 5, 5, 5, 0, 6, 6, 6, 0, 7, 7, 7]
+    assert _consolidate_row(prev, cur, True, threshold=0.25) == [(7, 1, [6, 7]), (7, 2, [5, 6]), (7, 3, [4, 5])]
+
+
+def test_consolidation_follows_a_kept_id_renamed_by_a_later_parent():
+    """Parent 1 keeps child 4, then parent 2 renames 4 onto 3; the test of parent 1 must look at 3."""
+    prev = [2, 2, 2, 2, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]
+    cur = [4, 4, 4, 3, 4, 4, 4, 4, 5, 5, 5, 0, 5, 5, 5, 5]
+    assert _consolidate_row(prev, cur, True, threshold=0.25) == [(7, 1, [4, 5])]
+
+
+def _bridged_mesh():
+    """A chain of seven cells, with cells 7, 8, 9 forming a path from cell 1 to cell 5 around it."""
+    edges = [(i, i + 1) for i in range(6)] + [(1, 7), (7, 8), (8, 9), (9, 5)]
+    table = [[] for _ in range(10)]
+    for a, b in edges:
+        table[a].append(b)
+        table[b].append(a)
+    return np.array([row + [-1] * (3 - len(row)) for row in table], dtype=np.int32).T
+
+
+def test_unstructured_pieces_joined_by_another_object_are_not_a_split():
+    prev = np.array([1] * 7 + [0] * 3, dtype=np.int32)
+    area = np.ones(10, dtype=np.float32)
+    bridged = np.array([2, 2, 0, 0, 0, 3, 3, 7, 7, 7], dtype=np.int32)
+    splits = []
+    merge_split._consolidate_slice(prev, bridged, area, 0.5, None, _bridged_mesh(), splits)
+    assert splits == []
+    open_water = np.array([2, 2, 0, 0, 0, 3, 3, 0, 0, 0], dtype=np.int32)
+    merge_split._consolidate_slice(prev, open_water, area, 0.5, None, _bridged_mesh(), splits)
+    assert splits == [(1, [2, 3])]
+
+
+def test_unstructured_water_is_labelled_once_per_slice(monkeypatch):
+    prev = np.array([1, 1, 1, 0, 4, 4, 4], dtype=np.int32)
+    cur = np.array([2, 0, 3, 0, 5, 0, 6], dtype=np.int32)
+    calls = []
+    pieces = _overlap._cell_pieces
+    monkeypatch.setattr(_overlap, "_cell_pieces", lambda cells, nb: calls.append(cells.size) or pieces(cells, nb))
+    splits = []
+    merge_split._consolidate_slice(prev, cur, np.ones(7, dtype=np.float32), 0.5, None, _chain_neighbours(7), splits)
+    assert [p for p, _ in splits] == [1, 4]
+    assert calls.count(4) == 1  # the four active cells; each parent's three cells are labelled apart
 
 
 def _chain_merges(temp_dir, serial, rows, time_chunk=None):
@@ -1103,6 +1258,20 @@ def test_two_events_that_merge_and_separate_are_not_a_split(client, tmp_path, se
     assert events.attrs["total_splits"] == 0
 
 
+def test_a_minted_parent_id_in_a_split_row_resolves_to_its_event(client, tmp_path):
+    """A parent minted by a merge is renumbered in the split row, and the row names the event that holds it."""
+    rows = [
+        [1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1] * 16,
+        [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1],
+    ]
+    _, merges = _chain_merges(tmp_path, False, rows)
+    assert merges.sizes["split_ID"] == 1
+    assert int(merges["split_parent_IDs"].values[0]) in merges["child_IDs"].values, "the parent is the ID the merge minted"
+    assert (merges["split_event_IDs"].values > 0).all(), "the split row names an event"
+
+
 @pytest.mark.parametrize("time_chunk", [1, 2, 5])
 def test_split_records_survive_chunk_reruns(client, tmp_path, time_chunk):
     """A merge at t1 changes the next chunk's boundary, so later chunks run again: their records replace the first run's."""
@@ -1110,6 +1279,6 @@ def test_split_records_survive_chunk_reruns(client, tmp_path, time_chunk):
     _, reference = _chain_merges(tmp_path / "whole", False, rows)
     _, merges = _chain_merges(tmp_path / f"chunk{time_chunk}", False, rows, time_chunk=time_chunk)
     assert reference.sizes["split_ID"] == 1
-    assert (reference["split_event_IDs"].values > 0).all(), "a minted parent ID must resolve to its event after compaction"
+    assert (reference["split_event_IDs"].values > 0).all(), "the split row must resolve to an event"
     for name in ("split_time", "split_parent_IDs", "split_child_IDs", "n_split_children", "split_event_IDs"):
         np.testing.assert_array_equal(merges[name].values, reference[name].values, err_msg=name)

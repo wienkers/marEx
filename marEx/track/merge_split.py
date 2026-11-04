@@ -96,7 +96,8 @@ def _consolidate_slice(
     renamed is skipped, and already-renamed children are not renamed again. ``ids_cur`` is
     relabelled IN PLACE. ``renames``, when given, receives each ``(old_id, kept_id)``. ``splits``,
     when given with the ``(nv, ncells)`` table ``neighbours``, receives ``(parent, [kept, *renamed])``
-    for each parent of which one connected piece overlaps two or more connected pieces of its children.
+    for each parent of which one connected piece overlaps its children in two or more connected
+    components of all objects' cells at ``ids_cur``.
 
     Returns the surviving IDs whose cells grew (empty when nothing changed).
     """
@@ -155,13 +156,19 @@ def _consolidate_slice(
     cells = np.where(np.isin(ids_cur, renamed_ids))[0]
     ids_cur[cells] = survivors[np.searchsorted(renamed_ids, ids_cur[cells])].astype(ids_cur.dtype)
     if splits is not None and neighbours is not None and candidates:
-        # One scan of each slice per consolidation, so the cost follows the objects and not the mesh.
+        # One scan of each slice per consolidation, and one labelling of all active cells: separated water is a whole-mesh question.
         kept = [target.get(children[0], children[0]) for _, children in candidates]
         parent_cells = np.flatnonzero(np.isin(ids_prev, [parent for parent, _ in candidates]))
         child_cells = np.flatnonzero(np.isin(ids_cur, kept))
+        active_cells = np.flatnonzero(ids_cur > 0)
+        water = _overlap._cell_pieces(active_cells, neighbours)
         for (parent, children), survivor in zip(candidates, kept):
             if _overlap.object_separates_unstructured(
-                parent_cells[ids_prev[parent_cells] == parent], child_cells[ids_cur[child_cells] == survivor], neighbours
+                parent_cells[ids_prev[parent_cells] == parent],
+                child_cells[ids_cur[child_cells] == survivor],
+                active_cells,
+                water,
+                neighbours,
             ):
                 splits.append((parent, children))
     return grown

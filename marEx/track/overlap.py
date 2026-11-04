@@ -282,28 +282,62 @@ def enforce_overlap_threshold(
     return overlap_objects_list_filtered
 
 
-def _a_piece_touches_two(parent_pieces: NDArray, child_pieces: NDArray) -> bool:
-    """Whether one labelled piece of the parent overlaps two or more labelled pieces of the child (0 is background)."""
-    both = (parent_pieces > 0) & (child_pieces > 0)
+def _a_piece_touches_two(parent_pieces: NDArray, water: NDArray) -> bool:
+    """Whether one labelled piece of the parent overlaps two or more labelled pieces of water (0 is background)."""
+    both = (parent_pieces > 0) & (water > 0)
     if not both.any():
         return False
-    stride = np.int64(child_pieces.max()) + 1
-    pairs = np.unique(parent_pieces[both].astype(np.int64) * stride + child_pieces[both])
+    stride = np.int64(water.max()) + 1
+    pairs = np.unique(parent_pieces[both].astype(np.int64) * stride + water[both])
     return bool((np.bincount(pairs // stride) >= 2).any())
 
 
-def object_separates_gridded(parent: NDArray[np.bool_], child: NDArray[np.bool_], wrap_x: bool) -> bool:
-    """
-    Whether one connected piece of ``parent`` overlaps two or more connected pieces of ``child``.
+def _gridded_pieces(mask: NDArray[np.bool_], wrap_x: bool) -> NDArray[np.int32]:
+    """Label the pieces of a ``(y, x)`` mask: 8-connected as at identification, joined across the seam when ``wrap_x``."""
+    # Imported here to avoid a module-level overlap->objects import edge
+    from .objects import _EIGHT_CONNECTIVITY, _merge_lon_seam
 
-    Pieces are 8-connected, as objects are at identification, and join across the periodic-longitude
-    seam when ``wrap_x``. Labelling is limited to the bounding box of the two masks, over the whole
-    ``x`` range when the seam joins.
+    labels, n_labels = scipy_label(mask, structure=_EIGHT_CONNECTIVITY)
+    return _merge_lon_seam(labels, n_labels) if wrap_x else labels
+
+
+def water_pieces_gridded(active: NDArray[np.bool_], wrap_x: bool) -> NDArray[np.int32]:
+    """
+    Label the connected pieces of all active water at one timestep, over the whole ``(y, x)`` slice.
+
+    A bounding box would cut the links outside it and invent separations. One labelling serves every
+    candidate of a timestep, because renames leave the active cells unchanged.
+
+    Parameters
+    ----------
+    active : numpy.ndarray
+        Boolean ``(y, x)`` mask of every object's cells.
+    wrap_x : bool
+        Join across the periodic-longitude seam.
+
+    Returns
+    -------
+    numpy.ndarray
+        Labels, 0 on background.
+    """
+    return _gridded_pieces(active, wrap_x)
+
+
+def object_separates_gridded(parent: NDArray[np.bool_], child: NDArray[np.bool_], water: NDArray[np.int32], wrap_x: bool) -> bool:
+    """
+    Whether one connected piece of ``parent`` overlaps ``child`` in two or more pieces of ``water``.
+
+    A connected piece of the child lies in one piece of water, so this counts the same thing as the
+    child's pieces in different water and needs no labelling of the child. Pieces joined only by another
+    object's cells share a piece of water and do not count. The parent's labelling is limited to its
+    bounding box, over the whole ``x`` range when the seam joins.
 
     Parameters
     ----------
     parent, child : numpy.ndarray
         Boolean ``(y, x)`` masks of one object at consecutive timesteps.
+    water : numpy.ndarray
+        Labels from :func:`water_pieces_gridded` at the child's timestep.
     wrap_x : bool
         Join across the periodic-longitude seam.
 
@@ -312,22 +346,17 @@ def object_separates_gridded(parent: NDArray[np.bool_], child: NDArray[np.bool_]
     bool
         True when the parent separated.
     """
-    # Imported here to avoid a module-level overlap->objects import edge
-    from .objects import _EIGHT_CONNECTIVITY, _merge_lon_seam
-
-    occupied = np.nonzero(parent | child)
+    occupied = np.nonzero(parent)
     if occupied[0].size == 0:
         return False
     box = [slice(int(axis.min()), int(axis.max()) + 1) for axis in occupied]
     if wrap_x:
         box[1] = slice(None)
     box = tuple(box)
-
-    def pieces(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
-        labels, n_labels = scipy_label(mask[box], structure=_EIGHT_CONNECTIVITY)
-        return _merge_lon_seam(labels, n_labels) if wrap_x else labels
-
-    return _a_piece_touches_two(pieces(parent), pieces(child))
+    child_water = np.where(child[box], water[box], 0)
+    if np.unique(child_water[child_water > 0]).size < 2:
+        return False
+    return _a_piece_touches_two(_gridded_pieces(parent[box], wrap_x), child_water)
 
 
 def _cell_pieces(cells: NDArray[np.int64], neighbours: NDArray[np.int32]) -> NDArray[np.int32]:
@@ -343,15 +372,23 @@ def _cell_pieces(cells: NDArray[np.int64], neighbours: NDArray[np.int32]) -> NDA
 
 
 def object_separates_unstructured(
-    parent_cells: NDArray[np.int64], child_cells: NDArray[np.int64], neighbours: NDArray[np.int32]
+    parent_cells: NDArray[np.int64],
+    child_cells: NDArray[np.int64],
+    active_cells: NDArray[np.int64],
+    water: NDArray[np.int32],
+    neighbours: NDArray[np.int32],
 ) -> bool:
     """
-    Whether one connected piece of a parent overlaps two or more connected pieces of a child.
+    Whether one connected piece of a parent overlaps a child in two or more pieces of water.
 
     Parameters
     ----------
     parent_cells, child_cells : numpy.ndarray
         Ascending flat cell indices of one object at consecutive timesteps.
+    active_cells : numpy.ndarray
+        Ascending flat indices of every object's cells at the child's timestep.
+    water : numpy.ndarray
+        ``_cell_pieces(active_cells, neighbours)``, aligned with ``active_cells``.
     neighbours : numpy.ndarray
         ``(nv, ncells)`` int32 neighbour table, -1 where absent.
 
@@ -362,8 +399,11 @@ def object_separates_unstructured(
     """
     if parent_cells.size == 0 or child_cells.size == 0:
         return False
-    _, in_parent, in_child = np.intersect1d(parent_cells, child_cells, assume_unique=True, return_indices=True)
-    return _a_piece_touches_two(_cell_pieces(parent_cells, neighbours)[in_parent], _cell_pieces(child_cells, neighbours)[in_child])
+    shared, in_parent, _ = np.intersect1d(parent_cells, child_cells, assume_unique=True, return_indices=True)
+    shared_water = water[np.searchsorted(active_cells, shared)]
+    if np.unique(shared_water).size < 2:
+        return False
+    return _a_piece_touches_two(_cell_pieces(parent_cells, neighbours)[in_parent], shared_water)
 
 
 def consolidate_object_ids(
@@ -510,20 +550,25 @@ def consolidate_object_ids(
                         cp["centroid"].values[1],
                     )
 
-    if splits is not None:
+    if splits is not None and candidates:
+        if unstructured_grid:
+            previous, current = data_t_minus_2.values.ravel(), data_t_minus_1.values.ravel()
+            active_cells = np.flatnonzero(current > 0)
+            water = _cell_pieces(active_cells, neighbours)
+        else:
+            previous, current = data_t_minus_2.transpose(ydim, xdim).values, data_t_minus_1.transpose(ydim, xdim).values
+            water = water_pieces_gridded(current > 0, not regional_mode)
         for parent_id, children in candidates:
             # A later parent can rename this parent's kept ID in turn, so follow it to the survivor.
             survivor = children[0]
             while survivor in id_mappings:
                 survivor = id_mappings[survivor]
             if unstructured_grid:
-                previous, current = data_t_minus_2.values.ravel(), data_t_minus_1.values.ravel()
                 separated = object_separates_unstructured(
-                    np.flatnonzero(previous == parent_id), np.flatnonzero(current == survivor), neighbours
+                    np.flatnonzero(previous == parent_id), np.flatnonzero(current == survivor), active_cells, water, neighbours
                 )
             else:
-                previous, current = data_t_minus_2.transpose(ydim, xdim).values, data_t_minus_1.transpose(ydim, xdim).values
-                separated = object_separates_gridded(previous == parent_id, current == survivor, not regional_mode)
+                separated = object_separates_gridded(previous == parent_id, current == survivor, water, not regional_mode)
             if separated:
                 splits.append((timestep, parent_id, children))
 

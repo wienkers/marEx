@@ -115,7 +115,7 @@ Why marEx?
 * **Overlap-based tracking**: merges and splits are decided by area overlap and
   recorded in ``merge_ledger``, so events that only touch keep their own
   identities.
-* **4-D spatiotemporal event tracking**: declaring depth follows events through
+* **4-D spatiotemporal event tracking**: declare depth and the tracker follows events through
   ``(time, depth, lat, lon)`` on lat/lon grids, with each event's volume in
   m\ :sup:`3` and depth range through time.
 * **Any grid, cadence and tail**: one API for lat/lon grids and unstructured

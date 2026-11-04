@@ -21,6 +21,7 @@ from marEx.core.compute_mode import Materialiser
 from marEx.track.region_writer import ObjectIDRegionWriter
 from marEx.track.volumetric.geometry import build_vertical_geometry
 from marEx.track.volumetric.ids import IDAllocator
+from marEx.track.volumetric.labelling import label_volume
 from marEx.track.volumetric.merge_loop import (
     MergeLedger,
     SplitGeometry,
@@ -959,9 +960,9 @@ def test_per_merge_allocations_bounded():
 # --------------------------------------------------------------------------------------
 
 
-def _consolidate_row(prev2, prev1, **kwargs):
-    """Consolidate one row of IDs (a two-timestep field) with split labelling on; returns the ledger's dataset."""
-    ids = np.array([prev2, prev1], dtype=np.int32)[:, np.newaxis, np.newaxis, :]
+def _consolidate_volumes(prev2, prev1, threshold=THRESHOLD, max_gap_m=0.0, wrap_x=False):
+    """Consolidate two ``(z, y, x)`` slices of IDs with split labelling on; returns the ledger's dataset."""
+    ids = np.array([prev2, prev1], dtype=np.int32)
     cv = np.ones(ids.shape[1:], dtype=np.float64)
     ledger = MergeLedger()
     consolidate_volumes(
@@ -969,13 +970,17 @@ def _consolidate_row(prev2, prev1, **kwargs):
         ids[1],
         store_from_field(ids, cv),
         cv,
-        THRESHOLD,
+        threshold,
         ledger=ledger,
         time_value=np.datetime64("2000-01-02", "ns"),
-        split_geometry=SplitGeometry(np.ones(cv.shape, dtype=bool), cv, 0.0, False),
-        **kwargs,
+        split_geometry=SplitGeometry(np.ones(cv.shape, dtype=bool), cv, max_gap_m, wrap_x),
     )
     return ledger.to_dataset()
+
+
+def _consolidate_row(prev2, prev1, **kwargs):
+    """Consolidate one row of IDs; returns the ledger's dataset."""
+    return _consolidate_volumes([[prev2]], [[prev1]], **kwargs)
 
 
 def test_consolidation_records_the_rename_and_the_split():
@@ -1029,6 +1034,130 @@ def test_one_piece_of_a_two_piece_parent_separating_is_a_split():
     np.testing.assert_array_equal(ds["split_child_IDs"].values, [[2, 3, 4]])
 
 
+@pytest.mark.parametrize(
+    "prev2, prev1",
+    [
+        pytest.param(
+            [[1] * 9, [8] * 9, [8] * 9, [8] * 9],
+            [[2, 2, 2, 7, 7, 7, 3, 3, 3], [7] * 9, [7] * 9, [7] * 9],
+            id="shares_of_a_partition_cut_by_a_third_object",
+        ),
+        pytest.param(
+            [[1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1], [0] * 12],
+            [[2, 2, 2, 2, 0, 3, 3, 3, 3, 3, 3, 3], [0, 0, 0, 7, 7, 7, 0, 0, 0, 0, 0, 0]],
+            id="growth_onto_another_pieces_footprint",
+        ),
+        pytest.param(
+            [[1] * 20, [0] * 20],
+            [[2] * 18 + [0, 3], [0] * 17 + [7, 7, 7]],
+            id="crumb_touching_another_object",
+        ),
+    ],
+)
+def test_pieces_joined_by_another_object_are_not_a_split(prev2, prev1):
+    """The water never separated: another object's cells join the child's pieces, outside its bounding box in two cases."""
+    ds = _consolidate_volumes([prev2], [prev1])
+    np.testing.assert_array_equal(ds["_renamed_from"].values, [3])
+    np.testing.assert_array_equal(ds["_renamed_to"].values, [2])
+    assert ds.sizes["split_ID"] == 0
+
+
+def test_a_parent_cut_by_empty_water_is_a_split():
+    ds = _consolidate_row([1] * 9, [2, 2, 2, 2, 0, 3, 3, 3, 3])
+    np.testing.assert_array_equal(ds["split_parent_IDs"].values, [1])
+    np.testing.assert_array_equal(ds["split_child_IDs"].values, [[2, 3]])
+
+
+def test_a_one_cell_piece_in_separate_water_is_a_split():
+    """The rule has no size threshold: only the connection of the water decides."""
+    ds = _consolidate_row([1] * 20, [2] * 18 + [0, 3])
+    np.testing.assert_array_equal(ds["split_child_IDs"].values, [[2, 3]])
+
+
+def test_a_split_does_not_need_a_majority_overlap():
+    """The second child piece links at 0.25 and shares 3 of 8 cells with the parent's only piece."""
+    ds = _consolidate_row([1] * 8 + [0] * 7, [2, 2, 2, 2, 0] + [3] * 10, threshold=0.25)
+    np.testing.assert_array_equal(ds["split_child_IDs"].values, [[2, 3]])
+
+
+def test_a_periodic_grid_does_not_wrap_the_parents_bounding_box():
+    """Two pieces away from the seam stay two pieces: the box edges are not neighbours."""
+    prev2 = [0] * 5 + [1, 1, 0, 0, 1, 1] + [0] * 9
+    prev1 = [0] * 5 + [2, 2, 0, 0, 3, 3] + [0] * 9
+    ds = _consolidate_row(prev2, prev1, wrap_x=True)
+    np.testing.assert_array_equal(ds["_renamed_from"].values, [3])
+    assert ds.sizes["split_ID"] == 0
+
+
+@pytest.mark.parametrize("wrap_x, n_splits", [(True, 1), (False, 0)])
+def test_the_seam_joins_a_parents_pieces(wrap_x, n_splits):
+    """One parent piece across the seam overlaps both child pieces only when the seam joins."""
+    prev2 = [1, 1, 1] + [0] * 15 + [1, 1]
+    prev1 = [0, 2, 2] + [0] * 15 + [3, 3]
+    assert _consolidate_row(prev2, prev1, wrap_x=wrap_x).sizes["split_ID"] == n_splits
+
+
+@pytest.mark.parametrize("wrap_x, n_splits", [(True, 0), (False, 1)])
+def test_the_seam_joins_the_water(wrap_x, n_splits):
+    """Child pieces meeting only across the seam are in one body of water when the seam joins."""
+    assert _consolidate_row([1] * 20, [2] * 9 + [0] + [3] * 10, wrap_x=wrap_x).sizes["split_ID"] == n_splits
+
+
+@pytest.mark.parametrize("max_gap_m, n_splits", [(1.0, 0), (0.0, 1)])
+def test_the_vertical_gap_joins_the_water(max_gap_m, n_splits):
+    """Child pieces one 1 m layer apart in one column are in one body of water when the gap bridges them."""
+    prev2 = [[[1]], [[1]], [[1]]]
+    prev1 = [[[2]], [[0]], [[3]]]
+    assert _consolidate_volumes(prev2, prev1, max_gap_m=max_gap_m).sizes["split_ID"] == n_splits
+
+
+def _touches_two_waters_by_definition(geometry, parent, child, active):
+    """The ruling read literally: label the child's pieces, place each in the water, count per parent piece."""
+
+    def label(mask):
+        return label_volume(mask, geometry.wet, geometry.thickness, geometry.max_gap_m, geometry.wrap_x)[0]
+
+    parent_pieces, child_pieces, water = label(parent), label(child), label(active)
+    waters_of_parent_piece = {}
+    for piece in np.unique(child_pieces[child_pieces > 0]):
+        waters = np.unique(water[child_pieces == piece])
+        assert waters.size == 1  # a connected piece of the child cannot span two bodies of water
+        for parent_piece in np.unique(parent_pieces[(child_pieces == piece) & (parent_pieces > 0)]):
+            waters_of_parent_piece.setdefault(int(parent_piece), set()).add(int(waters[0]))
+    return any(len(waters) >= 2 for waters in waters_of_parent_piece.values())
+
+
+@pytest.mark.parametrize("wrap_x", [False, True])
+@pytest.mark.parametrize("max_gap_m", [0.0, 1.0])
+def test_separates_matches_the_definition_on_random_slices(wrap_x, max_gap_m):
+    rng = np.random.default_rng(20261103)
+    shape = (3, 5, 9)
+    thickness = np.ones(shape, dtype=np.float64)
+    wet = rng.random(shape) > 0.1
+    geometry = SplitGeometry(wet, thickness, max_gap_m, wrap_x)
+    answers = []
+    for density in np.tile([0.15, 0.25, 0.35, 0.5], 50):
+        parent, child, neighbour = (rng.random(shape) < density for _ in range(3))
+        parent, child = parent & wet, child & wet
+        active = child | (neighbour & wet)
+        got = geometry.separates(parent, child, geometry.water_pieces(active))
+        assert got == _touches_two_waters_by_definition(geometry, parent, child, active)
+        answers.append(got)
+    assert 0 < sum(answers) < len(answers)  # both outcomes were exercised
+
+
+def test_water_is_labelled_once_per_consolidation(monkeypatch):
+    calls = []
+    water_pieces = SplitGeometry.water_pieces
+    monkeypatch.setattr(SplitGeometry, "water_pieces", lambda self, active: calls.append(1) or water_pieces(self, active))
+    ds = _consolidate_row([1, 1, 1, 1, 1, 0, 4, 4, 4, 4, 4], [2, 2, 0, 3, 3, 0, 5, 5, 0, 6, 6])
+    np.testing.assert_array_equal(ds["split_parent_IDs"].values, [1, 4])
+    assert len(calls) == 1
+    calls.clear()
+    _consolidate_row([1, 1, 1, 0, 4, 4, 4], [2, 2, 2, 0, 5, 5, 5])
+    assert not calls
+
+
 def test_split_follows_a_kept_id_that_a_later_parent_renames():
     """Parent 5 keeps 2, then parent 6 renames 2 onto 1: the children of parent 5 are read as survivor 1."""
     ds = _consolidate_row([6, 6, 6, 5, 5, 5, 5, 5, 5, 5], [1, 0, 2, 2, 0, 0, 0, 3, 3, 3])
@@ -1036,6 +1165,15 @@ def test_split_follows_a_kept_id_that_a_later_parent_renames():
     np.testing.assert_array_equal(ds["_renamed_to"].values, [2, 1])
     np.testing.assert_array_equal(ds["split_parent_IDs"].values, [5, 6])
     np.testing.assert_array_equal(ds["split_child_IDs"].values, [[2, 3], [1, 2]])
+
+
+def test_split_follows_a_kept_id_renamed_through_two_later_parents():
+    """Parent 1 keeps 4, parent 2 renames 4 onto 5, parent 3 renames 5 onto 6: the children of parent 1 are read as 6."""
+    ds = _consolidate_row(
+        [3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1], [4, 4, 4, 0, 5, 5, 5, 0, 6, 6, 6, 0, 7, 7, 7], threshold=0.25
+    )
+    np.testing.assert_array_equal(ds["split_parent_IDs"].values, [1, 2, 3])
+    np.testing.assert_array_equal(ds["split_child_IDs"].values, [[6, 7], [5, 6], [4, 5]])
 
 
 def test_consolidation_without_a_ledger_is_unchanged():

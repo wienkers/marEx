@@ -94,9 +94,9 @@ events = marEx.tracker(
 ).run()
 ```
 
-<a href="media/mhw_4d_blob.jpg"><img src="media/mhw_4d_blob.jpg" alt="Two tracked marine heatwaves in the northeast Pacific on 10 August 2015, drawn in 3-D as isosurfaces coloured by temperature anomaly: a warm slab at the surface and a deep column below 140 m" width="100%"></a>
+<a href="media/mhw_4d_blob.jpg"><img src="media/mhw_4d_blob.jpg" alt="Two tracked marine heatwaves in the northeast Pacific on 10 August 2015, drawn in 3-D as isosurfaces coloured by temperature anomaly: a surface heatwave above a deep heatwave that starts at 142 m" width="100%"></a>
 
-<sub>Two tracked 4-D marine heatwaves in the northeast Pacific on 10 August 2015 (95th percentile, GLORYS12): a warm slab at the surface and a column reaching the 1150 m limit of the input, coloured by temperature anomaly, with their footprints on the floor. Vertical exaggeration ×967.</sub>
+<sub>Two tracked 4-D marine heatwaves in the northeast Pacific on 10 August 2015 (95th percentile, GLORYS12): a surface heatwave reaching 415 m and a deep heatwave from 142 m to the 1150 m limit of the input, coloured by temperature anomaly, with their footprints on the floor. Vertical exaggeration about ×870.</sub>
 
 The [guide](https://marex.readthedocs.io/en/latest/guide/tracking.html#tracking-in-4d) covers the vertical geometry, the gap rule and the memory model. The [4-D notebooks](https://marex.readthedocs.io/en/latest/tutorials/4d.html) detect marine heatwaves in 30 years of GLORYS12 on 36 levels to 1150 m at 1/12°, then track the events of the 2013-16 Blob.
 
@@ -112,7 +112,7 @@ The [guide](https://marex.readthedocs.io/en/latest/guide/tracking.html#tracking-
 | Detect | Global SST 0.25°, 40 yr daily | **122 GB** | 61 min |
 | Track | Global 0.25°, 20 yr 6-hourly | **91 GB** | 139 min |
 | Track | ICON, 14.9 M cells, 3 yr daily | **66 GB** | 70 min |
-| Track (4-D) | GLORYS12 1/12°, 36 levels, 4 yr daily | **46 GB** | 75 min |
+| Track (4-D) | GLORYS12 1/12°, 36 levels, 4 yr daily | **46 GB** | 80 min |
 | Track | Global 0.25°, 10 yr daily | **16 GB** | 27 min |
 
 Sizing guidance is in the [performance guide](https://marex.readthedocs.io/en/latest/guide/performance.html).

@@ -116,7 +116,7 @@ so ``(time, lat, lon)`` or ``(time, cell)`` is 3-D, and adding depth or pressure
 * The tracker follows volumes through ``(time, depth, lat, lon)`` when depth is declared under
   ``"z"`` in ``dimensions`` (see :ref:`tracking-in-4d`). The ``plotX`` accessor takes one
   map per timestep, so select a level with ``isel`` before plotting.
-  ``multi_plot(config, col="lev")`` draws one panel per level, and :ref:`tracking-in-4d` lists
+  ``multi_plot(config, col="lev")`` draws one panel per level, and the same guide section lists
   the plotting helpers for tracked volumes.
 
 The :doc:`../tutorials/4d` tutorial runs this on 30 years of daily GLORYS12 ocean temperature on
