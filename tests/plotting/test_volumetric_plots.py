@@ -399,6 +399,47 @@ def test_levels_extent_cropped_past_a_whole_turn_suggests_no_centre(caplog, exte
     assert "whole turn" in message and "central_longitude" not in message
 
 
+@pytest.mark.parametrize("half_cell", [0.5, 0.125, 1.0 / 24.0, 0.025])
+def test_levels_extent_warns_when_a_global_grid_edge_past_the_seam_crops_a_column(caplog, half_cell):
+    # lon.min() - dx / 2 to lon.max() + dx / 2 on a grid holding both -180 and 180: the window loses the seam column.
+    _module_log(caplog)
+    extent = (-180.0 - half_cell, 180.0 + half_cell, 0.0, 20.0)
+    plot_event_levels(_hand_events(), 0, [0], zdim=ZDIM, extent=extent, projection=ccrs.PlateCarree())
+    assert ["crops" in message for message in _warnings(caplog)] == [True]
+
+
+def test_levels_extent_past_a_whole_turn_measures_the_crop_against_the_projections_centre(caplog):
+    # Against the width centred on Greenwich this window looks whole, though it loses 150W at the equator.
+    _module_log(caplog)
+    projection = ccrs.Robinson(central_longitude=30)
+    plot_event_levels(_hand_events(), 0, [0], zdim=ZDIM, extent=(-200.0, 200.0, -60.0, 60.0), projection=projection)
+    assert ["crops" in message for message in _warnings(caplog)] == [True]
+
+
+def test_levels_extent_past_a_whole_turn_never_advises_a_centre_on_a_polar_map(caplog):
+    # drawn is 1.03 of framed here, which is the seam test's width branch on a range under a whole turn.
+    _module_log(caplog)
+    projection = ccrs.NorthPolarStereo(central_longitude=-170)
+    plot_event_levels(_hand_events(), 0, [0], zdim=ZDIM, extent=(-181.0, 181.0, 80.0, 85.0), projection=projection)
+    assert not any("seam" in message or "central_longitude" in message for message in _warnings(caplog))
+
+
+def test_levels_extent_check_frames_at_the_latitudes_of_the_window(caplog):
+    # The polar cap frames at any latitude, but its width at 50-70N is not its width at the equator.
+    _module_log(caplog)
+    plot_event_levels(_hand_events(), 0, [0], zdim=ZDIM, extent=(-180.0, 180.0, 50.0, 70.0), projection=ccrs.NorthPolarStereo())
+    assert _warnings(caplog) == []
+
+
+def test_levels_extent_check_keeps_the_collapse_warning_of_its_throwaway_axes_to_itself(caplog):
+    _module_log(caplog)
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        vol_mod._warn_if_extent_misdrawn((0.0, 360.0, 0.0, 20.0), ccrs.PlateCarree())
+    assert [str(w.message) for w in seen] == []
+    assert "collapses" in _warnings(caplog)[0]
+
+
 def test_levels_extent_warns_once_for_a_figure_of_many_panels(caplog):
     _module_log(caplog)
     plot_event_levels(_hand_events(), 0, [0, 1, 2], zdim=ZDIM, extent=(170.0, 190.0, 0.0, 20.0), projection=ccrs.PlateCarree())
