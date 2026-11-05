@@ -480,6 +480,15 @@ class _IDBlock:
         return out
 
 
+def _rows_by_child(pairs: NDArray[np.int64], merging: NDArray[np.int64]) -> List[NDArray[np.int64]]:
+    """Return the overlap-table rows of each child in ``merging``, in table order; one sort, O(rows + children) held."""
+    order = np.argsort(pairs[:, 1], kind="stable")
+    children = pairs[order, 1]
+    starts = np.searchsorted(children, merging, side="left")
+    stops = np.searchsorted(children, merging, side="right")
+    return [order[start:stop] for start, stop in zip(starts.tolist(), stops.tolist())]
+
+
 def _resolve_merges(
     cur: NDArray[np.int32],
     index_t: ObjectIndex,
@@ -502,8 +511,8 @@ def _resolve_merges(
     handled in ascending order and take consecutive IDs from that block, which gives the same IDs
     as allocating per child.
     """
-    rows_by_child = [pairs[:, 1] == child_id for child_id in merging.tolist()]
-    block = _IDBlock(allocator.allocate(sum(int(rows.sum()) - 1 for rows in rows_by_child)))
+    rows_by_child = _rows_by_child(pairs, merging)
+    block = _IDBlock(allocator.allocate(sum(rows.size - 1 for rows in rows_by_child)))
     for child_id, rows in zip(merging.tolist(), rows_by_child):
         child_ids, overlap_volumes = _resolve_merge(
             cur,

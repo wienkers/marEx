@@ -234,41 +234,91 @@ def _coordinate_rtol(a: NDArray, b: NDArray) -> float:
     return 1.0e-9 if eps <= np.finfo(np.float64).eps else 4.0 * eps
 
 
-def _align_mask(mask: xr.DataArray, data_bin: xr.DataArray, dims: VolumetricDims) -> xr.DataArray:
-    """
-    Put the mask on the data's coordinate labels along ``z``, ``y`` and ``x``.
+def _labels_axis(da: xr.DataArray, name: str, dim: str) -> bool:
+    """Return whether ``name`` is a one-dimensional coordinate along ``dim`` of ``da``."""
+    return name in da.coords and da[name].dims == (dim,)
 
-    Where both carry a coordinate on a dimension, the mask is reordered to the data's labels
-    (it may list them in a different order, e.g. an ascending depth mask for descending data).
-    Coordinates equal up to rounding in the same order are taken as aligned. Coordinates that
-    do not hold the same set of labels raise.
+
+def align_to_data(
+    da: xr.DataArray,
+    data_bin: xr.DataArray,
+    axes: Sequence[Tuple[str, str]],
+    name: str,
+) -> xr.DataArray:
     """
-    for d in (dims.z, dims.y, dims.x):
-        if d not in mask.coords or d not in data_bin.coords:
+    Put an input on the data's coordinate labels.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        The input: the wet mask, or a geometry array.
+    data_bin : xarray.DataArray
+        The field whose labels and order are wanted, in the order the user gave it.
+    axes : sequence of (str, str)
+        ``(dimension, coordinate name)`` pairs to match. The coordinate need not be the
+        dimension's index, so a ``latitude(j)`` labels ``j``; where one side lacks it, the
+        dimension's index is matched instead.
+    name : str
+        What to call the input in an error.
+
+    Returns
+    -------
+    xarray.DataArray
+        ``da``, reordered along any axis it listed in a different order (e.g. an ascending depth
+        mask for descending data). Labels equal up to rounding in the same order are taken as
+        aligned, as is an axis either side leaves unlabelled or a length that differs, which the
+        caller's shape checks report.
+
+    Raises
+    ------
+    ConfigurationError
+        If the coordinates do not hold the same set of labels.
+    """
+    for dim, coord in axes:
+        # The named coordinate if both sides carry it, else the dimension's own index.
+        label = next((n for n in (coord, dim) if _labels_axis(da, n, dim) and _labels_axis(data_bin, n, dim)), None)
+        if label is None:
             continue
-        want = np.asarray(data_bin[d].values)
-        have = np.asarray(mask[d].values)
-        if (
-            want.shape == have.shape
-            and np.issubdtype(want.dtype, np.number)
-            and np.allclose(want, have, rtol=_coordinate_rtol(want, have), atol=0.0)
-        ):
+        want = np.asarray(data_bin[label].values)
+        have = np.asarray(da[label].values)
+        if want.shape != have.shape:
             continue
-        if want.shape != have.shape or not np.all(np.isin(want, have)):
+        # Compare in sorted order: labels closer than the rounding bar are still different cells, so
+        # "equal up to rounding" can only be asked of labels already known to pair up. Only floats round.
+        rounded = np.issubdtype(want.dtype, np.floating) or np.issubdtype(have.dtype, np.floating)
+        rounded = rounded and np.issubdtype(want.dtype, np.number) and np.issubdtype(have.dtype, np.number)
+        want_order, have_order = np.argsort(want, kind="stable"), np.argsort(have, kind="stable")
+        same_labels = (
+            np.unique(want).size == np.unique(have).size
+            and np.allclose(want[want_order], have[have_order], rtol=_coordinate_rtol(want, have), atol=0.0)
+            if rounded
+            else np.array_equal(want[want_order], have[have_order])
+        )
+        if not same_labels:
             raise ConfigurationError(
-                f"The mask's '{d}' coordinate does not match the data's",
-                details="The mask and the extremes field must be defined on the same grid",
-                suggestions=[f"Build the mask on the same '{d}' labels as the extremes field, or drop the mask's '{d}' coordinate"],
-                context={"dim": d},
+                f"The {name}'s '{label}' coordinate does not match the data's",
+                details=f"The {name} and the extremes field must be defined on the same grid",
+                suggestions=[
+                    f"Build the {name} on the same '{label}' labels as the extremes field, or drop its '{label}' coordinate"
+                ],
+                context={"dim": dim, "coordinate": label},
             )
-        mask = mask.reindex({d: want})
-    return mask
+        if np.array_equal(want_order, have_order):
+            continue
+        positions = np.empty_like(have_order)
+        positions[want_order] = have_order
+        da = da.isel({dim: positions})
+        if label == dim:
+            da = da.assign_coords({dim: want})
+    return da
 
 
 def prepare_volumetric_data(
     data_bin: xr.DataArray,
     mask: Optional[xr.DataArray],
     dims: VolumetricDims,
+    y_coord: Optional[str] = None,
+    x_coord: Optional[str] = None,
 ) -> Tuple[xr.DataArray, xr.DataArray, NDArray, dict, Tuple[str, ...]]:
     """
     Bring a 4-D field and its wet mask into internal order.
@@ -281,6 +331,8 @@ def prepare_volumetric_data(
         Boolean wet mask with dimensions ``(z, y, x)``. Required.
     dims : VolumetricDims
         The dimension names.
+    y_coord, x_coord : str, optional
+        The horizontal coordinate names, where they differ from the dimension names.
 
     Returns
     -------
@@ -344,7 +396,8 @@ def prepare_volumetric_data(
     _, flip, _ = _z_order(z_values, z_attrs)
     original_dims = tuple(str(d) for d in data_bin.dims)
 
-    mask = _align_mask(mask, data_bin, dims)
+    axes = ((dims.z, dims.z), (dims.y, y_coord or dims.y), (dims.x, x_coord or dims.x))
+    mask = align_to_data(mask, data_bin, axes, "mask")
     data = data_bin.transpose(*dims.internal_order())
     wet = mask.transpose(dims.z, dims.y, dims.x)
     if flip:

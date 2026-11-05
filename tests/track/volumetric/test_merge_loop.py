@@ -1184,3 +1184,114 @@ def test_consolidation_without_a_ledger_is_unchanged():
         ids[0], ids[1], store_from_field(ids, cv), cv, THRESHOLD, ledger=MergeLedger(), time_value=np.datetime64("2000-01-02", "ns")
     )
     np.testing.assert_array_equal(a, b)
+
+
+# -- memory of the merge pass ---------------------------------------------------------------------
+
+
+class _StopAtAllocation(Exception):
+    pass
+
+
+def _bytes_held_at_allocation(k):
+    """Traced bytes when ``_resolve_merges`` reaches its ID request, with k children each linked to k parents."""
+    from marEx.track.volumetric.merge_loop import _resolve_merges
+
+    pairs = np.stack([np.repeat(np.arange(k), k), np.tile(np.arange(k), k)], axis=1).astype(np.int64)
+    merging = np.arange(k, dtype=np.int64)
+    held = {}
+
+    class Allocator:
+        def allocate(self, n):
+            held["bytes"] = tracemalloc.get_traced_memory()[0]
+            held["n"] = n
+            raise _StopAtAllocation
+
+    gc.collect()
+    tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        with pytest.raises(_StopAtAllocation):
+            _resolve_merges(None, None, None, pairs, np.ones(k * k), merging, None, Allocator(), None, None, None, None)
+        assert held["n"] == k * (k - 1)
+        return held["bytes"] - base
+    finally:
+        tracemalloc.stop()
+
+
+def test_merge_pass_grouping_grows_with_the_rows_not_children_times_rows():
+    # k children and k^2 rows: linear in the rows is 4x per doubling, a mask per child is 8x.
+    small, large = _bytes_held_at_allocation(128), _bytes_held_at_allocation(256)
+    assert large / small < 6.0, (small, large)
+
+
+def test_merge_pass_gives_each_child_its_rows_in_table_order():
+    from marEx.track.volumetric.merge_loop import _rows_by_child
+
+    children = np.array([7, 3, 7, 3, 9, 7], dtype=np.int64)
+    pairs = np.stack([np.arange(6), children], axis=1)
+    groups = _rows_by_child(pairs, np.array([3, 7], dtype=np.int64))
+    for child, rows in zip((3, 7), groups):
+        np.testing.assert_array_equal(rows, np.flatnonzero(children == child))
+
+
+# -- two parents after consolidation --------------------------------------------------------------
+
+
+def _consolidation_join_inputs():
+    """Children C and D each pass against parent A only; consolidated, the larger object also passes against B."""
+    binary = np.zeros((2, 1, 6, 10), dtype=bool)
+    binary[0, 0, 1, :] = True
+    binary[0, 0, 0, [1, 8]] = True  # A, volume 12
+    binary[0, 0, 3, :] = True
+    binary[0, 0, 4, [1, 8]] = True  # B, volume 12
+    for start, stop, bridge in ((0, 3, 1), (7, 10, 8)):  # C and D, volume 8 each
+        binary[1, 0, [1, 3], start:stop] = True
+        binary[1, 0, [0, 2], bridge] = True
+    return binary
+
+
+@pytest.mark.parametrize("time_chunk", [1, 2])
+def test_consolidation_join_is_logged_and_keeps_the_3d_semantics(time_chunk, caplog):
+    import marEx
+    from marEx.track.volumetric import tracker4d as tracker4d_mod
+
+    binary = _consolidation_join_inputs()
+    lat, lon = np.arange(6.0) + 10.0, np.arange(10.0) + 10.0
+    depth = xr.DataArray([0.5], dims="depth", attrs={"units": "m", "positive": "down"})
+    coords = {"time": pd.date_range("2000-01-01", periods=2), "depth": depth, "lat": lat, "lon": lon}
+    data = xr.DataArray(binary, dims=("time", "depth", "lat", "lon"), coords=coords).chunk(
+        {"time": time_chunk, "depth": -1, "lat": -1, "lon": -1}
+    )
+    wet = xr.DataArray(
+        np.ones((1, 6, 10), dtype=bool), dims=("depth", "lat", "lon"), coords={"depth": depth, "lat": lat, "lon": lon}
+    )
+    bounds = xr.DataArray([[0.0, 1.0]], dims=("depth", "nv"), coords={"depth": depth}, attrs={"units": "m"})
+    areas = xr.DataArray(np.ones((6, 10)), dims=("lat", "lon"), coords={"lat": lat, "lon": lon}, attrs={"units": "m2"})
+
+    logger = tracker4d_mod.logger
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            events = (
+                marEx.tracker(
+                    data,
+                    wet,
+                    layer_bounds=bounds,
+                    cell_areas=areas,
+                    R_fill=0,
+                    T_fill=0,
+                    dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+                    regional_mode=True,
+                    coordinate_units="degrees",
+                    volume_filter_absolute=1.0,
+                )
+                .run()
+                .compute()
+            )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert events.attrs["N_events_final"] == 1
+    assert events.attrs["total_merges"] == 0
+    assert any("1 children have more than one parent" in r.getMessage() for r in caplog.records)

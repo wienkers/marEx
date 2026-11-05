@@ -34,6 +34,11 @@ EXPECTED_ATTRS = (
     "N_events_final",
     "total_merges",
     "multi_parent_merges",
+    "horizontal_y_dim",
+    "horizontal_x_dim",
+    "horizontal_y_coord",
+    "horizontal_x_coord",
+    "horizontal_coordinate_units",
 )
 DIAGNOSTICS = ("volume", "footprint_area", "centroid", "depth_centroid", "depth_top", "depth_bottom", "mean_thickness")
 

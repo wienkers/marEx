@@ -1220,3 +1220,200 @@ def test_animation_writes_a_movie(merge_run, tmp_path):
     out = animate_event_levels(events, zdim=ZDIM, plot_dir=str(tmp_path), file_name="movie", config=PlotConfig(framerate=2))
     # The call returns after the encoder exits, so the file is complete here; no waiting on time.
     assert out is not None and Path(out).is_file() and Path(out).stat().st_size > 0
+
+
+# -- 5. which coordinate is which -----------------------------------------------------------------
+
+LAT_DEG = np.array([40.0, 41.0, 42.0, 43.0])
+LON_DEG = np.array([-150.0, -149.0, -148.0, -147.0])
+
+
+def _axes_inputs():
+    """A 2 x 2 event on a grid whose latitudes and longitudes cannot be taken for each other or for indices."""
+    values = np.zeros((2, 1, 4, 4), dtype=bool)
+    values[:, 0, 1:3, 1:3] = True
+    depth = xr.DataArray([0.5], dims="depth", attrs={"units": "m", "positive": "down"})
+    time = np.array(["2000-01-01", "2000-01-02"], dtype="datetime64[ns]")
+    data = xr.DataArray(
+        values, dims=("time", "depth", "lat", "lon"), coords={"time": time, "depth": depth, "lat": LAT_DEG, "lon": LON_DEG}
+    )
+    wet = xr.DataArray(
+        np.ones((1, 4, 4), dtype=bool), dims=("depth", "lat", "lon"), coords={"depth": depth, "lat": LAT_DEG, "lon": LON_DEG}
+    )
+    bounds = xr.DataArray([[0.0, 1.0]], dims=("depth", "nv"), coords={"depth": depth}, attrs={"units": "m"})
+    areas = xr.DataArray(np.ones((4, 4)), dims=("lat", "lon"), coords={"lat": LAT_DEG, "lon": LON_DEG}, attrs={"units": "m2"})
+    return data, wet, bounds, areas
+
+
+def _track_axes(data, wet, bounds, areas, *, dimensions=DIMS, coordinates=None, units="degrees"):
+    tracker = marEx.tracker(
+        data.chunk({"time": 1, **{d: -1 for d in data.dims if d != "time"}}),
+        wet,
+        layer_bounds=bounds,
+        cell_areas=areas,
+        R_fill=0,
+        T_fill=0,
+        dimensions=dimensions,
+        coordinates=coordinates,
+        regional_mode=True,
+        coordinate_units=units,
+        volume_filter_absolute=1.0,
+        quiet=True,
+    )
+    return tracker.run().compute()
+
+
+def _radian_events():
+    data, wet, bounds, areas = _axes_inputs()
+    rad = {"lat": np.deg2rad(LAT_DEG), "lon": np.deg2rad(LON_DEG)}
+    return _track_axes(data.assign_coords(rad), wet.assign_coords(rad), bounds, areas.assign_coords(rad), units="radians")
+
+
+def _ji_events():
+    def on_ji(obj):
+        return obj.rename(lat="j", lon="i").drop_vars(["j", "i"]).assign_coords(latitude=("j", LAT_DEG), longitude=("i", LON_DEG))
+
+    data, wet, bounds, areas = _axes_inputs()
+    return _track_axes(
+        on_ji(data),
+        on_ji(wet),
+        bounds,
+        on_ji(areas),
+        dimensions={"time": "time", "z": "depth", "y": "j", "x": "i"},
+        coordinates={"y": "latitude", "x": "longitude"},
+    )
+
+
+def _lonlat_events():
+    def named(obj):
+        return obj.rename(lat="latitude", lon="longitude")
+
+    data, wet, bounds, areas = _axes_inputs()
+    return _track_axes(
+        named(data).transpose("time", "depth", "longitude", "latitude"),
+        named(wet),
+        bounds,
+        named(areas),
+        dimensions={"time": "time", "z": "depth", "y": "latitude", "x": "longitude"},
+    )
+
+
+LAYOUTS = {"radians": _radian_events, "separate_dims": _ji_events, "lon_before_lat": _lonlat_events}
+
+
+@pytest.fixture
+def drawn_grid(monkeypatch):
+    """The (x, y) of every mesh handed to cartopy, in the PlateCarree degrees it will read them as."""
+    grids = []
+    real = vol_mod.pcolormesh_seam_safe
+
+    def spy(ax, x, y, *args, **kwargs):
+        grids.append((np.asarray(x).copy(), np.asarray(y).copy()))
+        return real(ax, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(vol_mod, "pcolormesh_seam_safe", spy)
+    return grids
+
+
+def _assert_on_the_true_grid(grids):
+    assert grids
+    for x, y in grids:
+        np.testing.assert_allclose(x, LON_DEG, atol=1e-9)
+        np.testing.assert_allclose(y, LAT_DEG, atol=1e-9)
+
+
+@pytest.mark.parametrize("layout", sorted(LAYOUTS))
+def test_levels_draw_the_true_geographic_grid(layout, drawn_grid):
+    events = LAYOUTS[layout]()
+    plot_event_levels(events, events.time.values[0], [0], zdim=ZDIM, projection=ccrs.PlateCarree())
+    _assert_on_the_true_grid(drawn_grid)
+
+
+@pytest.mark.parametrize("layout", sorted(LAYOUTS))
+@pytest.mark.parametrize("levels", ["footprint", [0]], ids=["footprint", "panels"])
+def test_movies_draw_the_true_geographic_grid(layout, levels, drawn_grid, stub_encoder, tmp_path):
+    events = LAYOUTS[layout]()
+    animate_event_levels(events, zdim=ZDIM, levels=levels, plot_dir=str(tmp_path), config=PlotConfig(projection=ccrs.PlateCarree()))
+    _assert_on_the_true_grid(drawn_grid)
+
+
+@pytest.mark.parametrize("layout", sorted(LAYOUTS))
+def test_zoom_to_event_frames_the_true_geographic_box(layout):
+    def window(events):
+        fig = plot_event_levels(
+            events, events.time.values[0], [0], zdim=ZDIM, event_id=1, zoom_to_event=True, projection=ccrs.PlateCarree()
+        )
+        return fig.axes[0].get_extent(crs=ccrs.PlateCarree())
+
+    np.testing.assert_allclose(window(LAYOUTS[layout]()), window(_track_axes(*_axes_inputs())), atol=1e-6)
+
+
+@pytest.mark.parametrize("layout", sorted(LAYOUTS))
+def test_the_axes_survive_writing_the_events_to_a_store(layout, drawn_grid, tmp_path):
+    events = LAYOUTS[layout]()
+    path = tmp_path / "events.zarr"
+    events[["ID_field"]].to_zarr(path, consolidated=False)
+    reopened = xr.open_zarr(path, consolidated=False)
+    plot_event_levels(reopened, reopened.time.values[0], [0], zdim=ZDIM, projection=ccrs.PlateCarree())
+    _assert_on_the_true_grid(drawn_grid)
+
+
+def _anonymous_events(**attrs):
+    ids = np.zeros((1, 1, 4, 4), dtype=np.int32)
+    ids[0, 0, 1:3, 1:3] = 1
+    coords = {
+        "time": np.array(["2000-01-01"], dtype="datetime64[ns]"),
+        ZDIM: [5.0],
+        "latitude": ("j", LAT_DEG),
+        "longitude": ("i", LON_DEG),
+        "ID": [1],
+    }
+    return xr.Dataset({"ID_field": (("time", ZDIM, "j", "i"), ids)}, coords=coords, attrs=attrs)
+
+
+def test_axes_nobody_named_raise_rather_than_draw_on_indices(drawn_grid):
+    events = _anonymous_events()
+    with pytest.raises(ConfigurationError, match="horizontal"):
+        plot_event_levels(events, events.time.values[0], [0], zdim=ZDIM)
+    assert not drawn_grid
+
+
+def test_a_plot_config_mapping_names_the_axes_of_a_hand_built_dataset(drawn_grid):
+    events = _anonymous_events()
+    config = PlotConfig(
+        dimensions={"time": "time", "y": "j", "x": "i"}, coordinates={"time": "time", "y": "latitude", "x": "longitude"}
+    )
+    plot_event_levels(events, events.time.values[0], [0], zdim=ZDIM, config=config, projection=ccrs.PlateCarree())
+    _assert_on_the_true_grid(drawn_grid)
+
+
+def test_a_coordinate_declared_in_radians_is_converted_on_a_hand_built_dataset(drawn_grid):
+    events = _hand_events()
+    events = events.assign_coords(
+        lat=("lat", np.deg2rad(events.lat.values), {"units": "radians"}),
+        lon=("lon", np.deg2rad(events.lon.values), {"units": "radian"}),
+    )
+    plot_event_levels(events, events.time.values[0], [0], zdim=ZDIM, projection=ccrs.PlateCarree())
+    np.testing.assert_allclose(drawn_grid[0][0], np.arange(40.0), atol=1e-9)
+    np.testing.assert_allclose(drawn_grid[0][1], np.arange(20.0), atol=1e-9)
+
+
+def test_hand_built_full_names_in_lon_lat_order_are_recognised(drawn_grid):
+    ids = np.zeros((1, 1, 4, 4), dtype=np.int32)
+    ids[0, 0, 1:3, 1:3] = 1
+    coords = {
+        "time": np.array(["2000-01-01"], dtype="datetime64[ns]"),
+        ZDIM: [5.0],
+        "longitude": LON_DEG,
+        "latitude": LAT_DEG,
+        "ID": [1],
+    }
+    events = xr.Dataset({"ID_field": (("time", ZDIM, "longitude", "latitude"), ids)}, coords=coords)
+    plot_event_levels(events, events.time.values[0], [0], zdim=ZDIM, projection=ccrs.PlateCarree())
+    _assert_on_the_true_grid(drawn_grid)
+
+
+def test_depth_time_sums_over_the_horizontal_whatever_it_is_called():
+    events = _anonymous_events()
+    fig = plot_event_depth_time(events, 1, zdim=ZDIM)
+    assert fig is not None

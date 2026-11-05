@@ -515,6 +515,10 @@ interfaces. The tracker accepts three ways to supply the vertical geometry.
    shortened from below, so the thickness on a wet cell must lie in ``(0, bounds thickness]``.
    It requires ``layer_bounds``.
 
+Labelled inputs are matched to the extremes field by their coordinates, so they may list depth,
+latitude or longitude in another order. Labels from a different grid raise, and an input with no
+coordinate on an axis is read by position.
+
 ``layer_bounds="from_centres"``
    Reconstructs the interfaces at midpoints between the level centres. It is an explicit
    opt-in because the result is approximate: it logs a warning and sets
@@ -569,9 +573,14 @@ are recorded in ``attrs["partition_scales_m"]``.
 This differs from 3-D on purpose. The 3-D partitioner caps its distance search and falls back
 to the parent centroids beyond it. The 4-D partitioner has no cap, so a lobe far from every
 parent still goes to the parent that owns its nearest cell. Ties between equidistant parents
-go to the smaller ID. The parts are disjoint and sum to the child's volume. The merge loop
-runs until no merging child remains, and raises a ``TrackingError`` naming the unresolved
-IDs if it does not converge.
+go to the smaller ID. The parts are disjoint and sum to the child's volume. The merge pass of
+a timestep runs until no merging child remains, and raises a ``TrackingError`` naming the
+unresolved IDs if it does not converge.
+
+Split consolidation runs after that pass, and can still give a child a second parent, as in
+the 3-D tracker: pieces that each failed against a parent can pass as one larger object. Those
+parents become one event, with no partition and no merge recorded. The tracker logs how many
+children this touched at INFO level.
 
 Parameters That Change or Raise
 -------------------------------
@@ -688,6 +697,12 @@ Four helpers in :mod:`marEx.plotX` draw the output, and each selects what it nee
 * :func:`marEx.plotX.plot_event_depth_time`: one event's cell count or volume at each level against time. ``depth_scale="sqrt"`` gives the thin upper levels more room.
 * :func:`marEx.plotX.plot_event_summary`: one event's volume, depth centroid, and top and bottom depth against time. The vertical lines mark where a run of merges begins and, given the merge dataset, where a run of splits begins.
 * :func:`marEx.plotX.animate_event_levels`: a movie of the depth-projected footprint, coloured by the event's shallowest depth, or one map panel per level. ``extent`` frames the movie on the events and ``theme="dark"`` draws it for dark figures.
+
+The maps read which dimension is latitude, its coordinate and its units from the
+``horizontal_y_dim``, ``horizontal_x_dim``, ``horizontal_y_coord``, ``horizontal_x_coord`` and
+``horizontal_coordinate_units`` attributes the tracker writes, and draw in degrees whichever
+units or dimension order the input used. For a dataset without them, name the axes with
+``PlotConfig(dimensions=..., coordinates=...)``, or declare ``units="radians"`` on a coordinate.
 
 The notebooks in ``examples/4d/`` run this chain on GLORYS12 data for the Blob, the 2013-16 marine
 heatwave in the northeast Pacific. ``02_track_extremes_4d.ipynb`` tracks the events and

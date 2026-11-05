@@ -333,7 +333,8 @@ def _glorys_pair(data_dtype, mask_dtype, mask_scale=1.0):
 def test_float32_data_depth_matches_float64_mask_depth():
     data, mask = _glorys_pair(np.float32, np.float64)
     assert not np.array_equal(data["depth"].values.astype(np.float64), mask["depth"].values)
-    t = build(data, mask, layer_bounds=layer_bounds())
+    # These bounds carry no depth labels: labelled ones from another grid raise.
+    t = build(data, mask, layer_bounds=layer_bounds().drop_vars("depth"))
     assert t.mask["depth"].dtype == np.float32
     np.testing.assert_array_equal(t.mask["depth"].values, data["depth"].values)
 
@@ -346,7 +347,7 @@ def test_float32_coordinate_rounding_is_accepted_on_every_axis(coord):
     )
     mask = wet_mask(data)
     data = data.assign_coords({coord: data[coord].values.astype(np.float32)})
-    out = marEx.track.volumetric.config._align_mask(mask, data, VDIMS)
+    out = marEx.track.volumetric.config.align_to_data(mask, data, [(d, d) for d in (VDIMS.z, VDIMS.y, VDIMS.x)], "mask")
     assert out[coord].dtype == np.float64
     np.testing.assert_array_equal(out[coord].values, mask[coord].values)
 

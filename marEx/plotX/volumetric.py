@@ -68,6 +68,9 @@ _WIDER_THAN_FRAMED = 1.02
 _FULL_WIDTH_FRACTION = 0.7
 _WHOLE_WIDTH_FRACTION = 0.9999
 _NEARLY_A_WHOLE_TURN = 359.0  # the full width is what such a range asks for
+_RADIAN_UNITS = {"radian", "radians", "rad"}
+_LATITUDE_NAMES = {"lat", "latitude"}
+_LONGITUDE_NAMES = {"lon", "longitude"}
 
 
 # --------------------------------------------------------------------------------------
@@ -76,22 +79,73 @@ _NEARLY_A_WHOLE_TURN = 359.0  # the full width is what such a range asks for
 
 
 def _horizontal_dims(id_field: xr.DataArray, zdim: str) -> Tuple[str, str]:
-    """Return the ``(y, x)`` dimension names of the ID field: the two dimensions that are neither time nor depth."""
-    if _TIME not in id_field.dims or zdim not in id_field.dims:
-        raise ConfigurationError(
-            f"The ID field has dimensions {tuple(id_field.dims)}, expected '{_TIME}' and '{zdim}' among them",
-            suggestions=["Pass zdim as the name of the depth dimension of the events dataset"],
-            context={"dims": tuple(id_field.dims), "zdim": zdim},
-        )
+    """Return the two horizontal dimensions in the field's order: enough to sum over, not to map."""
     rest = [str(d) for d in id_field.dims if d not in (_TIME, zdim)]
     if len(rest) != 2:
         raise ConfigurationError(
             f"Expected two horizontal dimensions besides '{_TIME}' and '{zdim}', found {rest}",
             context={"dims": tuple(id_field.dims)},
         )
-    if "lat" in rest and "lon" in rest:
-        return "lat", "lon"
     return rest[0], rest[1]
+
+
+def _horizontal_coordinate(
+    id_field: xr.DataArray, dim: str, candidates: Sequence[Optional[str]], units: Optional[str]
+) -> np.ndarray:
+    """Return the 1-D coordinate along ``dim`` in degrees, from the first candidate that labels it."""
+    for name in candidates:
+        if name is None or name not in id_field.coords or id_field[name].dims != (dim,):
+            continue
+        values = np.asarray(id_field[name].values)
+        declared = str(id_field[name].attrs.get("units", units)).strip().lower()
+        return np.degrees(values) if declared in _RADIAN_UNITS else values
+    raise ConfigurationError(
+        f"No one-dimensional coordinate labels the horizontal dimension '{dim}', so its cells have no position on a map",
+        suggestions=["Name the coordinate with PlotConfig(coordinates={'y': ..., 'x': ...})"],
+        context={"dim": dim, "coordinates": [str(c) for c in id_field.coords]},
+    )
+
+
+def _horizontal_axes(
+    events_ds: xr.Dataset, id_field: xr.DataArray, zdim: str, config: PlotConfig
+) -> Tuple[str, str, np.ndarray, np.ndarray]:
+    """
+    Resolve which horizontal dimension is which, and where its cells are.
+
+    The dimensions come from ``config`` when they name both, then from the tracker's
+    ``horizontal_*`` attributes, then from unmistakable names. Nothing else is guessed: neither
+    the dimension order nor the range of the values tells latitude from longitude or radians from
+    degrees, and drawing the wrong one still gives a plausible map.
+
+    Returns
+    -------
+    ydim, xdim : str
+        The dimensions along latitude and longitude.
+    lats, lons : numpy.ndarray
+        Their 1-D coordinates in degrees, as the PlateCarree transform of the maps reads them.
+    """
+    first, second = _horizontal_dims(id_field, zdim)
+    rest = {first, second}
+    attrs = events_ds.attrs
+    wanted_y, wanted_x = (config.dimensions or {}).get("y"), (config.dimensions or {}).get("x")
+    if {wanted_y, wanted_x} == rest:
+        ydim, xdim = str(wanted_y), str(wanted_x)
+    elif {attrs.get("horizontal_y_dim"), attrs.get("horizontal_x_dim")} == rest:
+        ydim, xdim = str(attrs["horizontal_y_dim"]), str(attrs["horizontal_x_dim"])
+    elif rest & _LATITUDE_NAMES and rest & _LONGITUDE_NAMES:
+        ydim, xdim = (first, second) if first in _LATITUDE_NAMES else (second, first)
+    else:
+        raise ConfigurationError(
+            f"Cannot tell which of the horizontal dimensions {sorted(rest)} is latitude",
+            details="The dataset has no tracker horizontal_* attributes, and the names are not lat/latitude, lon/longitude",
+            suggestions=["Name them with PlotConfig(dimensions={'y': ..., 'x': ...}, coordinates={'y': ..., 'x': ...})"],
+            context={"dims": tuple(id_field.dims)},
+        )
+    units = attrs.get("horizontal_coordinate_units")
+    coordinates = config.coordinates or {}
+    lats = _horizontal_coordinate(id_field, ydim, [coordinates.get("y"), attrs.get("horizontal_y_coord"), ydim], units)
+    lons = _horizontal_coordinate(id_field, xdim, [coordinates.get("x"), attrs.get("horizontal_x_coord"), xdim], units)
+    return ydim, xdim, lats, lons
 
 
 def _id_field(events_ds: xr.Dataset, zdim: str) -> xr.DataArray:
@@ -399,7 +453,7 @@ def plot_event_levels(
     _check_plotting_dependencies()
     config = config or PlotConfig()
     ids = _id_field(events_ds, zdim)
-    ydim, xdim = _horizontal_dims(ids, zdim)
+    ydim, xdim, lats, lons = _horizontal_axes(events_ds, ids, zdim, config)
     levels = [int(k) for k in levels]
     if not levels:
         raise ConfigurationError("levels is empty", suggestions=["Pass at least one level index"])
@@ -422,7 +476,7 @@ def plot_event_levels(
     if extent is None and zoom_to_event:
         member = (block.values == event_id).any(axis=0)
         if member.any():
-            extent = _event_extent(member, block[xdim].values, block[ydim].values)
+            extent = _event_extent(member, lons, lats)
         else:
             logger.warning(f"Event {event_id} has no cells at this time and these levels, so the whole domain stays in view")
     time_label = _time_text(block[_TIME].values[()]) if _TIME in block.coords else ""
@@ -438,8 +492,6 @@ def plot_event_levels(
 
     cmap, norm = _id_style(event_id)
 
-    lons = block[xdim].values
-    lats = block[ydim].values
     for i, ax in enumerate(axes):
         if i >= n:
             fig.delaxes(ax)
@@ -733,14 +785,14 @@ def animate_event_levels(
     _check_plotting_dependencies()
     config = config or PlotConfig()
     ids = _id_field(events_ds, zdim)
-    ydim, xdim = _horizontal_dims(ids, zdim)
+    ydim, xdim, lats, lons = _horizontal_axes(events_ds, ids, zdim, config)
     extent = _check_extent(extent)
     theme = _check_theme(theme)
     _warn_if_extent_misdrawn(extent, config.projection or ccrs.Robinson())
 
     if not isinstance(levels, str):
         picks = _check_levels(ids, zdim, levels)
-        return _animate_level_panels(ids, picks, zdim, ydim, xdim, config, plot_dir, file_name, extent, theme)
+        return _animate_level_panels(ids, picks, zdim, ydim, xdim, lons, lats, config, plot_dir, file_name, extent, theme)
     if levels != "footprint":
         raise ConfigurationError(f"levels must be 'footprint' or a sequence of level indices, got {levels!r}")
 
@@ -751,7 +803,7 @@ def animate_event_levels(
     lo, hi = float(depth_values.min()), float(depth_values.max())
     clim = config.clim or (lo, hi if hi > lo else lo + 1.0)
     return _animate_footprint(
-        shallowest, zdim, ydim, xdim, config, clim, plot_dir, file_name or "event_footprint_depth", extent, theme
+        shallowest, zdim, lons, lats, config, clim, plot_dir, file_name or "event_footprint_depth", extent, theme
     )
 
 
@@ -767,8 +819,8 @@ def _shallowest_occupied(ids: xr.DataArray, zdim: str, ydim: str, xdim: str) -> 
 def _animate_footprint(
     shallowest: xr.DataArray,
     zdim: str,
-    ydim: str,
-    xdim: str,
+    lons: np.ndarray,
+    lats: np.ndarray,
     config: PlotConfig,
     clim: Tuple[float, float],
     plot_dir: Any,
@@ -780,7 +832,6 @@ def _animate_footprint(
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
     projection = config.projection or (ccrs.PlateCarree() if extent else ccrs.Robinson())
-    lons, lats = shallowest[xdim].values, shallowest[ydim].values
     window_lons, window_lats = (np.array(extent[:2]), np.array(extent[2:])) if extent else (lons, lats)
     cmap = plt.get_cmap(config.cmap or "viridis_r")
     norm = Normalize(*clim)
@@ -840,6 +891,8 @@ def _animate_level_panels(
     zdim: str,
     ydim: str,
     xdim: str,
+    lons: np.ndarray,
+    lats: np.ndarray,
     config: PlotConfig,
     plot_dir: Any,
     file_name: Optional[str],
@@ -851,7 +904,6 @@ def _animate_level_panels(
 
     name = file_name or "event_levels"
     projection = config.projection or ccrs.Robinson()
-    lons, lats = ids[xdim].values, ids[ydim].values
     depths = _depth_values(ids, zdim)[picks]
     times = ids[_TIME].values
     cmap, norm = _id_style(None)

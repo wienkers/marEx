@@ -26,7 +26,7 @@ from .. import morphology as _morphology
 from .. import validation as _validation
 from ..objects import _anchor
 from ..tracker import _format_chunk_pattern, _is_uniform_time_chunking, _prune_stale_temp_stores, tracker
-from .config import VolumetricDims, check_volumetric_config, prepare_volumetric_data
+from .config import VolumetricDims, align_to_data, check_volumetric_config, prepare_volumetric_data
 from .diagnostics import event_diagnostics
 from .events import cluster_events
 from .geometry import EARTH_RADIUS_M, VerticalGeometry, _z_order, build_vertical_geometry
@@ -239,7 +239,21 @@ class VolumetricTracker(tracker):
         self.unstructured_grid = False
 
         # Order, rank, depth coordinate, mask and chunking checks.
-        data_bin, wet_mask, self.z_values, self.z_attrs, self.original_dims = prepare_volumetric_data(data_bin, mask, self.dims)
+        as_given = data_bin
+        data_bin, wet_mask, self.z_values, self.z_attrs, self.original_dims = prepare_volumetric_data(
+            data_bin, mask, self.dims, y_coord=self.ycoord, x_coord=self.xcoord
+        )
+
+        # Geometry is matched to the labels of the field as given, before its depth order is normalised.
+        label_axes = ((self.zdim, self.zdim), (self.ydim, self.ycoord), (self.xdim, self.xcoord))
+        if isinstance(layer_bounds, xr.DataArray):
+            layer_bounds = align_to_data(layer_bounds, as_given, label_axes, "layer_bounds")
+        if layer_thickness is not None:
+            layer_thickness = align_to_data(layer_thickness, as_given, label_axes, "layer_thickness")
+        if cell_volumes is not None:
+            cell_volumes = align_to_data(cell_volumes, as_given, label_axes, "cell_volumes")
+        if cell_areas is not None and grid_resolution is None:  # grid_resolution overrides cell_areas
+            cell_areas = align_to_data(cell_areas, as_given, label_axes, "cell_areas")
         self.data_attrs = dict(data_bin.attrs)
 
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
@@ -608,6 +622,14 @@ class VolumetricTracker(tracker):
             )
             del id_field
         links = final_links(merged, store, geom.cell_volume, self.overlap_threshold, self.timedim)
+        # Consolidation can give a child a second parent after the merge pass, as in the 3-D tracker: the larger
+        # consolidated object can pass the threshold against a parent its pieces failed against.
+        n_joining = int((np.unique(links[:, 1], return_counts=True)[1] > 1).sum())
+        if n_joining:
+            logger.info(
+                f"{n_joining} children have more than one parent after splitting/merging "
+                "(ID consolidation joined them; their parents become one event with no merge recorded)"
+            )
         merges_ds = ledger.to_dataset()
 
         with log_timing(logger, "Clustering objects into events"):
@@ -725,6 +747,16 @@ class VolumetricTracker(tracker):
         )
 
         events_ds.attrs.update(self.data_attrs)
+        # Written after the input's attributes, so the plotting helpers can trust them.
+        events_ds.attrs.update(
+            {
+                "horizontal_y_dim": self.ydim,
+                "horizontal_x_dim": self.xdim,
+                "horizontal_y_coord": self.ycoord,
+                "horizontal_x_coord": self.xcoord,
+                "horizontal_coordinate_units": self.coordinate_units,
+            }
+        )
         events_ds = self._remap_coordinates(events_ds)
         return events_ds.chunk({self.timedim: 1})
 
