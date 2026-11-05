@@ -642,9 +642,11 @@ def test_one_split_and_merge_then_split(tmp_path, name, mode, time_chunk):
     np.testing.assert_array_equal(ds.child_IDs.values, [m[2] for m in merges])
     np.testing.assert_array_equal(ds.merge_time.values, field.time.values[[3, 4, 5]])
     cv = case.cell_volume.ravel()
-    # Summed left to right in flat voxel order (the order the loop's float64 sums use).
+    # Summed left to right in flat voxel order (the order the loop's float64 sums use). Not the builtin sum, which
+    # compensates its rounding from Python 3.12.
     overlaps = [
-        [sum(cv[(expected[t - 1] == p) & (flat_in[t] == children[0])].tolist()) for p in parents] for t, parents, children in merges
+        [np.cumsum(cv[(expected[t - 1] == p) & (flat_in[t] == children[0])])[-1] for p in parents]
+        for t, parents, children in merges
     ]
     np.testing.assert_array_equal(ds.overlap_volumes.values, overlaps)
     # The store holds exactly the volumes of the final field.

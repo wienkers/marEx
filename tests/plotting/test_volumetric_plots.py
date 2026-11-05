@@ -9,6 +9,7 @@ is read back.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import warnings
 from pathlib import Path
@@ -19,11 +20,13 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import cartopy  # noqa: E402
 import cartopy.crs as ccrs  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import xarray as xr  # noqa: E402
+from packaging.version import Version  # noqa: E402
 from PIL import Image  # noqa: E402
 
 import marEx  # noqa: E402
@@ -37,6 +40,7 @@ from marEx.plotX import (  # noqa: E402
 )
 from marEx.plotX import animation as animation_mod  # noqa: E402
 from marEx.plotX import volumetric as vol_mod  # noqa: E402
+from marEx.plotX.mesh import pcolormesh_seam_safe, projection_centre  # noqa: E402
 
 from ..track.volumetric.synthetic import make_inputs, scenarios  # noqa: E402
 
@@ -208,8 +212,12 @@ def test_levels_zoom_to_event_frames_the_union_of_the_drawn_levels_with_a_margin
 
 
 def _module_log(caplog):
-    """The package logger does not propagate, so hand caplog's handler to this module's logger."""
-    vol_mod.logger.addHandler(caplog.handler)
+    """The package logger does not propagate, so hand caplog's handler to this module's logger.
+
+    pytest 9 already attaches it to non-propagating loggers, and a second copy would count every record twice.
+    """
+    if caplog.handler not in logging.getLogger("marEx").handlers:
+        vol_mod.logger.addHandler(caplog.handler)
     caplog.set_level("WARNING", logger=vol_mod.logger.name)
 
 
@@ -305,7 +313,8 @@ def test_levels_extent_across_the_projection_seam_warns(caplog, extent, projecti
         # On the seam, not only across it.
         ((180.0, 200.0, 0.0, 20.0), ccrs.PlateCarree(), True),
         ((180.0, 200.0, 0.0, 20.0), ccrs.Robinson(), True),
-        ((180.0, 360.0, 0.0, 20.0), ccrs.PlateCarree(central_longitude=180), True),
+        # cartopy 0.25 draws this range as the whole map; 0.26 draws the window asked for.
+        ((180.0, 360.0, 0.0, 20.0), ccrs.PlateCarree(central_longitude=180), Version(cartopy.__version__) < Version("0.26")),
         ((-180.0, -170.0, 0.0, 20.0), ccrs.PlateCarree(), False),
         ((-180.0, -170.0, 0.0, 20.0), ccrs.Robinson(), False),
         # A whole turn off the map's own range collapses instead of widening.
@@ -327,7 +336,8 @@ def test_levels_extent_across_the_projection_seam_warns(caplog, extent, projecti
         ((-122.0, 178.0, -60.0, 60.0), ccrs.Robinson(central_longitude=180), True),
         ((-100.0, 200.0, -43.0, 80.0), ccrs.Mollweide(), True),
         # Ending on the seam can frame, and then it stays quiet.
-        ((180.0, 200.0, -10.0, 10.0), ccrs.Robinson(), False),
+        # cartopy 0.26 draws this range nearly across the whole map, so the warning is right there.
+        ((180.0, 200.0, -10.0, 10.0), ccrs.Robinson(), Version(cartopy.__version__) >= Version("0.26")),
         # Asking for the whole width and getting it.
         ((0.0, 359.0, 0.0, 20.0), ccrs.PlateCarree(), False),
         ((-170.0, 160.0, 50.0, 70.0), ccrs.Robinson(), False),
@@ -1417,3 +1427,26 @@ def test_depth_time_sums_over_the_horizontal_whatever_it_is_called():
     events = _anonymous_events()
     fig = plot_event_depth_time(events, 1, zdim=ZDIM)
     assert fig is not None
+
+
+@pytest.mark.parametrize(
+    "params, centre",
+    [
+        ({"proj": "eqc", "lon_0": 180}, 180.0),  # PlateCarree up to cartopy 0.25
+        ({"proj": "latlong", "pm": 180}, 180.0),  # PlateCarree from cartopy 0.26
+        ({"proj": "robin", "lon_0": -30}, -30.0),
+        ({"proj": "stere"}, 0.0),
+    ],
+)
+def test_projection_centre_reads_either_form(params, centre):
+    assert projection_centre(params) == centre
+
+
+def test_seam_is_found_on_a_map_centred_on_180(monkeypatch):
+    """A cell across lon 0 is split on a map centred on 180, whichever way cartopy stores the centre."""
+    fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree(central_longitude=180)})
+    drawn = {}
+    monkeypatch.setattr(ax, "pcolormesh", lambda x, y, values, **kwargs: drawn.update(x=np.asarray(x)))
+    lons, lats = np.array([-20.0, 0.0, 20.0]), np.array([0.0, 10.0])
+    pcolormesh_seam_safe(ax, lons, lats, np.zeros((2, 3)), shading="auto")
+    assert 0.0 in drawn["x"] and drawn["x"].size == 5

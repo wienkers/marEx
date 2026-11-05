@@ -5,6 +5,11 @@ from typing import Any
 import numpy as np
 
 
+def projection_centre(params: dict) -> float:
+    """Central longitude from a projection's ``proj4_params``: ``lon_0``, or ``pm`` on cartopy's ``latlong`` PlateCarree."""
+    return float(params.get("lon_0", params.get("pm", 0.0)))
+
+
 def _cell_edges(centres: np.ndarray) -> np.ndarray:
     """Cell edges for 1-D cell centres: midpoints, with the outer edges extrapolated half a cell."""
     mid = 0.5 * (centres[:-1] + centres[1:])
@@ -28,7 +33,7 @@ def pcolormesh_seam_safe(ax: Any, lons: np.ndarray, lats: np.ndarray, values: np
         return ax.pcolormesh(lons, lats, values, **kwargs)
 
     edges = _cell_edges(lons.astype(float))
-    seam = float(params.get("lon_0", 0.0)) + 180.0
+    seam = projection_centre(params) + 180.0
     seams = seam + 360.0 * np.arange(np.ceil((edges.min() - seam) / 360.0), np.floor((edges.max() - seam) / 360.0) + 1)
 
     # Insert each seam that falls strictly inside a cell as an extra edge, duplicating that cell's column.

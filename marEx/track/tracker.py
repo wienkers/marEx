@@ -82,6 +82,22 @@ def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_A
             continue
 
 
+def _match_datetime_precision(ds: Optional[xr.Dataset], dtype: Optional[np.dtype], keep: frozenset = frozenset()) -> None:
+    """
+    Give the datetimes derived from the input time axis that axis's precision, in place.
+
+    Staged stores are read back at the reader's default precision, which recent xarray no longer fixes at nanoseconds.
+    The values agree, but ``persist`` and ``streaming`` would otherwise return different dtypes. ``keep`` names the
+    input's other datetime coordinates, which may be finer than the axis and would lose values. A non-datetime64 time
+    axis (cftime), or one not known (``dtype=None``), is left alone.
+    """
+    if ds is None or dtype is None or not np.issubdtype(dtype, np.datetime64):
+        return
+    for name in list(ds.variables):
+        if name not in keep and np.issubdtype(ds[name].dtype, np.datetime64) and ds[name].dtype != dtype:
+            ds[name] = ds[name].astype(dtype)
+
+
 def _is_uniform_time_chunking(chunks: Tuple[int, ...]) -> bool:
     """Check that a chunk tuple is uniform except for a possibly-smaller final chunk.
 
@@ -1004,6 +1020,18 @@ class tracker:
         logger.info("Starting complete tracking pipeline")
         log_memory_usage(logger, "Pipeline start")
 
+        # Read now: the pipeline releases the input. A checkpoint load has no input left to read.
+        time_dtype = None
+        own_datetimes: frozenset = frozenset()
+        if self.data_bin is not None:
+            names = [name for name in (self.timecoord, self.timedim) if name in self.data_bin.coords]
+            time_dtype = self.data_bin[names[0]].dtype if names else None
+            own_datetimes = frozenset(
+                name
+                for name, coord in self.data_bin.coords.items()
+                if name not in names and np.issubdtype(coord.dtype, np.datetime64)
+            )
+
         # Progress tracking
         total_steps = 3
         current_step = 0
@@ -1046,6 +1074,8 @@ class tracker:
         clear_store_encoding(events_ds)
         clear_store_encoding(merges_ds)
         clear_inherited_attrs(events_ds, (self.timedim, self.timecoord, "time_start", "time_end"))
+        _match_datetime_precision(events_ds, time_dtype, own_datetimes)
+        _match_datetime_precision(merges_ds, time_dtype, own_datetimes)
 
         # Streaming mode returns a dataset that reads lazily from the staged zarr stores,
         # so the staging directory deliberately OUTLIVES this call. The caller writes its

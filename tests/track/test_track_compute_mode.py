@@ -707,3 +707,43 @@ def test_extra_property_is_relabelled_by_lookup(client, tmp_path, monkeypatch):
 
         check(failures, mode, row)
     assert_no_failures(failures)
+
+
+def test_restore_keeps_the_datetime_precision_of_the_staged_array():
+    times = np.array(["2000-01-01", "2000-01-02"], dtype="datetime64[ns]")
+    staged = xr.DataArray([1, 2], dims="time", coords={"time": times})
+    reopened = staged.assign_coords(time=times.astype("datetime64[us]"))
+    assert Materialiser._restore(reopened, staged).time.dtype == np.dtype("datetime64[ns]")
+
+
+@pytest.mark.parametrize("mode", ["persist", "streaming"])
+def test_a_finer_auxiliary_datetime_coordinate_keeps_its_values(tmp_path, mode):
+    """Only what the tracker derives from the time axis takes its precision; a user's own coordinate stays as it came."""
+    from tests.track.volumetric.synthetic import make_inputs, scenarios
+
+    binary, meta = scenarios()["one_merge"]
+    extremes, wet, bounds, areas = make_inputs(binary, **meta["make_inputs"])
+    extremes = extremes.assign_coords(time=extremes.time.values.astype("datetime64[us]"))
+    stamps = np.datetime64("1999-01-01T00:00:00.123456789", "ns") + np.arange(extremes.sizes["time"]).astype("timedelta64[D]")
+    extremes = extremes.assign_coords(sensor_timestamp=("time", stamps))
+
+    events = marEx.tracker(
+        extremes,
+        wet,
+        layer_bounds=bounds,
+        cell_areas=areas,
+        R_fill=0,
+        T_fill=0,
+        dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+        regional_mode=True,
+        coordinate_units="degrees",
+        volume_filter_absolute=1.0,
+        quiet=True,
+        compute_mode=mode,
+        temp_dir=str(tmp_path),
+    ).run()
+
+    np.testing.assert_array_equal(events.sensor_timestamp.values, stamps)
+    assert events.sensor_timestamp.dtype == stamps.dtype
+    assert events.time.dtype == extremes.time.dtype
+    marEx.clear_staging(events)

@@ -385,6 +385,9 @@ see which events merged. ``merge_ledger`` records only that an event was a paren
 that time. ``global_ID`` contains one object per event per timestep and none that consolidation
 later renamed, so it cannot resolve every object ID.
 
+Merges at one timestep resolve in repeated passes, so a parent can appear in two rows of one
+``merge_time``. Read the last row that names it (see the 4-D section below).
+
 The same Dataset records splits, one row each: ``split_time``, ``split_parent_IDs``,
 ``split_child_IDs``, ``split_event_IDs`` and ``n_split_children``. A split is a connected piece of an
 object that overlaps two or more connected pieces of the object it continues into at the next

@@ -29,7 +29,7 @@ from ..logging_config import get_logger
 from . import animation as _anim
 from .config import PlotConfig
 from .dependencies import _check_plotting_dependencies
-from .mesh import pcolormesh_seam_safe
+from .mesh import pcolormesh_seam_safe, projection_centre
 
 try:
     import cartopy.crs as ccrs
@@ -341,7 +341,7 @@ def _warn_if_extent_misdrawn(extent: Optional[Tuple[float, float, float, float]]
         return
     lon0, lon1, lat0, lat1 = extent
     asked = lon1 - lon0
-    centre = float(projection.proj4_params.get("lon_0", 0.0))
+    centre = projection_centre(projection.proj4_params)
     half = min(asked, 360.0) / 2.0
     try:
         drawn = _drawn_width(extent, projection)

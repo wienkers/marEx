@@ -15,6 +15,8 @@ All notable changes to marEx are documented here. The format follows [Keep a Cha
 
 ### Fixed
 
+- On cartopy 0.26 and later, `PlateCarree(central_longitude=...)` was treated as centred on 0: plotX cut grid cells at the wrong longitude seam and the 4-D map helpers warned about the wrong one.
+- With xarray versions that decode times at microsecond precision, `compute_mode="streaming"` returned `time_start`, `time_end` and other datetimes at a different precision from `persist`. They now keep the input time axis's precision.
 - `multi_plot` panel titles round a float coordinate to 4 significant figures (`depth=0.494`, not `depth=0.49402499198913574`).
 - `detrend_fixed_baseline` and `fixed_baseline` no longer split the input onto a small climatology tile, which made the task count grow with the square of the record length on long, spatially chunked records. Values are unchanged.
 

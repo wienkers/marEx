@@ -19,7 +19,7 @@ the input, detect at depth, track the events in 4-D as volumes and visualise the
 | `4d/` | `00_download_glorys12` | GLORYS12V1 daily thetao, 1/12°, northeast Pacific (30-60°N, 170-120°W), 36 levels to 1150 m, 1993-2022 | 8 CPUs × 12 GB, own environment | about 16 min per year |
 | | `01_preprocess_extremes` | output of 00, kept 2013-16 | 256 SLURM workers × 7.8 GB | 26.9 min fixed baseline + Hobday |
 | | `02_track_extremes_4d` | output of 01 | 1 node, 8 workers × 6 GB (the timing is from 8 × 8 GB) | 79.6 min tracking with merging |
-| | `03_visualise_events` | outputs of 01-02 | 1 node, 16 workers × 14 GB | 3.1 min isosurface movie, 0.2 min footprint movie |
+| | `03_visualise_events` | outputs of 01-02 | 1 node, 16 workers × 14 GB | 4.0 min isosurface movie, 5.5 min footprint movie |
 | `applications/` | `wind_drought_europe` | ERA5 daily wind capacity factor over Europe, 1980-2024 | 8 workers × 6 GB | 1.6 min detect (lower tail), 4.5 min regional tracking |
 | `larger-than-memory/` | `larger_than_memory` | IFS-FESOM2-SR 6-hourly SST, 0.25° global, 10 and 20 years | 32 GiB job, 3 workers × 9 GB | 63-192 min detect, 57-139 min track per batch run (the notebook reads their summaries) |
 

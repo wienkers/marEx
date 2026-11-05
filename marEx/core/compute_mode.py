@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Tuple, Union
 
 import dask
+import numpy as np
 import xarray as xr
 
 from ..exceptions import ConfigurationError
@@ -428,6 +429,12 @@ class Materialiser:
         # array is substitutable for the original everywhere downstream.
         for cname, cvar in obj.coords.items():
             if cname not in reopened.coords:
+                reopened = reopened.assign_coords({cname: cvar})
+
+        # A round trip decodes datetimes at the reader's default precision, not the input's. Values agree, but
+        # later arrays built from this coordinate would carry a dtype that differs from the other modes.
+        for cname, cvar in obj.coords.items():
+            if np.issubdtype(cvar.dtype, np.datetime64) and reopened[cname].dtype != cvar.dtype:
                 reopened = reopened.assign_coords({cname: cvar})
 
         reopened.attrs.update(obj.attrs)
