@@ -47,6 +47,8 @@ def voxel_graph_labels(
     active = np.asarray(active, dtype=bool)
     wet = np.asarray(wet, dtype=bool)
     thickness = np.asarray(thickness, dtype=np.float64)
+    if thickness.ndim == 1:
+        thickness = np.broadcast_to(thickness[:, None, None], active.shape)
     nz, ny, nx = active.shape
     fg = active & wet
 

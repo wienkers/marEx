@@ -53,6 +53,7 @@ def _column_contacts(
     state lives in ``last`` and ``gap``.
     """
     nz, ny, nx = level_ids.shape
+    depth_only = thickness.shape[1] == 1 and thickness.shape[2] == 1
     out = np.empty((max(nz - 1, 0) * ny * nx, 2), dtype=np.int64)
     last = np.zeros((ny, nx), dtype=np.int64)
     gap = np.zeros((ny, nx), dtype=np.float64)
@@ -73,7 +74,7 @@ def _column_contacts(
                     last[j, i] = cur
                     gap[j, i] = 0.0
                 else:
-                    gap[j, i] += thickness[k, j, i]
+                    gap[j, i] += thickness[k, 0, 0] if depth_only else thickness[k, j, i]
     return out[:count].copy()
 
 
@@ -106,7 +107,8 @@ def label_volume(
     wet : numpy.ndarray
         Boolean wet mask, same shape. Active dry cells are ignored.
     thickness : numpy.ndarray
-        Layer thickness in metres, same shape; read on wet inactive cells only.
+        Layer thickness in metres, ``(z,)`` or the same shape as `active`;
+        read on wet inactive cells only.
     max_gap_m : float
         Largest summed thickness of wet inactive cells that a vertical link may bridge.
         Equality joins.
@@ -122,14 +124,20 @@ def label_volume(
         Number of objects.
     """
     active = np.asarray(active, dtype=bool)
-    if active.ndim != 3 or np.shape(wet) != active.shape or np.shape(thickness) != active.shape:
+    thickness = np.asarray(thickness, dtype=np.float64)
+    if active.ndim != 3 or np.shape(wet) != active.shape or thickness.shape not in (active.shape[:1], active.shape):
         raise ConfigurationError(
-            "active, wet and thickness must be (z, y, x) arrays of one shape",
-            context={"active": active.shape, "wet": np.shape(wet), "thickness": np.shape(thickness)},
+            "active and wet must have shape (z, y, x), with thickness of shape (z,) or (z, y, x)",
+            context={"active": active.shape, "wet": np.shape(wet), "thickness": thickness.shape},
         )
     max_gap = _check_max_gap(max_gap_m)
-    wet = np.ascontiguousarray(wet, dtype=bool)
-    thickness = np.ascontiguousarray(thickness, dtype=np.float64)
+    # Keep the same C-contiguous, read-only input types for both geometry ranks.
+    wet = np.ascontiguousarray(wet, dtype=bool).view()
+    wet.setflags(write=False)
+    thickness = np.ascontiguousarray(thickness).view()
+    if thickness.ndim == 1:
+        thickness = thickness.reshape(-1, 1, 1)
+    thickness.setflags(write=False)
     foreground = active & wet
 
     # Per-level 8-connected labels with distinct temporary IDs: level k's labels are
@@ -223,7 +231,8 @@ def label_volumes_lazy(
     # dask's from_array, and they carry no time dimension so nothing is broadcast in time.
     whole = {d: -1 for d in core}
     wet = xr.DataArray(geom.wet, dims=core).chunk(whole)
-    thickness = xr.DataArray(geom.thickness, dims=core).chunk(whole)
+    thickness_core = core[:1] if geom.thickness.ndim == 1 else core
+    thickness = xr.DataArray(geom.thickness, dims=thickness_core).chunk({d: -1 for d in thickness_core})
 
     def _labels_only(active, wet_cells, layer_thickness):
         return label_volume(active, wet_cells, layer_thickness, max_gap, wrap_x)[0]
@@ -233,7 +242,7 @@ def label_volumes_lazy(
         data,
         wet,
         thickness,
-        input_core_dims=[core, core, core],
+        input_core_dims=[core, core, thickness_core],
         output_core_dims=[core],
         output_dtypes=[np.int32],
         vectorize=True,

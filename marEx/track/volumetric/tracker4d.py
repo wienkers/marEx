@@ -34,8 +34,6 @@ from .ids import IDAllocator
 from .labelling import label_volumes_lazy
 from .merge_loop import (
     _RETAINED_CHUNKS,
-    _STATIC_FLOAT64_PER_VOXEL,
-    final_links,
     merge_loop_client_bytes,
     split_and_merge_volumetric,
 )
@@ -384,8 +382,11 @@ class VolumetricTracker(tracker):
 
     def _warn_client_memory(self) -> None:
         """Warn when the merge loop's modelled client memory exceeds ``CLIENT_WARN_BYTES``."""
-        n_voxels = int(np.prod(self.geom.cell_volume.shape))
-        needed = merge_loop_client_bytes(n_voxels, self.timechunks, self.compute_mode)
+        n_voxels = self.geom.cell_volume.size
+        layer_elements = self.geom.thickness.size
+        needed = merge_loop_client_bytes(
+            n_voxels, self.timechunks, self.compute_mode, layer_elements=layer_elements, pristine_slices=2
+        )
         budget = CLIENT_WARN_BYTES
         if needed <= budget:
             return
@@ -393,8 +394,9 @@ class VolumetricTracker(tracker):
         message = (
             f"The 4-D merge loop is modelled to need {needed:,} bytes on the client, above the "
             f"{budget:,}-byte budget: {retained} retained chunks x {self.timechunks} time steps x "
-            f"{n_voxels} voxels x 4 B (int32 IDs) + {_STATIC_FLOAT64_PER_VOXEL} x {n_voxels} voxels x 8 B "
-            "(float64 cell volumes and layer top, bottom, thickness and midpoint depths). Per-merge partition buffers come on top. "
+            f"{n_voxels} voxels x 4 B (int32 IDs) + 2 x {n_voxels} voxels x 4 B (pristine labels) + "
+            f"({n_voxels} voxels + 4 x {layer_elements} layer elements) x 8 B "
+            "(float64 cell volumes and layer geometry). Per-merge buffers come on top. "
             f"Reduce the time chunk of the input (now {self.timechunks})"
             + (", or use compute_mode='streaming', which retains 2 chunks" if self.compute_mode == "persist" else "")
             + "."
@@ -605,7 +607,8 @@ class VolumetricTracker(tracker):
             store = self._volume_store(id_field)
         logger.info(f"Identified {len(store)} objects")
 
-        coords = ScaledCoords(lat_deg, lon_deg, geom.midpoint, *self.partition_scales)
+        coords = ScaledCoords(lat_deg, lon_deg, geom.midpoint, *self.partition_scales, wet=geom.wet)
+        link_blocks = []
         with log_timing(logger, "4-D split and merge"):
             merged, store, ledger = split_and_merge_volumetric(
                 id_field,
@@ -619,9 +622,12 @@ class VolumetricTracker(tracker):
                 id_field_path=None,
                 max_gap_m=self.max_vertical_gap_m,
                 wrap_x=not self.regional_mode,
+                pristine_labels=True,
+                links_out=link_blocks,
             )
             del id_field
-        links = final_links(merged, store, geom.cell_volume, self.overlap_threshold, self.timedim)
+        links = np.concatenate(link_blocks) if link_blocks else np.empty((0, 2), dtype=np.int64)
+        del link_blocks
         # Consolidation can give a child a second parent after the merge pass, as in the 3-D tracker: the larger
         # consolidated object can pass the threshold against a parent its pieces failed against.
         n_joining = int((np.unique(links[:, 1], return_counts=True)[1] > 1).sum())

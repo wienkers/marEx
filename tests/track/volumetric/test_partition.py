@@ -6,7 +6,7 @@ import xarray as xr
 
 from marEx.exceptions import ConfigurationError, TrackingError
 from marEx.track.volumetric.geometry import EARTH_RADIUS_M, build_vertical_geometry
-from marEx.track.volumetric.partition import ScaledCoords, partition_child
+from marEx.track.volumetric.partition import ScaledCoords, _squared_distance, partition_child
 
 
 class TablePoints:
@@ -17,12 +17,6 @@ class TablePoints:
 
     def points(self, flat_idx):
         return self.table[np.asarray(flat_idx, dtype=np.int64)]
-
-
-def _sqdist(a, b):
-    """Squared distance in float64, summed in a fixed coordinate order."""
-    d = a - b
-    return ((d[..., 0] * d[..., 0] + d[..., 1] * d[..., 1]) + d[..., 2] * d[..., 2]) + d[..., 3] * d[..., 3]
 
 
 def brute_nearest(child_pts, parent_pts, parent_of_pt, parent_ids):
@@ -39,7 +33,7 @@ def brute_nearest(child_pts, parent_pts, parent_of_pt, parent_ids):
     parent_ids = np.asarray(parent_ids)
     out = np.empty(len(child_pts), dtype=np.intp)
     for i, c in enumerate(child_pts):
-        d = _sqdist(c[None, :], parent_pts)
+        d = _squared_distance(c[None, :], parent_pts)
         tied = np.flatnonzero(d == d.min())
         ids = parent_ids[parent_of_pt[tied]]
         winner_id = ids.min()
@@ -211,7 +205,7 @@ def test_ties_actually_occur_in_lattice_case():
     owner = np.repeat(np.arange(4), 40)
     n_tied_parents = 0
     for c in child:
-        d = _sqdist(c[None, :], parent_pts)
+        d = _squared_distance(c[None, :], parent_pts)
         n_tied_parents += len(set(owner[d == d.min()])) > 1
     assert n_tied_parents > 0
 
@@ -219,7 +213,7 @@ def test_ties_actually_occur_in_lattice_case():
 def test_near_tie_stays_distinct():
     one = 1.0
     up = np.nextafter(one, 2.0)  # one ULP above 1
-    assert _sqdist(np.array([up, 0, 0, 0.0]), np.zeros(4)) != _sqdist(np.array([one, 0, 0, 0.0]), np.zeros(4))
+    assert _squared_distance(np.array([up, 0, 0, 0.0]), np.zeros(4)) != _squared_distance(np.array([one, 0, 0, 0.0]), np.zeros(4))
     table = np.array([[0, 0, 0, 0], [one, 0, 0, 0], [up, 0, 0, 0], [0, -one, 0, 0], [0, -up, 0, 0.0]])
     coords = TablePoints(table)
     child = np.array([0], dtype=np.int64)
@@ -238,6 +232,119 @@ def test_near_tie_stays_distinct():
     ]:
         got = partition_child(child, parents, ids, coords)
         assert ids[got[0]] == 8
+
+
+def _adversarial_case(rng, i):
+    horizontal = rng.normal(size=(8, 3))
+    query = np.r_[rng.normal(size=3), rng.uniform(-2, 2)]
+    depths = rng.uniform(-3, 3, size=(8, 3))
+    case = i % 10
+    if case in (0, 1, 2):
+        lat = rng.choice([90.0, -90.0, np.nextafter(90.0, 0.0)]) if case < 2 else rng.uniform(-70, 70)
+        lon = np.array([180.0, -180.0, np.nextafter(180.0, 0.0), 0.0, -0.0, -90.0, 90.0, 179.0])
+        coords = ScaledCoords(np.array([lat]), lon, np.arange(1.0, 4.0), EARTH_RADIUS_M, 10.0)
+        grid = coords.points(np.arange(24)).reshape(3, 8, 4)
+        horizontal, depths = grid[0, :, :3].copy(), grid[:, :, 3].T.copy()
+        query = grid[1, i % 8].copy()
+        if case == 1:
+            horizontal[:, :2] = query[:2] = 0.0  # exactly coincident polar columns
+    elif case in (3, 4, 5):
+        query[:] = 0.0
+        horizontal[:3] = np.eye(3)
+        depths[:3] = 0.0
+        if case == 4:
+            horizontal[0, 0] = np.nextafter(1.0, 2.0)
+        if case == 5:
+            depths[:3] = [0.0, 2**-30, -(2**-30)]  # rounded full distances tie
+        horizontal[3:] *= 10.0
+        horizontal[3:, 0] += 25.0
+    elif case == 6:
+        query[:] = 0.0
+        horizontal *= 1e-170
+        depths *= 1e-170
+    elif case == 7:
+        query[:3] = horizontal[0]
+        horizontal[1] = horizontal[0]
+        depths = np.round(depths)
+        depths[0, 0] = depths[1, 1] = query[3]
+    elif case == 8:
+        horizontal *= 1e100
+        depths *= 1e99
+        query *= 1e98
+    else:
+        horizontal[:4] = horizontal[0]  # non-uniform partial-cell midpoints
+    points = np.c_[np.repeat(horizontal, 3, axis=0), depths.ravel()]
+    ids = rng.permutation(np.arange(1, 25, dtype=np.int32))
+    return points, ids, query
+
+
+@pytest.mark.parametrize("leafsize", [1, 2, 16])
+@pytest.mark.parametrize("batch_size", [1, 7, 65536])
+def test_adversarial_column_tree_matches_exhaustive(leafsize, batch_size):
+    rng = np.random.default_rng(241124)
+    parents = [np.array([i]) for i in range(24)]
+    for case in range(500):
+        seeds, ids, query = _adversarial_case(rng, case)
+        queries = np.vstack([query, seeds[::3]])  # also score overlapping voxels across batch boundaries
+        coords = TablePoints(np.vstack([seeds, queries]))
+        child = np.arange(len(seeds), len(seeds) + len(queries))
+        got = partition_child(child, parents, ids, coords, leafsize=leafsize, batch_size=batch_size)
+        np.testing.assert_array_equal(got, _oracle(coords, child, parents, ids), err_msg=f"case {case}")
+
+
+def test_distinct_grid_columns_with_coincident_horizontal_coordinates():
+    lat = np.array([[90.0, 90.0, 90.0]])
+    lon = np.array([[180.0, 180.0, -180.0]])
+    midpoint = np.array([[[1.0, 1.0, 1.1]], [[2.0, 2.1, 2.2]], [[3.0, 3.1, 3.2]]])
+    coords = ScaledCoords(lat, lon, midpoint, L_H=1e170, L_Z=10.0)
+    child = np.array([0, 3, 4, 6, 7])
+    parents = [np.array([0, 8]), np.array([1, 4]), np.array([2, 6])]
+    ids = np.array([9, 3, 2], dtype=np.int32)
+    got = partition_child(child, parents, ids, coords, leafsize=1)
+    np.testing.assert_array_equal(got, _oracle(coords, child, parents, ids))
+    assert ids[got[0]] == 3  # the overlapping seed owns a larger ID
+
+
+def test_scaled_depth_rounding_changes_the_nearest_parent():
+    coords = ScaledCoords(np.array([0.0]), np.array([0.0]), np.arange(1.0, 4.0), L_H=1.0, L_Z=10.0)
+    parents = [np.array([0]), np.array([2])]
+    ids = np.array([1, 2], dtype=np.int32)
+    np.testing.assert_array_equal(partition_child([1], parents, ids, coords), [1])
+
+
+def test_finite_coordinates_with_squared_distance_overflow():
+    max_float = np.finfo(np.float64).max
+    coords = TablePoints([[max_float, 0, 0, max_float], [-max_float, 0, 0, -max_float], [0, 0, 0, 0]])
+    parents = [np.array([0]), np.array([1])]
+    ids = np.array([9, 3], dtype=np.int32)
+    child = np.array([0, 2])
+    got = partition_child(child, parents, ids, coords, leafsize=1)
+    with np.errstate(over="ignore"):
+        np.testing.assert_array_equal(got, _oracle(coords, child, parents, ids))
+    np.testing.assert_array_equal(got, [0, 1])
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("role", ["parent", "child"])
+def test_non_finite_scaled_coordinates_raise(bad, role):
+    table = np.zeros((3, 4))
+    table[0 if role == "parent" else 2, 3] = bad
+    with pytest.raises(TrackingError, match=f"Non-finite scaled coordinates among {role}"):
+        partition_child([2], [[0], [1]], np.array([1, 2]), TablePoints(table))
+
+
+@pytest.mark.parametrize("role", ["parent", "child"])
+def test_scaled_coordinate_overflow_raises_even_with_one_parent(role):
+    coords = ScaledCoords(np.array([0.0]), np.array([0.0]), np.array([0.0, 10.0]), L_H=1.0, L_Z=1e-308)
+    parent, child = (1, 0) if role == "parent" else (0, 1)
+    with pytest.raises(TrackingError, match=f"Non-finite scaled coordinates among {role}"):
+        partition_child([child], [[parent]], np.array([1]), coords)
+
+
+def test_horizontal_scale_overflow_raises():
+    coords = ScaledCoords(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0, 10.0]), L_H=1e-308, L_Z=1.0)
+    with pytest.raises(TrackingError, match="Non-finite scaled coordinates among parent"):
+        partition_child([2], [[0], [1]], np.array([1, 2]), coords)
 
 
 def test_highly_unequal_parents():

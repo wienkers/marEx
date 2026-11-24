@@ -8,27 +8,18 @@ the vertical part is the layer-midpoint depth divided by ``L_Z``. The chord need
 wrap-around logic, so the dateline seam and regional domains need no special case.
 There is no distance cap: a nearest parent voxel always exists.
 
-Equidistant candidates are resolved exactly, not by whichever point the spatial tree
-happens to return: squared distances are recomputed in float64 from the stored scaled
-coordinates and a tie (exact equality) goes to the smallest parent ID.
+Squared distances are evaluated in a fixed float64 order from the stored scaled
+coordinates. A tie (exact equality) goes to the smallest parent ID.
 """
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
-from scipy.spatial import cKDTree
 
 from ...exceptions import ConfigurationError, TrackingError
-from ...logging_config import get_logger
 from .geometry import EARTH_RADIUS_M
-
-logger = get_logger(__name__)
-
-# Relative widening of the candidate radius so that points at exactly the minimum
-# distance are never lost to the tree's own rounding. It only widens the search:
-# the winner is always chosen by exact recomputed distances.
-_BALL_WIDEN = 1.0e-9
 
 
 def _positive_finite(value: float, name: str) -> float:
@@ -62,9 +53,11 @@ class ScaledCoords:
     lat_deg, lon_deg : numpy.ndarray
         Latitude and longitude in degrees: ``(y,)`` and ``(x,)``, or both ``(y, x)``.
     midpoint : numpy.ndarray
-        Layer-midpoint depth (m, positive down), shape ``(z, y, x)``.
+        Layer-midpoint depth (m, positive down), shape ``(z,)`` or ``(z, y, x)``.
     L_H, L_Z : float
         Horizontal and vertical length scales (m), both positive and finite.
+    wet : numpy.ndarray, optional
+        Wet mask. For depth-only midpoints, dry voxels read as zero depth.
     """
 
     def __init__(
@@ -74,19 +67,26 @@ class ScaledCoords:
         midpoint: NDArray[np.float64],
         L_H: float,
         L_Z: float,
+        *,
+        wet: Optional[NDArray[np.bool_]] = None,
     ) -> None:
         """Precompute the horizontal coordinates and store the depth midpoints."""
         self.L_H = _positive_finite(L_H, "L_H")
         self.L_Z = _positive_finite(L_Z, "L_Z")
         midpoint = np.asarray(midpoint, dtype=np.float64)
-        if midpoint.ndim != 3:
-            raise ConfigurationError(
-                f"midpoint must have shape (z, y, x), got {midpoint.shape}",
-                context={"shape": midpoint.shape},
-            )
-        _, ny, nx = midpoint.shape
         lat = np.asarray(lat_deg, dtype=np.float64)
         lon = np.asarray(lon_deg, dtype=np.float64)
+        if midpoint.ndim == 3:
+            _, ny, nx = midpoint.shape
+        elif midpoint.ndim == 1 and lat.ndim > 0 and lon.ndim > 0:
+            ny, nx = lat.shape[0], lon.shape[-1]
+        else:
+            raise ConfigurationError(
+                f"midpoint must have shape (z,) or (z, y, x), got {midpoint.shape}",
+                context={"shape": midpoint.shape},
+            )
+        if midpoint.ndim == 1 and wet is not None and wet.shape != (midpoint.size, ny, nx):
+            raise ConfigurationError(f"wet has shape {wet.shape}, expected {(midpoint.size, ny, nx)}")
         if lat.shape == (ny,):
             lat = lat[:, None]
         elif lat.shape != (ny, nx):
@@ -100,10 +100,12 @@ class ScaledCoords:
         cos_phi = np.cos(phi)
         # Horizontal coordinates are computed once, so a voxel always maps to the same
         # bits no matter which batch or call asks for it.
-        self._hx = np.ascontiguousarray((EARTH_RADIUS_M * cos_phi * np.cos(lam)) / self.L_H).reshape(-1)
-        self._hy = np.ascontiguousarray((EARTH_RADIUS_M * cos_phi * np.sin(lam)) / self.L_H).reshape(-1)
-        self._hz = np.ascontiguousarray((EARTH_RADIUS_M * np.sin(phi)) / self.L_H).reshape(-1)
-        self._depth = midpoint.reshape(-1)
+        with np.errstate(over="ignore"):
+            self._hx = np.ascontiguousarray((EARTH_RADIUS_M * cos_phi * np.cos(lam)) / self.L_H).reshape(-1)
+            self._hy = np.ascontiguousarray((EARTH_RADIUS_M * cos_phi * np.sin(lam)) / self.L_H).reshape(-1)
+            self._hz = np.ascontiguousarray((EARTH_RADIUS_M * np.sin(phi)) / self.L_H).reshape(-1)
+        self._depth = midpoint
+        self._wet = wet
         self._ncol = ny * nx
 
     def points(self, flat_idx: NDArray[np.int64]) -> NDArray[np.float64]:
@@ -126,8 +128,166 @@ class ScaledCoords:
         out[:, 0] = self._hx[col]
         out[:, 1] = self._hy[col]
         out[:, 2] = self._hz[col]
-        out[:, 3] = self._depth[idx] / self.L_Z
+        if self._depth.ndim == 1:
+            depth = self._depth[idx // self._ncol]
+            if self._wet is not None:
+                depth = np.where(self._wet.flat[idx], depth, 0.0)
+        else:
+            depth = self._depth.flat[idx]
+        out[:, 3] = depth / self.L_Z
         return out
+
+
+def _finite_points(coords, flat, role):
+    """Gather stored coordinates and reject non-finite values before tree arithmetic."""
+    with np.errstate(over="ignore"):
+        points = np.ascontiguousarray(coords.points(flat), dtype=np.float64)
+    if points.shape != (flat.size, 4):
+        raise TrackingError(f"Scaled {role} coordinates have shape {points.shape}, expected {(flat.size, 4)}")
+    if not np.isfinite(points).all():
+        raise TrackingError(f"Non-finite scaled coordinates among {role} voxels")
+    return points
+
+
+def _seed_columns(coords, seed_flat, points):
+    """Return horizontal triples, groups of seed indices and the grid lookup."""
+    if not isinstance(coords, ScaledCoords):
+        horizontal, column = np.unique(points[:, :3], axis=0, return_inverse=True)
+        groups = [[] for _ in horizontal]
+        for i, group in enumerate(column.ravel()):
+            groups[group].append(i)
+        return horizontal, groups, {}
+
+    # Compact only the occupied grid columns in a single pass. Distinct grid columns
+    # can have the same horizontal triple and remain distinct leaves of the search.
+    by_column = {}
+    for i, grid_col in enumerate(seed_flat % coords._ncol):
+        by_column.setdefault(grid_col, []).append(i)
+    groups = list(by_column.values())
+    first = [group[0] for group in groups]
+    lookup = {grid_col: i for i, grid_col in enumerate(by_column)}
+    return points[first, :3], groups, lookup
+
+
+def _column_tree(horizontal, leafsize):
+    """Build a balanced tree with exact horizontal bounds and contiguous leaf ranges."""
+    order = np.arange(len(horizontal), dtype=np.intp)
+    # Each median split halves the maximum possible node size, rounding up.
+    depth = ((len(order) - 1) // leafsize).bit_length()
+    capacity = (2 << depth) - 1
+    bounds = np.empty((capacity, 6), dtype=np.float64)
+    nodes = np.empty((capacity, 3), dtype=np.intp)
+    count = 0
+
+    def build(start, stop):
+        nonlocal count
+        node = count
+        count += 1
+        xyz = horizontal[order[start:stop]]
+        lo, hi = xyz.min(axis=0), xyz.max(axis=0)
+        bounds[node, :3], bounds[node, 3:] = lo, hi
+        if stop - start <= leafsize:
+            nodes[node] = (-1, start, stop)
+        else:
+            axis = (hi - lo).argmax()
+            half = (stop - start) // 2
+            order[start:stop] = order[start:stop][np.argpartition(xyz[:, axis], half)]
+            left = build(start, start + half)
+            right = build(start + half, stop)
+            nodes[node] = (left, right, -1)
+        return node
+
+    # The split heuristic may overflow for opposite extreme finite coordinates.
+    # An infinite span is still a valid choice of split axis.
+    with np.errstate(over="ignore"):
+        build(0, len(order))
+    return order, nodes[:count].ravel(), bounds[:count].ravel()
+
+
+@njit(cache=True, nogil=True)
+def _query_columns(points, own_columns, horizontal, spans, depths, owners, nodes, bounds, stack, lower, out):
+    """Traverse the tree for a batch, deferring the farther child at each split."""
+    # Packed rows: four coordinates per query, three coordinates and two seed
+    # offsets per column, three indices and six box coordinates per tree node.
+    for row in range(len(out)):
+        query = 4 * row
+        qx, qy, qz, qd = points[query], points[query + 1], points[query + 2], points[query + 3]
+        best_dist, best_owner = np.inf, len(owners)
+        own = own_columns[row]
+        pending = 1
+        stack[0], lower[0] = 0, 0.0
+        if own >= 0:
+            # Score the query's own column first as a one-column leaf.
+            stack[1], lower[1] = -1, 0.0
+            pending = 2
+        while pending:
+            pending -= 1
+            if lower[pending] > best_dist:
+                continue
+            node = stack[pending]
+            left = nodes[3 * node] if node >= 0 else -1
+            if left >= 0:
+                right = nodes[3 * node + 1]
+                stack[pending], stack[pending + 1] = right, left
+                for i in range(pending, pending + 2):
+                    box = 6 * stack[i]
+                    h2 = 0.0  # Adding the first square to zero is exact.
+                    for axis in range(3):
+                        value = points[query + axis]
+                        lo, hi = bounds[box + axis], bounds[box + axis + 3]
+                        clamped = lo if value < lo else hi if value > hi else value
+                        gap = value - clamped
+                        h2 += gap * gap
+                    # Clamped gaps are no larger than any descendant's gaps. Rounded
+                    # squares and fixed-order sums are monotone on these terms.
+                    lower[i] = 0.0 if h2 <= 0.0 else np.nextafter(h2, -np.inf)
+                if lower[pending] < lower[pending + 1]:
+                    stack[pending], stack[pending + 1] = left, right
+                    lower[pending], lower[pending + 1] = lower[pending + 1], lower[pending]
+                pending += 2
+                continue
+
+            if node < 0:
+                first, last = own, own + 1
+            else:
+                first, last = nodes[3 * node + 1], nodes[3 * node + 2]
+            for col in range(first, last):
+                if node >= 0 and col == own:
+                    continue
+                xyz = 3 * col
+                dx = qx - horizontal[xyz]
+                dy = qy - horizontal[xyz + 1]
+                dz = qz - horizontal[xyz + 2]
+                h2 = (dx * dx + dy * dy) + dz * dz
+                bound = 0.0 if h2 <= 0.0 else np.nextafter(h2, -np.inf)
+                if bound > best_dist:
+                    continue
+
+                start, stop = spans[2 * col], spans[2 * col + 1]
+                lo, hi = start, stop
+                while lo < hi:
+                    mid = lo + ((hi - lo) >> 1)
+                    if depths[mid] < qd:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+
+                # The rounded distances never decrease outwards in either direction.
+                # Unequal vertical squares can round to the same full distance.
+                for side in range(2):
+                    step = 2 * side - 1
+                    i = lo + side - 1
+                    while start <= i < stop:
+                        dd = qd - depths[i]
+                        dist = h2 + dd * dd
+                        if dist > best_dist:
+                            break
+                        owner = owners[i]
+                        if dist < best_dist or owner < best_owner:
+                            best_dist = dist
+                            best_owner = owner
+                        i += step
+        out[row] = best_owner
 
 
 def partition_child(
@@ -155,12 +315,12 @@ def partition_child(
         Flat voxel indices of each parent, aligned with ``parent_ids``.
     parent_ids : numpy.ndarray
         Parent IDs, one per entry of ``parent_flat``.
-    coords : ScaledCoords
-        Scaled coordinates of the grid voxels.
+    coords : ScaledCoords or object with a points method
+        Finite scaled coordinates of the grid voxels.
     batch_size : int, default=65536
         Number of child voxels queried at a time.
     leafsize : int, default=16
-        Leaf size of the KD-tree over the parent voxels.
+        Maximum number of horizontal seed columns in a tree leaf.
 
     Returns
     -------
@@ -189,52 +349,58 @@ def partition_child(
             suggestions=["Check that the parents come from the previous timestep's accepted parent objects"],
             context={"n_parents": len(parent_ids)},
         )
-    if n_child == 0:
-        return np.empty(0, dtype=np.intp)
-
-    # Parents with no voxel can never win; keep their indices for the final mapping.
+    # Rank nonempty parents by ID (with original indices as the fallback).
+    # The kernel compares ranks, and keep maps them back to input indices.
     keep = np.flatnonzero(sizes > 0)
-    if keep.size == 1:
-        return np.full(n_child, keep[0], dtype=np.intp)
-
+    keep = keep[np.argsort(parent_ids[keep], kind="stable")]
     seed_flat = np.concatenate([np.asarray(parent_flat[j], dtype=np.int64).reshape(-1) for j in keep])
-    owner = np.repeat(keep, sizes[keep]).astype(np.intp)  # index into parent_ids, per seed voxel
-    seed_pts = coords.points(seed_flat)
-    seed_id = parent_ids[owner]
-    tree = cKDTree(seed_pts, leafsize=leafsize)
-    k = 2 if len(seed_pts) >= 2 else 1
-
+    points = _finite_points(coords, seed_flat, "parent")
     out = np.empty(n_child, dtype=np.intp)
-    n_tied = 0
+    if not n_child:
+        return out
+    if keep.size == 1:
+        for start in range(0, n_child, batch_size):
+            _finite_points(coords, child_flat[start : start + batch_size], "child")
+        out.fill(keep[0])
+        return out
+
+    horizontal, groups, lookup = _seed_columns(coords, seed_flat, points)
+    owner = np.repeat(np.arange(keep.size, dtype=np.intp), sizes[keep])
+    depths = np.empty(len(points), dtype=np.float64)
+    owners = np.empty(len(points), dtype=np.intp)
+    offsets = np.empty(len(groups) + 1, dtype=np.intp)
+    stop = 0
+    for col, group in enumerate(groups):
+        start, stop = stop, stop + len(group)
+        offsets[col] = start
+        col_depths = points[group, 3]
+        col_owners = owner[group]
+        if len(group) > 1:
+            vertical_order = np.lexsort((col_owners, col_depths))
+            col_depths = col_depths[vertical_order]
+            col_owners = col_owners[vertical_order]
+        depths[start:stop] = col_depths
+        owners[start:stop] = col_owners
+    offsets[-1] = stop
+
+    order, nodes, bounds = _column_tree(horizontal, leafsize)
+    horizontal = horizontal[order].ravel()
+    spans = np.column_stack((offsets[order], offsets[order + 1])).ravel()
+    if lookup:
+        tree_col = np.empty_like(order)
+        tree_col[order] = np.arange(len(order), dtype=np.intp)
+        lookup = {grid_col: tree_col[group] for grid_col, group in lookup.items()}
+
+    # Median splits keep the path below 64 entries for index-sized arrays.
+    stack = np.empty(64, dtype=np.intp)
+    lower = np.empty(64, dtype=np.float64)
     for start in range(0, n_child, batch_size):
         stop = min(start + batch_size, n_child)
-        q = coords.points(child_flat[start:stop])
-        if k == 1:
-            _, nn = tree.query(q, k=1)
-            out[start:stop] = owner[nn]
-            continue
-        _, nn = tree.query(q, k=2)
-        d0 = _squared_distance(q, seed_pts[nn[:, 0]])
-        d1 = _squared_distance(q, seed_pts[nn[:, 1]])
-        # The tree's distances are not bit-identical to the exact recomputation, so order the
-        # pair by the exact values; anything within the widening of a tie goes to the exact search.
-        first = np.where(d1 < d0, nn[:, 1], nn[:, 0])
-        best = out[start:stop]
-        best[:] = owner[first]
-        near = d1 <= d0 * (1.0 + _BALL_WIDEN) ** 2
-        near_rows = np.flatnonzero(near)
-        if near_rows.size == 0:
-            continue
-        n_tied += near_rows.size
-        dmin = np.minimum(d0[near_rows], d1[near_rows])
-        radius = np.sqrt(dmin) * (1.0 + _BALL_WIDEN)
-        cands = tree.query_ball_point(q[near_rows], radius)
-        for row, extra, cand in zip(near_rows, nn[near_rows], cands):
-            cand_idx = np.unique(np.concatenate([np.asarray(cand, dtype=np.intp), extra]))
-            dist = _squared_distance(q[row][None, :], seed_pts[cand_idx])
-            tied = cand_idx[dist == dist.min()]
-            winner_id = seed_id[tied].min()
-            best[row] = owner[tied[seed_id[tied] == winner_id][0]]
-    if n_tied:
-        logger.debug(f"Partition: {n_tied} of {n_child} child voxels needed the exact tie search")
-    return out
+        flat = child_flat[start:stop]
+        q = _finite_points(coords, flat, "child")
+        if lookup:
+            own = np.fromiter((lookup.get(col, -1) for col in flat % coords._ncol), dtype=np.intp, count=flat.size)
+        else:
+            own = np.full(flat.size, -1, dtype=np.intp)
+        _query_columns(q.ravel(), own, horizontal, spans, depths, owners, nodes, bounds, stack, lower, out[start:stop])
+    return keep[out]

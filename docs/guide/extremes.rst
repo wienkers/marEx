@@ -81,15 +81,15 @@ follows:
 
 * ``None`` (default) gives ``5``, a 5 × 5 neighbourhood, for ``seasonal_percentile`` with
   ``method_percentile="approximate"`` on a gridded field, and no pooling everywhere else.
-* An odd integer sets the neighbourhood explicitly. ``window_spatial=1`` gives single-cell
-  thresholds, as in Hobday et al. (2016). An explicit value is accepted only in the same
-  configuration as the default 5 × 5.
+* A positive odd integer sets the horizontal neighbourhood explicitly for exact and
+  approximate seasonal percentiles on structured grids. ``window_spatial=1`` gives
+  single-cell thresholds, as in Hobday et al. (2016).
 
 When the x dimension has a one-dimensional numeric coordinate, the neighbourhood wraps in
 longitude only if that coordinate spans the globe, so on a regional box the edge columns
 pool only real neighbours, as the latitude edges always do. Without such a coordinate the
 neighbourhood always wraps. The resolved value is recorded in the output attribute
-``window_spatial``, which is present only when spatial pooling is used.
+``window_spatial`` when a width is supplied or the 5 × 5 default applies.
 
 For daily data, the number of samples behind each threshold is about ``n_years × window_days × window_spatial²``,
 and the number expected beyond the threshold is that times ``1 - q`` in the upper tail and

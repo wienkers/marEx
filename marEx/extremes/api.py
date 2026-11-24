@@ -82,10 +82,9 @@ def _effective_window_spatial(
     """
     Resolve the spatial window actually used.
 
-    ``identify_extremes`` silently defaults a gridded seasonal run to a 5x5 window
-    when the caller leaves it ``None``, so the recorded attributes and steps must
-    reflect that rather than the raw ``None``. Delegates to
-    :func:`marEx.extremes.base.resolve_window_spatial`, which owns that rule.
+    Record the gridded approximate default of 5 when the caller leaves the
+    width unset. Exact seasonal percentiles use one cell by default. Delegates
+    to :func:`marEx.extremes.base.resolve_window_spatial`.
     """
     return resolve_window_spatial(ds_or_da, dimensions, method, method_percentile, window_spatial)
 
@@ -243,12 +242,10 @@ def identify(
         Width of the seasonal window in days
         (``seasonal_percentile`` only).
     window_spatial
-        Width in cells (odd) of the square spatial pooling window
-        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
-        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
-        on that path and to no pooling elsewhere. Passing a value raises an
-        error on unstructured meshes, with ``global_percentile``, and with
-        ``method_percentile='exact'``.
+        Positive odd width in cells of the square horizontal pooling window
+        for ``seasonal_percentile`` on structured grids. The default is 5 for
+        approximate percentiles and a single cell for exact percentiles.
+        An explicit width of 1 uses a single cell on either path.
     method_percentile
         ``'approximate'`` (default) uses a histogram-based quantile. ``'exact'`` computes a true quantile and needs
         the full series of each cell in memory.
@@ -364,7 +361,7 @@ def identify(
         ds["thresholds"] = thresholds
 
         # `method_percentile` is threaded rather than left to the helper's own default:
-        # the exact path ignores `window_spatial` entirely, so defaulting it there would
+        # the exact path defaults to a single cell, so defaulting it to 5 would
         # record a 5x5 window the run never used.
         effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds, method_percentile)
         ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile, "tail": tail})

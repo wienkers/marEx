@@ -132,6 +132,23 @@ def test_anomaly_matches_the_full_pipeline_bit_for_bit(da):
     np.testing.assert_array_equal(standalone.mask.values, chained.mask.values)
 
 
+@pytest.mark.parametrize("days", [10, 20, 40])
+def test_harmonic_standardisation_uses_observed_cycle_labels(days):
+    first = xr.date_range("2001-05-01", periods=days, freq="D")
+    second = xr.date_range("2002-05-01", periods=days, freq="D")
+    field = _gridded(nt=2 * days, ny=2, nx=3).assign_coords(time=first.append(second)).chunk({"time": 8})
+    ds = marEx.anomaly.compute(field, method="detrend_harmonic", standardise=True, dask_chunks={"time": 8})
+
+    assert ds.dat_stn.chunks == ds.dat_anomaly.chunks
+    assert ds.dat_stn.dtype == ds.dat_anomaly.dtype == np.float32
+    ds = ds.compute()
+    np.testing.assert_array_equal(ds.dayofyear, np.arange(121, 121 + days))
+    divisor = ds.STD.where(ds.STD > 1e-10).sel(dayofyear=ds.time.dt.dayofyear).drop_vars("dayofyear")
+    expected = ds.dat_anomaly / divisor
+    xr.testing.assert_identical(ds.dat_stn, expected.rename("dat_stn"))
+    assert np.isfinite(ds.dat_stn.values[:, ds.mask.values]).all()
+
+
 def test_identify_composes_onto_the_anomaly_dataset(da):
     # extremes.identify accepts the anomaly stage's Dataset directly; that
     # composition is what makes the two functions peers rather than stages.

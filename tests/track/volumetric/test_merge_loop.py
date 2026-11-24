@@ -204,24 +204,19 @@ def test_region_writer_4d_smoke(tmp_path):
 
 
 def _resident_float64_bytes(geom) -> int:
-    """Bytes of the float64 ``(z, y, x)`` arrays the geometry keeps resident (counted from the real object)."""
-    return sum(
-        value.nbytes
-        for value in vars(geom).values()
-        if isinstance(value, np.ndarray) and value.dtype == np.float64 and value.ndim == 3
-    )
+    """Resident bytes of the vertical geometry and cell volume arrays."""
+    return sum(getattr(geom, name).nbytes for name in ("top", "bottom", "thickness", "midpoint", "cell_volume"))
 
 
 def test_client_bytes_model(volumetric_case):
-    # The static term is what the vertical geometry really holds: five float64 (z, y, x) arrays
-    # (layer top, bottom, thickness, midpoint depth and cell volume), counted from the object.
     binary, meta = scenarios()["one_merge"]
     case = volumetric_case(binary, meta)
     n_voxels = case.cell_volume.size
-    assert _resident_float64_bytes(case.geom) == 5 * n_voxels * 8
+    nz = case.cell_volume.shape[0]
     static = _resident_float64_bytes(case.geom)
+    assert static == (n_voxels + 4 * nz) * 8
     for mode, retained in (("streaming", 2), ("persist", 11)):
-        assert merge_loop_client_bytes(n_voxels, 3, mode) == retained * 3 * n_voxels * 4 + static
+        assert merge_loop_client_bytes(n_voxels, 3, mode, layer_elements=nz) == retained * 3 * n_voxels * 4 + static
     assert merge_loop_client_bytes(7_560_000, 30, "streaming") == 2 * 30 * 7_560_000 * 4 + 5 * 7_560_000 * 8
     assert merge_loop_client_bytes(7_560_000, 30, "persist") == 11 * 30 * 7_560_000 * 4 + 5 * 7_560_000 * 8
     # At the 361 x 601 x 36 box the static term is ~312 MB, not the ~125 MB two arrays would give.
@@ -851,12 +846,14 @@ def test_partition_volumes_conserved_in_loop(tmp_path, monkeypatch):
     calls = []
     real = merge_loop._resolve_merge
 
-    def recording(slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume):
+    def recording(
+        slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume, **kwargs
+    ):
         before_vox = index_t.voxels(child_id).copy()
         before_vol = store.volumes([child_id])[0]
         np.testing.assert_array_equal(before_vox, np.flatnonzero(slice_t == child_id))
         child_ids, overlap = real(
-            slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume
+            slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume, **kwargs
         )
         pieces = [index_t.voxels(c) for c in child_ids]
         vols = [store.volumes([c])[0] for c in child_ids if c in store]
@@ -1297,3 +1294,53 @@ def test_consolidation_join_is_logged_and_keeps_the_3d_semantics(time_chunk, cap
     assert events.attrs["N_events_final"] == 1
     assert events.attrs["total_merges"] == 0
     assert any("1 children have more than one parent" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("mode", ["persist", "streaming"])
+def test_empty_time_axis_merge_loop(mode, tmp_path):
+    from marEx.core.compute_mode import Materialiser
+    from marEx.track.volumetric.config import VolumetricDims
+    from marEx.track.volumetric.geometry import build_vertical_geometry
+    from marEx.track.volumetric.ids import IDAllocator
+    from marEx.track.volumetric.merge_loop import split_and_merge_volumetric
+    from marEx.track.volumetric.partition import ScaledCoords
+    from marEx.track.volumetric.store import VolumeStore
+
+    dims = VolumetricDims("time", "depth", "lat", "lon")
+    depth = xr.DataArray([0.5], dims="depth", attrs={"units": "m", "positive": "down"})
+    lat, lon = np.array([10.0]), np.arange(8.0)
+    wet = xr.DataArray(np.ones((1, 1, 8), dtype=bool), dims=("depth", "lat", "lon"))
+    bounds = xr.DataArray([[0.0, 1.0]], dims=("depth", "nv"))
+    areas = xr.DataArray(np.ones((1, 8)), dims=("lat", "lon"), attrs={"units": "m2"})
+    geom = build_vertical_geometry(
+        depth.values,
+        depth.attrs,
+        wet,
+        zdim="depth",
+        ydim="lat",
+        xdim="lon",
+        lat_deg=lat,
+        lon_deg=lon,
+        layer_bounds=bounds,
+        layer_thickness=None,
+        cell_volumes=None,
+        cell_areas=areas,
+        grid_resolution=None,
+    )
+    coords = ScaledCoords(lat, lon, geom.midpoint, *geom.default_scales, wet=geom.wet)
+    empty = xr.DataArray(
+        np.empty((0, 1, 1, 8), dtype=np.int32),
+        dims=("time", "depth", "lat", "lon"),
+        coords={"time": np.array([], dtype="datetime64[ns]"), "depth": depth, "lat": lat, "lon": lon},
+        name="ID_field",
+    ).chunk({"time": (0,), "depth": -1, "lat": -1, "lon": -1})
+    mat = Materialiser(mode, str(tmp_path) if mode == "streaming" else None)
+    links_out = []
+    merged, store, ledger = split_and_merge_volumetric(
+        empty, VolumeStore(), IDAllocator(1), geom, coords, 0.5, dims, materialiser=mat, id_field_path=None, links_out=links_out
+    )
+    assert merged.shape == (0, 1, 1, 8)
+    assert merged.compute().shape == (0, 1, 1, 8)
+    assert links_out == []
+    assert len(store) == 0
+    assert len(ledger.times) == 0

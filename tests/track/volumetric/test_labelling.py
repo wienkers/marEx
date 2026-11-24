@@ -327,10 +327,25 @@ def test_invalid_inputs_raise():
         label_volume(active, wet[:2], thk, max_gap_m=1.0, wrap_x=False)
 
 
+def test_single_latitude_row_keeps_column_specific_thickness():
+    active = np.zeros((3, 1, 4), dtype=bool)
+    active[0, 0, ::3] = active[2, 0, ::3] = True
+    wet = np.ones_like(active)
+    thickness = np.full(active.shape, 8.0)
+    thickness[1, 0, 3] = 9.0
+    dense, n_dense = label_volume(active, wet, thickness, max_gap_m=8.0, wrap_x=False)
+    vector, n_vector = label_volume(active, wet, thickness[:, 0, 0], max_gap_m=8.0, wrap_x=False)
+    assert n_dense == 3 and n_vector == 2
+    assert dense[0, 0, 3] != dense[2, 0, 3]
+    assert vector[0, 0, 3] == vector[2, 0, 3]
+
+
 def test_column_contacts_python_semantics_equal_jitted():
     for trial in range(20):
         active, wet, thickness = _random_case(400 + trial)
         level_ids = np.where(active & wet, np.arange(1, active.size + 1).reshape(active.shape), 0).astype(np.int64)
+        wet.setflags(write=False)
+        thickness.setflags(write=False)
         for gap in (0.0, 10.0, 25.0):
             jitted = _column_contacts(level_ids, wet, thickness, gap)
             python = _column_contacts.py_func(level_ids, wet, thickness, gap)

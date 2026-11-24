@@ -353,13 +353,17 @@ def test_client_memory_warning(monkeypatch):
     nt, nz, ny, nx = extremes.shape
     n_voxels = nz * ny * nx
     time_chunk = extremes.chunks[0][0]
-    # The static term is what the tracker's geometry really holds (five float64 (z, y, x) arrays).
+    # The static term is one full volume array and four depth-only arrays.
     held = marEx.tracker(extremes, wet, layer_bounds=bounds, cell_areas=areas, **_kwargs())
-    static = sum(v.nbytes for v in vars(held.geom).values() if isinstance(v, np.ndarray) and v.dtype == np.float64 and v.ndim == 3)
-    assert static == 5 * n_voxels * 8
-    expected = 11 * time_chunk * n_voxels * 4 + static
-    assert _merge_loop.merge_loop_client_bytes(n_voxels, time_chunk, "persist") == expected
-    assert _merge_loop.merge_loop_client_bytes(n_voxels, time_chunk, "streaming") == 2 * time_chunk * n_voxels * 4 + static
+    static = sum(getattr(held.geom, name).nbytes for name in ("cell_volume", "top", "bottom", "midpoint", "thickness"))
+    assert static == (n_voxels + 4 * nz) * 8
+    pristine = 2 * n_voxels * 4
+    expected = 11 * time_chunk * n_voxels * 4 + static + pristine
+    sizes = {"layer_elements": nz, "pristine_slices": 2}
+    assert _merge_loop.merge_loop_client_bytes(n_voxels, time_chunk, "persist", **sizes) == expected
+    assert _merge_loop.merge_loop_client_bytes(n_voxels, time_chunk, "streaming", **sizes) == (
+        2 * time_chunk * n_voxels * 4 + static + pristine
+    )
     assert _tracker4d.CLIENT_WARN_BYTES == 8 * 2**30
 
     with warnings.catch_warnings(record=True) as caught:
@@ -373,7 +377,7 @@ def test_client_memory_warning(monkeypatch):
     message = " ".join(str(w.message) for w in record if "merge loop" in str(w.message))
     assert f"{expected:,} bytes" in message
     assert re.search(r"11 retained chunks x 4 time steps x 480 voxels x 4 B", message)
-    assert "5 x 480 voxels x 8 B" in message
+    assert f"(480 voxels + 4 x {nz} layer elements) x 8 B" in message
     assert f"{expected - 1:,}" in message
 
     monkeypatch.setattr(_tracker4d, "CLIENT_WARN_BYTES", expected)

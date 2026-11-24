@@ -15,8 +15,9 @@ import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
-from ..core.dimensions import KEEP_INPUT_CHUNK_FACTOR, TASK_ELEMENTS, spatial_dims
+from ..core.dimensions import spatial_dims
 from ..core.numerics import rolling_numerics
+from ..core.seasonal_apply import apply_seasonal_field
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -95,23 +96,6 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
         folded, dims=(cycle_dim, *other), coords={cycle_dim: labels, **{k: v for k, v in clim.coords.items() if k != cycle_dim}}
     )
     return out.transpose(*dims).astype(np.float32).chunk({cycle_dim: -1})
-
-
-def _align_climatology_to_input(clim: xr.DataArray, da: xr.DataArray, cycle_dim: str) -> xr.DataArray:
-    """Put the climatology on the input's spatial chunks, unless that makes one task too large.
-
-    The subtraction runs on the finer of the two layouts in each dimension, so a climatology on
-    a small tile forces every year of the input onto that tile, and the task count then grows
-    with the square of the record length.
-    """
-    if clim.chunks is None or da.chunks is None:
-        return clim
-    input_chunks = dict(zip(da.dims, da.chunks))  # the data's own; `chunksizes` also checks the coordinates
-    spatial = {dim: input_chunks[dim] for dim in clim.dims if dim != cycle_dim and dim in input_chunks}
-    largest_chunk = clim.sizes[cycle_dim] * int(np.prod([max(sizes) for sizes in spatial.values()], dtype=np.int64))
-    if largest_chunk > KEEP_INPUT_CHUNK_FACTOR * TASK_ELEMENTS:
-        return clim
-    return clim.chunk(spatial)
 
 
 def _compute_anomaly_fixed_baseline(
@@ -196,7 +180,7 @@ def _compute_anomaly_fixed_baseline(
     logger.debug("Computing daily climatology across %s", "reference period" if reference_period else "all years")
     daily_climatology = flox.xarray.xarray_reduce(
         da_for_clim,
-        cycle.index_of(da_for_clim[coordinates["time"]]),
+        cycle.index_of(da_for_clim[coordinates["time"]]).compute(),
         dim=dimensions["time"],
         func="nanmean",
         isbin=False,
@@ -230,26 +214,22 @@ def _compute_anomaly_fixed_baseline(
         daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
     )
     daily_climatology = _smooth_climatology_circular(daily_climatology, cycle, smooth_days)
-    daily_climatology = _align_climatology_to_input(daily_climatology, da, cycle_dim)
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
-    da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]])})
-    anomalies = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))}) - daily_climatology
-    anomalies = anomalies.astype(np.float32)
-
-    # Drop the cycle-index coordinate to avoid merge conflicts
-    if cycle_dim in anomalies.coords:
-        anomalies = anomalies.drop_vars(cycle_dim)
+    anomalies = apply_seasonal_field(
+        da,
+        daily_climatology,
+        cycle.index_of(da[coordinates["time"]]).values,
+        timedim=dimensions["time"],
+        cycledim=cycle_dim,
+        operation="subtract",
+    ).astype(np.float32)
 
     # Create ocean/land mask from first time step
     # Handle both spatial (3D) and time-series (1D) data
     mask_dims = spatial_dims(da, dimensions)
     if mask_dims:
-        # Spatial data - create 2D/3D mask.
-        # `da` gained a per-timestep ``dayofyear`` coord above; dropping only the time
-        # coord would leak a scalar ``dayofyear`` into the mask (and the output schema
-        # under global_percentile). Drop both.
         # Extra (non-horizontal) spatial dims such as depth are made whole alongside
         # the horizontal ones, so the mask keeps the field's full spatial shape.
         chunk_dict_mask = {dim: -1 for dim in mask_dims}

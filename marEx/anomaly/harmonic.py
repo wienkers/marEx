@@ -14,6 +14,7 @@ import xarray as xr
 
 from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_dims
 from ..core.numerics import rolling_numerics
+from ..core.seasonal_apply import apply_seasonal_field
 from ..core.time_axis import SeasonalCycle, _median_step_days, add_decimal_year, is_subdaily_axis, resolve_cycle
 from ..core.validation import _infer_dims_coords
 from ..exceptions import ConfigurationError
@@ -174,24 +175,22 @@ def _compute_anomaly_detrended(
     pmodel = np.linalg.pinv(model)
     n_coeffs = len(model_components)
 
-    # Convert model matrices to xarray
+    # Convert model matrices to xarray, keeping any existing index on the time dimension.
+    time_dim = dimensions["time"]
+    model_coords = {"coeff": np.arange(1, n_coeffs + 1)}
+    if time_dim in da.indexes:
+        model_coords[time_dim] = da.coords[time_dim]
     model_da = xr.DataArray(
         model.T,
-        dims=[dimensions["time"], "coeff"],
-        coords={
-            dimensions["time"]: da[coordinates["time"]].values,
-            "coeff": np.arange(1, n_coeffs + 1),
-        },
-    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
+        dims=[time_dim, "coeff"],
+        coords=model_coords,
+    ).chunk({time_dim: da.chunksizes[time_dim]})
 
     pmodel_da = xr.DataArray(
         pmodel.T,
-        dims=["coeff", dimensions["time"]],
-        coords={
-            "coeff": np.arange(1, n_coeffs + 1),
-            dimensions["time"]: da[coordinates["time"]].values,
-        },
-    ).chunk({dimensions["time"]: da.chunksizes[dimensions["time"]]})
+        dims=["coeff", time_dim],
+        coords=model_coords,
+    ).chunk({time_dim: da.chunksizes[time_dim]})
 
     # Prepare dimensions for model coefficients based on data structure
     dims = ["coeff"]
@@ -223,7 +222,7 @@ def _compute_anomaly_detrended(
     # the input but is only (coeff, y, x) -- tens of MB -- whereas the detrended series is
     # the size of the input. With the coefficients materialised, the detrend below is a
     # cheap elementwise expression, so the pipeline-level persist of dat_anomaly is the
-    # only full-size copy that ever exists (review findings 2.5, 2.6).
+    # only full-size copy that ever exists.
     model_fit_da = xr.DataArray(dot_result, dims=result_dims, coords=result_coords).persist()
 
     # Remove trend and seasonal cycle
@@ -268,11 +267,12 @@ def _compute_anomaly_detrended(
     if standardise:
         cycle = resolve_cycle(da, coordinates["time"], cycle)
         cycle_dim = cycle.index_name
+        cycle_index = cycle.index_of(da_detrend[coordinates["time"]]).compute()
 
         # Calculate per-cycle-slot standard deviation using cohorts
         std_day = flox.xarray.xarray_reduce(
             da_detrend,
-            cycle.index_of(da_detrend[coordinates["time"]]),
+            cycle_index,
             dim=dimensions["time"],
             func="std",
             isbin=False,
@@ -280,12 +280,7 @@ def _compute_anomaly_detrended(
             dtype=np.float32,
         )
 
-        # Calculate 30-day rolling standard deviation with annual wrapped padding.
-        # Slice/label by the actual number of cycle groups: a span with no
-        # leap year yields 365 groups, and hardcoding 366 produced a duplicate wrap
-        # label and an align error. The common (leap-containing) case is 366, so this
-        # is behaviour-preserving there.
-        #
+        # Calculate the 30-day rolling standard deviation over the observed cycle slots.
         # The 30 days and the padding width are physical, so they are converted through
         # the cycle. `steps_for_days` deliberately does NOT force the result odd: on
         # daily data 30 days is 30 steps and the pad is 16, exactly what this code has
@@ -303,7 +298,12 @@ def _compute_anomaly_detrended(
             )
         pad_size = std_steps // 2 + 1
         n_doy = std_day.sizes[cycle_dim]
-        std_day_wrap = std_day.pad({cycle_dim: pad_size}, mode="wrap")
+        if n_doy < pad_size:
+            # Dask's wrap padding takes at most one copy of the axis on each side.
+            wrapped_positions = np.arange(-pad_size, n_doy + pad_size) % n_doy
+            std_day_wrap = std_day.isel({cycle_dim: wrapped_positions})
+        else:
+            std_day_wrap = std_day.pad({cycle_dim: pad_size}, mode="wrap")
         with rolling_numerics():
             std_rolling = np.sqrt((std_day_wrap**2).rolling({cycle_dim: std_steps}, center=True).mean()).isel(
                 {cycle_dim: slice(pad_size, n_doy + pad_size)}
@@ -312,12 +312,14 @@ def _compute_anomaly_detrended(
         # Divide anomalies by rolling standard deviation
         # Replace any zeros or extremely small values with NaN to avoid division warnings
         std_rolling_safe = std_rolling.where(std_rolling > 1e-10, np.nan)
-        da_detrend = da_detrend.assign_coords({cycle_dim: cycle.index_of(da_detrend[coordinates["time"]])})
-        da_stn = da_detrend.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, n_doy + 1))}) / std_rolling_safe
-
-        # Drop the cycle-index coordinate to avoid merge conflicts
-        if cycle_dim in da_stn.coords:
-            da_stn = da_stn.drop_vars(cycle_dim)
+        da_stn = apply_seasonal_field(
+            da_detrend,
+            std_rolling_safe,
+            cycle_index.values,
+            timedim=dimensions["time"],
+            cycledim=cycle_dim,
+            operation="divide",
+        )
 
         # Rechunk data for efficient processing: horizontal whole, extra dims (depth, level)
         # per level unless a small grid leaves budget to stack them -- the layout `finalise`

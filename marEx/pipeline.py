@@ -98,12 +98,10 @@ def preprocess_data(
     window_days
         Day-of-year window in days (``seasonal_percentile`` only).
     window_spatial
-        Width in cells (odd) of the square spatial pooling window
-        (``seasonal_percentile`` with ``method_percentile='approximate'`` on
-        gridded data only). ``None`` (the default) resolves to 5, a 5x5 window,
-        on that path and to no pooling elsewhere. Passing a value raises an
-        error on unstructured meshes, with ``global_percentile``, and with
-        ``method_percentile='exact'``.
+        Positive odd width in cells of the square horizontal pooling window
+        for ``seasonal_percentile`` on structured grids. The default is 5 for
+        approximate percentiles and a single cell for exact percentiles.
+        An explicit width of 1 uses a single cell on either path.
     standardise
         Also threshold a standardised series, adding ``dat_stn``, ``STD``,
         ``extreme_events_stn`` and ``thresholds_stn``. Requires
@@ -285,7 +283,7 @@ def preprocess_data(
         # Merge the extremes stage's metadata onto the anomaly stage's. Each stage
         # appends its own steps, so the chained list reads in execution order.
         # `method_percentile` is threaded rather than left to the helper's own default:
-        # the exact path ignores `window_spatial` entirely, so defaulting it there would
+        # the exact path defaults to a single cell, so defaulting it to 5 would
         # record a 5x5 window the run never used.
         effective_window_spatial = _effective_window_spatial(method_extreme, window_spatial, dimensions, ds, method_percentile)
         ds.attrs.update({"method_extreme": method_extreme, "threshold_percentile": threshold_percentile, "tail": tail})

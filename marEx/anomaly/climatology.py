@@ -61,9 +61,31 @@ def last_day_pool(time_coord: xr.DataArray, cycle: SeasonalCycle, read_coord: Op
     return positions, slots, np.arange(first_slot, cycle.length + 1, dtype=np.int32)
 
 
-def _gather_slots(block: np.ndarray, flat_index: np.ndarray) -> np.ndarray:
-    """Read one value per time step from a block whose last two axes are (target_year, cycle)."""
-    return block.reshape(block.shape[:-2] + (-1,))[..., flat_index]
+def _gather_slots(block: np.ndarray, flat_index: np.ndarray, n_group_dims: int) -> np.ndarray:
+    """Read one value per time step from the trailing, whole group axes of a tile."""
+    return block.reshape(block.shape[:-n_group_dims] + (-1,))[..., flat_index]
+
+
+def _reduce_occupied(data: xr.DataArray, dim: str, keys: np.ndarray, occupied: np.ndarray, method: Optional[str]) -> xr.DataArray:
+    """Reduce compact group codes without changing the order or chunks of the samples."""
+    return flox.xarray.xarray_reduce(
+        data,
+        xr.DataArray(np.searchsorted(occupied, keys), dims=[dim], name="target_year"),
+        dim=dim,
+        func="nanmean",
+        expected_groups=(pd.RangeIndex(occupied.size),),
+        isbin=False,
+        method=method,
+        dtype=np.float32,
+        fill_value=np.nan,
+    )
+
+
+def _slot_positions(keys: np.ndarray, targets: np.ndarray, offset: int, missing: int) -> np.ndarray:
+    """Find target keys in a sorted table; absent keys read the shared NaN row."""
+    positions = np.searchsorted(keys, targets)
+    found = (positions < keys.size) & (keys[np.minimum(positions, keys.size - 1)] == targets)
+    return np.where(found, positions + offset, missing)
 
 
 def rolling_climatology(
@@ -208,6 +230,61 @@ def rolling_climatology(
     target_year_groups = np.array(contributing_target_years, dtype=np.int32)
     cycle_groups = np.array(contributing_cycle_indices, dtype=np.int32)
 
+    cycle_index = pd.Index(cycle.labels)
+    n_cycle = len(cycle_index)
+    contrib_pos = np.empty(0, dtype=np.intp)
+    if time_indices.size:
+        contrib_pos = cycle_index.get_indexer(cycle_groups)
+        valid_contrib = contrib_pos >= 0
+        if not valid_contrib.all():
+            time_indices = time_indices[valid_contrib]
+            target_year_groups = target_year_groups[valid_contrib]
+            cycle_groups = cycle_groups[valid_contrib]
+            contrib_pos = contrib_pos[valid_contrib]
+
+    pool_time, pool_target, pool_cycle = [], [], []
+    pool = last_day_pool(da[time_coord], cycle)
+    if pool is not None and len(pool[0]):
+        positions, slots, last_labels = pool
+        for position, slot in zip(positions.tolist(), slots.tolist()):
+            year_val = int(year_vals[position])
+            targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_years)]
+            targets = targets[targets >= min_year + window_years]
+            pool_time.extend([position] * len(targets))
+            pool_target.extend(targets.tolist())
+            pool_cycle.extend([slot] * len(targets))
+    pool_pos = np.empty(0, dtype=np.intp)
+    pool_occupied = np.empty(0, dtype=np.int64)
+    if pool_time:
+        pool_pos = cycle_index.get_indexer(np.asarray(pool_cycle, dtype=np.int32))
+        valid_pool = pool_pos >= 0
+        if not valid_pool.all():
+            pool_time = np.asarray(pool_time, dtype=np.int32)[valid_pool].tolist()
+            pool_target = np.asarray(pool_target, dtype=np.int32)[valid_pool].tolist()
+            pool_cycle = np.asarray(pool_cycle, dtype=np.int32)[valid_pool].tolist()
+            pool_pos = pool_pos[valid_pool]
+
+    if not time_indices.size and not pool_time:
+        # No eligible history. Keep the static coordinates and the usual output order and dtype.
+        template = da.drop_vars([name for name, coord in da.coords.items() if timedim in coord.dims])
+        result = xr.full_like(template.transpose(..., timedim), np.nan, dtype=np.float32).chunk(original_chunk_dict)
+        clear_store_encoding(result)
+        return result
+
+    # An expected group with no observations makes flox build a Dask setitem graph whose
+    # client cost is quadratic in the block count. Reduce the Cartesian product when all
+    # slots of a standard 1..length cycle are present in every contributing year, or only
+    # the occupied pairs otherwise.
+    standard_cycle = n_cycle == cycle.length and np.array_equal(cycle_index.to_numpy(), np.arange(1, cycle.length + 1))
+    data_years = np.unique(target_year_groups) if time_indices.size else np.empty(0, dtype=np.int32)
+    keys = target_year_groups.astype(np.int64) * n_cycle + contrib_pos if time_indices.size else np.empty(0, dtype=np.int64)
+    occupied = np.unique(keys)
+    doy_pos = cycle_index.get_indexer(doy_vals)
+    complete = standard_cycle and time_indices.size > 0 and occupied.size == len(data_years) * n_cycle and not (doy_pos < 0).any()
+    if pool_time and not complete:
+        pool_keys = np.asarray(pool_target, dtype=np.int64) * n_cycle + pool_pos
+        pool_occupied = np.unique(pool_keys)
+
     # Bound the long-form expansion before building it.
     #
     # The `isel` below materialises roughly `window_years` times the input along time,
@@ -224,80 +301,60 @@ def rolling_climatology(
     # bit-identical (verified against both goldens and pinned by
     # tests/test_climatology_tiling.py).
     #
-    # The time axis is held whole in the same rechunk. Flox's grouped mean and the rolling mean
-    # before it accumulate block by block, so a time chunk boundary moves the result,
-    # and flox's task count scales with tiles x time chunks. `original_chunk_dict` was
-    # captured before this point, so the restore at the end returns the caller's own layout.
+    # Split spatial chunks before combining the time axis so Dask never forms an untiled
+    # whole-time block in an intermediate rechunk task.
+    output_rows = max(
+        len(unique_years) * cycle.length,
+        0 if complete else (occupied.size + pool_occupied.size + 1),
+    )
     spatial_tile = tile_spatial_chunks(
         da,
         spatial_dims(da, dimensions),
-        input_elements_per_cell=len(time_indices),
-        output_elements_per_cell=len(unique_years) * cycle.length,
+        input_elements_per_cell=max(da.sizes[timedim], len(time_indices), len(pool_time)),
+        output_elements_per_cell=output_rows,
     )
-    da = da.chunk({timedim: -1, **spatial_tile})
+    da = da.chunk(spatial_tile).chunk({timedim: -1})
 
-    # Create long-form dataset by selecting the contributing time points
-    long_form_data = da.isel({timedim: time_indices})
-
-    # Create a new time dimension for the long-form data
     long_timedim = f"{timedim}_contrib"
-    long_form_data = long_form_data.rename({timedim: long_timedim})
-
-    # Convert grouping arrays to DataArrays with the correct dimension
-    target_year_da = xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year")
-    cycle_da = xr.DataArray(cycle_groups, dims=[long_timedim], name=cycle_dim)
-
-    # flox fills an expected group that received no data by assigning NaN through dask's
-    # `__setitem__`, whose graph build is quadratic in the number of blocks: hours of client
-    # time on the ICON mesh before any task runs. Here the only empty groups are normally
-    # whole target years (the first `window_years` have no history), so reduce over the
-    # years that do have data and pad the rest back with a reindex, which is one indexing
-    # task per block. Any other gap falls back to letting flox fill it.
-    data_years = np.unique(target_year_groups)
-    n_pairs = len(set(zip(target_year_groups.tolist(), cycle_groups.tolist())))
-    complete = len(data_years) > 0 and n_pairs == len(data_years) * len(cycle.labels)
-    reduce_years = data_years if complete else unique_years
-
-    # Use flox with both grouping variables to compute climatologies. The method is named:
-    # flox's automatic choice searches for cohorts with a label-by-label containment matrix that
-    # grows with the square of the (target year, cycle) group count, client-side before any task
-    # runs (a 60-year daily record peaked near 9 GB against 2 GB with map-reduce). Whether flox
-    # then picks cohorts depends on how many blocks the long-form axis has, not on the record
-    # length, so naming the method also makes the result independent of that heuristic.
-    climatologies = flox.xarray.xarray_reduce(
-        long_form_data,
-        target_year_da,
-        cycle_da,
-        dim=long_timedim,
-        func="nanmean",
-        expected_groups=(reduce_years, cycle.labels),
-        isbin=(False, False),
-        method="map-reduce",
-        dtype=np.float32,
-        fill_value=np.nan,
-    )
+    climatologies = None
+    if time_indices.size:
+        long_form_data = da.isel({timedim: time_indices}).rename({timedim: long_timedim})
+        # Name the main reduction method:
+        # flox's automatic choice searches for cohorts with a label-by-label containment matrix
+        # that grows with the square of the (target year, cycle) group count, client-side before
+        # any task runs (a 60-year daily record peaked near 9 GB against 2 GB with map-reduce).
+        # Whether flox then picks cohorts depends on how many blocks the long-form axis has, not
+        # on the record length, so naming the method also makes the result independent of that
+        # heuristic.
+        if complete:
+            climatologies = flox.xarray.xarray_reduce(
+                long_form_data,
+                xr.DataArray(target_year_groups, dims=[long_timedim], name="target_year"),
+                xr.DataArray(cycle_groups, dims=[long_timedim], name=cycle_dim),
+                dim=long_timedim,
+                func="nanmean",
+                expected_groups=(data_years, cycle.labels),
+                isbin=(False, False),
+                method="map-reduce",
+                dtype=np.float32,
+                fill_value=np.nan,
+            )
+        else:
+            climatologies = _reduce_occupied(long_form_data, long_timedim, keys, occupied, "map-reduce")
 
     # Recompute the day-366 slots from every year's 31 December (see `last_day_pool`) and
     # splice them in. Every other slot is left exactly as reduced above.
-    pool = last_day_pool(da[time_coord], cycle)
-    if pool is not None and len(pool[0]):
-        positions, slots, last_labels = pool
-        pool_time, pool_target, pool_cycle = [], [], []
-        for position, slot in zip(positions.tolist(), slots.tolist()):
-            year_val = int(year_vals[position])
-            targets = unique_years[(unique_years > year_val) & (unique_years <= year_val + window_years)]
-            targets = targets[targets >= min_year + window_years]
-            pool_time.extend([position] * len(targets))
-            pool_target.extend(targets.tolist())
-            pool_cycle.extend([slot] * len(targets))
-        if pool_time:
+    last_day = None
+    if pool_time:
+        pool_data = da.isel({timedim: np.array(pool_time, dtype=np.int32)}).rename({timedim: long_timedim})
+        if complete:
             last_day = flox.xarray.xarray_reduce(
-                da.isel({timedim: np.array(pool_time, dtype=np.int32)}).rename({timedim: long_timedim}),
+                pool_data,
                 xr.DataArray(np.array(pool_target, dtype=np.int32), dims=[long_timedim], name="target_year"),
                 xr.DataArray(np.array(pool_cycle, dtype=np.int32), dims=[long_timedim], name=cycle_dim),
                 dim=long_timedim,
                 func="nanmean",
-                expected_groups=(reduce_years, last_labels),
+                expected_groups=(data_years, last_labels),
                 isbin=(False, False),
                 dtype=np.float32,
                 fill_value=np.nan,
@@ -305,49 +362,70 @@ def rolling_climatology(
             climatologies = xr.concat(
                 [climatologies.sel({cycle_dim: slice(None, int(last_labels[0]) - 1)}), last_day], dim=cycle_dim
             )
+        else:
+            last_day = _reduce_occupied(pool_data, long_timedim, pool_keys, pool_occupied, None).assign_coords(
+                target_year=occupied.size + np.arange(pool_occupied.size)
+            )
 
-    if len(reduce_years) < len(unique_years):
-        # Pad by position onto one appended all-NaN year. A `reindex(fill_value=nan)` builds its
-        # fill mask by OR-ing per-dimension dask masks of different chunking, which multiplies
-        # the task count across every spatial tile.
-        nan_year = xr.full_like(climatologies.isel(target_year=slice(0, 1)), np.nan)
-        padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
-        position = pd.Series(range(len(reduce_years)), index=reduce_years).reindex(unique_years, fill_value=len(reduce_years))
-        climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
-    climatologies = climatologies.chunk({"target_year": -1, cycle_dim: -1})
-
-    # Create index arrays for final mapping
-    year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
-    year_indices = year_to_idx[year_vals].values
+    if complete:
+        if len(data_years) < len(unique_years):
+            # Pad by position onto one appended all-NaN year. Reindexing with a fill mask
+            # multiplies the number of tasks across spatial tiles.
+            nan_year = xr.full_like(climatologies.isel(target_year=slice(0, 1)), np.nan)
+            padded = xr.concat([climatologies, nan_year], dim="target_year").chunk({"target_year": -1})
+            position = pd.Series(range(len(data_years)), index=data_years).reindex(unique_years, fill_value=len(data_years))
+            climatologies = padded.isel(target_year=position.to_numpy()).assign_coords(target_year=unique_years)
+        group_dims = ("target_year", cycle_dim)
+        year_to_idx = pd.Series(range(len(unique_years)), index=unique_years)
+        indices = year_to_idx[year_vals].values * climatologies.sizes[cycle_dim] + doy_pos
+    else:
+        targets = year_vals.astype(np.int64) * n_cycle + np.maximum(doy_pos, 0)
+        missing = occupied.size + (last_day.sizes["target_year"] if last_day is not None else 0)
+        indices = (
+            _slot_positions(occupied, targets, 0, missing) if occupied.size else np.full(targets.shape, missing, dtype=np.intp)
+        )
+        tables = [climatologies] if climatologies is not None else []
+        if last_day is not None:
+            # The separate pool replaces every day-366 target, including missing pool groups.
+            use_pool = (doy_pos >= 0) & (doy_vals >= last_labels[0])
+            indices[use_pool] = _slot_positions(pool_occupied, targets[use_pool], occupied.size, missing)
+            tables.append(last_day)
+        indices[doy_pos < 0] = missing
+        nan_row = xr.full_like(tables[0].isel(target_year=slice(0, 1)), np.nan).assign_coords(target_year=[missing])
+        climatologies = xr.concat([*tables, nan_row], dim="target_year")
+        group_dims = ("target_year",)
 
     # Select appropriate climatology for each time point. Both slot axes are whole in every tile,
     # so the (target_year, cycle) pair is one flat position and the time index is one dask array
     # that every tile references. Pointwise `isel` with two indexers embeds that index in each
     # tile's tasks instead: the graph grows as tiles x time steps (about 1 GB on a century of
     # daily data over 7 x 161 x 321 cells).
-    climatologies = climatologies.transpose(..., "target_year", cycle_dim)
+    climatologies = climatologies.chunk(dict.fromkeys(group_dims, -1)).transpose(..., *group_dims)
     # The tile was budgeted on the long-form input, which can be shorter than the record (a one-year window, or a
     # cycle coarser than the time step), so the gather also splits time to keep each output block within budget.
-    n_spatial = climatologies.ndim - 2
+    n_group_dims = len(group_dims)
+    n_spatial = climatologies.ndim - n_group_dims
     tile_cells = int(np.prod([max(chunks) for chunks in climatologies.chunks[:n_spatial]]))
     flat_index = dask.array.from_array(
-        year_indices * climatologies.sizes[cycle_dim] + (doy_vals - 1),
+        indices,
         chunks=max(1, core_dimensions.TASK_ELEMENTS // tile_cells),
     )
     spatial_index = tuple(range(n_spatial))
+    gather_axis = (climatologies.ndim,)
     result = xr.DataArray(
         dask.array.blockwise(
             _gather_slots,
-            spatial_index + (n_spatial + 2,),
+            spatial_index + gather_axis,
             climatologies.data,
-            spatial_index + (n_spatial, n_spatial + 1),
+            tuple(range(climatologies.ndim)),
             flat_index,
-            (n_spatial + 2,),
+            gather_axis,
+            n_group_dims=n_group_dims,
             dtype=climatologies.dtype,
             concatenate=True,
         ),
-        dims=climatologies.dims[:-2] + (timedim,),
-        coords={name: coord for name, coord in climatologies.coords.items() if not {"target_year", cycle_dim} & set(coord.dims)},
+        dims=climatologies.dims[:n_spatial] + (timedim,),
+        coords={name: coord for name, coord in climatologies.coords.items() if not set(group_dims) & set(coord.dims)},
         attrs=climatologies.attrs,
     )
     result.name = climatologies.name  # an unnamed input stays unnamed rather than taking the dask array's name

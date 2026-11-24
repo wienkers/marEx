@@ -1,12 +1,10 @@
 """
 MarEx Track: the 4-D split-and-merge loop.
 
-The loop walks a ``(time, z, y, x)`` ID field one time chunk at a time, on the client,
-exactly as the 3-D gridded loop does: load one chunk, take ``t-1``/``t-2`` from the
-retained previous chunk at a chunk start, consolidate ``t-1`` against ``t-2``, link
-``t-1`` to ``t`` by volume overlap, resolve children with several parents, consolidate
-the chunk's last timestep, retain the chunk, and flush finished chunks to the output
-(zarr regions when streaming; setitem plus a persist every 10 chunks otherwise).
+The client walks a ``(time, z, y, x)`` ID field one chunk at a time. It links each
+slice to its settled predecessor, resolves merges, consolidates splits, and emits
+the boundary's final links. Finished chunks are written to Zarr regions in
+streaming mode or assigned and persisted every 10 chunks in persist mode.
 
 Every slice is handled flat (``ravel()`` of ``(z, y, x)`` in C order), and every
 overlap and volume is a float64 sum in a fixed order (see :mod:`.overlap` and
@@ -28,7 +26,7 @@ from .config import VolumetricDims
 from .geometry import VerticalGeometry
 from .ids import IDAllocator
 from .labelling import label_volume
-from .overlap import link_mask, volume_overlaps
+from .overlap import OverlapTable, link_mask, volume_overlaps
 from .partition import ScaledCoords, partition_child
 from .store import ObjectIndex, VolumeStore
 
@@ -42,11 +40,6 @@ MAX_MERGE_ITERATIONS: int = 100
 # current one; persist flushes every 10 chunks, so it can hold 10 finished chunks plus one.
 _RETAINED_CHUNKS = {"streaming": 2, "persist": 11}
 _PERSIST_FLUSH_EVERY = 10
-# Float64 ``(z, y, x)`` arrays the client holds for the whole run: the vertical geometry's layer
-# top, bottom, thickness and midpoint depth, and the cell volume. The loop reads the cell volumes
-# and the midpoints (through the partition coordinates); the other three stay resident on the
-# tracker's geometry.
-_STATIC_FLOAT64_PER_VOXEL = 5
 
 
 @dataclass
@@ -157,7 +150,7 @@ class SplitGeometry:
     wet : numpy.ndarray
         Boolean wet mask, ``(z, y, x)``.
     thickness : numpy.ndarray
-        Layer thickness in metres, ``(z, y, x)``.
+        Layer thickness in metres, ``(z,)`` or ``(z, y, x)``.
     max_gap_m : float
         Largest gap a vertical link bridges, as in identification.
     wrap_x : bool
@@ -224,25 +217,87 @@ class SplitGeometry:
         overlap = child[box] & (water[box] > 0)
         if np.unique(water[box][overlap]).size < 2:
             return False
-        parent_pieces, _ = label_volume(parent[box], self.wet[box], self.thickness[box], self.max_gap_m, self.wrap_x)
+        thickness_box = box[:1] if self.thickness.ndim == 1 else box
+        parent_pieces, _ = label_volume(parent[box], self.wet[box], self.thickness[thickness_box], self.max_gap_m, self.wrap_x)
         overlap &= parent_pieces > 0
         pairs = np.unique(np.c_[parent_pieces[overlap], water[box][overlap]], axis=0)
         return pairs.shape[0] > 0 and bool((np.bincount(pairs[:, 0]) >= 2).any())
 
 
-def merge_loop_client_bytes(n_voxels: int, time_chunk: int, compute_mode: str) -> int:
+class _WaterComponents:
+    """Pristine identification labels and voxel ownership for the objects that were edited."""
+
+    def __init__(self, labels: NDArray[np.int32]) -> None:
+        self.labels = labels
+        self._protected = False
+        self._sizes: Dict[int, int] = {}
+        self._ownership: Dict[int, Dict[int, int]] = {}
+
+    def preserve(self) -> None:
+        """Keep the pre-edit labels before the active slice is overwritten."""
+        if not self._protected:
+            self.labels = self.labels.copy()
+            self._protected = True
+
+    def partition(self, voxels: NDArray[np.int64], ids: NDArray, counts: NDArray) -> None:
+        """Record each piece's share of a pristine component during merge resolution."""
+        # Partitions precede consolidation, so every child here has a single origin.
+        origin = int(self.labels[voxels[0]])
+        self._sizes.setdefault(origin, voxels.size)
+        self._ownership.update({oid: {origin: count} for oid, count in zip(ids.tolist(), counts.tolist())})
+
+    def consolidate(self, kept: int, removed: List[int], index: ObjectIndex) -> None:
+        """Combine integer ownership counts while renaming onto the survivor."""
+        combined: Dict[int, int] = {}
+        for oid in [kept, *removed]:
+            membership = self._ownership.pop(oid, None)
+            if membership is None:
+                count = index.voxels(oid).size
+                self._sizes.setdefault(oid, count)
+                membership = {oid: count}
+            for origin, count in membership.items():
+                combined[origin] = combined.get(origin, 0) + count
+        self._ownership[kept] = combined
+
+    def certifies_split(self, parent: int, intersection: NDArray[np.int64], current: "_WaterComponents") -> Optional[bool]:
+        """Decide from pristine components or defer a partial parent to the geometric predicate."""
+        if intersection.size < 2:
+            return False
+        waters = current.labels[intersection]
+        if np.all(waters == waters[0]):
+            return False
+        # The parent's pieces refine the original components. Deleting an active
+        # voxel removes horizontal contacts and adds its thickness to a vertical gap.
+        owned = self._ownership.get(parent)
+        if owned is None:
+            return True
+        if len(owned) == 1:
+            origin, count = next(iter(owned.items()))
+            return True if count == self._sizes[origin] else None
+
+        origins, codes = np.unique(self.labels[intersection], return_inverse=True)
+        lower = np.full(origins.size, np.iinfo(waters.dtype).max, dtype=waters.dtype)
+        upper = np.zeros_like(lower)
+        np.minimum.at(lower, codes, waters)
+        np.maximum.at(upper, codes, waters)
+        multiple = origins[lower != upper]
+        if any(owned[origin] == self._sizes[origin] for origin in multiple.tolist()):
+            return True
+        return None if multiple.size else False
+
+
+def merge_loop_client_bytes(
+    n_voxels: int, time_chunk: int, compute_mode: str, *, layer_elements: Optional[int] = None, pristine_slices: int = 0
+) -> int:
     """
     Client memory the merge loop needs for chunk buffers and static voxel geometry.
 
-    ``retained_chunks * time_chunk * n_voxels * 4`` (int32 ID chunks) plus
-    ``5 * n_voxels * 8``: the five float64 ``(z, y, x)`` arrays of the vertical geometry the
-    client holds for the whole run (layer top, bottom, thickness and midpoint depth, and the
-    cell volume; the loop reads the volumes and the midpoints). ``retained_chunks`` is 2 for
-    ``streaming`` and 11 for ``persist``.
+    Counts the retained int32 ID chunks, any pristine slices, the dense float64 cell
+    volumes and four float64 layer arrays. There are 2 retained chunks in
+    ``streaming`` and 11 in ``persist``.
 
-    Not counted: the two boolean wet masks (1 B per voxel each), the one int32 empty slice
-    (4 B per voxel), the three float64 horizontal partition coordinates (per column, a factor
-    ``nz`` smaller), per-merge partition buffers, and the dask graph.
+    Not counted: wet masks, horizontal geometry, object and overlap tables, temporary
+    working buffers and the Dask graph.
 
     Parameters
     ----------
@@ -252,6 +307,10 @@ def merge_loop_client_bytes(n_voxels: int, time_chunk: int, compute_mode: str) -
         Time chunk width of the ID field.
     compute_mode : {'streaming', 'persist'}
         Tracker compute mode.
+    layer_elements : int, optional
+        Elements per layer array. Defaults to ``n_voxels`` for dense geometry.
+    pristine_slices : int, default=0
+        Maximum number of extra copies of edited slices used to certify splits.
 
     Returns
     -------
@@ -265,7 +324,9 @@ def merge_loop_client_bytes(n_voxels: int, time_chunk: int, compute_mode: str) -
             context={"compute_mode": compute_mode, "valid": sorted(_RETAINED_CHUNKS)},
         )
     n_voxels, time_chunk = int(n_voxels), int(time_chunk)
-    return _RETAINED_CHUNKS[compute_mode] * time_chunk * n_voxels * 4 + _STATIC_FLOAT64_PER_VOXEL * n_voxels * 8
+    layer_elements = n_voxels if layer_elements is None else int(layer_elements)
+    id_buffers = (_RETAINED_CHUNKS[compute_mode] * time_chunk + pristine_slices) * n_voxels * 4
+    return id_buffers + (n_voxels + 4 * layer_elements) * 8
 
 
 def consolidate_volumes(
@@ -278,6 +339,8 @@ def consolidate_volumes(
     ledger: Optional[MergeLedger] = None,
     time_value=None,
     split_geometry: Optional[SplitGeometry] = None,
+    overlaps: Optional[OverlapTable] = None,
+    water_components: Optional[Tuple[_WaterComponents, _WaterComponents]] = None,
 ) -> NDArray[np.int32]:
     """
     Give one ID to the pieces of ``prev1`` that continue a single object of ``prev2``.
@@ -304,16 +367,21 @@ def consolidate_volumes(
     split_geometry : SplitGeometry, optional
         Labels the pieces that decide a split. A rename is not itself a split: the pieces of one
         partition, or an object already in two pieces, also link one parent to several children.
+    overlaps : OverlapTable, optional
+        Active boundary's raw overlaps, updated when objects are renamed.
+    water_components : tuple, optional
+        Pristine components and ownership of the earlier and later slices.
 
     Returns
     -------
     numpy.ndarray
         The consolidated ``prev1`` (a new array when anything was renamed; ``prev1`` itself otherwise).
     """
-    pairs, overlap = volume_overlaps(prev2.ravel(), prev1.ravel(), cell_volume.ravel())
-    if pairs.shape[0] == 0:
-        return prev1
-    linked = pairs[link_mask(pairs, overlap, store, threshold)]
+    flat_prev, flat_cur, flat_volume = prev2.ravel(), prev1.ravel(), cell_volume.ravel()
+    if overlaps is None:
+        linked, _ = _linked_pairs(flat_prev, flat_cur, store, flat_volume, threshold)
+    else:
+        linked, _ = overlaps.linked(store, threshold)
     if linked.shape[0] == 0:
         return prev1
 
@@ -326,6 +394,8 @@ def consolidate_volumes(
     kept: List[int] = []
     renamed_onto: Dict[int, int] = {}
     candidates: List[Tuple[int, List[int]]] = []
+    changed = set()
+    index = overlaps.current_index if overlaps is not None else None
     # Parents in ascending order; each sees the store as left by the previous one, as in 3-D.
     for parent in splitting.tolist():
         if parent not in store:
@@ -336,7 +406,22 @@ def consolidate_volumes(
             continue
         others = sorted({int(c) for c in children[1:].tolist() if int(c) in store and int(c) != first})
         if others:
-            out = np.where(np.isin(out, others), np.int32(first), out).astype(prev1.dtype, copy=False)
+            if overlaps is None and water_components is None:
+                out = np.where(np.isin(out, others), np.int32(first), out).astype(prev1.dtype, copy=False)
+            else:
+                if out is prev1:
+                    out = prev1.copy(order="C")
+                    if index is None:
+                        index = ObjectIndex.from_slice(flat_cur)
+                    if water_components is not None:
+                        water_components[1].preserve()
+                if water_components is not None:
+                    water_components[1].consolidate(first, others, index)
+                flat_out = out.ravel()
+                for oid in others:
+                    flat_out[index.voxels(oid)] = first
+                index.rename(others, first)
+                changed.update([first, *others])
             for oid in others:
                 store.drop(oid)
             logger.debug(f"Consolidated {others} into {first} (parent {parent})")
@@ -347,13 +432,24 @@ def consolidate_volumes(
         kept.append(first)
 
     if ledger is not None and split_geometry is not None and candidates:
-        water = split_geometry.water_pieces(out != 0)
+        water = (
+            split_geometry.water_pieces(out != 0)
+            if water_components is None
+            else water_components[1].labels.reshape(split_geometry.wet.shape)
+        )
         for parent, children in candidates:
             # A later parent can rename this parent's kept ID in turn, so follow it to the survivor.
             survivor = children[0]
             while survivor in renamed_onto:
                 survivor = renamed_onto[survivor]
-            if split_geometry.separates(prev2 == parent, out == survivor, water):
+            split = None
+            if water_components is not None:
+                voxels = index.voxels(survivor)
+                intersection = voxels[flat_prev[voxels] == parent]
+                split = water_components[0].certifies_split(parent, intersection, water_components[1])
+            if split is None:
+                split = split_geometry.separates(prev2 == parent, out == survivor, water)
+            if split:
                 ledger.record_split(time_value, parent, children)
 
     # Recompute the kept objects' volumes from the consolidated slice, with the store's own
@@ -361,6 +457,9 @@ def consolidate_volumes(
     alive = [k for k in kept if k in store]
     if alive:
         store.update_from_slice(np.where(np.isin(out, alive), out, 0), cell_volume)
+    if overlaps is not None and changed:
+        overlaps.current_index = index
+        overlaps.refresh(flat_prev, out.ravel(), flat_volume, changed)
     return out
 
 
@@ -388,6 +487,8 @@ def _resolve_merge(
     allocator: IDAllocator,
     coords: ScaledCoords,
     cell_volume: NDArray[np.float64],
+    *,
+    components: Optional[_WaterComponents] = None,
 ) -> Tuple[NDArray[np.int32], NDArray[np.float64]]:
     """
     Partition one merged child among its parents.
@@ -441,6 +542,8 @@ def _resolve_merge(
     parent_vox = [index_prev.voxels(p) for p in parent_ids.tolist()]
     labels = child_ids[partition_child(child_vox, parent_vox, parent_ids, coords)]
 
+    if components is not None:
+        components.preserve()
     slice_t[child_vox] = labels
     index_t.reassign(child_id, child_vox, labels)
 
@@ -448,7 +551,9 @@ def _resolve_merge(
     # identifying the pieces directly. A piece that received no voxel is dropped.
     present = np.zeros(child_ids.size, dtype=bool)
     if child_vox.size:
-        uniq, inverse = np.unique(labels, return_inverse=True)
+        uniq, inverse, counts = np.unique(labels, return_inverse=True, return_counts=True)
+        if components is not None:
+            components.partition(child_vox, uniq, counts)
         sums = np.bincount(inverse.ravel(), weights=cell_volume[child_vox], minlength=uniq.size)
         for oid, vol in zip(uniq.tolist(), sums.tolist()):
             store.set(oid, vol)
@@ -502,6 +607,8 @@ def _resolve_merges(
     cell_volume: NDArray[np.float64],
     ledger: MergeLedger,
     time_value,
+    *,
+    components: Optional[_WaterComponents] = None,
 ) -> NDArray[np.int32]:
     """
     Partition every child in ``merging`` among its linked parents, in place, and record each merge.
@@ -525,6 +632,7 @@ def _resolve_merges(
             block,
             coords,
             cell_volume,
+            components=components,
         )
         ledger.times.append(time_value)
         ledger.parent_ids.append(pairs[rows, 0].astype(np.int32))
@@ -545,13 +653,17 @@ def _resolve_timestep(
     time_value,
     absolute_t: int,
     max_iterations: int,
+    *,
+    overlaps: Optional[OverlapTable] = None,
+    components: Optional[_WaterComponents] = None,
 ) -> NDArray[np.int32]:
     """Resolve merges at one timestep, in place, until no child has more than one linked parent."""
     iteration = 0
     index_prev: Optional[ObjectIndex] = None
-    index_t: Optional[ObjectIndex] = None
+    if overlaps is None:
+        overlaps = OverlapTable(prev, cur, cell_volume)
     while True:
-        pairs, overlap = _linked_pairs(prev, cur, store, cell_volume, threshold)
+        pairs, overlap = overlaps.linked(store, threshold)
         merging = np.empty(0, dtype=np.int64)
         if pairs.shape[0]:
             children, counts = np.unique(pairs[:, 1], return_counts=True)
@@ -567,14 +679,29 @@ def _resolve_timestep(
                 suggestions=["Raise overlap_threshold so fewer weak overlaps count as merges"],
                 context={"timestep": absolute_t, "unresolved_children": merging.tolist()[:20]},
             )
-        if index_t is None:
+        if index_prev is None:
             # Built once per timestep: t-1 does not change here, and the t index is kept
             # current by each partition.
             index_prev = ObjectIndex.from_slice(prev)
-            index_t = ObjectIndex.from_slice(cur)
+            overlaps.current_index = ObjectIndex.from_slice(cur)
+        first_edit = len(ledger.child_ids)
         cur = _resolve_merges(
-            cur, index_t, index_prev, pairs, overlap, merging, store, allocator, coords, cell_volume, ledger, time_value
+            cur,
+            overlaps.current_index,
+            index_prev,
+            pairs,
+            overlap,
+            merging,
+            store,
+            allocator,
+            coords,
+            cell_volume,
+            ledger,
+            time_value,
+            components=components,
         )
+        changed = {int(oid) for children in ledger.child_ids[first_edit:] for oid in children}
+        overlaps.refresh(prev, cur, cell_volume, changed)
         iteration += 1
 
 
@@ -612,6 +739,8 @@ def split_and_merge_volumetric(
     max_iterations: int = MAX_MERGE_ITERATIONS,
     max_gap_m: Optional[float] = None,
     wrap_x: Optional[bool] = None,
+    pristine_labels: bool = False,
+    links_out: Optional[List[NDArray[np.int64]]] = None,
 ) -> Tuple[xr.DataArray, VolumeStore, MergeLedger]:
     """
     Consolidate splits and resolve merges over a 4-D ID field.
@@ -646,6 +775,11 @@ def split_and_merge_volumetric(
         and record splits. Without both, no split is recorded.
     wrap_x : bool, optional
         Whether identification joined across the periodic-longitude seam.
+    pristine_labels : bool, default=False
+        Use the input IDs as water-component labels. Only set for the unedited
+        output of identification under the supplied gap and seam rules.
+    links_out : list, optional
+        Append final linked pairs for each nonempty boundary in chronological order.
 
     Returns
     -------
@@ -688,19 +822,18 @@ def split_and_merge_volumetric(
         writer = None
         id_field = id_field.persist()
 
-    zeros = np.zeros(n_voxels, dtype=np.int32)
     chunk_sizes = list(id_field.chunks[0])
     chunk_bounds = np.cumsum([0] + chunk_sizes)
     n_chunks = len(chunk_sizes)
-    # (start, end, (n, z, y, x) values, (n, voxels) flat view of the same buffer)
-    updated: List[Tuple[int, int, NDArray[np.int32], NDArray[np.int32]]] = []
+    updated: List[Tuple[int, int, NDArray[np.int32]]] = []
+    previous = previous_water = None
 
     def flush(entries) -> None:
         nonlocal id_field
-        for start, end, values, _ in entries:
+        for start, end, values in entries:
             if writer is not None:
                 writer.write(start, end, id_field.isel({timedim: slice(start, end)}).copy(data=values))
-            else:
+            elif end > start:
                 id_field[{timedim: slice(start, end)}] = values
 
     for chunk_idx in range(n_chunks):
@@ -711,76 +844,60 @@ def split_and_merge_volumetric(
 
         for relative_t in range(n):
             absolute_t = chunk_start + relative_t
-            if relative_t > 1:
-                prev2, prev1 = flat[relative_t - 2], flat[relative_t - 1]
-            elif relative_t == 1:
-                prev1 = flat[0]
-                prev2 = updated[-1][3][-1] if updated else zeros
-            else:
-                if updated:
-                    last = updated[-1][3]
-                    prev2 = last[-2] if last.shape[0] >= 2 else zeros
-                    prev1 = last[-1]
-                else:
-                    prev2 = prev1 = zeros
-
-            # Consolidate t-1 against t-2 whenever t-1 is in this chunk.
-            if relative_t > 0:
-                flat[relative_t - 1] = consolidate_volumes(
-                    prev2,
-                    prev1,
+            current = flat[relative_t]
+            current_water = _WaterComponents(current) if pristine_labels and split_geometry is not None else None
+            if previous is not None:
+                overlaps = OverlapTable(previous, current, cell_volume)
+                _resolve_timestep(
+                    previous,
+                    current,
+                    store,
+                    allocator,
+                    coords,
+                    cell_volume,
+                    overlap_threshold,
+                    ledger,
+                    time_values[absolute_t],
+                    absolute_t,
+                    max_iterations,
+                    overlaps=overlaps,
+                    components=current_water,
+                )
+                settled = consolidate_volumes(
+                    previous,
+                    current,
                     store,
                     cell_volume,
                     overlap_threshold,
                     ledger=ledger,
-                    time_value=time_values[absolute_t - 1],
+                    time_value=time_values[absolute_t],
                     split_geometry=split_geometry,
+                    overlaps=overlaps,
+                    water_components=(previous_water, current_water) if current_water is not None else None,
                 )
-                prev1 = flat[relative_t - 1]
+                if settled is not current:
+                    current[:] = settled
+                del settled
+                if links_out is not None:
+                    # Both IDs and volumes are final at this boundary. Consolidation
+                    # can make formerly subthreshold pairs pass.
+                    pairs, _ = overlaps.linked(store, overlap_threshold)
+                    if pairs.size:
+                        links_out.append(pairs)
+                del overlaps
+            previous, previous_water = current, current_water
 
-            flat[relative_t] = _resolve_timestep(
-                prev1,
-                flat[relative_t],
-                store,
-                allocator,
-                coords,
-                cell_volume,
-                overlap_threshold,
-                ledger,
-                time_values[absolute_t],
-                absolute_t,
-                max_iterations,
-            )
-
-        # Consolidate the chunk's last timestep against the one before it; a one-step chunk
-        # takes that reference from the previous chunk, so the result is chunking-invariant.
-        if n >= 2 or updated:
-            reference = flat[-2] if n >= 2 else updated[-1][3][-1]
-            flat[-1] = consolidate_volumes(
-                reference,
-                flat[-1],
-                store,
-                cell_volume,
-                overlap_threshold,
-                ledger=ledger,
-                time_value=time_values[chunk_end - 1],
-                split_geometry=split_geometry,
-            )
-
-        updated.append((chunk_start, chunk_end, values, flat))
+        updated.append((chunk_start, chunk_end, values))
 
         if chunk_idx % 10 == 0:
             logger.info(f"4-D split/merge: chunk {chunk_idx} of {n_chunks}")
 
-        # Flush finished chunks; the last one is always retained as the next chunk's t-1/t-2.
+        # Retain the latest chunk for the next boundary.
         if len(updated) > 1 and (writer is not None or chunk_idx % _PERSIST_FLUSH_EVERY == 0):
             flush(updated[:-1])
             updated = updated[-1:]
             if writer is None:
                 id_field = id_field.persist()
-
-        # Drop every name that can still view an older chunk's buffer.
-        values = flat = prev1 = prev2 = reference = last = None
 
     flush(updated)
     updated = []

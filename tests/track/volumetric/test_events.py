@@ -333,12 +333,13 @@ def _oracle(values_t, geom, lat2, lon2, ids):
                 v = float(geom.cell_volume[k, j, i])
                 a = acc[e]
                 a["v"] += v
-                a["vm"] += v * float(geom.midpoint[k, j, i])
+                layer = k if geom.midpoint.ndim == 1 else (k, j, i)
+                a["vm"] += v * float(geom.midpoint[layer])
                 a["sx"] += v * float(ex[j, i])
                 a["sy"] += v * float(ey[j, i])
                 a["sz"] += v * float(ez[j, i])
-                a["top"] = min(a["top"], float(geom.top[k, j, i]))
-                a["bot"] = max(a["bot"], float(geom.bottom[k, j, i]))
+                a["top"] = min(a["top"], float(geom.top[layer]))
+                a["bot"] = max(a["bot"], float(geom.bottom[layer]))
                 columns[e].add(j * nx + i)
     for e, cols in columns.items():
         for c in sorted(cols):  # columns in C (y, x) order

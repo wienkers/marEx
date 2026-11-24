@@ -35,19 +35,20 @@ class VerticalGeometry:
     """
     Vertical geometry of a structured ``(z, y, x)`` grid.
 
-    Depth arrays are positive-down metres in ascending-depth order. ``top``,
-    ``bottom``, ``thickness``, ``midpoint`` and ``cell_volume`` are 0.0 on dry
-    cells and are only meaningful where ``wet`` is True.
+    Depth arrays are positive-down metres in ascending-depth order. Layer quantities
+    are ``(z,)`` for depth-only interfaces or ``(z, y, x)`` for per-cell geometry,
+    and are only meaningful where ``wet`` is True. Dense layer quantities and cell
+    volumes are zero on dry cells.
 
     Attributes
     ----------
     top, bottom : numpy.ndarray
-        Layer interfaces, shape ``(z, y, x)``. A partial cell keeps its standard
+        Layer interfaces. A partial cell keeps its standard
         top interface and is shortened from below.
     thickness : numpy.ndarray
-        Partial-cell-aware layer thickness, shape ``(z, y, x)``.
+        Partial-cell-aware layer thickness.
     midpoint : numpy.ndarray
-        ``(top + bottom) / 2``, shape ``(z, y, x)``.
+        ``(top + bottom) / 2``.
     cell_area_m2 : numpy.ndarray
         Horizontal cell area (m^2), shape ``(y, x)``.
     cell_volume : numpy.ndarray
@@ -140,7 +141,7 @@ def _interfaces_from_bounds(
     flip: bool,
     shape: Tuple[int, int, int],
 ) -> Tuple[NDArray, NDArray]:
-    """Return ``(top, bottom)`` as ``(z, y, x)`` float64, positive down and ascending."""
+    """Return positive-down float64 interfaces, retaining the bounds' spatial rank."""
     dims = set(layer_bounds.dims)
     extra = dims - {zdim, ydim, xdim}
     if zdim not in dims or len(extra) != 1:
@@ -174,7 +175,6 @@ def _interfaces_from_bounds(
             raise _fail(f"layer_bounds has shape {arr.shape}, expected {(nz, ny, nx, 2)}")
     else:
         arr = np.asarray(layer_bounds.transpose(zdim, bdim).values, dtype=np.float64)
-        arr = np.broadcast_to(arr[:, None, None, :], (nz, ny, nx, 2))
     if negate:
         arr = -arr
     if flip:
@@ -185,7 +185,7 @@ def _interfaces_from_bounds(
     return np.ascontiguousarray(top), np.ascontiguousarray(bottom)
 
 
-def _interfaces_from_centres(centres: NDArray[np.float64], shape: Tuple[int, int, int]) -> Tuple[NDArray, NDArray]:
+def _interfaces_from_centres(centres: NDArray[np.float64]) -> Tuple[NDArray, NDArray]:
     """Reconstruct ``(top, bottom)`` from level centres by the midpoint rule."""
     if centres.size < 2:
         raise _fail(
@@ -196,9 +196,7 @@ def _interfaces_from_centres(centres: NDArray[np.float64], shape: Tuple[int, int
     first = max(2.0 * centres[0] - mid[0], 0.0)
     last = 2.0 * centres[-1] - mid[-1]
     interfaces = np.concatenate([[first], mid, [last]])
-    top = np.broadcast_to(interfaces[:-1, None, None], shape).copy()
-    bottom = np.broadcast_to(interfaces[1:, None, None], shape).copy()
-    return top, bottom
+    return interfaces[:-1].copy(), interfaces[1:].copy()
 
 
 def _area_units_factor(cell_areas: xr.DataArray) -> float:
@@ -261,7 +259,7 @@ def _cell_area_m2(
     return np.ascontiguousarray(area)
 
 
-def _median_over_wet_columns(values: NDArray[np.float64], counts: NDArray[np.int64]) -> float:
+def _median_over_wet_cells(values: NDArray[np.float64], counts: NDArray[np.int64]) -> float:
     """Median of ``values`` where each entry is repeated ``counts`` times (matches ``numpy.median``)."""
     keep = counts > 0
     v = values[keep]
@@ -271,6 +269,8 @@ def _median_over_wet_columns(values: NDArray[np.float64], counts: NDArray[np.int
     cum = np.cumsum(c[order])
     n = int(cum[-1])
     lo = v[np.searchsorted(cum, (n - 1) // 2, side="right")]
+    if n % 2:
+        return float(lo)
     hi = v[np.searchsorted(cum, n // 2, side="right")]
     return float(0.5 * (lo + hi))
 
@@ -378,16 +378,19 @@ def build_vertical_geometry(
             'layer_bounds="from_centres": layer interfaces are reconstructed at midpoints between level '
             "centres, so layer thicknesses and volumes are approximate. Pass explicit layer_bounds for exact volumes."
         )
-        top, bottom = _interfaces_from_centres(centres, shape)
+        top, bottom = _interfaces_from_centres(centres)
         source = "reconstructed_from_centres"
     else:
         top, bottom = _interfaces_from_bounds(layer_bounds, zdim, ydim, xdim, negate, flip, shape)
         source = "bounds"
 
+    depth_only = top.ndim == 1 and layer_thickness is None
+    top_grid = top[:, None, None] if top.ndim == 1 else top
+    bottom_grid = bottom[:, None, None] if bottom.ndim == 1 else bottom
     # Depths are positive down, so a wet cell above the surface means the coordinate is really
     # positive up and is missing its 'positive' attribute.
     with np.errstate(invalid="ignore"):
-        above_surface = wet & (top < 0)
+        above_surface = wet & (top_grid < 0)
     if above_surface.any():
         raise _fail(
             f"Negative depths on {int(above_surface.sum())} wet cell(s): depths must be positive down",
@@ -402,7 +405,8 @@ def build_vertical_geometry(
         )
 
     bounds_thickness = bottom - top
-    bad = wet & ~(np.isfinite(top) & np.isfinite(bottom) & (bounds_thickness > 0))
+    thickness_grid = bounds_thickness[:, None, None] if bounds_thickness.ndim == 1 else bounds_thickness
+    bad = wet & ~(np.isfinite(top_grid) & np.isfinite(bottom_grid) & (thickness_grid > 0))
     if bad.any():
         raise _fail(
             f"layer_bounds give non-finite or non-positive thickness on {int(bad.sum())} wet cell(s)",
@@ -410,13 +414,13 @@ def build_vertical_geometry(
             context={"n_cells": int(bad.sum())},
         )
 
-    thickness = bounds_thickness
+    thickness = thickness_grid
     if layer_thickness is not None:
         thk = _to_zyx(layer_thickness, "layer_thickness", zdim, ydim, xdim, nz, shape)
         if flip:
             thk = thk[::-1]
         with np.errstate(invalid="ignore"):
-            bad = wet & ~(np.isfinite(thk) & (thk > 0) & (thk <= bounds_thickness * (1.0 + _THICKNESS_RTOL)))
+            bad = wet & ~(np.isfinite(thk) & (thk > 0) & (thk <= thickness_grid * (1.0 + _THICKNESS_RTOL)))
         if bad.any():
             raise _fail(
                 f"layer_thickness is outside (0, bounds thickness] on {int(bad.sum())} wet cell(s)",
@@ -428,8 +432,8 @@ def build_vertical_geometry(
                 context={"n_cells": int(bad.sum())},
             )
         # Rounding-level excess over the layer is clipped so interfaces stay consistent.
-        thickness = np.where(wet, np.minimum(thk, bounds_thickness), 0.0)
-        bottom = top + thickness
+        thickness = np.where(wet, np.minimum(thk, thickness_grid), 0.0)
+        bottom_grid = top_grid + thickness
         if source == "bounds":
             source = "bounds+thickness"
 
@@ -453,15 +457,25 @@ def build_vertical_geometry(
             )
         volume = np.where(wet, vol, 0.0)
     else:
-        volume = np.where(wet, area[None, :, :] * np.where(wet, thickness, 0.0), 0.0)
+        with np.errstate(invalid="ignore"):
+            volume = np.zeros(shape, dtype=np.float64)
+            np.multiply(area[None, :, :], thickness, out=volume, where=wet)
 
-    top = np.where(wet, top, 0.0)
-    bottom = np.where(wet, bottom, 0.0)
-    thickness = np.where(wet, thickness, 0.0)
-    midpoint = np.where(wet, 0.5 * (top + bottom), 0.0)
+    if depth_only:
+        wet_per_level = wet.sum(axis=(1, 2))
+        top = np.where(wet_per_level, top, 0.0)
+        bottom = np.where(wet_per_level, bottom, 0.0)
+        thickness = np.where(wet_per_level, bounds_thickness, 0.0)
+        midpoint = 0.5 * (top + bottom)
+        l_z = _median_over_wet_cells(thickness, wet_per_level)
+    else:
+        top = np.where(wet, top_grid, 0.0)
+        bottom = np.where(wet, bottom_grid, 0.0)
+        thickness = np.where(wet, thickness, 0.0)
+        midpoint = np.where(wet, 0.5 * (top + bottom), 0.0)
+        l_z = float(np.median(thickness[wet]))
 
-    l_h = _median_over_wet_columns(np.sqrt(area).ravel(), wet.sum(axis=0).ravel().astype(np.int64))
-    l_z = float(np.median(thickness[wet]))
+    l_h = _median_over_wet_cells(np.sqrt(area).ravel(), wet.sum(axis=0).ravel().astype(np.int64))
 
     for arr in (top, bottom, thickness, midpoint, area, volume, wet):
         arr.setflags(write=False)

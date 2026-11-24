@@ -619,18 +619,20 @@ tracker models the bytes it needs as
 
 .. code-block:: text
 
-   retained_chunks * time_chunk * n_voxels * 4  +  5 * n_voxels * 8
+   (retained_chunks * time_chunk + 2) * n_voxels * 4  +  (n_voxels + 4 * layer_elements) * 8
 
-where ``n_voxels = nz * ny * nx``. The first term is the int32 ID chunks, with
-``retained_chunks`` equal to 2 for ``streaming`` and 11 for ``persist``. The second is the five
-float64 arrays of vertical geometry (layer top, bottom, thickness and midpoint depth, and
-the cell volume). ``merge_loop_client_bytes`` in ``marEx.track.volumetric.merge_loop`` returns it.
+where ``n_voxels = nz * ny * nx`` and ``layer_elements`` is ``nz`` for depth-only geometry or
+``n_voxels`` for spatially varying layers. The first term is the int32 ID chunks plus two
+pristine slices used for split certification, with ``retained_chunks`` equal to 2 for
+``streaming`` and 11 for ``persist``. The second is the float64 cell volumes and four vertical
+layer arrays (top, bottom, thickness and midpoint depth). ``merge_loop_client_bytes`` in
+``marEx.track.volumetric.merge_loop`` returns it.
 
 Treat the formula as a lower bound. The wet masks, the per-merge partition buffers and the Dask
 graph are not in the model. On the GLORYS12 northeast Pacific box (36 x 361 x 601 =
 7.81 M voxels, 75 days, ``streaming``, 8 workers of 14 GB), the measured client memory above
-the pre-tracking baseline was 1.6 times the model at a time chunk of 5 (1.48 GiB peak in
-total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba
+the pre-tracking baseline was 1.6 times the earlier five-array dense model at a time chunk of 5
+(1.48 GiB peak in total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba
 baseline of about 0.6 GiB. The tracker warns when the model exceeds 8 GiB. A chunk of 5
 halved the client peak and ran faster (263 s versus 359 s) with identical events.
 

@@ -454,19 +454,6 @@ def test_subtraction_keeps_the_input_spatial_chunks(n_days):
     assert anomaly.chunksizes["lon"] == field.chunksizes["lon"]
 
 
-def test_climatology_alignment_is_bounded_for_a_spatially_whole_input():
-    """A spatially whole input must not put the whole climatology in one task."""
-    from marEx.anomaly.fixed_baseline import _align_climatology_to_input
-
-    clim = xr.DataArray(
-        dsa.zeros((366, 36, 361, 601), chunks=(366, 9, 23, 22), dtype="f4"), dims=("dayofyear", "depth", "lat", "lon")
-    )
-    whole = xr.DataArray(dsa.zeros((10, 36, 361, 601), chunks=(10, 36, 361, 601), dtype="f4"), dims=("time", "depth", "lat", "lon"))
-    tiled = whole.chunk({"depth": 9, "lat": 181, "lon": 301})
-    assert _align_climatology_to_input(clim, whole, "dayofyear").chunksizes["lat"] == clim.chunksizes["lat"]
-    assert _align_climatology_to_input(clim, tiled, "dayofyear").chunksizes["lat"] == tiled.chunksizes["lat"]
-
-
 def _sparse_clim(length=366, n_x=6, seed=1):
     """One finite day, all NaN, isolated finite days, a NaN season, and two complete cells."""
     data = np.random.default_rng(seed).normal(size=(length, n_x)).astype(np.float32)
@@ -512,13 +499,20 @@ def test_a_finer_climatology_tile_does_not_reach_the_anomaly(monkeypatch):
     assert anomaly.chunksizes["lon"] == field.chunksizes["lon"]
 
 
-def test_climatology_alignment_ignores_a_differently_chunked_coordinate():
-    from marEx.anomaly.fixed_baseline import _align_climatology_to_input
+def test_subtraction_preserves_a_differently_chunked_coordinate():
+    from marEx.core.seasonal_apply import apply_seasonal_field
 
     field = xr.DataArray(
         dsa.zeros((10, 4, 6), chunks=(10, 2, 3), dtype="f4"),
         dims=("time", "lat", "lon"),
-        coords={"area": (("lat", "lon"), dsa.ones((4, 6), chunks=(4, 6)))},
+        coords={"area": (("lon", "lat"), dsa.ones((6, 4), chunks=(6, 4)))},
     )
-    clim = xr.DataArray(dsa.zeros((366, 4, 6), chunks=(366, 1, 1), dtype="f4"), dims=("dayofyear", "lat", "lon"))
-    assert _align_climatology_to_input(clim, field, "dayofyear").chunks[1:] == field.chunks[1:]
+    clim = xr.DataArray(
+        dsa.zeros((366, 4, 6), chunks=(366, 1, 1), dtype="f4"),
+        dims=("dayofyear", "lat", "lon"),
+        coords={"dayofyear": DAILY_CYCLE.labels},
+    )
+    anomaly = apply_seasonal_field(field, clim, np.arange(1, 11), timedim="time", cycledim="dayofyear", operation="subtract")
+    assert anomaly.chunks == field.chunks
+    assert anomaly.area.chunks == field.area.chunks
+    xr.testing.assert_identical(anomaly.area, field.area)

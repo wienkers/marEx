@@ -223,7 +223,7 @@ class _EagerWrapSpy:
 
 def test_geometry_not_broadcast_over_time(tmp_path):
     """
-    Geometry reaches dask as ``(z, y, x)`` / ``(y, x)`` arrays: the wrapped geometry bytes are equal at nt=8 and nt=32.
+    Geometry reaches dask as ``(z,)``, ``(z, y, x)`` or ``(y, x)`` arrays, independent of time length.
 
     Geometry is every wrapped array that is float64 (the ID chunks are int32, the offsets int32, the
     masks bool). None may carry a time axis, whatever its length. The graph of the cell volumes is a
@@ -245,10 +245,11 @@ def test_geometry_not_broadcast_over_time(tmp_path):
     assert seen[8][0] == seen[32][0], f"eagerly wrapped geometry grew with nt: {seen[8][0]} B vs {seen[32][0]} B"
     for nt, (_total, geometry, n_keys, chunks, spatial) in seen.items():
         assert geometry, "the spy saw no geometry wrap: it is not wired to the code under test"
-        offenders = [w for w in geometry if w[0] not in (spatial, spatial[1:])]
+        offenders = [w for w in geometry if w[0] not in (spatial, spatial[:1], spatial[1:])]
         assert not offenders, f"geometry arrays with a time axis (or any other shape) wrapped at nt={nt}: {offenders}"
         assert chunks == tuple((n,) for n in spatial), chunks
         assert n_keys == 1, n_keys
-    # The geometry arrays themselves are (z, y, x) only.
-    for field in ("top", "bottom", "thickness", "midpoint", "cell_volume", "wet"):
+    for field in ("top", "bottom", "thickness", "midpoint"):
+        assert getattr(t.geom, field).shape == spatial[:1], field
+    for field in ("cell_volume", "wet"):
         assert getattr(t.geom, field).shape == spatial, field

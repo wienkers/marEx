@@ -194,10 +194,10 @@ def test_extremes_stage_rejects_bad_configuration():
                 identify(method_extreme="global_percentile", window_spatial=3, **grid),
             ),
             (
-                "window_spatial with exact",
+                "even window_spatial with exact",
                 ConfigurationError,
-                [r"window_spatial is not supported with method_percentile='exact'"],
-                identify(method_extreme="seasonal_percentile", method_percentile="exact", window_spatial=3, **grid),
+                [r"window_spatial must be an odd number"],
+                identify(method_extreme="seasonal_percentile", method_percentile="exact", window_spatial=4, **grid),
             ),
             (
                 "even window_days",

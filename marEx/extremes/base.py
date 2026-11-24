@@ -9,6 +9,7 @@ extreme-detection parameters and delegates to one of the concrete methods
 
 import warnings
 from dataclasses import dataclass, replace
+from numbers import Integral
 from statistics import NormalDist
 from typing import Dict, Literal, Optional, Tuple
 
@@ -52,10 +53,8 @@ def resolve_window_spatial(
     Sole definition of that default. :mod:`marEx.extremes.api` calls it to record
     the resolved value in the output attributes rather than restating the rule.
 
-    The default applies only to the approximate seasonal path: the exact
-    percentile path ignores ``window_spatial`` entirely, and validation rejects it
-    when a caller supplies it there, so defaulting it would only inflate
-    ``N_samples`` and hide the warning.
+    The approximate seasonal path defaults to 5 on gridded data.
+    The exact path uses a single cell unless a width is supplied.
     """
     if (
         method_extreme == "seasonal_percentile"
@@ -64,7 +63,7 @@ def resolve_window_spatial(
         and supports_spatial_window(da, dimensions)
     ):
         return 5  # Default to 5x5 spatial window for structured grids
-    return window_spatial
+    return int(window_spatial) if window_spatial is not None else None
 
 
 # Bin geometry used when the data gives no usable scale (all-NaN, or constant). These are the
@@ -424,9 +423,10 @@ def identify_extremes(
     window_days : int, default=11
         Window in days (seasonal_percentile only)
     window_spatial : int, default=None
-        Width in cells (odd) of the square spatial pooling window (seasonal_percentile
-        with method_percentile='approximate' on gridded data only). ``None`` resolves
-        to 5 (a 5x5 window) on that path and to no pooling elsewhere.
+        Positive odd width in cells of the square horizontal pooling window.
+        Applies to seasonal percentiles on structured grids. ``None`` uses a 5x5
+        window for approximate percentiles and a single cell for exact percentiles.
+        An explicit width of 1 uses a single cell on either path.
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
     precision : float, optional
@@ -702,26 +702,10 @@ def identify_extremes(
                 },
             )
 
-        # Check if window_spatial is specified when method_percentile is "exact"
-        if method_percentile == "exact":
-            logger.error(f"window_spatial={window_spatial} specified with method_percentile='exact'")
+        if isinstance(window_spatial, (bool, np.bool_)) or not isinstance(window_spatial, Integral) or window_spatial <= 0:
             raise ConfigurationError(
-                "window_spatial is not supported with method_percentile='exact'",
-                details=(
-                    "The window_spatial parameter is only implemented for the approximate percentile method. "
-                    "Exact percentile computation does not support spatial smoothing due to computational and memory "
-                    "limitations of the algorithms."
-                ),
-                suggestions=[
-                    "Remove the window_spatial parameter when using method_percentile='exact'",
-                    "Use method_percentile='approximate' if spatial smoothing is required",
-                    "Set window_spatial=None to use default behavior",
-                ],
-                context={
-                    "method_percentile": method_percentile,
-                    "window_spatial": window_spatial,
-                    "compatible_methods": ["approximate"],
-                },
+                "window_spatial must be a positive odd integer",
+                context={"window_spatial": window_spatial},
             )
 
     # Validate that window parameters are odd numbers (only for seasonal_percentile method).

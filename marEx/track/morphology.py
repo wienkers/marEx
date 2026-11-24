@@ -10,6 +10,8 @@ methods.
 """
 
 import gc
+from math import isqrt
+from operator import index
 from typing import Optional, Tuple
 
 import dask
@@ -17,9 +19,8 @@ import dask.array as dsa
 import numpy as np
 import xarray as xr
 from dask import persist
-from dask_image.ndmorph import binary_closing as binary_closing_dask
+from numba import njit
 from numpy.typing import NDArray
-from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import label as scipy_label
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
@@ -76,6 +77,253 @@ def compute_area(
     return area
 
 
+@njit(nogil=True)
+def _graph_dilation_kind(data, indices, indptr):
+    """Identify graphs requiring exact walks, a transpose, or neither."""
+    symmetric = True
+    for cell in range(indptr.size - 1):
+        has_loop = False
+        for edge in range(indptr[cell], indptr[cell + 1]):
+            if not data[edge]:
+                continue
+            neighbour = indices[edge]
+            if neighbour == cell:
+                has_loop = True
+            elif symmetric:
+                start, stop = indptr[neighbour], indptr[neighbour + 1]
+                # Reciprocal triangular meshes have at most four entries per row.
+                # Bound the search on other graphs to keep setup linear in the edge count.
+                symmetric = False
+                if stop - start <= 8:
+                    for reverse in range(start, stop):
+                        if indices[reverse] == cell and data[reverse]:
+                            symmetric = True
+                            break
+        if not has_loop:
+            return 0
+    return 2 if symmetric else 1
+
+
+@njit(nogil=True)
+def _graph_close_open(values, data, indices, indptr, wet, radius, result, queue, visited):
+    """Apply four bounded dilations with the appropriate foreground polarity."""
+    n_frames, n_cells = values.shape
+    for frame in range(n_frames):
+        for cell in range(n_cells):
+            visited[cell] = 0
+        for stamp in range(1, 5):
+            tail = 0
+            for cell in range(n_cells):
+                if stamp == 1:
+                    seed = values[frame, cell]
+                elif stamp == 2:
+                    seed = visited[cell] != 1 and wet[cell]
+                elif stamp == 3:
+                    seed = visited[cell] == 2 and wet[cell]
+                else:
+                    seed = visited[cell] != 3
+                # The wet restriction on each erosion makes land foreground before negation.
+                if seed:
+                    visited[cell] = stamp
+                    queue[tail] = cell
+                    tail += 1
+
+            head = 0
+            for _ in range(radius):
+                end_of_level = tail
+                if head == end_of_level or tail == n_cells:
+                    break
+                while head < end_of_level and tail < n_cells:
+                    cell = queue[head]
+                    head += 1
+                    for edge in range(indptr[cell], indptr[cell + 1]):
+                        neighbour = indices[edge]
+                        if visited[neighbour] != stamp and data[edge]:
+                            visited[neighbour] = stamp
+                            queue[tail] = neighbour
+                            tail += 1
+
+        for cell in range(n_cells):
+            result[frame, cell] = visited[cell] == 4
+
+
+def _unstructured_fill_block(bitmap, sp_data, indices, indptr, mask, *, radius):
+    """Close and open a time chunk using push adjacency when all walks can wait."""
+    if radius == 0:
+        result = bitmap.copy()
+        result[:, ~mask] = True
+        return result
+
+    kind = _graph_dilation_kind(sp_data, indices, indptr)
+    if kind == 0:
+        # Without self-loops, the power counts walks of exactly radius steps.
+        bitmap = sparse_bool_power(bitmap, sp_data, indices, indptr, radius)
+        bitmap[:, ~mask] = True
+        bitmap = ~sparse_bool_power(~bitmap, sp_data, indices, indptr, radius)
+        bitmap[:, ~mask] = True
+        bitmap = ~sparse_bool_power(~bitmap, sp_data, indices, indptr, radius)
+        return sparse_bool_power(bitmap, sp_data, indices, indptr, radius)
+
+    n_cells = indptr.size - 1
+    if kind == 1:
+        gather = csr_matrix((sp_data, indices, indptr), shape=(n_cells, n_cells))
+        push = gather.T.tocsr()
+        sp_data, indices, indptr = push.data, push.indices, push.indptr
+
+    result = np.empty(bitmap.shape, dtype=bool)
+    queue = np.empty(n_cells, dtype=indices.dtype)
+    visited = np.empty(n_cells, dtype=np.uint8)
+    _graph_close_open(bitmap, sp_data, indices, indptr, mask, radius, result, queue, visited)
+    return result
+
+
+@njit(nogil=True)
+def _dilate_disk_words(source, result, horizontal, scratch, half_widths, first, stop, last_mask):
+    """OR disk chords into the valid output rows of a packed longitude grid."""
+    radius = half_widths.size - 1
+    n_words = source.shape[1]
+    result[first:stop] = 0
+    expanded = source
+    enlarged = horizontal
+    other = scratch
+    width = 0
+    for dy in range(radius, -1, -1):
+        half_width = half_widths[dy]
+        while width < half_width:
+            # Shifting by at most width + 1 extends the interval without gaps even at
+            # a clipped outer work-buffer boundary.
+            step = min(half_width - width, width + 1)
+            left_shift = np.uint64(step)
+            right_shift = np.uint64(64 - step)
+            for y in range(first - dy, stop + dy):
+                for word in range(n_words):
+                    centre = expanded[y, word]
+                    spread = centre | (centre << left_shift) | (centre >> left_shift)
+                    if word > 0:
+                        spread |= expanded[y, word - 1] >> right_shift
+                    if word + 1 < n_words:
+                        spread |= expanded[y, word + 1] << right_shift
+                    enlarged[y, word] = spread
+                enlarged[y, n_words - 1] &= last_mask
+            width += step
+            expanded, enlarged, other = enlarged, other, enlarged
+
+        for y in range(first, stop):
+            for word in range(n_words):
+                result[y, word] |= expanded[y - dy, word] | expanded[y + dy, word]
+
+
+@njit(nogil=True)
+def _dilate_disk_edt(source, result, horizontal, vertices, starts, radius):
+    """Threshold the squared Euclidean distance to the nearest foreground pixel."""
+    ny, nx = source.shape
+    # A capped horizontal distance is already outside the disk.
+    cap = radius + 1
+    limit = radius * radius
+    for y in range(ny):
+        run = cap
+        for x in range(nx):
+            run = 0 if source[y, x] else min(run + 1, cap)
+            horizontal[y, x] = run * run
+        run = cap
+        for x in range(nx - 1, -1, -1):
+            run = 0 if source[y, x] else min(run + 1, cap)
+            horizontal[y, x] = min(horizontal[y, x], run * run)
+
+    for x in range(nx):
+        # Each row contributes a parabola. Keep its vertex and its first
+        # integer row on the lower envelope, clamped to the grid extent.
+        size = 0
+        for y in range(ny):
+            start = 0
+            while size:
+                previous = vertices[size - 1]
+                delta = y - previous
+                numerator = horizontal[y, x] - horizontal[previous, x] + delta * (y + previous)
+                # Round the intersection up to the first integer row the new vertex owns.
+                start = 1 + (numerator - 1) // (2 * delta)
+                if start > starts[size - 1]:
+                    break
+                size -= 1
+            if size == 0:
+                start = 0
+            if start < ny:
+                vertices[size] = y
+                starts[size] = start
+                size += 1
+
+        active = 0
+        for y in range(ny):
+            if active + 1 < size and y == starts[active + 1]:
+                active += 1
+            vertex = vertices[active]
+            delta = y - vertex
+            result[y, x] = horizontal[vertex, x] + delta * delta <= limit
+
+
+def _structured_fill_block(bitmap, *, radius, regional):
+    """Close and open each horizontal plane using the same four-radius halo."""
+    radius = index(radius)
+    ny, nx = bitmap.shape[-2:]
+    result = np.empty(bitmap.shape, dtype=bool)
+    if result.size == 0:
+        return result
+    # A change at any outer boundary can travel at most one radius per pass.
+    halo = 4 * radius
+    ny_padded, nx_padded = ny + 2 * halo, nx + 2 * halo
+    core = slice(halo, halo + ny), slice(halo, halo + nx)
+    mode = "edge" if regional else "wrap"
+    planes = bitmap.reshape(-1, ny, nx)
+    outputs = result.reshape(-1, ny, nx)
+    erosions = (False, True, True, False)
+
+    if radius <= 32:
+        n_words = (nx_padded + 63) // 64
+        shape = ny_padded, n_words
+        packed, work, horizontal, scratch = (np.empty(shape, dtype=np.uint64) for _ in range(4))
+        half_widths = np.array([isqrt(radius * radius - dy * dy) for dy in range(radius + 1)], dtype=np.int64)
+        last_mask = np.uint64((1 << (nx_padded - 64 * (n_words - 1))) - 1)
+        packed_bytes = np.zeros((ny_padded, n_words * 8), dtype=np.uint8)
+        first_byte, leading_bits = divmod(halo, 8)
+        for plane, output in zip(planes, outputs):
+            padded = np.pad(np.pad(plane, ((0, 0), (halo, halo)), mode=mode), ((halo, halo), (0, 0)), mode="edge")
+            byte_rows = np.packbits(padded.astype(bool, copy=False), axis=1, bitorder="little")
+            packed_bytes[:, : byte_rows.shape[1]] = byte_rows
+            packed[:] = packed_bytes.view("<u8")
+            for step, erosion in enumerate(erosions):
+                first, stop = step * radius, ny_padded - step * radius
+                if erosion:
+                    np.bitwise_not(packed[first:stop], out=packed[first:stop])
+                    packed[first:stop, -1] &= last_mask
+                first, stop = first + radius, stop - radius
+                _dilate_disk_words(packed, work, horizontal, scratch, half_widths, first, stop, last_mask)
+                if erosion:
+                    np.bitwise_not(work[first:stop], out=work[first:stop])
+                    work[first:stop, -1] &= last_mask
+                packed, work = work, packed
+            bytes_in_core_rows = packed[core[0]].astype("<u8", copy=False).view(np.uint8)
+            core_bits = np.unpackbits(bytes_in_core_rows[:, first_byte:], axis=1, count=leading_bits + nx, bitorder="little")
+            output[:] = core_bits[:, leading_bits:]
+    else:
+        shape = ny_padded, nx_padded
+        work = np.empty(shape, dtype=bool)
+        horizontal = np.empty(shape, dtype=np.int64)
+        vertices = np.empty(ny_padded, dtype=np.int64)
+        starts = np.empty(ny_padded, dtype=np.int64)
+        for plane, output in zip(planes, outputs):
+            lon_padded = np.pad(plane, ((0, 0), (halo, halo)), mode=mode)
+            padded = np.pad(lon_padded, ((halo, halo), (0, 0)), mode="edge").astype(bool, copy=False)
+            for erosion in erosions:
+                if erosion:
+                    np.logical_not(padded, out=padded)
+                _dilate_disk_edt(padded, work, horizontal, vertices, starts, radius)
+                if erosion:
+                    np.logical_not(work, out=work)
+                padded, work = work, padded
+            output[:] = padded[core]
+    return result
+
+
 def fill_holes(
     data_bin: xr.DataArray,
     default_R_fill: int,
@@ -109,53 +357,14 @@ def fill_holes(
         R_fill = default_R_fill
 
     if unstructured_grid:
-        # Process unstructured grid using sparse matrix operations
-        # _Put the data into an xarray.DataArray to pass into the apply_ufunc_ -- Needed for correct memory management !
-        # One chunk each: they are core dimensions, and left to dask's automatic chunking a large
-        # mesh splits them (indices alone is ~0.8 GB at 14.9 M cells), which apply_gufunc then has
-        # to merge back while re-splitting the loop dimension.
+        # Keep each CSR vector in a single chunk. Splitting a core dimension
+        # forces Dask to join it again and subdivide the time chunks.
         sp_data = xr.DataArray(dilate_sparse.data, dims="sp_data").chunk(-1)
         indices = xr.DataArray(dilate_sparse.indices, dims="indices").chunk(-1)
         indptr = xr.DataArray(dilate_sparse.indptr, dims="indptr").chunk(-1)
 
-        def binary_open_close(
-            bitmap_binary: NDArray[np.bool_],
-            sp_data: NDArray[np.bool_],
-            indices: NDArray[np.int32],
-            indptr: NDArray[np.int32],
-            mask: NDArray[np.bool_],
-        ) -> NDArray[np.bool_]:
-            """
-            Binary opening and closing for unstructured grid.
-            Uses sparse matrix power operations for efficiency.
-            """
-            # Closing: Dilation then Erosion (fills small gaps)
-
-            # Dilation
-            bitmap_binary = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, R_fill)
-
-            # Set land values to True (to avoid artificially eroding the shore)
-            bitmap_binary[:, ~mask] = True
-
-            # Erosion (negated dilation of negated image)
-            bitmap_binary = ~sparse_bool_power(~bitmap_binary, sp_data, indices, indptr, R_fill)
-
-            # Opening: Erosion then Dilation (removes small objects)
-
-            # Set land values to True (to avoid artificially eroding the shore)
-            bitmap_binary[:, ~mask] = True
-
-            # Erosion
-            bitmap_binary = ~sparse_bool_power(~bitmap_binary, sp_data, indices, indptr, R_fill)
-
-            # Dilation
-            bitmap_binary = sparse_bool_power(bitmap_binary, sp_data, indices, indptr, R_fill)
-
-            return bitmap_binary
-
-        # Apply the operations
         data_bin = xr.apply_ufunc(
-            binary_open_close,
+            _unstructured_fill_block,
             data_bin,
             sp_data,
             indices,
@@ -175,61 +384,56 @@ def fill_holes(
                 "output_sizes": {xdim: data_bin.sizes[xdim]},
             },
             dask="parallelized",
+            kwargs={"radius": R_fill},
         )
 
     else:
-        # Structured grid: exact Euclidean-disk closing + opening via distance transforms.
-        #
-        # The previous implementation used dask_image.ndmorph.binary_closing/opening with a
-        # brute-force disk structuring element (O(N * R_fill^2) per pixel) split into a large
-        # per-chunk task graph; profiling showed this morphology dominated tracker preprocessing
-        # (deferred into the "Small object filtering" step). The distance-transform formulation
-        # is O(N) per 2D slice regardless of R_fill, embarrassingly parallel across time, and a
-        # tiny task graph. Padding by 4*R_fill resolves the full closing+opening reach (4*R_fill)
-        # exactly at the periodic-longitude seam -- this also removes a latent under-padding
-        # artifact in the old code, which padded only 2*R_fill.
-        mode = "wrap" if not regional_mode else "edge"
-
-        if R_fill == 0:
-            pass  # No morphological operations needed
-        else:
-            r_squared = R_fill * R_fill
-            pad_width = 4 * R_fill
-
-            def edt_close_open(bitmap_binary: NDArray[np.bool_]) -> NDArray[np.bool_]:
-                """Euclidean-disk closing (fill gaps) then opening (remove specks) on one slice."""
-                # Pad longitude (axis 1) with `mode` (periodic wrap for global grids); always pad
-                # latitude (axis 0) with edge. The poles are not periodic, so a single mode="wrap"
-                # pad coupled features across the north/south array boundary.
-                lon_padded = np.pad(bitmap_binary, ((0, 0), (pad_width, pad_width)), mode=mode)
-                padded = np.pad(lon_padded, ((pad_width, pad_width), (0, 0)), mode="edge").astype(bool)
-
-                def dilate(b: NDArray[np.bool_]) -> NDArray[np.bool_]:
-                    # True where the nearest foreground pixel is within disk radius R_fill.
-                    return distance_transform_edt(~b) ** 2 <= r_squared
-
-                def erode(b: NDArray[np.bool_]) -> NDArray[np.bool_]:
-                    # True where the nearest background pixel is beyond disk radius R_fill.
-                    return distance_transform_edt(b) ** 2 > r_squared
-
-                closed = erode(dilate(padded))
-                opened = dilate(erode(closed))
-                return opened[pad_width:-pad_width, pad_width:-pad_width]
-
+        if R_fill != 0:
             data_bin = xr.apply_ufunc(
-                edt_close_open,
+                _structured_fill_block,
                 data_bin,
                 input_core_dims=[[ydim, xdim]],
                 output_core_dims=[[ydim, xdim]],
                 output_dtypes=[np.bool_],
-                vectorize=True,
+                vectorize=False,
                 dask="parallelized",
+                kwargs={"radius": R_fill, "regional": regional_mode},
             )
 
         # Mask out edge features from morphological operations
         data_bin = data_bin.where(mask, drop=False, other=False)
 
     return data_bin
+
+
+@njit(nogil=True)
+def _close_time_runs(values, max_gap):
+    """Close bounded false runs in a contiguous (time, cells) block."""
+    closed = values.copy()
+    n_time, n_cells = values.shape
+    # Keep the previous-hit array and the rows being revisited by short fills in cache.
+    tile_cells = 8192
+    last = np.empty(min(tile_cells, n_cells), dtype=np.int64)
+    for start in range(0, n_cells, tile_cells):
+        width = min(tile_cells, n_cells - start)
+        last[:width] = -1
+        for t in range(n_time):
+            for j in range(width):
+                cell = start + j
+                if values[t, cell]:
+                    prev = last[j]
+                    if prev >= 0 and t - prev - 1 <= max_gap:
+                        closed[prev + 1 : t, cell] = True
+                    last[j] = t
+    return closed
+
+
+def _close_time_block(block, *, max_gap, time_axis):
+    time_first = np.ascontiguousarray(np.moveaxis(block, time_axis, 0))
+    if time_first.size == 0:
+        return block
+    closed = _close_time_runs(time_first.reshape(time_first.shape[0], -1), max_gap)
+    return np.moveaxis(closed.reshape(time_first.shape), 0, time_axis)
 
 
 def fill_time_gaps(
@@ -249,8 +453,9 @@ def fill_time_gaps(
     """
     Fill temporal gaps between objects.
 
-    Performs binary closing (dilation then erosion) along the time dimension
-    to fill small time gaps between objects.
+    Fill runs of at most `T_fill` inactive samples bounded by active samples.
+    This is the temporal closing with a flat kernel of length `T_fill + 1`
+    and false padding at the record ends.
 
     Parameters
     ----------
@@ -265,33 +470,22 @@ def fill_time_gaps(
     if T_fill == 0:
         return data_bin
 
-    # dask_image's overlap step calls ensure_minimum_chunksize: any time chunk shorter than
-    # the kernel depth is refilled from its neighbour, which SHIFTS an interior boundary and
-    # never shifts it back. Remember the input's layout so it can be restored below.
+    # Dask can rebalance time chunks shorter than the halo. Restore the caller's
+    # boundaries after closing, including the short final chunk used for Zarr writes.
     time_axis = data_bin.dims.index(timedim)
     input_time_chunks = data_bin.chunks[time_axis] if data_bin.chunks is not None else None
-
-    # Create temporal structuring element
-    kernel_size = T_fill + 1  # This will then fill a maximum hole size of T_fill
-    time_kernel = np.ones(kernel_size, dtype=bool)
-
-    if ydim is None:
-        # Unstructured grid has only 1 additional dimension
-        time_kernel = time_kernel[:, np.newaxis]
-    elif data_bin.ndim == 4:
-        # Volumetric (time, z, y, x): closing along time only
-        time_kernel = time_kernel[:, np.newaxis, np.newaxis, np.newaxis]
-    else:
-        time_kernel = time_kernel[:, np.newaxis, np.newaxis]
-
-    # Pad in time to avoid edge effects
-    data_bin = data_bin.pad({timedim: kernel_size}, mode="constant", constant_values=False)
-
-    # Apply temporal closing
-    data_bin_dask = data_bin.data
-    closed_dask_array = binary_closing_dask(data_bin_dask, structure=time_kernel)
-
-    # Convert back to xarray.DataArray
+    # Each cell in a fillable run is at most T_fill samples from either bounding hit.
+    depth = min(T_fill, max(0, data_bin.sizes[timedim] - 1))
+    closed_dask_array = dsa.map_overlap(
+        _close_time_block,
+        dsa.asarray(data_bin.data, dtype=bool),
+        depth={time_axis: depth},
+        boundary="none",
+        dtype=bool,
+        meta=np.empty((0,) * data_bin.ndim, dtype=bool),
+        max_gap=T_fill,
+        time_axis=time_axis,
+    )
     data_bin_filled = xr.DataArray(
         closed_dask_array,
         coords=data_bin.coords,
@@ -299,15 +493,6 @@ def fill_time_gaps(
         attrs=data_bin.attrs,
     )
 
-    # Remove padding
-    data_bin_filled = data_bin_filled.isel({timedim: slice(kernel_size, -kernel_size)})
-
-    # Realign to the boundaries we were handed. Without this the tail chunk that the overlap
-    # step rebalanced stays rebalanced: a (..., 25, 1) record comes back as (..., 24, 2) and a
-    # (..., 3, 1) one as (..., 4). Both are illegal for zarr, which permits a short FINAL chunk
-    # and nothing else, so ObjectIDRegionWriter._initialise dies mid-merge under
-    # compute_mode="streaming" -- observed at n_time=951, time chunk 25, T_fill=4. The
-    # realignment touches only the tail chunks, so it is not an all-to-all.
     if input_time_chunks is not None and data_bin_filled.chunks is not None:
         if data_bin_filled.chunks[time_axis] != input_time_chunks:
             data_bin_filled = data_bin_filled.chunk({timedim: input_time_chunks})

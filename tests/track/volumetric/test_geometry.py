@@ -49,10 +49,10 @@ def _build(z=CENTRES, attrs=None, wet=None, **kw):
 def test_bounds_1d():
     g = _build()
     assert isinstance(g, VerticalGeometry)
-    np.testing.assert_array_equal(g.thickness[:, 0, 0], [10, 10, 20])
-    np.testing.assert_array_equal(g.midpoint[:, 0, 0], [5, 15, 30])
-    np.testing.assert_array_equal(g.top[:, 0, 0], [0, 10, 20])
-    np.testing.assert_array_equal(g.bottom[:, 0, 0], [10, 20, 40])
+    np.testing.assert_array_equal(g.thickness, [10, 10, 20])
+    np.testing.assert_array_equal(g.midpoint, [5, 15, 30])
+    np.testing.assert_array_equal(g.top, [0, 10, 20])
+    np.testing.assert_array_equal(g.bottom, [10, 20, 40])
     np.testing.assert_array_equal(g.cell_volume[:, 0, 0], [40, 40, 80])
     assert g.source == "bounds"
     assert g.flip_z is False
@@ -110,19 +110,22 @@ def test_from_centres_reconstruction_warns_and_records(caplog):
             g = _build(layer_bounds="from_centres")
     finally:
         lg.removeHandler(caplog.handler)
-    np.testing.assert_array_equal(g.top[:, 0, 0], [0, 10, 22.5])
-    np.testing.assert_array_equal(g.bottom[:, 0, 0], [10, 22.5, 37.5])
+    np.testing.assert_array_equal(g.top, [0, 10, 22.5])
+    np.testing.assert_array_equal(g.bottom, [10, 22.5, 37.5])
     assert g.source == "reconstructed_from_centres"
     assert any(r.levelname == "WARNING" and "from_centres" in r.getMessage() for r in caplog.records)
 
 
 def test_from_centres_cropped_column_uses_midpoint_rule():
     wet = _wet(ny=1, nx=2)
-    wet[0, 0, 1] = False
+    wet[1, 0, 1] = False
+    wet[2] = False
     g = _build(layer_bounds="from_centres", wet=wet, nx=2)
-    assert g.top[1, 0, 1] == 10.0
-    assert g.top[0, 0, 1] == 0.0  # dry cell
-    assert g.top[1, 0, 0] == 10.0
+    np.testing.assert_array_equal(g.top, [0, 10, 0])
+    np.testing.assert_array_equal(g.bottom, [10, 22.5, 0])
+    np.testing.assert_array_equal(g.thickness, [10, 12.5, 0])
+    np.testing.assert_array_equal(g.midpoint, [5, 16.25, 0])
+    np.testing.assert_array_equal(g.cell_volume[:, 0, :], [[40, 40], [50, 0], [0, 0]])
 
 
 @pytest.mark.parametrize(
@@ -136,8 +139,8 @@ def test_from_centres_cropped_column_uses_midpoint_rule():
 )
 def test_from_centres_first_top_is_mirrored_then_floored_at_zero(centres, expect_top, expect_bottom):
     g = _build(z=centres, layer_bounds="from_centres")
-    np.testing.assert_array_equal(g.top[:, 0, 0], expect_top)
-    np.testing.assert_array_equal(g.bottom[:, 0, 0], expect_bottom)
+    np.testing.assert_array_equal(g.top, expect_top)
+    np.testing.assert_array_equal(g.bottom, expect_bottom)
 
 
 @pytest.mark.parametrize(
@@ -161,7 +164,7 @@ def test_negative_depth_on_dry_cell_is_ignored():
     wet = _wet()
     wet[0] = False
     g = _build(layer_bounds=_bounds(b), wet=wet)
-    assert g.thickness[0, 0, 0] == 0.0
+    assert g.thickness[0] == 0.0
 
 
 def test_dangling_bounds_attr_raises():
@@ -271,12 +274,28 @@ def test_cell_volumes_override():
     v = xr.DataArray(np.array([1.0, 2.0, 3.0]).reshape(3, 1, 1), dims=(Z, Y, X))
     g = _build(cell_volumes=v)
     np.testing.assert_array_equal(g.cell_volume[:, 0, 0], [1, 2, 3])
-    np.testing.assert_array_equal(g.thickness[:, 0, 0], [10, 10, 20])
+    np.testing.assert_array_equal(g.thickness, [10, 10, 20])
     with pytest.raises(ConfigurationError, match="layer_bounds"):
         _build(cell_volumes=v, layer_bounds=None)
     bad = xr.DataArray(np.array([1.0, -2.0, 3.0]).reshape(3, 1, 1), dims=(Z, Y, X))
     with pytest.raises(ConfigurationError, match="cell_volumes"):
         _build(cell_volumes=bad)
+
+
+@pytest.mark.parametrize("bounds", [_bounds(), "from_centres"])
+def test_cell_volume_override_preserves_depth_vectors_and_dry_mask(bounds):
+    wet = _wet(ny=1, nx=2)
+    wet[1, 0, 1] = False
+    wet[2] = False
+    v = xr.DataArray([[[1.0, 2.0]], [[3.0, np.nan]], [[np.nan, np.nan]]], dims=(Z, Y, X))
+    g = _build(layer_bounds=bounds, cell_volumes=v, wet=wet, nx=2)
+    ref = _build(layer_bounds=bounds, wet=wet, nx=2)
+    for name in ("top", "bottom", "thickness", "midpoint"):
+        values = getattr(g, name)
+        assert values.shape == (3,) and values[-1] == 0.0
+        np.testing.assert_array_equal(values, getattr(ref, name))
+    np.testing.assert_array_equal(g.cell_volume[:, 0, :], [[1, 2], [3, 0], [0, 0]])
+    assert g.default_scales == ref.default_scales
 
 
 def test_dry_cells_zero_volume_and_ignored():

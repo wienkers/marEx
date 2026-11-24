@@ -50,6 +50,7 @@ def _event_slice(
     midpoint: NDArray[np.float64],
     top: NDArray[np.float64],
     bottom: NDArray[np.float64],
+    wet: NDArray[np.bool_],
     cell_area: NDArray[np.float64],
     ex: NDArray[np.float64],
     ey: NDArray[np.float64],
@@ -79,10 +80,16 @@ def _event_slice(
     n_columns = cell_area.size
     columns = occupied % n_columns
     v = cell_volume.ravel()[occupied]
+    layer_indices = occupied // n_columns if midpoint.ndim == 1 else occupied
+    layer_wet = wet.flat[occupied] if midpoint.ndim == 1 else None
+
+    def layer_values(values):
+        sampled = values.flat[layer_indices]
+        return sampled if layer_wet is None else np.where(layer_wet, sampled, 0.0)
 
     # Sequential float64 sums in C order (np.bincount accumulates in input order).
     volume = np.bincount(codes, weights=v, minlength=n_ids)
-    weighted_mid = np.bincount(codes, weights=v * midpoint.ravel()[occupied], minlength=n_ids)
+    weighted_mid = np.bincount(codes, weights=v * layer_values(midpoint), minlength=n_ids)
     sx = np.bincount(codes, weights=v * ex.ravel()[columns], minlength=n_ids)
     sy = np.bincount(codes, weights=v * ey.ravel()[columns], minlength=n_ids)
     sz = np.bincount(codes, weights=v * ez.ravel()[columns], minlength=n_ids)
@@ -93,8 +100,8 @@ def _event_slice(
 
     shallowest = np.full(n_ids, np.inf)
     deepest = np.full(n_ids, -np.inf)
-    np.minimum.at(shallowest, codes, top.ravel()[occupied])
-    np.maximum.at(deepest, codes, bottom.ravel()[occupied])
+    np.minimum.at(shallowest, codes, layer_values(top))
+    np.maximum.at(deepest, codes, layer_values(bottom))
 
     # Volume-weighted mean of unit vectors on the sphere: continuous across the lon seam.
     lat_c = np.degrees(np.arctan2(sz, np.hypot(sx, sy)))
@@ -175,10 +182,11 @@ def event_diagnostics(
 
     # Static geometry as single-chunk dask arrays: apply_ufunc loops over time lazily, so
     # nothing is copied or broadcast to (time, z, y, x).
-    def static(values: NDArray, core: Tuple[str, ...]) -> xr.DataArray:
-        return xr.DataArray(np.ascontiguousarray(values, dtype=np.float64), dims=core).chunk({d: -1 for d in core})
+    def static(values: NDArray, core: Tuple[str, ...], dtype=np.float64) -> xr.DataArray:
+        return xr.DataArray(np.asarray(values, dtype=dtype), dims=core).chunk({d: -1 for d in core})
 
     zyx = (zdim, ydim, xdim)
+    depth_core = zyx[:1] if geom.midpoint.ndim == 1 else zyx
     yx = (ydim, xdim)
     ids_axis = xr.DataArray(event_ids.astype(np.int32), dims="ID").chunk({"ID": -1})
     presence = presence.chunk({timedim: id_field.chunks[0], "ID": -1})
@@ -190,9 +198,10 @@ def event_diagnostics(
         presence.drop_vars("ID"),
         ids_axis,
         static(geom.cell_volume, zyx),
-        static(geom.midpoint, zyx),
-        static(geom.top, zyx),
-        static(geom.bottom, zyx),
+        static(geom.midpoint, depth_core),
+        static(geom.top, depth_core),
+        static(geom.bottom, depth_core),
+        static(geom.wet, zyx, dtype=bool),
         static(geom.cell_area_m2, yx),
         static(ex, yx),
         static(ey, yx),
@@ -203,8 +212,9 @@ def event_diagnostics(
             ["ID"],
             ["ID"],
             list(zyx),
-            list(zyx),
-            list(zyx),
+            list(depth_core),
+            list(depth_core),
+            list(depth_core),
             list(zyx),
             list(yx),
             list(yx),

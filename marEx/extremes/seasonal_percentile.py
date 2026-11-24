@@ -3,9 +3,7 @@ Seasonal (day-of-year specific) extreme identification.
 
 Provides :func:`_identify_extremes_seasonal`, which computes day-of-year resolved
 percentile thresholds (with a rolling day window) to identify extreme events.
-This backs the ``seasonal_percentile`` extreme-detection method. The exact-percentile
-branch uses a nested ``_doy_percentiles`` closure that must remain inside the
-parent function.
+This backs the ``seasonal_percentile`` extreme-detection method.
 
 The day-of-year percentile definition implemented here follows Hobday, A. J.,
 et al. (2016), "A hierarchical approach to defining marine heatwaves",
@@ -16,14 +14,16 @@ soil moisture, or a biogeochemical tracer.
 
 from typing import Dict, Literal, Optional, Tuple
 
+import dask.array
 import numpy as np
 import xarray as xr
 
 from ..core.compute_mode import Materialiser
 from ..core.dimensions import TASK_ELEMENTS, horizontal_dims, spatial_dims
+from ..core.seasonal_apply import apply_seasonal_field
 from ..core.time_axis import SeasonalCycle, resolve_cycle
 from ..logging_config import get_logger
-from .histogram import _chunk_spatial_for_histogram, _clamp_exact_threshold, _compute_histogram_quantile_2d
+from .histogram import _chunk_spatial_for_histogram, _clamp_exact_threshold, _compute_histogram_quantile_2d, _x_is_periodic
 
 # Get module logger
 logger = get_logger(__name__)
@@ -31,6 +31,159 @@ logger = get_logger(__name__)
 # Fewest expected threshold exceedances per cell and cycle slot below which the threshold is
 # called unreliable.
 _MIN_EXCEEDANCES = 10
+
+# Allowance for one concurrent task, including its overlapped source and index.
+_EXACT_POOL_TASK_BYTES = 128 * 2**20
+
+
+def _exact_pool_tiles(n_time, n_slots, shape, halo, half, wrap, itemsize, max_active, full_cycle):
+    """Size a single extra-dimension slice, including the halo and reduction workspace."""
+    ny, nx = shape
+    hy, hx = halo
+    allowed = (max(1, ny // max(1, hy)), 1 if wrap and hx == 0 else max(1, nx // max(1, hx)))
+    counts = [1, 1]
+    width = 2 * half + 1
+    rows = min(ny, width)
+    samples = max_active * rows * (width if wrap else min(nx, width))
+    # A replay holds a native sample crop plus NaN indices, masks and, for
+    # wrapped windows, the ordered horizontal indices.
+    oracle_bytes = (2 * itemsize + 16) * samples + (8 * (rows + width) if wrap and hx == 0 else 0)
+
+    def working_set(indexed):
+        cy, cx = ((size + count - 1) // count for size, count in zip(shape, counts))
+        ay, ax = cy + 2 * hy, cx + 2 * hx
+        cells, core = ay * ax, cy * cx
+        # Source and overlap assembly, output thresholds and the shared slot index.
+        shared = 3 * itemsize * n_time * cells + 4 * n_slots * core + 32 * (n_time + n_slots)
+        if not indexed:
+            return shared + oracle_bytes
+        # Native-to-float64 copy, uint16 IDs, 8-byte postings, sort keys and
+        # slot-update temporaries. The cell/bucket allowance includes extrema,
+        # offsets, cursors, counts and both strip-prefix workspaces.
+        return (
+            shared
+            + 48 * n_time * cells
+            + 256 * (80 * cells + 32 * core + 8 * (ax + cy + 3))
+            + (1 if full_cycle else n_slots) * core
+            + max(16 * samples, oracle_bytes)
+            + 80 * core
+            + 512 * 1024
+        )
+
+    direct = False
+    while working_set(not direct) > _EXACT_POOL_TASK_BYTES:
+        candidates = [axis for axis in range(2) if counts[axis] < allowed[axis]]
+        if not candidates:
+            if direct:
+                raise MemoryError(f"The exact {width}-cell spatial window exceeds the per-task memory budget")
+            direct = True
+            counts = [1, 1]
+            continue
+        axis = max(candidates, key=lambda axis: shape[axis] / counts[axis])
+        counts[axis] = min(2 * counts[axis], allowed[axis])
+
+    return tuple(
+        (size // count + 1,) * (size % count) + (size // count,) * (count - size % count) for size, count in zip(shape, counts)
+    ), direct
+
+
+def _exact_pool_block(block, slots, n_slots, window_steps, half, halo, shape, percentile, x_periodic, direct, block_info=None):
+    """Drop artificial edge padding before reducing the block's core centres."""
+    from ._exact_spatial_pool import _pooled_percentiles
+
+    # Extra axes have unit chunks. Time is whole for threshold calculation.
+    values = block.reshape(block.shape[-3:])
+    origin, core_shape, crop = [], [], []
+    for axis, (depth, size) in enumerate(zip(halo, shape), start=-2):
+        start, end = block_info[None]["array-location"][axis]
+        left_pad = max(0, depth - start)
+        right_pad = max(0, end + depth - size)
+        if axis == -1 and x_periodic:
+            left_pad = right_pad = 0
+        crop.append(slice(left_pad, values.shape[axis] - right_pad))
+        origin.append(depth - left_pad)
+        core_shape.append(end - start)
+    result = _pooled_percentiles(
+        values[:, crop[0], crop[1]],
+        slots,
+        n_slots,
+        window_steps,
+        half,
+        origin,
+        core_shape,
+        percentile,
+        periodic=x_periodic and halo[1] == 0,
+        direct=direct,
+    )
+    return result.reshape(block.shape[:-3] + result.shape)
+
+
+def _exact_spatial_threshold(da, dimensions, cycle, window_steps, window_spatial, percentile):
+    """Build haloed horizontal tasks and a lazy all-time dry-centre mask."""
+    time_dim, y_dim, x_dim = (dimensions[key] for key in ("time", "y", "x"))
+    spatial = tuple(dim for dim in da.dims if dim != time_dim)
+    extra = tuple(dim for dim in spatial if dim not in (y_dim, x_dim))
+    cycle_dim = cycle.index_name
+    n_slots = cycle.length
+    n_time, ny, nx = (da.sizes[dim] for dim in (time_dim, y_dim, x_dim))
+    half = int(window_spatial) // 2
+    x_periodic = _x_is_periodic(da, x_dim)
+    # A wide global window can visit one longitude several times. Keep the
+    # axis whole and let the kernel wrap the offsets in that case.
+    wrap_in_kernel = x_periodic and half >= nx
+    halo = (min(half, max(0, ny - 1)), 0 if wrap_in_kernel else half if x_periodic else min(half, max(0, nx - 1)))
+
+    raw_slots = np.asarray(da[cycle_dim].values)
+    valid = (raw_slots >= 1) & (raw_slots <= n_slots) & (raw_slots == np.floor(raw_slots))
+    slots = np.where(valid, raw_slots, 0).astype(np.int64)
+    # Number of timestamps in the largest temporal window, including repeats
+    # and excluding invalid labels. Used to bound a single refinement buffer.
+    width = min(window_steps, n_slots)
+    counts = np.bincount(slots, minlength=n_slots + 1)[1:]
+    counts = np.concatenate(([0], np.tile(counts, 2))).cumsum()
+    max_active = int(np.max(counts[width : width + n_slots] - counts[:n_slots]))
+    (y_chunks, x_chunks), direct = _exact_pool_tiles(
+        n_time, n_slots, (ny, nx), halo, half, x_periodic, da.dtype.itemsize, max_active, width == n_slots
+    )
+    data = (
+        da.transpose(*extra, time_dim, y_dim, x_dim)
+        .chunk({**dict.fromkeys(extra, 1), time_dim: -1, y_dim: y_chunks, x_dim: x_chunks})
+        .data
+    )
+    # Integer padding cannot be NaN. The block function crops the artificial
+    # padding on both regional axes before either reducer sees it.
+    pad = np.nan if da.dtype.kind in "fc" else 0
+    axes = (data.ndim - 2, data.ndim - 1)
+    data = dask.array.overlap.overlap(
+        data,
+        depth=dict(zip(axes, halo)),
+        boundary={axes[0]: pad, axes[1]: "periodic" if x_periodic else pad},
+        allow_rechunk=False,
+    )
+
+    results = dask.array.map_blocks(
+        _exact_pool_block,
+        data,
+        slots=slots,
+        n_slots=n_slots,
+        window_steps=window_steps,
+        half=half,
+        halo=halo,
+        shape=(ny, nx),
+        percentile=percentile,
+        x_periodic=x_periodic,
+        direct=direct,
+        chunks=data.chunks[:-3] + ((n_slots,), y_chunks, x_chunks),
+        drop_axis=len(extra),
+        new_axis=len(extra),
+        dtype=np.float32,
+        meta=np.array((), dtype=np.float32),
+    )
+    dims = (*extra, cycle_dim, y_dim, x_dim)
+    coords = {name: coord for name, coord in da.coords.items() if time_dim not in coord.dims and cycle_dim not in coord.dims}
+    coords[cycle_dim] = np.arange(1, n_slots + 1)
+    thresholds = xr.DataArray(results, dims=dims, coords=coords).transpose(cycle_dim, *spatial)
+    return thresholds.where(~da.isnull().all(dim=time_dim))
 
 
 def _identify_extremes_seasonal(
@@ -67,7 +220,7 @@ def _identify_extremes_seasonal(
         Window in days
     window_spatial : int, default=None
         Width in cells of the square spatial pooling window. Used as given here: the
-        default of 5 on gridded data is applied upstream by
+        approximate default of 5 on gridded data is applied upstream by
         :func:`marEx.extremes.base.resolve_window_spatial`, so ``None`` means no pooling.
     method_percentile : str, default='approximate'
         Method for percentile computation ('exact' or 'approximate')
@@ -106,13 +259,11 @@ def _identify_extremes_seasonal(
     # 10 is below a 30-year, 11-day climatology at the 95th percentile (16.5 on one cell), the
     # standard Hobday et al. (2016) set-up, so that set-up passes and only thinner windows warn.
     if N_above_threshold < _MIN_EXCEEDANCES:
-        # No advice to switch to method_percentile='exact': it cannot pool spatially, so on
-        # a grid it sees fewer samples than the default approximate path, not more.
+        spatial_advice = " or using a larger window_spatial" if all(key in dimensions for key in ("x", "y")) else ""
         logger.warning(
             f"Not enough samples for accurate extreme detection: {N_above_threshold:g} < {_MIN_EXCEEDANCES}. "
             "Consider using a lower threshold_percentile, increasing your time-series size, "
-            "increasing the window_days, or (method_percentile='approximate' only) using a larger "
-            "window_spatial. Below this count the threshold depends on the percentile convention "
+            f"increasing the window_days{spatial_advice}. Below this count the threshold depends on the percentile convention "
             "as much as on the data: exact and approximate can differ by many histogram bins."
         )
 
@@ -133,8 +284,13 @@ def _identify_extremes_seasonal(
     da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]]).compute()})
 
     # Group by cycle index and compute percentile
-    if method_percentile == "exact":
-        # Use apply_ufunc to compute DOY percentiles per spatial chunk in pure numpy.
+    if method_percentile == "exact" and window_spatial not in (None, 1):
+        thresholds = _exact_spatial_threshold(da, dimensions, cycle, window_steps, window_spatial, threshold_percentile)
+        thresholds = _clamp_exact_threshold(thresholds, tail)
+    elif method_percentile == "exact":
+        from ._exact_seasonal import _doy_percentiles as _exact_doy_percentiles
+
+        # Use apply_ufunc to compute DOY percentiles per spatial chunk.
         # Tile the spatial dims alongside time:-1. Rechunking only time leaves a
         # spatially-unchunked pipeline anomaly as a single (time, y, x) task, which is a
         # guaranteed worker OOM at scale; the constant-threshold exact path already tiles
@@ -147,34 +303,11 @@ def _identify_extremes_seasonal(
             da, dimensions["time"], output_elements_per_cell=cycle.length, horizontal=horizontal_dims(dimensions)
         )
         cycle_vals = np.asarray(cycle.index_of(da_ufunc[coordinates["time"]]).values, dtype=np.int32)
-        half_w = window_steps // 2
         n_slots = cycle.length
-
-        def _slot_members(cycle_vals):
-            """Yield, slot by slot (1, 2, ...), the ascending time indices contributing to it.
-
-            Built inside the task from the per-step cycle index, which is all the graph carries
-            (n_time ints). The previous cycle.length x n_time boolean table was built in the
-            client and rode in the graph: 2 MB daily, ~2.3 GB at hourly x 30 yr. Sorted,
-            these indices select exactly the elements, in exactly the order, the mask did.
-            """
-            order = np.argsort(cycle_vals, kind="stable")
-            bounds = np.searchsorted(cycle_vals[order], np.arange(1, n_slots + 2))
-            # A generator: one slot's indices live at a time. Building every slot's list up front
-            # held window_steps x n_time int64 per task (557 MB at hourly x 30 yr).
-            for slot in range(1, n_slots + 1):
-                targets = [((slot - 1 + offset) % n_slots) + 1 for offset in range(-half_w, half_w + 1)]
-                # A window wider than the cycle revisits a slot; the mask counted it once.
-                parts = [order[bounds[t - 1] : bounds[t]] for t in sorted(set(targets))]
-                yield np.sort(np.concatenate(parts)) if parts else np.empty(0, dtype=np.intp)
 
         def _doy_percentiles(data, cycle_vals, percentile):
             """Per-slot percentiles. data: (*spatial, time) -> (*spatial, cycle.length)."""
-            result = np.full(data.shape[:-1] + (n_slots,), np.nan, dtype=np.float32)
-            for i, idx in enumerate(_slot_members(cycle_vals)):
-                if idx.size:
-                    result[..., i] = np.nanpercentile(data[..., idx], percentile, axis=-1)
-            return result
+            return _exact_doy_percentiles(data, cycle_vals, n_slots, window_steps, percentile)
 
         thresholds = xr.apply_ufunc(
             _doy_percentiles,
@@ -226,22 +359,15 @@ def _identify_extremes_seasonal(
     if coords_to_drop:
         thresholds = thresholds.drop_vars(coords_to_drop)
 
-    # Rechunk thresholds BEFORE comparison to align with input data
-    # This eliminates expensive implicit rechunking during the groupby operation.
-    # Bound the cycle axis as well. On a lat/lon grid the input is spatially whole, so
-    # `spatial_chunks` spans the field and an unchunked cycle axis makes the threshold ONE
-    # block of cycle.length x space: 1.5 GB at 0.25 deg. The comparison indexes that block
-    # once per run of consecutive slots, and each of those tasks holds a copy of it, which
-    # killed a full-resolution global run. Size the cycle chunk to the shared element budget.
+    # Keep the threshold storage chunks aligned with the input's modal spatial chunks.
+    # Cap the stored cycle chunks as well. On a spatially whole grid, holding the cycle
+    # whole here could make a single multi-gigabyte block before the comparison is tiled.
     spatial_block = int(np.prod(list(spatial_chunks.values()), dtype=np.int64))
     cycle_chunk = max(1, min(cycle.length, TASK_ELEMENTS // max(1, spatial_block)))
     align_chunks = {**spatial_chunks, cycle_dim: cycle_chunk}
     logger.debug(f"Aligning threshold chunks to match input data spatial chunks: {align_chunks}")
     thresholds = thresholds.chunk(align_chunks)
 
-    # Compare anomalies to day-of-year specific thresholds
-    # Assign the cycle-index coordinate and use UniqueGrouper for chunked arrays
-    da = da.assign_coords({cycle_dim: cycle.index_of(da[coordinates["time"]])})
     # Anchor the thresholds BEFORE the comparison is built on top of them. `extremes` is
     # a lazy expression over `thresholds`; anchoring after this line would leave it
     # pointing at the original graph and the whole threshold reduction would run a second
@@ -251,20 +377,21 @@ def _identify_extremes_seasonal(
     # (`pin_bounded`); staging it here writes it to disk so the pin is released and
     # every downstream consumer reads the store.
     thresholds = materialiser.stage(thresholds, threshold_label)
-    grouped = da.groupby({cycle_dim: xr.groupers.UniqueGrouper(labels=np.arange(1, cycle.length + 1))})
-    extremes = (grouped >= thresholds) if tail == "upper" else (grouped <= thresholds)
+    extremes = apply_seasonal_field(
+        da,
+        thresholds,
+        da[cycle_dim].values,
+        timedim=dimensions["time"],
+        cycledim=cycle_dim,
+        operation=tail,
+    )
 
-    # Drop the now-unnecessary cycle-index coordinate
-    if cycle_dim in extremes.coords:
-        extremes = extremes.drop_vars(cycle_dim)
-
-    # Rechunk to fix irregular time chunks created by groupby operation
-    # Zarr requires uniform chunks, so we rechunk to match input data's time chunks
+    # Keep the established modal chunk layout for Zarr.
     time_chunks = da.chunksizes[dimensions["time"]]
     time_chunk_size = max(set(time_chunks), key=time_chunks.count)
     rechunk_dict = {dimensions["time"]: time_chunk_size}
     rechunk_dict.update(spatial_chunks)
-    logger.debug(f"Rechunking extremes to fix irregular chunks from groupby: {rechunk_dict}")
+    logger.debug(f"Rechunking extremes to the input's modal chunks: {rechunk_dict}")
     extremes = extremes.chunk(rechunk_dict)
 
     return extremes, thresholds

@@ -7,7 +7,7 @@ taken with ``np.bincount`` over a sorted pair index, so the summation order, and
 every bit of the result, is deterministic.
 """
 
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Collection, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from ...exceptions import TrackingError
 
 if TYPE_CHECKING:
-    from .store import VolumeStore
+    from .store import ObjectIndex, VolumeStore
 
 _KEY_LIMIT = 2**62
 
@@ -125,3 +125,43 @@ def link_mask(
         fraction = overlap[present] / smaller
     out[present] = (smaller > 0) & (fraction >= threshold)
     return out
+
+
+class OverlapTable:
+    """Raw overlaps for the active boundary, including pairs below the link threshold."""
+
+    def __init__(self, previous: NDArray, current: NDArray, cell_volume: NDArray[np.float64]) -> None:
+        """Build a table from the initial C-order slices."""
+        self.pairs, self.volumes = volume_overlaps(previous, current, cell_volume)
+        self.current_index: "ObjectIndex | None" = None
+
+    def linked(self, store: "VolumeStore", threshold: float) -> Tuple[NDArray[np.int64], NDArray[np.float64]]:
+        """Apply the threshold using the current volumes of both objects."""
+        keep = link_mask(self.pairs, self.volumes, store, threshold)
+        return self.pairs[keep], self.volumes[keep]
+
+    def refresh(
+        self,
+        previous: NDArray,
+        current: NDArray,
+        cell_volume: NDArray[np.float64],
+        changed: Collection[int],
+    ) -> None:
+        """Replace affected rows using the complete, current membership of every edited child."""
+        if not changed:
+            return
+        members = [self.current_index.voxels(child) for child in changed]
+        # A dense pass is cheaper as a full scan than as a gather and merge of table rows.
+        if sum(voxels.size for voxels in members) * 4 >= current.size:
+            self.pairs, self.volumes = volume_overlaps(previous, current, cell_volume)
+            return
+
+        # One sorted gather is important. Adding old overlap totals for a consolidated
+        # survivor changes the order of additions and can move a link across its threshold.
+        voxels = np.sort(np.concatenate(members))
+        pairs, volumes = volume_overlaps(previous[voxels], current[voxels], cell_volume[voxels])
+        keep = ~np.isin(self.pairs[:, 1], list(changed))
+        combined = np.concatenate((self.pairs[keep], pairs))
+        order = np.lexsort((combined[:, 1], combined[:, 0]))
+        self.pairs = combined[order]
+        self.volumes = np.concatenate((self.volumes[keep], volumes))[order]

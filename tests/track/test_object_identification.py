@@ -19,6 +19,7 @@ import pytest
 import xarray as xr
 from dask.array.core import PerformanceWarning
 from dask_image.ndmeasure import label as dask_image_label
+from scipy.ndimage import binary_closing
 from scipy.ndimage import label as scipy_label
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -697,8 +698,8 @@ def test_sparse_matrix_core_dims_do_not_multiply_chunks():
 
 # -- time-gap filling keeps the input's time chunking -------------------------------------------------
 #
-# ``fill_time_gaps`` pads the record by ``T_fill + 1`` and hands it to dask_image's ``binary_closing``,
-# whose overlap step calls ``ensure_minimum_chunksize``: any chunk shorter than the kernel depth is refilled
+# The former dask_image-based implementation padded the record by ``T_fill + 1``. Its overlap step called
+# ``ensure_minimum_chunksize``: any chunk shorter than the kernel depth was refilled
 # from its neighbour, and nothing realigns it afterwards. The trigger is arithmetic,
 # ``0 < n_time % time_chunk < (T_fill + 1) // 2``, and which ILLEGAL layout comes back depends on the width
 # (T_fill=4, depth 2, on the gridded store):
@@ -720,6 +721,37 @@ GAP_FILL_LAYOUTS = [
     ("remainder_at_depth", 22, 5, 4, False),
     ("deeper_kernel", 22, 5, 8, True),  # T_fill=8 widens the depth to 4, so remainders 1..3 all trigger
 ]
+
+
+@pytest.mark.parametrize("max_gap", [1, 2, 4, 32])
+def test_time_gap_values_equal_padded_closing(max_gap):
+    # Brackets can straddle either edge of a block. Include a run at the record
+    # boundary, an all-false column, and gaps both at and above the fill limit.
+    rng = np.random.default_rng(24)
+    values = rng.random((23, 3, 4)) < 0.25
+    values[:2, 0, 0] = False
+    values[2, 0, 0] = True
+    values[:, 0, 1] = False
+    values[[3, 8, 14], 0, 1] = True
+    values[:, 0, 2] = False
+    data = xr.DataArray(values, dims=("time", "lat", "lon")).chunk({"time": (5, 2, 10, 5, 1), "lat": 2, "lon": 2})
+    filled = fill_time_gaps(
+        data,
+        max_gap,
+        0,
+        "time",
+        "lat",
+        False,
+        None,
+        "lon",
+        xr.ones_like(data.isel(time=0)),
+        True,
+    )
+    width = max_gap + 1
+    padded = np.pad(values, ((width, width), (0, 0), (0, 0)))
+    expected = binary_closing(padded, structure=np.ones((width, 1, 1), bool))[width:-width]
+    assert filled.chunks == data.chunks
+    np.testing.assert_array_equal(filled.compute(scheduler="single-threaded"), expected)
 
 
 def _fill(data_bin, mask, t_fill):
