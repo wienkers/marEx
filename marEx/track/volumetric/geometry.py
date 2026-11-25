@@ -15,7 +15,7 @@ import numpy as np
 import xarray as xr
 from numpy.typing import NDArray
 
-from ...exceptions import ConfigurationError
+from ...exceptions import ConfigurationError, DataValidationError
 from ...logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -102,6 +102,8 @@ def _z_order(z_values: NDArray, z_attrs: dict) -> Tuple[NDArray[np.float64], boo
     z = np.asarray(z_values, dtype=np.float64)
     if z.ndim != 1 or z.size < 1:
         raise _fail("The depth coordinate must be one-dimensional and non-empty", context={"shape": z.shape})
+    if not np.isfinite(z).all():
+        raise DataValidationError("The depth coordinate must be finite")
     if positive == "up":
         z = -z
     step = np.diff(z)
@@ -179,10 +181,7 @@ def _interfaces_from_bounds(
         arr = -arr
     if flip:
         arr = arr[::-1]
-    # NaN propagates through min/max so a missing bound is still caught on wet cells.
-    top = np.minimum(arr[..., 0], arr[..., 1])
-    bottom = np.maximum(arr[..., 0], arr[..., 1])
-    return np.ascontiguousarray(top), np.ascontiguousarray(bottom)
+    return np.ascontiguousarray(arr[..., 0]), np.ascontiguousarray(arr[..., 1])
 
 
 def _interfaces_from_centres(centres: NDArray[np.float64]) -> Tuple[NDArray, NDArray]:
@@ -210,11 +209,23 @@ def _area_units_factor(cell_areas: xr.DataArray) -> float:
     return _AREA_FACTORS[units]
 
 
+def _has_duplicate_longitude_endpoint(lon_deg: NDArray) -> bool:
+    """Whether a rectilinear longitude axis spans a full turn and repeats its first meridian at the end."""
+    lon = np.asarray(lon_deg, dtype=np.float64)
+    if lon.ndim != 1 or lon.size < 2 or not np.all(np.isfinite(lon)):
+        return False
+    gaps = np.abs(np.diff(lon))
+    step = float(np.median(np.minimum(gaps, 360.0 - np.mod(gaps, 360.0))))
+    if step <= 0 or not np.isclose((lon.size - 1) * step, 360.0):
+        return False
+    turns = abs(float(lon[-1]) - float(lon[0])) / 360.0
+    return bool(np.isclose(turns, np.rint(turns), rtol=0.0, atol=np.finfo(np.float32).eps))
+
+
 def _cell_area_m2(
     cell_areas: Optional[xr.DataArray],
     grid_resolution: Optional[float],
     lat_deg: NDArray,
-    lon_deg: NDArray,
     ydim: str,
     xdim: str,
     ny: int,
@@ -225,21 +236,15 @@ def _cell_area_m2(
         if cell_areas is not None:
             logger.warning("grid_resolution parameter overrides provided cell_areas for structured grid")
         lat = np.asarray(lat_deg, dtype=np.float64)
-        lon = np.asarray(lon_deg, dtype=np.float64)
         if lat.ndim == 1:
-            if lat.size != ny:
-                raise _fail(f"lat_deg has {lat.size} values, expected {ny}")
             lat = lat[:, None]
-        elif lat.shape != (ny, nx):
-            raise _fail(f"lat_deg has shape {lat.shape}, expected ({ny},) or ({ny}, {nx})")
-        if lon.shape[-1:] != (nx,) and lon.shape != (ny, nx):
-            raise _fail(f"lon_deg has shape {lon.shape}, expected ({nx},) or ({ny}, {nx})")
         logger.info(f"Calculating cell areas from grid resolution: {grid_resolution} degrees")
         lat_r = np.radians(lat)
         dlat = np.radians(float(grid_resolution))
         dlon = np.radians(float(grid_resolution))
-        # Area = R^2 * |sin(lat + dlat/2) - sin(lat - dlat/2)| * dlon, in float64 m^2.
-        area = EARTH_RADIUS_M**2 * np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) * dlon
+        north = np.clip(lat_r + dlat / 2, -np.pi / 2, np.pi / 2)
+        south = np.clip(lat_r - dlat / 2, -np.pi / 2, np.pi / 2)
+        area = EARTH_RADIUS_M**2 * np.abs(np.sin(north) - np.sin(south)) * dlon
         return np.ascontiguousarray(np.broadcast_to(area, (ny, nx)), dtype=np.float64)
     if cell_areas is None:
         raise _fail(
@@ -290,6 +295,7 @@ def build_vertical_geometry(
     cell_volumes: Optional[xr.DataArray],
     cell_areas: Optional[xr.DataArray],
     grid_resolution: Optional[float],
+    regional_mode: bool = False,
 ) -> VerticalGeometry:
     """
     Build the vertical geometry of a structured ``(z, y, x)`` grid.
@@ -306,10 +312,11 @@ def build_vertical_geometry(
     zdim, ydim, xdim : str
         Dimension names.
     lat_deg, lon_deg : numpy.ndarray
-        Latitude and longitude in degrees (used for the area from ``grid_resolution``).
+        Latitude and longitude in degrees. If the last longitude of a one-dimensional
+        axis repeats its first meridian after a full turn, the geometry omits the last column.
     layer_bounds : xarray.DataArray, ``"from_centres"`` or None
-        Layer interfaces in metres, ``(z, 2)`` or ``(z, y, x, 2)``, in the original
-        depth order and sign. The bounds dimension may have any name. ``"from_centres"``
+        Top and bottom interfaces in metres, ``(z, 2)`` or ``(z, y, x, 2)``, in the
+        original depth order and sign. The bounds dimension may have any name. ``"from_centres"``
         opts in to reconstructing interfaces at midpoints between level centres.
     layer_thickness : xarray.DataArray, optional
         ``(z, y, x)`` thickness (m) for partial cells, in the original depth order.
@@ -333,18 +340,64 @@ def build_vertical_geometry(
     ConfigurationError
         If the depth units are not metres, no vertical geometry or horizontal area is
         supplied, or any wet cell has non-finite or non-positive thickness or volume.
+    DataValidationError
+        If wet bounds are inverted or overlap, derived wet volumes are invalid, wet
+        coordinates are non-finite, or the wet mask differs at a duplicate seam.
     """
     centres, flip, negate = _z_order(z_values, z_attrs)
     wet_da = wet_mask
     if set(wet_da.dims) != {zdim, ydim, xdim}:
         raise _fail(f"wet_mask must have dimensions ({zdim}, {ydim}, {xdim}), got {tuple(wet_da.dims)}")
     wet = np.array(wet_da.transpose(zdim, ydim, xdim).values, dtype=bool)  # copy: frozen below
+    lat_deg, lon_deg = np.asarray(lat_deg), np.asarray(lon_deg)
+    if not regional_mode and _has_duplicate_longitude_endpoint(lon_deg):
+        if lon_deg.size != wet.shape[2]:
+            raise _fail(f"lon_deg has {lon_deg.size} values, expected {wet.shape[2]}")
+        if not np.array_equal(wet[..., 0], wet[..., -1]):
+            raise DataValidationError("The wet mask differs on the duplicate longitude endpoint")
+        wet_seam_2d = wet.any(axis=0)[:, 0]
+        for label, da_seam in (
+            ("layer_bounds", layer_bounds),
+            ("layer_thickness", layer_thickness),
+            ("cell_volumes", cell_volumes),
+            ("cell_areas", None if grid_resolution is not None else cell_areas),
+        ):
+            if isinstance(da_seam, xr.DataArray) and xdim in da_seam.dims and ydim in da_seam.dims:
+                extra = [d for d in da_seam.dims if d not in (zdim, ydim, xdim)]
+                order = ([zdim] if zdim in da_seam.dims else []) + [ydim, xdim] + extra
+                ordered = da_seam.transpose(*order)
+                expected_head = ((wet.shape[0],) if zdim in da_seam.dims else ()) + wet.shape[1:]
+                if ordered.shape[: len(expected_head)] == expected_head:
+                    arr_seam = np.asarray(ordered.values, dtype=np.float64)
+                    if flip and zdim in da_seam.dims:
+                        arr_seam = arr_seam[::-1]
+                    c0 = arr_seam[:, :, 0] if zdim in da_seam.dims else arr_seam[:, 0]
+                    c1 = arr_seam[:, :, -1] if zdim in da_seam.dims else arr_seam[:, -1]
+                    active = wet[:, :, 0] if zdim in da_seam.dims else wet_seam_2d
+                    while active.ndim < c0.ndim:
+                        active = active[..., None]
+                    if not np.allclose(np.where(active, c0, 0.0), np.where(active, c1, 0.0), rtol=1e-6, atol=0.0, equal_nan=True):
+                        raise DataValidationError(f"{label} differs on wet cells at the duplicate longitude endpoint")
+        wet, lon_deg = np.ascontiguousarray(wet[..., :-1]), lon_deg[:-1]
+        layer_bounds, layer_thickness, cell_volumes, cell_areas = (
+            da.isel({xdim: slice(None, -1)}) if isinstance(da, xr.DataArray) and xdim in da.dims else da
+            for da in (layer_bounds, layer_thickness, cell_volumes, cell_areas)
+        )
     nz, ny, nx = wet.shape
     shape = (nz, ny, nx)
     if centres.size != nz:
         raise _fail(f"The depth coordinate has {centres.size} levels but wet_mask has {nz} along '{zdim}'")
     if not wet.any():
         raise _fail("wet_mask has no wet cells")
+    if lat_deg.shape == (ny,) and lon_deg.shape == (nx,):
+        finite_coords = np.isfinite(lat_deg[:, None]) & np.isfinite(lon_deg)
+    elif lat_deg.shape == lon_deg.shape == (ny, nx):
+        finite_coords = np.isfinite(lat_deg) & np.isfinite(lon_deg)
+    else:
+        raise _fail(f"lat_deg/lon_deg have shapes {lat_deg.shape}, {lon_deg.shape}, expected ({ny},)/({nx},) or ({ny}, {nx})")
+    wet_per_column = wet.sum(axis=0)
+    if np.any((wet_per_column > 0) & ~finite_coords):
+        raise DataValidationError("Latitude and longitude must be finite in wet columns")
 
     # Which geometry source applies.
     if layer_bounds is None:
@@ -385,12 +438,17 @@ def build_vertical_geometry(
         source = "bounds"
 
     depth_only = top.ndim == 1 and layer_thickness is None
-    top_grid = top[:, None, None] if top.ndim == 1 else top
-    bottom_grid = bottom[:, None, None] if bottom.ndim == 1 else bottom
+    bounds_wet = wet
+    if top.ndim == 1:
+        top, bottom = top[:, None, None], bottom[:, None, None]
+        wet_per_level = wet.sum(axis=(1, 2))
+        bounds_wet = (wet_per_level > 0)[:, None, None]
+    if np.any(bounds_wet & (bottom < top)):
+        raise DataValidationError("layer_bounds are inverted on wet cells. The first interface must be the top")
     # Depths are positive down, so a wet cell above the surface means the coordinate is really
     # positive up and is missing its 'positive' attribute.
     with np.errstate(invalid="ignore"):
-        above_surface = wet & (top_grid < 0)
+        above_surface = wet & (top < 0)
     if above_surface.any():
         raise _fail(
             f"Negative depths on {int(above_surface.sum())} wet cell(s): depths must be positive down",
@@ -404,9 +462,8 @@ def build_vertical_geometry(
             context={"n_cells": int(above_surface.sum()), "positive": z_attrs.get("positive")},
         )
 
-    bounds_thickness = bottom - top
-    thickness_grid = bounds_thickness[:, None, None] if bounds_thickness.ndim == 1 else bounds_thickness
-    bad = wet & ~(np.isfinite(top_grid) & np.isfinite(bottom_grid) & (thickness_grid > 0))
+    thickness = bottom - top
+    bad = wet & ~(np.isfinite(top) & np.isfinite(bottom) & (thickness > 0))
     if bad.any():
         raise _fail(
             f"layer_bounds give non-finite or non-positive thickness on {int(bad.sum())} wet cell(s)",
@@ -414,13 +471,19 @@ def build_vertical_geometry(
             context={"n_cells": int(bad.sum())},
         )
 
-    thickness = thickness_grid
+    # Remember the deepest preceding wet interface, including across dry levels.
+    previous_bottom = np.full(top.shape[1:], -np.inf)
+    for layer_top, layer_bottom, layer_wet in zip(top, bottom, bounds_wet):
+        if np.any(layer_wet & (layer_top < previous_bottom)):
+            raise DataValidationError("layer_bounds overlap or are out of depth order on wet cells")
+        np.copyto(previous_bottom, layer_bottom, where=layer_wet)
+
     if layer_thickness is not None:
         thk = _to_zyx(layer_thickness, "layer_thickness", zdim, ydim, xdim, nz, shape)
         if flip:
             thk = thk[::-1]
         with np.errstate(invalid="ignore"):
-            bad = wet & ~(np.isfinite(thk) & (thk > 0) & (thk <= thickness_grid * (1.0 + _THICKNESS_RTOL)))
+            bad = wet & ~(np.isfinite(thk) & (thk > 0) & (thk <= thickness * (1.0 + _THICKNESS_RTOL)))
         if bad.any():
             raise _fail(
                 f"layer_thickness is outside (0, bounds thickness] on {int(bad.sum())} wet cell(s)",
@@ -432,13 +495,13 @@ def build_vertical_geometry(
                 context={"n_cells": int(bad.sum())},
             )
         # Rounding-level excess over the layer is clipped so interfaces stay consistent.
-        thickness = np.where(wet, np.minimum(thk, thickness_grid), 0.0)
-        bottom_grid = top_grid + thickness
+        thickness = np.minimum(thk, thickness)
+        bottom = top + thickness
         if source == "bounds":
             source = "bounds+thickness"
 
-    area = _cell_area_m2(cell_areas, grid_resolution, lat_deg, lon_deg, ydim, xdim, ny, nx)
-    bad_area = wet.any(axis=0) & ~(np.isfinite(area) & (area > 0))
+    area = _cell_area_m2(cell_areas, grid_resolution, lat_deg, ydim, xdim, ny, nx)
+    bad_area = (wet_per_column > 0) & ~(np.isfinite(area) & (area > 0))
     if bad_area.any():
         raise _fail(
             f"Horizontal cell area is non-finite or non-positive in {int(bad_area.sum())} wet column(s)",
@@ -457,25 +520,24 @@ def build_vertical_geometry(
             )
         volume = np.where(wet, vol, 0.0)
     else:
-        with np.errstate(invalid="ignore"):
+        with np.errstate(invalid="ignore", over="ignore", under="ignore"):
             volume = np.zeros(shape, dtype=np.float64)
             np.multiply(area[None, :, :], thickness, out=volume, where=wet)
+        bad = wet & ~(np.isfinite(volume) & (volume > 0))
+        if bad.any():
+            raise DataValidationError(
+                f"Area times thickness is non-finite or non-positive on {int(bad.sum())} wet cell(s)",
+                context={"n_cells": int(bad.sum())},
+            )
 
     if depth_only:
-        wet_per_level = wet.sum(axis=(1, 2))
-        top = np.where(wet_per_level, top, 0.0)
-        bottom = np.where(wet_per_level, bottom, 0.0)
-        thickness = np.where(wet_per_level, bounds_thickness, 0.0)
-        midpoint = 0.5 * (top + bottom)
-        l_z = _median_over_wet_cells(thickness, wet_per_level)
-    else:
-        top = np.where(wet, top_grid, 0.0)
-        bottom = np.where(wet, bottom_grid, 0.0)
-        thickness = np.where(wet, thickness, 0.0)
-        midpoint = np.where(wet, 0.5 * (top + bottom), 0.0)
-        l_z = float(np.median(thickness[wet]))
+        top, bottom, thickness = (a[:, 0, 0] for a in (top, bottom, thickness))
+    keep = wet_per_level > 0 if depth_only else wet
+    top, bottom, thickness = (np.where(keep, a, 0.0) for a in (top, bottom, thickness))
+    midpoint = 0.5 * (top + bottom)
+    l_z = _median_over_wet_cells(thickness, wet_per_level) if depth_only else float(np.median(thickness[wet]))
 
-    l_h = _median_over_wet_cells(np.sqrt(area).ravel(), wet.sum(axis=0).ravel().astype(np.int64))
+    l_h = _median_over_wet_cells(np.sqrt(area).ravel(), wet_per_column.ravel())
 
     for arr in (top, bottom, thickness, midpoint, area, volume, wet):
         arr.setflags(write=False)

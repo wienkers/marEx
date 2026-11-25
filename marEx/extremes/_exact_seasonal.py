@@ -19,8 +19,7 @@ _MIN_COMPILED_WORK = 50_000
 @intrinsic
 def _popcount(typingctx, word):
     def codegen(context, builder, signature, args):
-        operation = builder.module.declare_intrinsic("llvm.ctpop", [args[0].type])
-        return builder.call(operation, args)
+        return builder.ctpop(args[0])
 
     return types.int64(word), codegen
 
@@ -28,9 +27,7 @@ def _popcount(typingctx, word):
 @intrinsic
 def _trailing_zeros(typingctx, word):
     def codegen(context, builder, signature, args):
-        value = args[0]
-        operation = builder.module.declare_intrinsic("llvm.cttz", [value.type, ir.IntType(1)])
-        return builder.call(operation, [value, ir.Constant(ir.IntType(1), 1)])
+        return builder.cttz(args[0], ir.Constant(ir.IntType(1), 1))
 
     return types.int64(word), codegen
 
@@ -128,6 +125,23 @@ def _slot_index(slots, n_slots, width):
     return valid[order], bounds
 
 
+def _native_fraction(percentile, dtype):
+    """Return a scalar fraction when native rank arithmetic matches NumPy."""
+    if dtype not in (np.float32, np.float64):
+        return None
+    fraction = np.true_divide(percentile, dtype.type(100))
+    # NumPy 1.x divides by Python 100.0, which promotes float32 quantiles.
+    if (
+        fraction.ndim == 0
+        and fraction.dtype == dtype
+        and np.true_divide(fraction, 1.0).dtype == dtype
+        and (1 * fraction).dtype == dtype
+        and 0 <= fraction <= 1
+    ):
+        return fraction
+    return None
+
+
 def _numpy_doy_percentiles(values, time_order, bounds, width, percentile, result):
     """Reduce one slot at a time, preserving the original sample order within it."""
     n_slots = bounds.size - 1
@@ -137,12 +151,28 @@ def _numpy_doy_percentiles(values, time_order, bounds, width, percentile, result
             members = time_order[bounds[slot] : bounds[end]]
         else:
             members = np.concatenate((time_order[bounds[slot] :], time_order[: bounds[end - n_slots]]))
-        if members.size:
-            result[..., slot] = np.nanpercentile(values[..., np.sort(members)], percentile, axis=-1)
+        if not members.size:
+            continue
+        samples = values[:, np.sort(members)]
+        start = 0
+        if values.dtype.type is np.float16 and np.isnan(samples[0]).all():
+            # NumPy sizes the output from the first row. A dry float16 row
+            # would round valid quantiles computed with wider percentile scalars.
+            wet = (~np.isnan(samples)).any(axis=1)
+            start = wet.argmax()
+            if not wet[start]:
+                continue
+        result[start:, slot] = np.nanpercentile(samples[start:], percentile, axis=-1)
 
 
 def _doy_percentiles(values, slots, n_slots, window_steps, percentile, *, _backend: Literal["auto", "compiled", "numpy"] = "auto"):
     """Compute exact thresholds for a time-last block, with float32 output."""
+    if isinstance(values, np.ma.MaskedArray):
+        out_dt = np.result_type(values.dtype, float) if values.dtype.kind in "bui" else values.dtype
+        values = np.asarray(
+            np.ma.filled(values.astype(out_dt, copy=False), np.nan) if np.ma.is_masked(values) else np.ma.getdata(values),
+            dtype=out_dt,
+        )
     spatial_shape = values.shape[:-1]
     n_time = values.shape[-1]
     n_cells = prod(spatial_shape)
@@ -157,7 +187,6 @@ def _doy_percentiles(values, slots, n_slots, window_steps, percentile, *, _backe
     if not time_order.size:
         return result.reshape(spatial_shape + (n_slots,))
     dtype = values.dtype
-    supported = not config.DISABLE_JIT and dtype in (np.dtype(np.float32), np.dtype(np.float64)) and n_time <= 2**24
     n_reductions = 1 if width == n_slots else n_slots
     populated = 1
     if _backend == "auto" and width < n_slots:
@@ -166,13 +195,13 @@ def _doy_percentiles(values, slots, n_slots, window_steps, percentile, *, _backe
         populated = np.count_nonzero(bounds[width:] != bounds[:-width])
         populated += np.count_nonzero((bounds[-width:-1] < bounds[-1]) | (bounds[1:width] > 0))
     work = n_cells * populated
-    compiled = supported and (_backend == "compiled" or (_backend == "auto" and work >= _MIN_COMPILED_WORK))
-    if compiled:
-        fraction = np.true_divide(percentile, dtype.type(100))
-        # NumPy 1.x divides quantiles by Python 100.0, promoting float32 quantiles to float64.
-        compiled = (
-            fraction.ndim == 0 and fraction.dtype == dtype and np.true_divide(fraction, 1.0).dtype == dtype and 0 <= fraction <= 1
-        )
+    fraction = None
+    if (
+        not config.DISABLE_JIT
+        and n_time <= 2**24
+        and (_backend == "compiled" or (_backend == "auto" and work >= _MIN_COMPILED_WORK))
+    ):
+        fraction = _native_fraction(percentile, dtype)
 
     rows_per_strip = max(1, min(_STRIP_ROWS, _STRIP_BYTES // (max(n_time, n_reductions) * dtype.itemsize)))
     # Adjacent spatial strides must agree before reshaping. NumPy can allocate a
@@ -181,7 +210,7 @@ def _doy_percentiles(values, slots, n_slots, window_steps, percentile, *, _backe
     collapsible = all(left == size * right for (_, left), (size, right) in zip(axes, axes[1:]))
     rows = values.reshape(n_cells, n_time) if collapsible else None
 
-    if compiled:
+    if fraction is not None:
         strip_buffer = np.empty((min(n_cells, rows_per_strip), n_time), dtype=dtype)
         unsigned = np.uint32 if dtype == np.float32 else np.uint64
         sign = unsigned(1 << (8 * dtype.itemsize - 1))
@@ -207,7 +236,7 @@ def _doy_percentiles(values, slots, n_slots, window_steps, percentile, *, _backe
         else:
             strip = rows[start:stop]
         destination = result[start:stop]
-        if compiled:
+        if fraction is not None:
             buffer = strip_buffer[: stop - start]
             buffer[:] = strip
             bits = buffer.view(unsigned)

@@ -108,7 +108,9 @@ Output Attributes and Variables
    * - attrs ``window_year_baseline``, ``smooth_days_baseline``, ``std_normalise``, ``window_days_hobday``
      - ``window_years``, ``smooth_days``, ``standardise``, ``window_days``
    * - attr ``window_spatial_hobday``
-     - ``window_spatial`` (the effective value, omitted on the exact path)
+     - ``window_spatial`` records an explicit odd width for either seasonal estimator
+       on a structured grid, or the approximate default of ``5``. Exact defaults to
+       ``None`` (single cell) and omits the attribute in that case.
    * - (none)
      - attr ``tail``. The streaming staging directory is on ``ds.encoding["marex_staging_dir"]``, not in attrs.
    * - boolean and ``None`` attrs

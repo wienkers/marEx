@@ -17,7 +17,8 @@ from .core.compute_mode import Materialiser, create_staging_dir
 from .core.dimensions import resolve_dims
 from .core.finalise import finalise_dataset, split_large_chunks
 from .core.time_axis import SeasonalCycle, cadence_index_name
-from .extremes.api import _effective_window_spatial, _extreme_steps, _extremes_core, _log_extreme_summary
+from .extremes.api import _align_threshold_cycle, _extreme_steps, _extremes_core, _log_extreme_summary
+from .extremes.base import resolve_window_spatial
 from .logging_config import configure_logging, get_logger
 
 # Get module logger
@@ -229,6 +230,7 @@ def preprocess_data(
             cycle=cycle,
             tail=tail,
         )
+        ds = _align_threshold_cycle(ds, thresholds)
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
 
@@ -263,6 +265,7 @@ def preprocess_data(
                 cycle=cycle,
                 tail=tail,
             )
+            ds = _align_threshold_cycle(ds, thresholds_stn)
             ds["extreme_events_stn"] = extremes_stn
             ds["thresholds_stn"] = thresholds_stn
 
@@ -282,10 +285,9 @@ def preprocess_data(
 
         # Merge the extremes stage's metadata onto the anomaly stage's. Each stage
         # appends its own steps, so the chained list reads in execution order.
-        # `method_percentile` is threaded rather than left to the helper's own default:
-        # the exact path defaults to a single cell, so defaulting it to 5 would
-        # record a 5x5 window the run never used.
-        effective_window_spatial = _effective_window_spatial(method_extreme, window_spatial, dimensions, ds, method_percentile)
+        effective_window_spatial = resolve_window_spatial(
+            ds.dat_anomaly, dimensions, method_extreme, method_percentile, window_spatial
+        )
         ds.attrs.update({"method_extreme": method_extreme, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
             method_extreme,
@@ -298,8 +300,10 @@ def preprocess_data(
         )
         if method_extreme == "seasonal_percentile":
             ds.attrs.update({"window_days": window_days})
-            if effective_window_spatial is not None:
-                ds.attrs.update({"window_spatial": effective_window_spatial})
+        if method_extreme == "seasonal_percentile" and effective_window_spatial is not None:
+            ds.attrs["window_spatial"] = effective_window_spatial
+        else:
+            ds.attrs.pop("window_spatial", None)
         # The RESOLVED geometry, not what the caller passed -- see marEx.extremes.identify.
         ds.attrs.update({"method_percentile": method_percentile, "precision": used_precision, "max_anomaly": used_max_anomaly})
 

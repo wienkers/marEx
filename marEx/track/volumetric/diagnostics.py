@@ -2,7 +2,8 @@
 MarEx Track: per-event diagnostics of a finished 4-D event field.
 
 Every diagnostic is computed from the final event labels, one timestep at a time, with the
-static geometry passed as single-chunk ``(z, y, x)`` arrays (never broadcast over time).
+static geometry passed as single-chunk arrays: ``(z,)`` or ``(z, y, x)`` for layers,
+``(z, y, x)`` for volumes and wet cells, and ``(y, x)`` for horizontal quantities.
 Each per-event sum is a float64 ``np.bincount`` over the occupied voxels in C ``(z, y, x)``
 order, which accumulates strictly sequentially, so the result does not depend on the time
 chunking or on the compute mode.
@@ -159,8 +160,9 @@ def event_diagnostics(
         (``volume / footprint_area``), all float64 ``(time, ID)`` in positive-down metres,
         and ``centroid`` ``(component=[0, 1], time, ID)``: the volume-weighted horizontal
         centroid (latitude, longitude) in degrees, with longitude in
-        ``[min(lon), min(lon) + 360)``, up to ``LON_WRAP_TOLERANCE_DEG`` of rounding west of
-        ``min(lon)``. NaN where an event is absent.
+        ``[lon_origin, lon_origin + 360)``, where ``lon_origin`` is the minimum finite wet
+        longitude. Rounding can place the result up to ``LON_WRAP_TOLERANCE_DEG`` west of
+        that origin. NaN where an event is absent.
     """
     timedim, zdim, ydim, xdim = dims.internal_order()
     if tuple(id_field.dims) != dims.internal_order():
@@ -175,7 +177,11 @@ def event_diagnostics(
         raise ConfigurationError("presence's ID coordinate must be strictly increasing")
 
     lat2, lon2 = _horizontal_2d(lat_deg, lon_deg, ny, nx)
-    lat_r, lon_r = np.radians(lat2), np.radians(lon2)
+    # Dry columns with missing geographic coordinates carry zero weight.
+    finite_lon = np.isfinite(lon2)
+    lon_origin = float(np.min(lon2, where=geom.wet.any(axis=0) & finite_lon, initial=np.inf))
+    lat_r = np.radians(np.where(np.isfinite(lat2), lat2, 0.0))
+    lon_r = np.radians(np.where(finite_lon, lon2, 0.0))
     ex = np.cos(lat_r) * np.cos(lon_r)
     ey = np.cos(lat_r) * np.sin(lon_r)
     ez = np.sin(lat_r)
@@ -206,7 +212,7 @@ def event_diagnostics(
         static(ex, yx),
         static(ey, yx),
         static(ez, yx),
-        kwargs={"lon_origin": float(np.min(lon2))},
+        kwargs={"lon_origin": lon_origin},
         input_core_dims=[
             list(zyx),
             ["ID"],

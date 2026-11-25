@@ -79,6 +79,27 @@ def test_staging_dir_on_encoding_and_cleared(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["persist", "streaming"])
+def test_volume_fractions_are_bit_identical_across_time_chunks(mode, tmp_path):
+    kept, removed = 772366091.67, 553072415.767
+    present = np.array([True, False, True, True, True, False, True])
+    binary = np.zeros((present.size, 1, 1, 3), dtype=bool)
+    binary[:, 0, 0, 0] = True
+    binary[:, 0, 0, 2] = present
+    extremes, wet, bounds, areas = make_inputs(binary, thickness=[1.0])
+    areas.data = np.array([[kept, 1.0, removed]])
+    expected = np.cumsum(kept + present * removed)[-1] / np.cumsum(np.full(present.size, kept))[-1]
+    for width in (1, 2, 3, -1):
+        options = _kwargs(temp_dir=str(tmp_path), volume_filter_absolute=600000000.0)
+        t = marEx.tracker(extremes.chunk(time=width), wet, layer_bounds=bounds, cell_areas=areas, compute_mode=mode, **options)
+        events = t.run()
+        try:
+            assert events.attrs["preprocessed_volume_fraction"] == expected, (mode, width)
+            assert events.ID_field.chunks == ((1,) * present.size, (1,), (1,), (3,))
+        finally:
+            marEx.clear_staging(events)
+
+
+@pytest.mark.parametrize("mode", ["persist", "streaming"])
 @pytest.mark.parametrize("time_chunk", [1, 2, 3])
 def test_split_records_do_not_depend_on_the_time_chunk(mode, time_chunk, tmp_path):
     nt = scenarios()["one_split"][0].shape[0]

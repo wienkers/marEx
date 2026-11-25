@@ -34,12 +34,6 @@ def _positive_finite(value: float, name: str) -> float:
     return out
 
 
-def _squared_distance(a: NDArray[np.float64], b: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Squared Euclidean distance over the last axis (length 4), summed in a fixed coordinate order."""
-    d = a - b
-    return ((d[..., 0] * d[..., 0] + d[..., 1] * d[..., 1]) + d[..., 2] * d[..., 2]) + d[..., 3] * d[..., 3]
-
-
 class ScaledCoords:
     """
     Scaled 4-D coordinates of the voxels of a structured ``(z, y, x)`` grid.
@@ -151,7 +145,7 @@ def _finite_points(coords, flat, role):
 
 def _seed_columns(coords, seed_flat, points):
     """Return horizontal triples, groups of seed indices and the grid lookup."""
-    if not isinstance(coords, ScaledCoords):
+    if type(coords) is not ScaledCoords:
         horizontal, column = np.unique(points[:, :3], axis=0, return_inverse=True)
         groups = [[] for _ in horizontal]
         for i, group in enumerate(column.ravel()):
@@ -349,15 +343,16 @@ def partition_child(
             suggestions=["Check that the parents come from the previous timestep's accepted parent objects"],
             context={"n_parents": len(parent_ids)},
         )
+    out = np.empty(n_child, dtype=np.intp)
+    if not n_child:
+        return out
+
     # Rank nonempty parents by ID (with original indices as the fallback).
     # The kernel compares ranks, and keep maps them back to input indices.
     keep = np.flatnonzero(sizes > 0)
     keep = keep[np.argsort(parent_ids[keep], kind="stable")]
     seed_flat = np.concatenate([np.asarray(parent_flat[j], dtype=np.int64).reshape(-1) for j in keep])
     points = _finite_points(coords, seed_flat, "parent")
-    out = np.empty(n_child, dtype=np.intp)
-    if not n_child:
-        return out
     if keep.size == 1:
         for start in range(0, n_child, batch_size):
             _finite_points(coords, child_flat[start : start + batch_size], "child")

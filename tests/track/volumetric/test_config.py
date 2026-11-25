@@ -91,6 +91,7 @@ REJECTIONS = [
     pytest.param({"nn_partitioning": False}, "nn_partitioning=True", id="nn_partitioning_false"),
     pytest.param({"unstructured_grid": True}, "structured", id="unstructured_grid"),
     pytest.param({"prefilter_min_cells": 5}, "prefilter_min_cells", id="prefilter_min_cells"),
+    pytest.param({"T_fill": 1}, "T_fill must be a non-negative even integer", id="odd_T_fill"),
     pytest.param({"max_vertical_gap_m": -1}, "max_vertical_gap_m", id="negative_gap"),
     pytest.param({"max_vertical_gap_m": float("nan")}, "max_vertical_gap_m", id="nan_gap"),
     pytest.param({"partition_scales": (0, 10)}, "partition_scales", id="scale_zero"),
@@ -119,6 +120,28 @@ def test_rejections(overrides, match):
     message = str(excinfo.value)
     del excinfo
     assert re.search(match, message), f"message does not match {match!r}: {message}"
+
+
+@pytest.mark.parametrize("units", ["degrees", "radians"])
+@pytest.mark.parametrize("lon_axis", [0, 1])
+def test_autodetect_units_on_a_repeated_2d_longitude_axis(units, lon_axis):
+    dims = ("j", "i")
+    full_turn = 360.0 if units == "degrees" else 2 * np.pi
+    n = (NY, NX)[lon_axis]
+    lon = np.arange(n) * full_turn / n
+    if lon_axis == 0:
+        lon = lon[:, None]
+    data = field().rename(lat="j", lon="i").assign_coords(longitude=(dims, np.broadcast_to(lon, (NY, NX))))
+    data = data.assign_coords(latitude=(dims, np.zeros((NY, NX))))
+    t = build(
+        data,
+        dimensions={**DIMS, "y": "j", "x": "i"},
+        coordinates={"y": "latitude", "x": "longitude"},
+        regional_mode=False,
+        coordinate_units=None,
+        cell_areas=cell_areas().rename(lat="j", lon="i"),
+    )
+    assert t.coordinate_units == units
 
 
 def test_nn_partitioning_defaults_to_true_for_volumetric():

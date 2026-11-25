@@ -15,6 +15,7 @@ import pytest
 import xarray as xr
 
 import marEx
+from marEx.core.time_axis import SeasonalCycle
 from marEx.exceptions import ConfigurationError
 
 from ..conftest import assert_no_failures
@@ -132,6 +133,13 @@ def test_anomaly_matches_the_full_pipeline_bit_for_bit(da):
     np.testing.assert_array_equal(standalone.mask.values, chained.mask.values)
 
 
+def _circular_population_std(residuals, labels, year_days):
+    slots = np.unique(labels[(labels >= 1) & (labels <= year_days)])
+    variances = np.stack([np.var(residuals[labels == slot], axis=0, dtype=np.float64) for slot in slots])
+    # An even 30-day window has 15 days before the centre and 14 after it.
+    return np.stack([np.sqrt(variances[((slots - slot + 15) % year_days) < 30].mean(axis=0)) for slot in slots])
+
+
 @pytest.mark.parametrize("days", [10, 20, 40])
 def test_harmonic_standardisation_uses_observed_cycle_labels(days):
     first = xr.date_range("2001-05-01", periods=days, freq="D")
@@ -143,10 +151,70 @@ def test_harmonic_standardisation_uses_observed_cycle_labels(days):
     assert ds.dat_stn.dtype == ds.dat_anomaly.dtype == np.float32
     ds = ds.compute()
     np.testing.assert_array_equal(ds.dayofyear, np.arange(121, 121 + days))
+    wet = ds.mask.values
+    expected_std = _circular_population_std(ds.dat_anomaly.values[:, wet], ds.time.dt.dayofyear.values, 366)
+    np.testing.assert_allclose(ds.STD.values[:, wet], expected_std, rtol=2e-6)
     divisor = ds.STD.where(ds.STD > 1e-10).sel(dayofyear=ds.time.dt.dayofyear).drop_vars("dayofyear")
     expected = ds.dat_anomaly / divisor
     xr.testing.assert_identical(ds.dat_stn, expected.rename("dat_stn"))
     assert np.isfinite(ds.dat_stn.values[:, ds.mask.values]).all()
+
+
+@pytest.mark.parametrize("sampling", ["pentads", "two_seasons"])
+def test_harmonic_standardisation_uses_physical_calendar_distance(sampling):
+    if sampling == "pentads":
+        time = xr.date_range("2000-01-01", "2009-12-31", freq="5D")
+    else:
+        daily = xr.date_range("2000-01-01", "2003-12-31", freq="D")
+        time = daily[np.isin(daily.month, [1, 7]) & (daily.day <= 20)]
+    values = (np.random.default_rng(17).normal(size=time.size) * np.where(time.month <= 3, 1, 8)).astype(np.float32)
+    field = xr.DataArray(values, dims="time", coords={"time": time}).chunk({"time": 47})
+    ds = marEx.anomaly.compute(field, method="detrend_harmonic", standardise=True, dimensions={"time": "time"}).compute()
+
+    expected = _circular_population_std(ds.dat_anomaly.values, time.dayofyear.to_numpy(), 366)
+    np.testing.assert_allclose(ds.STD.values, expected, rtol=2e-6)
+
+
+@pytest.mark.parametrize("calendar,year_days", [("standard", 366), ("noleap", 365), ("all_leap", 366), ("360_day", 360)])
+def test_harmonic_standardisation_matches_complete_calendar_oracle(calendar, year_days):
+    time = xr.date_range("2000-01-01", "2004-01-01", freq="D", inclusive="left", calendar=calendar, use_cftime=True)
+    values = np.random.default_rng(22).normal(size=time.size).astype(np.float32)
+    field = xr.DataArray(values, dims="time", coords={"time": time}).chunk({"time": 91})
+    ds = marEx.anomaly.compute(field, method="detrend_harmonic", standardise=True, dimensions={"time": "time"}).compute()
+
+    expected = _circular_population_std(ds.dat_anomaly.values, ds.time.dt.dayofyear.values, year_days)
+    np.testing.assert_array_equal(ds.dayofyear.values, np.arange(1, year_days + 1))
+    np.testing.assert_allclose(ds.STD.values, expected, rtol=2e-6)
+
+
+def test_harmonic_standardisation_excludes_days_outside_the_declared_cycle():
+    time = xr.date_range("2000-01-01", "2008-12-31", freq="D")
+    labels = time.dayofyear.to_numpy()
+    values = (np.random.default_rng(4).normal(size=time.size) * np.where(labels == 366, 100, 1)).astype(np.float32)
+    field = xr.DataArray(values, dims="time", coords={"time": time}).chunk({"time": 91})
+    ds = marEx.anomaly.compute(
+        field, method="detrend_harmonic", standardise=True, dimensions={"time": "time"}, cycle=SeasonalCycle("dayofyear", 365, 1)
+    ).compute()
+
+    np.testing.assert_array_equal(ds.time, time.values)
+    np.testing.assert_array_equal(ds.dayofyear, np.arange(1, 366))
+    assert np.isnan(ds.dat_anomaly.values[labels == 366]).all()
+    assert np.isnan(ds.dat_stn.values[labels == 366]).all()
+    expected = _circular_population_std(ds.dat_anomaly.values, labels, 365)
+    np.testing.assert_allclose(ds.STD.values, expected, rtol=2e-6)
+
+
+def test_harmonic_standardisation_keeps_time_when_no_declared_slots_are_observed():
+    time = xr.date_range("2000-12-31", periods=3, freq="4YE")
+    field = xr.DataArray([3.0, 1.0, 4.0], dims="time", coords={"time": time}).chunk({"time": 2})
+    ds = marEx.anomaly.compute(
+        field, method="detrend_harmonic", standardise=True, dimensions={"time": "time"}, cycle=SeasonalCycle("dayofyear", 365, 1)
+    ).compute()
+
+    np.testing.assert_array_equal(ds.time, time.values)
+    assert ds.sizes["dayofyear"] == 0
+    assert np.isnan(ds.dat_anomaly.values).all()
+    assert np.isnan(ds.dat_stn.values).all()
 
 
 def test_identify_composes_onto_the_anomaly_dataset(da):

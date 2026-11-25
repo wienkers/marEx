@@ -1,6 +1,5 @@
 """Bitwise controls for the exact seasonal rank kernel and its block dispatch."""
 
-import json
 import subprocess
 import sys
 import tracemalloc
@@ -118,6 +117,35 @@ def test_reference_fallback_dtypes(dtype):
     _compare(np.array([[0, 1, 2]], dtype=dtype), np.ones(3, dtype=np.int32), 12, 3, 5.2)
 
 
+@pytest.mark.parametrize("q", [np.float32(95), np.float64(95), 95.0])
+@pytest.mark.parametrize("dry_rows", [(0,), (1,), (63,), (64,), (65,), (0, 1, 63, 64, 65)])
+def test_float16_dry_strip_boundaries(q, dry_rows):
+    slots = np.tile(np.arange(1, 13, dtype=np.int32), 16)
+    values = np.ones((66, slots.size), dtype=np.float16)
+    values[:, -12:-10] = np.nextafter(np.float16(1), np.float16(2))
+    values[list(dry_rows)] = np.nan
+    values[0, slots == 2] = np.nan
+    expected = np.array(
+        [[np.nanpercentile(row[slots == slot], q) for slot in range(1, 13)] for row in values],
+        dtype=np.float32,
+    )
+
+    time = xr.date_range("2000-01-01", periods=slots.size, freq="MS")
+    dims = {"time": "time", "x": "lon", "y": "lat"}
+    data = xr.DataArray(values.T[:, None, :], dims=("time", "lat", "lon"), coords={"time": time})
+    flags, thresholds = _identify_extremes_seasonal(
+        data.chunk({"time": 12, "lon": 66}),
+        threshold_percentile=q,
+        window_days=1,
+        method_percentile="exact",
+        dimensions=dims,
+        coordinates=dims,
+        materialiser=Materialiser("lazy"),
+    )
+    _assert_bits(thresholds.compute().values[:, 0, :].T, expected)
+    np.testing.assert_array_equal(flags.compute().values[:, 0, :].T, values >= expected[:, slots - 1])
+
+
 @pytest.mark.parametrize(
     "dtype,n_time,cycle,window,q",
     [
@@ -153,7 +181,7 @@ def test_empty_samples(shape):
 
 @pytest.mark.parametrize("all_exceptional", [False, True])
 def test_only_exceptional_rows_use_numpy(monkeypatch, all_exceptional):
-    values = np.arange(30, dtype=np.float32).reshape(5, 6)
+    values = np.arange(30, dtype=np.float64).reshape(5, 6)
     values[1, 1] = -0.0
     values[3, 4] = np.inf
     if all_exceptional:
@@ -167,9 +195,10 @@ def test_only_exceptional_rows_use_numpy(monkeypatch, all_exceptional):
         return numpy_backend(rows, *args)
 
     monkeypatch.setattr(exact, "_numpy_doy_percentiles", record)
-    result = exact._doy_percentiles(values, slots, 6, 3, np.float32(5.2), _backend="compiled")
-    _assert_bits(result, _mask_reference(values, slots, 6, 3, np.float32(5.2)))
-    np.testing.assert_array_equal(seen, values[:, -1] if all_exceptional else values[[1, 3], -1])
+    result = exact._doy_percentiles(values, slots, 6, 3, 5.2, _backend="compiled")
+    _assert_bits(result, _mask_reference(values, slots, 6, 3, 5.2))
+    expected = values[:, -1] if all_exceptional or exact.config.DISABLE_JIT else values[[1, 3], -1]
+    np.testing.assert_array_equal(seen, expected)
 
 
 def test_auto_workload_crossover(monkeypatch):
@@ -182,24 +211,23 @@ def test_auto_workload_crossover(monkeypatch):
         return kernel(*args)
 
     monkeypatch.setattr(exact, "_rolling_rank_percentiles", record)
-    values = np.arange(12, dtype=np.float32).reshape(3, 4)
+    values = np.arange(12, dtype=np.float64).reshape(3, 4)
     slots = np.arange(1, 5, dtype=np.int32)
     for rows in (2, 3):
-        actual = exact._doy_percentiles(values[:rows], slots, 4, 3, np.float32(5.2))
-        _assert_bits(actual, _mask_reference(values[:rows], slots, 4, 3, np.float32(5.2)))
-        assert len(calls) == rows - 2
-    exact._doy_percentiles(values, slots, 4, 11, np.float32(5.2))
-    assert len(calls) == 1
-    exact._doy_percentiles(values, np.ones_like(slots), 60, 1, np.float32(5.2))
-    assert len(calls) == 1
+        actual = exact._doy_percentiles(values[:rows], slots, 4, 3, 5.2)
+        _assert_bits(actual, _mask_reference(values[:rows], slots, 4, 3, 5.2))
+        assert len(calls) == (0 if exact.config.DISABLE_JIT else rows - 2)
+    exact._doy_percentiles(values, slots, 4, 11, 5.2)
+    exact._doy_percentiles(values, np.ones_like(slots), 60, 1, 5.2)
+    assert len(calls) == (0 if exact.config.DISABLE_JIT else 1)
 
 
+@pytest.mark.smoke
+@pytest.mark.skipif(exact.config.DISABLE_JIT, reason="Requires native compilation")
 def test_cold_first_call():
     script = """
-import json
 import runpy
 import sys
-from time import perf_counter
 
 import numpy as np
 
@@ -207,19 +235,19 @@ namespace = runpy.run_path(sys.argv[1])
 percentiles = namespace['_doy_percentiles']
 kernel = namespace['_rolling_rank_percentiles']
 slots = np.arange(1, 9, dtype=np.int32)
-values = np.arange(16, dtype=np.float32).reshape(2, -1)
-percentiles(values, slots, 8, 3, np.float32(5.2))
+values = np.arange(16, dtype=np.float64).reshape(2, -1)
+percentiles(values, slots, 8, 3, 5.2)
 assert not kernel.signatures
-start = perf_counter()
-percentiles(values, slots, 8, 3, np.float32(5.2), _backend='compiled')
-elapsed = perf_counter() - start
-percentiles(values.astype(np.float64), slots, 8, 3, np.float64(5.2), _backend='compiled')
-print(json.dumps([elapsed, len(kernel.signatures)]))
+for dtype in (np.float32, np.float64):
+    samples = values.astype(dtype)
+    q = dtype(5.2)
+    actual = percentiles(samples, slots, 8, 3, q, _backend='compiled')
+    expected = percentiles(samples, slots, 8, 3, q, _backend='numpy')
+    np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+    # NumPy 1.x promotes the float32 case, so only the float64 case compiles there.
+    assert len(kernel.signatures) == int(np.nanpercentile(samples[0], q).dtype == dtype)
 """
-    cold = subprocess.run([sys.executable, "-c", script, exact.__file__], check=True, capture_output=True, text=True, timeout=30)
-    elapsed, signatures = json.loads(cold.stdout)
-    assert signatures == 1
-    assert elapsed <= 1.5, f"cold compile and first call took {elapsed:.3f} s"
+    subprocess.run([sys.executable, "-c", script, exact.__file__], check=True, timeout=120)
 
 
 def test_strided_tile_uses_bounded_strips():

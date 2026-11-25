@@ -9,15 +9,19 @@ import sys
 import tracemalloc
 import weakref
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
+import cftime
 import dask.array as dsa
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from xarray.coding.times import CFDatetimeCoder
 
 from marEx.core.compute_mode import Materialiser
+from marEx.exceptions import ConfigurationError
 from marEx.track.region_writer import ObjectIDRegionWriter
 from marEx.track.volumetric.geometry import build_vertical_geometry
 from marEx.track.volumetric.ids import IDAllocator
@@ -26,7 +30,6 @@ from marEx.track.volumetric.merge_loop import (
     MergeLedger,
     SplitGeometry,
     consolidate_volumes,
-    final_links,
     merge_loop_client_bytes,
     split_and_merge_volumetric,
 )
@@ -35,6 +38,7 @@ from marEx.track.volumetric.partition import ScaledCoords
 from marEx.track.volumetric.store import ObjectIndex, VolumeStore
 
 from .conftest import VDIMS, build_case, store_from_field
+from .oracles import final_links
 from .synthetic import Ball, paint, scenarios
 from .test_partition import brute_nearest
 
@@ -558,6 +562,46 @@ def _merge_ids():
     return ids
 
 
+def test_merge_loop_rejects_cell_volumes_with_the_wrong_shape(tmp_path):
+    ids = _merge_ids()
+    geom, coords, field = _unit_case(ids)
+    store = store_from_field(ids, geom.cell_volume)
+    wrong_geom = replace(geom, cell_volume=geom.cell_volume.swapaxes(1, 2))
+    with pytest.raises(ConfigurationError, match="cell_volume has shape .* expected"):
+        _run_field(field.chunk({"time": 1}), store, IDAllocator(4), wrong_geom, coords, "persist", tmp_path)
+
+
+@pytest.mark.parametrize("event", ["merge", "split", "neither"])
+def test_empty_360_day_ledger_columns_roundtrip_through_zarr(event, tmp_path):
+    ids = _merge_ids()
+    if event == "split":
+        ids[0, 0, 0] = 1
+        ids[1, 0, 0] = [2, 2, 2, 0, 3, 3, 3]
+    if event == "neither":
+        ids[:] = 0
+    geom, coords, field = _unit_case(ids)
+    dates = [cftime.Datetime360Day(2000, 2, day) for day in (29, 30)]
+    field = field.assign_coords(time=dates).chunk({"time": 1})
+    units = "days since 1999-01-01"
+    field.time.encoding.update(calendar="360_day", units=units)
+    store = store_from_field(ids, geom.cell_volume)
+    _, _, ledger = _run_field(field, store, IDAllocator(4), geom, coords, "persist", tmp_path, max_gap_m=0.0, wrap_x=False)
+    ds = ledger.to_dataset()
+    path = tmp_path / "ledger.zarr"
+    ds.to_zarr(path, zarr_format=2)
+
+    # Xarray 2025.6.1 needs an explicit cftime decoder for empty non-standard calendars.
+    with xr.open_zarr(path, decode_times=CFDatetimeCoder(use_cftime=True)) as restored:
+        for kind in ("merge", "split"):
+            times = restored[f"{kind}_time"]
+            assert times.dtype == np.dtype(object)
+            assert times.encoding["calendar"] == "360_day"
+            assert times.values.tolist() == ([dates[1]] if kind == event else [])
+            if kind != event:
+                assert times.encoding["dtype"] == np.dtype(np.int64)
+                assert times.encoding["units"] == units
+
+
 @pytest.mark.parametrize("mode,time_chunk", [("persist", 2), ("persist", 1), ("streaming", 1)])
 def test_one_merge_partitions_and_records_ledger(tmp_path, mode, time_chunk):
     ids = _merge_ids()
@@ -846,19 +890,15 @@ def test_partition_volumes_conserved_in_loop(tmp_path, monkeypatch):
     calls = []
     real = merge_loop._resolve_merge
 
-    def recording(
-        slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume, **kwargs
-    ):
+    def recording(slice_t, index_t, index_prev, child_id, parent_ids, store, new_ids, coords, cell_volume, **kwargs):
         before_vox = index_t.voxels(child_id).copy()
         before_vol = store.volumes([child_id])[0]
         np.testing.assert_array_equal(before_vox, np.flatnonzero(slice_t == child_id))
-        child_ids, overlap = real(
-            slice_t, index_t, index_prev, child_id, parent_ids, overlap_rows, store, allocator, coords, cell_volume, **kwargs
-        )
+        child_ids = real(slice_t, index_t, index_prev, child_id, parent_ids, store, new_ids, coords, cell_volume, **kwargs)
         pieces = [index_t.voxels(c) for c in child_ids]
         vols = [store.volumes([c])[0] for c in child_ids if c in store]
         calls.append((before_vox, before_vol, pieces, vols, slice_t.copy(), child_ids))
-        return child_ids, overlap
+        return child_ids
 
     monkeypatch.setattr(merge_loop, "_resolve_merge", recording)
 
@@ -885,14 +925,15 @@ def test_partition_volumes_conserved_in_loop(tmp_path, monkeypatch):
 
 
 def _allocation_inputs(domain, n_parents):
-    """A child and its parents with fixed voxel counts (480 each) inside a (z, y, x) domain."""
+    """Two independent 480-voxel children and their parents in a (z, y, x) domain."""
     nz, ny, nx = domain
     prev = np.zeros(domain, dtype=np.int32)
     cur = np.zeros(domain, dtype=np.int32)
     width = 24 // n_parents
-    for p in range(n_parents):
-        prev[0:2, 0:10, p * width : (p + 1) * width] = p + 1
-    cur[0:2, 0:10, 0:24] = 100
+    for i, rows in enumerate((slice(0, 10), slice(20, 30))):
+        for p in range(n_parents):
+            prev[:2, rows, p * width : (p + 1) * width] = i * n_parents + p + 1
+        cur[:2, rows, :24] = 100 + i
     prev, cur = prev.ravel(), cur.ravel()
     cv = np.ones(prev.size, dtype=np.float64)
     lat, lon = np.linspace(30.0, 40.0, ny), np.linspace(-170.0, -160.0, nx)
@@ -901,32 +942,42 @@ def _allocation_inputs(domain, n_parents):
     store = VolumeStore()
     store.update_from_slice(prev, cv)
     store.update_from_slice(cur, cv)
-    parent_ids = np.arange(1, n_parents + 1, dtype=np.int32)
-    overlap_rows = np.full(n_parents, 480.0 / n_parents)
-    return prev, cur, cv, coords, store, parent_ids, overlap_rows
+    return prev, cur, cv, coords, store
 
 
 def _merge_peak(domain, n_parents):
-    from marEx.track.volumetric.merge_loop import _resolve_merge
+    from marEx.track.volumetric.merge_loop import _resolve_merge, _WaterComponents
 
     def once():
-        prev, cur, cv, coords, store, parent_ids, overlap_rows = _allocation_inputs(domain, n_parents)
+        prev, cur, cv, coords, store = _allocation_inputs(domain, n_parents)
         index_prev, index_t = ObjectIndex.from_slice(prev), ObjectIndex.from_slice(cur)
+        components = _WaterComponents(cur)
+        expected_pristine = cur.copy()
         allocator = IDAllocator(1000)
-        gc.collect()
-        tracemalloc.start()
-        try:
-            base = tracemalloc.get_traced_memory()[0]
-            tracemalloc.reset_peak()
-            child_ids, _ = _resolve_merge(cur, index_t, index_prev, 100, parent_ids, overlap_rows, store, allocator, coords, cv)
-            peak = tracemalloc.get_traced_memory()[1] - base
-        finally:
-            tracemalloc.stop()
-        assert len(child_ids) == n_parents and (cur[cur > 0] != 100).sum() == 480 - 480 // n_parents
-        return peak
+        peaks, pristine = [], []
+        for i in range(2):
+            child_id = 100 + i
+            voxels = index_t.voxels(child_id)
+            parent_ids = np.arange(1, n_parents + 1, dtype=np.int32) + i * n_parents
+            new_ids = allocator.allocate(n_parents - 1)
+            gc.collect()
+            tracemalloc.start()
+            try:
+                child_ids = _resolve_merge(
+                    cur, index_t, index_prev, child_id, parent_ids, store, new_ids, coords, cv, components=components
+                )
+                peaks.append(tracemalloc.get_traced_memory()[1])
+            finally:
+                tracemalloc.stop()
+            pristine.append(components.labels)
+            assert child_ids.size == n_parents
+            assert (cur[voxels] != child_id).sum() == 480 - 480 // n_parents
+        assert pristine[0] is pristine[1] and not np.shares_memory(pristine[0], cur)
+        np.testing.assert_array_equal(pristine[0], expected_pristine)
+        return peaks
 
     once()  # warm up first-call allocations (imports, caches)
-    return min(once() for _ in range(3))
+    return [min(peaks) for peaks in zip(*(once() for _ in range(3)))]
 
 
 _PEAKS_SCRIPT = """
@@ -938,20 +989,22 @@ print(json.dumps([[list(d), n, _merge_peak(d, n)] for d in [(4, 40, 60), (4, 80,
 
 
 def test_per_merge_allocations_bounded():
-    # Asserts invariance of the per-merge peak, not an absolute size. tracemalloc counts every
-    # thread, and a dask cluster left running by another test allocates in the background, so
-    # the peaks are measured in a fresh interpreter.
+    # Measure in a fresh interpreter so tracemalloc excludes allocations by other tests' threads.
     root = str(Path(__file__).resolve().parents[3])
     proc = subprocess.run([sys.executable, "-c", _PEAKS_SCRIPT, root], cwd=root, capture_output=True, text=True, check=True)
     peaks = {(tuple(d), n): peak for d, n, peak in json.loads(proc.stdout.strip().splitlines()[-1])}
-    # Neither the domain (9600 -> 38400 voxels) nor the parent count (2 -> 8) moves the peak. One
-    # full-domain bool mask of the larger domain is 38400 B; the allowance is a fraction of it.
+    # The first edit can retain one pristine int32 slice. Its peak can occur before the
+    # copy, so bound its overhead without subtracting the slice from the measured peak.
     allowance = 4096
     small, large = (4, 40, 60), (4, 80, 120)
+    for (domain, _), (first, later) in peaks.items():
+        slice_bytes = int(np.prod(domain)) * np.dtype(np.int32).itemsize
+        assert slice_bytes <= first <= slice_bytes + later + allowance, peaks
     for n in (2, 8):
-        assert peaks[(large, n)] - peaks[(small, n)] <= allowance, peaks
+        assert abs(peaks[large, n][1] - peaks[small, n][1]) <= allowance, peaks
     for d in (small, large):
-        assert peaks[(d, 8)] - peaks[(d, 2)] <= allowance, peaks
+        for two, eight in zip(peaks[d, 2], peaks[d, 8]):
+            assert abs(two - eight) <= allowance, peaks
 
 
 # --------------------------------------------------------------------------------------

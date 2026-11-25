@@ -6,7 +6,7 @@ import pytest
 import xarray as xr
 
 import marEx
-from marEx.exceptions import ConfigurationError
+from marEx.exceptions import ConfigurationError, DataValidationError
 
 DIMS = {"time": "time", "z": "depth", "y": "lat", "x": "lon"}
 LAT = np.array([60.0, 0.0])
@@ -230,3 +230,29 @@ def test_integer_labels_are_compared_exactly():
     areas = _on_indexed_ji(_areas(), geographic=False).assign_coords(j=np.arange(base + 1, base + 3, dtype=np.int64))
     with pytest.raises(ConfigurationError, match="cell_areas.*'j'"):
         _track(data=data, mask=wet, cell_areas=areas, dimensions=dims, coordinates={"y": "latitude", "x": "longitude"})
+
+
+@pytest.mark.parametrize(
+    "name, make, axis, coordinate", [("cell_areas", _areas, "j", "latitude"), ("cell_volumes", _volumes, "i", "longitude")]
+)
+def test_curvilinear_shape_and_indexes_do_not_hide_misplaced_geometry(name, make, axis, coordinate):
+    lat, lon = np.meshgrid(LAT + 0.1, LON + 0.1, indexing="ij")
+    geographic = {"latitude": (("j", "i"), lat), "longitude": (("j", "i"), lon)}
+    data = _on_indexed_ji(_data(), geographic=False).assign_coords(geographic)
+    wet = _on_indexed_ji(_wet(), geographic=False)
+    wet[:, 1, 2] = False
+    areas = _on_indexed_ji(_areas(), geographic=False)
+    dims, values = geographic[coordinate]
+    geographic[coordinate] = (dims, np.where(wet.any("depth"), values, np.nan))
+    geometry = _on_indexed_ji(make(), geographic=False).assign_coords(
+        {key: (dims, values.astype(np.float32)) for key, (dims, values) in geographic.items()}
+    )
+    kwargs = dict(data=data, mask=wet, dimensions={**DIMS, "y": "j", "x": "i"}, coordinates={"y": "latitude", "x": "longitude"})
+    if name == "cell_volumes":
+        kwargs["cell_areas"] = areas
+    reference = _track(**kwargs, **{name: geometry})
+    reordered = geometry.isel({axis: slice(None, None, -1)})
+    _assert_same(_track(**kwargs, **{name: reordered}), reference)
+    misplaced = reordered.assign_coords({axis: geometry[axis]})
+    with pytest.raises(DataValidationError, match=rf"{name}.*'{coordinate}'.*wet columns"):
+        _track(**kwargs, **{name: misplaced})

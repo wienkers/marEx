@@ -12,6 +12,7 @@ identical to the original ``tracker`` methods.
 import warnings
 from typing import Optional, Tuple
 
+import numpy as np
 import xarray as xr
 from dask.base import is_dask_collection
 
@@ -95,6 +96,21 @@ def validate_required_coordinates(data_bin: xr.DataArray, timecoord: str, xcoord
         )
 
 
+def validate_fill_size(value: int, parameter: str) -> None:
+    """Reject a negative or non-integer spatial radius or temporal gap limit."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ConfigurationError(
+            f"{parameter} must be an integer, got {value!r}",
+            context={"provided_value": value, "requirement": "integer"},
+        )
+    if value < 0:
+        raise ConfigurationError(
+            f"{parameter} must be non-negative",
+            details=f"Provided {parameter}={value}",
+            context={"provided_value": value, "requirement": "non-negative"},
+        )
+
+
 def validate_inputs(
     data_bin: xr.DataArray,
     mask: xr.DataArray,
@@ -123,6 +139,7 @@ def validate_inputs(
     unstructured grids), and the (possibly rechunked) ``mask``, ``lat`` and
     ``lon`` so the orchestrator can reassign them.
     """
+    validate_fill_size(T_fill, "T_fill")
     if regional_mode and unstructured_grid:
         raise NotImplementedError("regional_mode is not yet implemented for unstructured grids")
 

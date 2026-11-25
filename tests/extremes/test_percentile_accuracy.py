@@ -291,6 +291,7 @@ def test_the_sparse_sample_warning_uses_the_requested_tail(marex_warnings):
         marEx.extremes.identify(da, method="seasonal_percentile", threshold_percentile=1, tail="lower", dimensions=GRID_DIMS)
     assert any("Not enough samples" in m for m in cap.messages), cap.messages
     assert any("5.5 < 10" in m for m in cap.messages), cap.messages  # 1 % of 550 samples, not 99 %
+    assert any("Consider increasing threshold_percentile" in m for m in cap.messages), cap.messages
 
 
 # ── the symmetry oracle ───────────────────────────────────────────────
@@ -391,6 +392,96 @@ def test_the_exact_path_records_no_spatial_window():
     assert "spatial neighbours" not in exact.attrs["preprocessing_steps"][-1]
     assert approximate.attrs["window_spatial"] == 5
     assert "5 spatial neighbours" in approximate.attrs["preprocessing_steps"][-1]
+
+
+@pytest.mark.parametrize("method", ["seasonal_percentile", "global_percentile"])
+def test_reidentification_clears_unused_spatial_window(method):
+    da = _gaussian(n_time=12)
+    pooled = marEx.extremes.identify(da, method_percentile="exact", window_spatial=3, compute_mode="lazy")
+    result = marEx.extremes.identify(pooled, method=method, method_percentile="exact", compute_mode="lazy")
+    assert pooled.attrs["window_spatial"] == 3
+    assert "window_spatial" not in result.attrs
+
+
+def _pooling_field(lon, row):
+    return xr.DataArray(
+        np.broadcast_to(np.asarray(row, dtype=np.float32), (3, 2, len(lon))),
+        dims=("time", "lat", "lon"),
+        coords={"time": pd.date_range("2000-01-01", periods=3), "lat": [48.0, 49.0], "lon": lon},
+    )
+
+
+@pytest.mark.parametrize(("lon", "western_threshold"), [([10, 11, 12, 13], 2.0), ([0, 90, 180, 270], 75.5)])
+def test_exact_pooling_uses_mapped_longitude(lon, western_threshold):
+    da = _pooling_field(lon, [2, 1, 3, 100]).chunk({"time": 2, "lon": 2})
+    mapped = da.rename(lon="i").assign_coords(lon=("i", lon), i=np.arange(len(lon)))
+    options = dict(method_percentile="exact", window_spatial=3, window_days=1, threshold_percentile=75, compute_mode="lazy")
+    expected = marEx.extremes.identify(da, **options).compute()
+    assert expected.thresholds.isel(lon=0, lat=0).sel(dayofyear=1).item() == western_threshold
+    result = marEx.extremes.identify(
+        mapped, dimensions={**GRID_DIMS, "x": "i"}, coordinates={"x": "lon", "y": "lat"}, **options
+    ).compute()
+    result = result.swap_dims(i="lon").drop_vars("i")
+    xr.testing.assert_identical(result.thresholds, expected.thresholds)
+    xr.testing.assert_identical(result.extreme_events, expected.extreme_events)
+
+
+@pytest.mark.parametrize("method_percentile", ["exact", "approximate"])
+@pytest.mark.parametrize("width", [3, 9])
+def test_spatial_pooling_copies_duplicated_longitude_endpoint_and_keeps_xindex(method_percentile, width):
+    da = _pooling_field([0, 90, 180, 270, 360], [2, 1, 3, 100, 2])
+    da = da.rename(lon="i").assign_coords(lon=("i", da.lon.values)).set_xindex("lon")
+    options = dict(
+        method_percentile=method_percentile,
+        dimensions={**GRID_DIMS, "x": "i"},
+        coordinates={"x": "lon", "y": "lat"},
+        window_spatial=width,
+        window_days=1,
+        threshold_percentile=75,
+        compute_mode="lazy",
+    )
+    result = marEx.extremes.identify(da, **options)
+    expected = marEx.extremes.identify(da.isel(i=slice(0, -1)).chunk({"time": 2, "i": 2}), **options).compute()
+    assert "lon" in result.xindexes
+    for variable in ("thresholds", "extreme_events"):
+        assert result[variable].chunksizes["i"] == (5,)
+        actual = result[variable].compute()
+        assert "lon" in actual.xindexes
+        xr.testing.assert_identical(actual.isel(i=slice(0, -1)), expected[variable])
+        np.testing.assert_array_equal(actual.isel(i=-1).values, expected[variable].isel(i=0).values)
+        np.testing.assert_array_equal(actual.lon, da.lon)
+        xr.testing.assert_identical(actual.sel(lon=90), expected[variable].sel(lon=90))
+
+
+def test_exact_pooling_visits_a_single_regional_column_once():
+    da = _pooling_field([10.0], [1]).copy(data=np.array([[[1.0], [9.0]]] * 3))
+    result = marEx.extremes.identify(
+        da, method_percentile="exact", window_spatial=5, window_days=1, threshold_percentile=75, compute_mode="lazy"
+    ).compute()
+    np.testing.assert_array_equal(result.thresholds.sel(dayofyear=[1, 2, 3]), np.full((3, 2, 1), 7.0))
+    np.testing.assert_array_equal(result.extreme_events, np.array([[[False], [True]]] * 3))
+
+
+def test_harmonic_std_keeps_full_threshold_cycle():
+    time = pd.date_range("2000-04-30", periods=10).append(pd.date_range("2004-04-30", periods=10))
+    da = _gaussian(n_time=20, n_y=2, n_x=2).assign_coords(time=time)
+    anomaly = marEx.anomaly.compute(da, method="detrend_harmonic", standardise=True, compute_mode="lazy")
+    options = dict(method_percentile="exact", window_days=11, compute_mode="lazy")
+    result = marEx.preprocess_data(da, method_anomaly="detrend_harmonic", standardise=True, **options).compute()
+    dataset_run = marEx.extremes.identify(anomaly, **options).compute()
+    array_run = marEx.extremes.identify(anomaly.dat_anomaly, **options).compute()
+    standardised_run = marEx.extremes.identify(anomaly.dat_stn, **options).compute()
+    observed = np.arange(121, 131)
+    np.testing.assert_array_equal(anomaly.dayofyear, observed)
+    np.testing.assert_array_equal(result.dayofyear, np.arange(1, 367))
+    np.testing.assert_array_equal(
+        result.dayofyear.where(result.thresholds.notnull().all(("lat", "lon")), drop=True), np.arange(116, 136)
+    )
+    for output in (result, dataset_run):
+        xr.testing.assert_identical(output.thresholds, array_run.thresholds)
+        xr.testing.assert_identical(output.STD.sel(dayofyear=observed), anomaly.STD.compute())
+        assert output.STD.drop_sel(dayofyear=observed).isnull().all().item()
+    xr.testing.assert_equal(result.thresholds_stn, standardised_run.thresholds.rename("thresholds_stn"))
 
 
 # ── the exact path's guard and accuracy ───────────────────────────────

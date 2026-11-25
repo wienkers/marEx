@@ -17,9 +17,8 @@ from typing import Dict, Literal, Optional, Tuple, Union
 import numpy as np
 import xarray as xr
 
-from ...core.compute_mode import Materialiser, create_staging_dir
-from ...core.encoding import write_zarr
-from ...exceptions import ConfigurationError, TrackingError
+from ...core.compute_mode import Materialiser, create_staging_dir, datetime_coordinate_dtypes
+from ...exceptions import ConfigurationError, DataValidationError, TrackingError
 from ...logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
 from .. import grid as _grid
 from .. import morphology as _morphology
@@ -29,7 +28,7 @@ from ..tracker import _format_chunk_pattern, _is_uniform_time_chunking, _prune_s
 from .config import VolumetricDims, align_to_data, check_volumetric_config, prepare_volumetric_data
 from .diagnostics import event_diagnostics
 from .events import cluster_events
-from .geometry import EARTH_RADIUS_M, VerticalGeometry, _z_order, build_vertical_geometry
+from .geometry import EARTH_RADIUS_M, VerticalGeometry, _has_duplicate_longitude_endpoint, _z_order, build_vertical_geometry
 from .ids import IDAllocator
 from .labelling import label_volumes_lazy
 from .merge_loop import (
@@ -192,6 +191,10 @@ class VolumetricTracker(tracker):
                 details="R_fill sets the morphological kernel radius, in grid cells; there is no sensible default",
                 suggestions=["Pass R_fill explicitly, e.g. tracker(data_bin, mask, R_fill=8, ...)"],
             )
+        if isinstance(R_fill, (bool, np.bool_)) or not isinstance(R_fill, (int, np.integer)) or R_fill < 0:
+            raise ConfigurationError(f"R_fill must be a non-negative integer, got {R_fill!r}")
+        if isinstance(T_fill, (bool, np.bool_)) or not isinstance(T_fill, (int, np.integer)) or T_fill < 0 or T_fill % 2:
+            raise ConfigurationError(f"T_fill must be a non-negative even integer, got {T_fill!r}")
         (self.volume_filter_quartile, self.volume_filter_absolute) = check_volumetric_config(
             area_filter_quartile=area_filter_quartile,
             area_filter_absolute=area_filter_absolute,
@@ -244,17 +247,20 @@ class VolumetricTracker(tracker):
 
         # Geometry is matched to the labels of the field as given, before its depth order is normalised.
         label_axes = ((self.zdim, self.zdim), (self.ydim, self.ycoord), (self.xdim, self.xcoord))
+        curvilinear = any(as_given.coords[c].ndim == 2 for c in (self.ycoord, self.xcoord) if c in as_given.coords)
+        wet_columns = wet_mask.any(self.zdim) if curvilinear else None
         if isinstance(layer_bounds, xr.DataArray):
             layer_bounds = align_to_data(layer_bounds, as_given, label_axes, "layer_bounds")
         if layer_thickness is not None:
             layer_thickness = align_to_data(layer_thickness, as_given, label_axes, "layer_thickness")
         if cell_volumes is not None:
-            cell_volumes = align_to_data(cell_volumes, as_given, label_axes, "cell_volumes")
+            cell_volumes = align_to_data(cell_volumes, as_given, label_axes, "cell_volumes", wet_columns=wet_columns)
         if cell_areas is not None and grid_resolution is None:  # grid_resolution overrides cell_areas
-            cell_areas = align_to_data(cell_areas, as_given, label_axes, "cell_areas")
+            cell_areas = align_to_data(cell_areas, as_given, label_axes, "cell_areas", wet_columns=wet_columns)
         self.data_attrs = dict(data_bin.attrs)
 
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
+        self._datetime_coordinate_dtypes = datetime_coordinate_dtypes(data_bin)
         if self.timecoord != self.timedim and (
             self.timedim not in data_bin.indexes or data_bin.indexes[self.timedim].name != self.timecoord
         ):
@@ -290,14 +296,28 @@ class VolumetricTracker(tracker):
             zdim=self.zdim,
             ydim=self.ydim,
             xdim=self.xdim,
-            lat_deg=np.asarray(self.lat.values, dtype=np.float64),
-            lon_deg=np.asarray(self.lon.values, dtype=np.float64),
+            lat_deg=self.lat.values,
+            lon_deg=self.lon.values,
             layer_bounds=layer_bounds,
             layer_thickness=layer_thickness,
             cell_volumes=cell_volumes,
             cell_areas=cell_areas,
             grid_resolution=grid_resolution,
+            regional_mode=self.regional_mode,
         )
+        self._seam_coords = {}
+        if not self.regional_mode and _has_duplicate_longitude_endpoint(self.lon.values):
+            # Geometry already dropped the duplicate after checking the wet masks.
+            # Compare the binary endpoints by position, ignoring flags on dry cells.
+            first = data_bin.isel({self.xdim: 0}).variable
+            last = data_bin.isel({self.xdim: -1}).variable
+            wet_at_seam = xr.Variable((self.zdim, self.ydim), self.geom.wet[..., 0])
+            if ((first != last) & wet_at_seam).any().compute().item():
+                raise DataValidationError("The binary extremes disagree on wet cells at the duplicate longitude endpoint")
+            self._seam_coords = {name: coord.variable for name, coord in data_bin.coords.items() if self.xdim in coord.dims}
+            self._seam_coords[self.xcoord] = self.lon_init.variable
+            unique = {self.xdim: slice(None, -1)}
+            data_bin, wet_mask, self.lon = (da.isel(unique) for da in (data_bin, wet_mask, self.lon))
         # The data was reordered in prepare_volumetric_data by the same rule the geometry used.
         assert _z_order(self.z_values, self.z_attrs)[1] == self.geom.flip_z
         self.partition_scales = (
@@ -432,10 +452,10 @@ class VolumetricTracker(tracker):
         occupied = data_bin.drop_vars([c for c in data_bin.coords if c in core])
         return (occupied * self._cell_volume_da()).sum(dim=core)
 
-    def _checkpoint_paths(self) -> Tuple[str, str]:
+    def _checkpoint_paths(self, prefix: str = "marEx_tracker4d_checkpoint") -> Tuple[str, str]:
         return (
-            f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr",
-            f"{self.scratch_dir}/marEx_checkpoint_stats.npz",
+            f"{self.scratch_dir}/{prefix}_proc_bin.zarr",
+            f"{self.scratch_dir}/{prefix}_stats.npz",
         )
 
     def run_preprocess(self, checkpoint: Optional[str] = None) -> Tuple[xr.DataArray, Tuple[float, int, int, float, float, float]]:
@@ -465,15 +485,20 @@ class VolumetricTracker(tracker):
             checkpoint = self.checkpoint
         field_path, stats_path = self._checkpoint_paths()
 
-        def load_data_from_checkpoint() -> xr.DataArray:
-            return xr.open_zarr(field_path, chunks={self.timedim: self.timechunks})["data_bin_preproc"]
-
         if checkpoint == "load":
             logger.info("Loading preprocessed data from checkpoint")
-            stats = np.load(stats_path)
-            values = [stats[key].item() for key in _CHECKPOINT_STATS]
+            if not os.path.exists(stats_path):
+                legacy_field, legacy_stats = self._checkpoint_paths("marEx_checkpoint")
+                if os.path.exists(legacy_stats):
+                    with np.load(legacy_stats) as saved:
+                        if all(key in saved for key in _CHECKPOINT_STATS):
+                            if self._seam_coords:
+                                raise DataValidationError("Rebuild the legacy 4-D checkpoint on this grid with a duplicate seam")
+                            field_path, stats_path = legacy_field, legacy_stats
+            with np.load(stats_path) as saved:
+                values = [saved[key].item() for key in _CHECKPOINT_STATS]
             object_stats = (float(values[0]), int(values[1]), int(values[2]), float(values[3]), float(values[4]), float(values[5]))
-            return load_data_from_checkpoint(), object_stats  # type: ignore[return-value]
+            return self._load_preprocess_checkpoint(field_path), object_stats  # type: ignore[return-value]
 
         # Mask before the morphology too: a True on a dry cell (a boolean that was never masked)
         # would otherwise take part in the closing and fill the wet cells between it and an event.
@@ -525,16 +550,17 @@ class VolumetricTracker(tracker):
         if checkpoint and "save" in checkpoint:
             logger.info("Saving preprocessed data to checkpoint")
             with log_timing(logger, "Checkpoint saving"):
-                write_zarr(data_bin_filtered.rename("data_bin_preproc"), field_path, mode="w")
-                data_bin_filtered = load_data_from_checkpoint()
+                self._write_preprocess_checkpoint(data_bin_filtered, field_path)
+                data_bin_filtered = self._load_preprocess_checkpoint(field_path)
         else:
             data_bin_filtered = self.materialiser.stage(data_bin_filtered, "data_bin_filtered", preserve_chunks=True)
 
         volumes = result.volumes
         total_volume_IDed = float(volumes.sum())
         accepted_volume_fraction = float(volumes[volumes >= result.threshold].sum()) / total_volume_IDed
-        total_raw_volume = float(raw_volume.sum().compute().item())
-        total_processed_volume = float(self._total_volume(data_bin_filtered).sum().compute().item())
+        # Accumulate the per-frame totals in chronological float64 order, independent of Dask's temporal chunk tree.
+        total_raw_volume = float(np.cumsum(raw_volume.values, dtype=np.float64)[-1])
+        total_processed_volume = float(np.cumsum(self._total_volume(data_bin_filtered).values, dtype=np.float64)[-1])
         if total_processed_volume <= 0:
             raise TrackingError(
                 "The objects kept after filtering have zero total volume",
@@ -658,6 +684,9 @@ class VolumetricTracker(tracker):
         for name in diagnostics.data_vars:
             events_ds[name] = diagnostics[name]
 
+        if self._seam_coords:
+            longitude_indices = np.r_[np.arange(lon_deg.size), 0]
+            events_ds = events_ds.isel({self.xdim: longitude_indices}).assign_coords(self._seam_coords)
         events_ds = events_ds.chunk({"ID": -1, "component": -1, "sibling_ID": -1, self.zdim: -1, self.ydim: -1, self.xdim: -1})
         N_events_final = int(events_ds["ID_field"].max().compute().item())
         events_ds = self._restore_layout(events_ds)
@@ -741,8 +770,16 @@ class VolumetricTracker(tracker):
                 "total_merges": len(merges_ds.merge_ID),
                 "total_splits": int(merges_ds.sizes.get("split_ID", 0)),
                 "multi_parent_merges": int((merges_ds.n_parents > 2).sum().item()),
+                "horizontal_y_dim": self.ydim,
+                "horizontal_x_dim": self.xdim,
+                "horizontal_y_coord": self.ycoord,
+                "horizontal_x_coord": self.xcoord,
+                "horizontal_coordinate_units": self.coordinate_units,
             }
         )
+        events_ds.attrs.update(self.data_attrs)
+        inactive_filter = "volume_filter_quartile" if self.volume_filter_quartile is None else "volume_filter_absolute"
+        events_ds.attrs.pop(inactive_filter, None)
         events_ds.attrs.update(attrs)
 
         logger.info(
@@ -752,18 +789,10 @@ class VolumetricTracker(tracker):
             f"{attrs['total_merges']} merges"
         )
 
-        events_ds.attrs.update(self.data_attrs)
-        # Written after the input's attributes, so the plotting helpers can trust them.
-        events_ds.attrs.update(
-            {
-                "horizontal_y_dim": self.ydim,
-                "horizontal_x_dim": self.xdim,
-                "horizontal_y_coord": self.ycoord,
-                "horizontal_x_coord": self.xcoord,
-                "horizontal_coordinate_units": self.coordinate_units,
-            }
+        # The volumetric diagnostic already wraps longitudes using the wet grid.
+        events_ds = _grid.remap_coordinates(
+            events_ds, self.lat_init, self.lon_init, self.coordinate_units, self.xcoord, self.ycoord, wrap_centroid_longitude=False
         )
-        events_ds = self._remap_coordinates(events_ds)
         return events_ds.chunk({self.timedim: 1})
 
 

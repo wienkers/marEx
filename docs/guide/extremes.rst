@@ -85,11 +85,13 @@ follows:
   approximate seasonal percentiles on structured grids. ``window_spatial=1`` gives
   single-cell thresholds, as in Hobday et al. (2016).
 
-When the x dimension has a one-dimensional numeric coordinate, the neighbourhood wraps in
-longitude only if that coordinate spans the globe, so on a regional box the edge columns
-pool only real neighbours, as the latitude edges always do. Without such a coordinate the
-neighbourhood always wraps. The resolved value is recorded in the output attribute
-``window_spatial`` when a width is supplied or the 5 × 5 default applies.
+The neighbourhood wraps in longitude when the one-dimensional numeric longitude
+coordinate spans the globe. A mapped longitude takes precedence over the x dimension
+coordinate. Regional longitude edges pool only the available neighbours, as latitude
+edges do. Without a one-dimensional numeric longitude, the neighbourhood wraps. Exact
+pooling counts a repeated global seam column once and copies its threshold to the
+duplicate endpoint. The output attribute ``window_spatial`` records the supplied width
+or the 5 × 5 approximate default.
 
 For daily data, the number of samples behind each threshold is about ``n_years × window_days × window_spatial²``,
 and the number expected beyond the threshold is that times ``1 - q`` in the upper tail and
@@ -132,8 +134,8 @@ Exact and Approximate Percentiles
 
 ``method_percentile="approximate"`` (default) counts samples into histogram bins and
 interpolates inside the bin where the cumulative count crosses the percentile. It processes spatial tiles, so each task's memory is bounded, and it processes 40 years
-of daily 0.25° global data (:doc:`performance`). ``"exact"`` sorts every sample a cell
-contributes and applies ``np.nanpercentile`` with numpy's default linear rule. It needs each
+of daily 0.25° global data (:doc:`performance`). ``"exact"`` computes the percentile using
+NumPy's default linear rule (``np.nanpercentile``). It needs each
 tile's full series in memory at once, and on 20 years of daily 0.25° global data it peaked
 at about 80 GB. Size an exact run from a short pilot.
 

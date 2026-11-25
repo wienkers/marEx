@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from marEx.exceptions import ConfigurationError
+from marEx.exceptions import ConfigurationError, DataValidationError
 from marEx.track.volumetric.geometry import EARTH_RADIUS_M, VerticalGeometry, build_vertical_geometry
 
 Z, Y, X = "depth", "lat", "lon"
@@ -57,6 +57,53 @@ def test_bounds_1d():
     assert g.source == "bounds"
     assert g.flip_z is False
     assert g.thickness.dtype == np.float64 and g.cell_volume.dtype == np.float64
+
+
+@pytest.mark.parametrize("start", [0.0, -180.0])
+def test_duplicate_endpoint_global_shell_volume(start):
+    lon = start + np.arange(7) * 60.0
+    kwargs = dict(z=[0.5], ny=4, lat_deg=np.arange(-90.0, 91.0, 60.0), layer_bounds=_bounds([[0.0, 1.0]]), grid_resolution=60.0)
+    unique = _build(nx=6, lon_deg=lon[:-1], **kwargs)
+    inclusive = _build(nx=7, lon_deg=lon, **kwargs)
+    assert inclusive.wet.shape == (1, 4, 6)
+    np.testing.assert_array_equal(inclusive.cell_volume, unique.cell_volume)
+    np.testing.assert_allclose(inclusive.cell_volume.sum(), 4 * np.pi * EARTH_RADIUS_M**2, rtol=1e-12)
+
+
+@pytest.mark.parametrize("latitude", [-90.0, 90.0])
+def test_inferred_polar_cell_is_a_half_degree_cap_wedge(latitude):
+    geom = _build(lat_deg=np.array([latitude]), grid_resolution=1.0)
+    height = 2 * np.sin(np.deg2rad(0.25)) ** 2
+    area = EARTH_RADIUS_M**2 * np.deg2rad(1.0) * height
+    np.testing.assert_allclose(geom.cell_area_m2[0, 0], area, rtol=2e-12)
+
+
+def test_negative_grid_resolution_does_not_produce_positive_cell_areas():
+    with pytest.raises(ConfigurationError, match="Horizontal cell area is non-finite or non-positive"):
+        _build(grid_resolution=-1.0)
+
+
+@pytest.mark.parametrize("dense", [False, True])
+@pytest.mark.parametrize("bounds, match", [([[10, 0], [10, 20], [20, 40]], "inverted"), ([[0, 25], [10, 20], [20, 40]], "overlap")])
+def test_invalid_bounds_fail_even_across_a_dry_level(dense, bounds, match):
+    wet = _wet()
+    wet[1] = False
+    interfaces = _bounds(bounds)
+    if dense:
+        interfaces = interfaces.expand_dims({Y: 1, X: 1})
+    with pytest.raises(DataValidationError, match=match):
+        _build(wet=wet, layer_bounds=interfaces)
+
+
+def test_non_finite_singleton_depth_raises():
+    with pytest.raises(DataValidationError, match="depth coordinate must be finite"):
+        _build(z=[np.nan], layer_bounds=_bounds([[0, 1]]))
+
+
+def test_derived_volume_overflow_raises():
+    area = xr.DataArray([[1e155]], dims=(Y, X), attrs={"units": "m2"})
+    with pytest.raises(DataValidationError, match="Area times thickness is non-finite"):
+        _build(z=[0.5], layer_bounds=_bounds([[0.0, 1e155]]), cell_areas=area)
 
 
 def test_bounds_3d_per_column():

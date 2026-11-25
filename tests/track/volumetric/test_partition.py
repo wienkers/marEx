@@ -6,7 +6,9 @@ import xarray as xr
 
 from marEx.exceptions import ConfigurationError, TrackingError
 from marEx.track.volumetric.geometry import EARTH_RADIUS_M, build_vertical_geometry
-from marEx.track.volumetric.partition import ScaledCoords, _squared_distance, partition_child
+from marEx.track.volumetric.partition import ScaledCoords, partition_child
+
+from .oracles import _squared_distance
 
 
 class TablePoints:
@@ -312,6 +314,19 @@ def test_scaled_depth_rounding_changes_the_nearest_parent():
     np.testing.assert_array_equal(partition_child([1], parents, ids, coords), [1])
 
 
+def test_scaled_coords_subclass_can_change_horizontal_position_with_depth():
+    class SlopingColumn(ScaledCoords):
+        def points(self, flat_idx):
+            points = super().points(flat_idx)
+            points[flat_idx > 0, :2] = [0.0, 1.0]  # deeper voxels lie at 90° E on the equator
+            return points
+
+    coords = SlopingColumn(np.array([0.0]), np.array([0.0]), np.arange(1.0, 4.0), L_H=EARTH_RADIUS_M, L_Z=1.0)
+    parents = [np.array([0]), np.array([2])]
+    ids = np.array([3, 9], dtype=np.int32)
+    np.testing.assert_array_equal(ids[partition_child([1], parents, ids, coords)], [9])
+
+
 def test_finite_coordinates_with_squared_distance_overflow():
     max_float = np.finfo(np.float64).max
     coords = TablePoints([[max_float, 0, 0, max_float], [-max_float, 0, 0, -max_float], [0, 0, 0, 0]])
@@ -388,8 +403,13 @@ def test_single_parent_and_single_voxel():
     np.testing.assert_array_equal(one, np.zeros(len(child), dtype=np.intp))
 
 
-def test_empty_child_and_invalid_inputs():
+def test_empty_child_and_invalid_inputs(monkeypatch):
     coords, child, parents, ids = _random_case(2)
+
+    def unexpected_points(flat_idx):
+        pytest.fail(f"Coordinate gathering is unnecessary for an empty or invalid query: {flat_idx}")
+
+    monkeypatch.setattr(coords, "points", unexpected_points)
     out = partition_child(np.empty(0, dtype=np.int64), parents, ids, coords)
     assert out.shape == (0,) and out.dtype == np.intp
     with pytest.raises(TrackingError):

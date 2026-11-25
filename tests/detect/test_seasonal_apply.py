@@ -3,6 +3,7 @@
 import operator
 from pathlib import Path
 
+import dask
 import dask.array as dsa
 import numpy as np
 import pytest
@@ -23,18 +24,20 @@ def _legacy_apply(da, lookup, values, *, timedim, cycledim, operation):
     positions = np.arange(da.sizes[timedim])
     labels = lookup[cycledim].values
     valid = (values > 0) & np.isin(values, labels)
-    indexed = da.drop_vars(cycledim, errors="ignore").assign_coords({timedim: positions, cycledim: (timedim, values)})
+    time_coords = [name for name, coord in da.coords.items() if timedim in coord.dims or name == cycledim]
+    indexed = da.drop_vars(time_coords).assign_coords({timedim: positions, cycledim: (timedim, values)})
     if not valid.all():
         indexed = indexed.isel({timedim: valid})
     grouped = indexed.groupby({cycledim: xr.groupers.UniqueGrouper(labels=labels)})
     result = _OPERATIONS[operation](grouped, lookup).drop_vars(cycledim)
     if not valid.all():
         result = result.reindex({timedim: positions}, fill_value=np.nan if operation in ("subtract", "divide") else False)
-    coords = {name: coord for name, coord in da.coords.items() if name != cycledim}
     result = result.transpose(*da.dims)
     if da.chunks is not None:
         result = result.chunk(dict(zip(da.dims, da.chunks)))
-    return xr.DataArray(result.data, dims=da.dims, coords=coords, name=da.name, attrs=result.attrs)
+    expected = da.drop_vars(cycledim, errors="ignore").copy(data=result.data)
+    expected.attrs = result.attrs
+    return expected
 
 
 def _assert_bits(actual, expected):
@@ -159,16 +162,84 @@ def test_eager_integer_divide_with_zero_divisors_and_invalid_labels():
     _assert_bits(actual.values, np.array([np.nan, np.inf, -np.inf, 4, np.nan, np.nan, np.nan], dtype="f8"))
 
 
+def test_divide_by_negative_zero():
+    source = xr.DataArray(np.array([1, -1], dtype="f4"), dims="time")
+    lookup = xr.DataArray(np.array([-0.0], dtype="f4"), dims="slot", coords={"slot": [1]})
+    actual = seasonal_apply.apply_seasonal_field(
+        source, lookup, np.array([1, 1]), timedim="time", cycledim="slot", operation="divide"
+    )
+    _assert_bits(actual.values, np.array([-np.inf, np.inf], dtype="f4"))
+
+
 @pytest.mark.parametrize("empty", [False, True])
-def test_eager_lookup_positions(empty):
+@pytest.mark.parametrize("indexed", [False, True])
+def test_eager_lookup_positions(empty, indexed):
     labels = [] if empty else [366, 0, 1, 3, -1]
     da = xr.DataArray([0.0] * 8, dims="t")
     lookup = xr.DataArray(labels, dims="slot", coords={"slot": labels})
+    if not indexed:
+        lookup = lookup.drop_indexes("slot")
     values = np.array([1, 2, 3, 366, 367, np.datetime64("NaT"), -1, 0], dtype=object)
     result = seasonal_apply.apply_seasonal_field(da, lookup, values, timedim="t", cycledim="slot", operation="subtract")
     expected = [np.nan] * 8 if empty else [-1, np.nan, -3, -366, np.nan, np.nan, np.nan, np.nan]
     assert result.chunks is None
     np.testing.assert_array_equal(result.values, expected)
+
+
+@pytest.mark.parametrize("operation", _OPERATIONS)
+@pytest.mark.parametrize("dtype", ["f4", "i8"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_masked_operands_are_chunk_invariant(operation, dtype, missing):
+    source = np.ma.array([8, 8, -8, 3], mask=[True, False, False, False], dtype=dtype)
+    table = np.ma.array([1, 0, 3], mask=[False, True, False], dtype=dtype)
+    values = np.array([1, 0 if missing else 1, 2, 3])
+    expected = {
+        "subtract": [np.nan, np.nan if missing else 7, np.nan, 0],
+        "divide": [np.nan, np.nan if missing else 8, np.nan, 1],
+        "upper": [False, not missing, False, True],
+        "lower": [False, False, False, True],
+    }[operation]
+    result_dtype = ("f8" if dtype == "i8" else dtype) if operation in ("subtract", "divide") else bool
+    lookup = xr.DataArray(dsa.from_array(table, chunks=1), dims="slot", coords={"slot": [1, 2, 3]})
+    for chunk in (1, 2, 4):
+        da = xr.DataArray(dsa.from_array(source, chunks=chunk), dims="time")
+        result = seasonal_apply.apply_seasonal_field(da, lookup, values, timedim="time", cycledim="slot", operation=operation)
+        assert result.chunks == da.chunks
+        assert result.dtype == result_dtype
+        _assert_bits(result.values, np.array(expected, dtype=result_dtype))
+
+
+def test_gather_preserves_auxiliary_time_index():
+    values = np.array([2, 0, 1])
+    source = xr.DataArray(
+        dsa.from_array([7.0, 8.0, 9.0], chunks=2),
+        dims="record",
+        coords={"valid_at": ("record", xr.date_range("2001", periods=3)), "slot": ("record", values)},
+    ).set_xindex("valid_at")
+    lookup = xr.DataArray([2.0, 3.0], dims="slot", coords={"slot": [1, 2]})
+    options = {"timedim": "record", "cycledim": "slot", "operation": "subtract"}
+    expected = _legacy_apply(source, lookup, values, **options)
+    result = seasonal_apply.apply_seasonal_field(source, lookup, values, **options)
+    assert result.xindexes.keys() == expected.xindexes.keys() == source.xindexes.keys()
+    assert result.xindexes["valid_at"].equals(expected.xindexes["valid_at"])
+    result, expected = result.compute(), expected.compute()
+    xr.testing.assert_identical(result, expected)
+    assert result.sel(valid_at="2001-01-01").item() == expected.sel(valid_at="2001-01-01").item() == 4.0
+
+
+def test_gather_does_not_read_delayed_dimension_coordinate():
+    coordinate = dsa.from_delayed(dask.delayed(np.arange)(3), shape=(3,), dtype=int)
+    coords = xr.Coordinates({"record": ("record", coordinate), "slot": ("record", [1, 2, 1])}, indexes={})
+    source = xr.DataArray(dsa.ones(3, chunks=2), dims="record", coords=coords)
+    lookup = xr.DataArray([1.0, 2.0], dims="slot", coords={"slot": [1, 2]})
+    started = []
+    with dask.callbacks.Callback(pretask=lambda key, *_: started.append(key)):
+        result = seasonal_apply.apply_seasonal_field(
+            source, lookup, np.array([1, 2, 1]), timedim="record", cycledim="slot", operation="subtract"
+        )
+    assert started == []
+    assert not result.xindexes
+    assert isinstance(result.record.data, dsa.Array)
 
 
 def test_executed_blocks_fit_task_budget(monkeypatch):
@@ -348,10 +419,12 @@ def test_source_missing_value_attr_does_not_corrupt_streaming_or_flags(tmp_path)
         coords={"time": xr.date_range("2001", periods=24, freq="MS"), "lon": [0], "lat": [0]},
         attrs={"missing_value": np.float32(0)},
     ).chunk({"time": 6})
+    anom = anom.assign_coords(cast=("time", np.arange(100, 124))).set_xindex("cast")
     flags, _ = marEx.extremes.identify_extremes(
         anom, method_extreme="seasonal_percentile", method_percentile="exact", window_days=30
     )
     assert "missing_value" not in flags.attrs
+    xr.testing.assert_identical(flags.sel(cast=103).compute(), flags.isel(time=3).compute())
     flag_store = tmp_path / "flags.zarr"
     flags.rename("flags").to_zarr(flag_store)
     with xr.open_zarr(flag_store) as reopened_flags:
@@ -384,51 +457,113 @@ def test_int64_adjacent_subtraction_with_missing_label_and_null_lookup_labels(ch
         np.testing.assert_array_equal(res.values, np.array([0.0, np.nan], dtype="f4"))
 
 
-def test_preprocess_data_with_non_index_time_coordinate():
+def test_preprocess_data_with_masked_observation_and_nat():
+    dates = xr.date_range("2001-01-01", periods=24, freq="MS").values.copy()
+    dates[1] = np.datetime64("NaT")
+    data = np.ones((24, 1, 2), dtype="f4")
+    data[0, 0] = 8
+    masked = np.ma.array(data, mask=np.zeros(data.shape, dtype=bool))
+    masked.mask[0, 0, 0] = True
+    da = xr.DataArray(
+        dsa.from_array(masked, chunks=(6, 1, 2)),
+        dims=("time", "lat", "lon"),
+        coords={"time": dates, "lat": [0.0], "lon": [0.0, 1.0]},
+    )
+    options = {
+        "method_anomaly": "fixed_baseline",
+        "reference_period": (2002, 2002),
+        "method_extreme": "global_percentile",
+        "method_percentile": "exact",
+        "smooth_days": 1,
+        "compute_mode": "lazy",
+    }
+    unmasked = dsa.from_array(masked.filled(np.nan), chunks=(6, 1, 2))
+    expected = marEx.preprocess_data(da.copy(data=unmasked), **options).compute()
+    ds = marEx.preprocess_data(da, **options).compute()
+    for name in ("dat_anomaly", "extreme_events"):
+        xr.testing.assert_identical(ds[name], expected[name])
+    np.testing.assert_array_equal(ds.dat_anomaly.values[:2, 0], [[np.nan, 7.0], [np.nan, np.nan]])
+    np.testing.assert_array_equal(ds.extreme_events.values[:2, 0], [[False, True], [False, False]])
+
+    # Masked outliers inside the active baseline/window must never leak into anomalies or exact seasonal quantiles.
+    daily_dates = xr.date_range("2001-01-01", periods=730, freq="D").values.copy()
+    raw = np.ones((730, 2, 3), dtype="f4")
+    raw[0, 0, 0] = 1e6
+    mask = np.zeros_like(raw, dtype=bool)
+    mask[0, 0, 0] = True
+    da_ma = xr.DataArray(
+        dsa.from_array(np.ma.array(raw, mask=mask), chunks=(180, 2, 3)),
+        dims=("time", "lat", "lon"),
+        coords={"time": daily_dates, "lat": [0.0, 1.0], "lon": [0.0, 1.0, 2.0]},
+    )
+    da_nan = da_ma.copy(data=dsa.from_array(np.where(mask, np.nan, raw), chunks=(180, 2, 3)))
+    for method in ("fixed_baseline", "shifting_baseline", "detrend_harmonic", "detrend_fixed_baseline"):
+        kw = {"method": method, "validate": False, "compute_mode": "lazy"}
+        if method == "shifting_baseline":
+            kw.update(window_years=1, smooth_days=1)
+        elif method in ("fixed_baseline", "detrend_fixed_baseline"):
+            kw.update(smooth_days=1)
+        got_anom = marEx.anomaly.compute(da_ma, **kw).compute()
+        exp_anom = marEx.anomaly.compute(da_nan, **kw).compute()
+        xr.testing.assert_identical(got_anom.dat_anomaly, exp_anom.dat_anomaly)
+    for ws in (None, 3):
+        got_ext = marEx.extremes.identify(
+            da_ma, method="seasonal_percentile", method_percentile="exact", window_days=5, window_spatial=ws, compute_mode="lazy"
+        ).compute()
+        exp_ext = marEx.extremes.identify(
+            da_nan,
+            method="seasonal_percentile",
+            method_percentile="exact",
+            window_days=5,
+            window_spatial=ws,
+            compute_mode="lazy",
+        ).compute()
+        xr.testing.assert_identical(got_ext.thresholds, exp_ext.thresholds)
+        xr.testing.assert_identical(got_ext.extreme_events, exp_ext.extreme_events)
+
+
+def test_preprocess_data_with_auxiliary_time_coordinate():
     dates = xr.date_range("2001-01-01", periods=24, freq="MS")
     da = xr.DataArray(
         np.tile(np.arange(1, 13, dtype="f4"), 2)[:, None, None],
         dims=("record", "lat", "lon"),
         coords={"valid_at": ("record", dates.values), "lat": [0.0], "lon": [0.0]},
     ).chunk({"record": 6})
-    ds = marEx.preprocess_data(
-        da,
-        method_anomaly="fixed_baseline",
-        method_extreme="seasonal_percentile",
-        method_percentile="exact",
-        smooth_days=1,
-        window_days=30,
-        dimensions={"time": "record", "y": "lat", "x": "lon"},
-        coordinates={"time": "valid_at", "y": "lat", "x": "lon"},
-        compute_mode="lazy",
-    ).compute()
-    assert int(np.isfinite(ds.dat_anomaly.values).sum()) == 24
+    common = {
+        "method_extreme": "seasonal_percentile",
+        "method_percentile": "exact",
+        "smooth_days": 1,
+        "window_days": 30,
+        "compute_mode": "lazy",
+    }
+    mapping = {
+        "dimensions": {"time": "record", "y": "lat", "x": "lon"},
+        "coordinates": {"time": "valid_at", "y": "lat", "x": "lon"},
+    }
+    for source in (da, da.set_xindex("valid_at")):
+        ds = marEx.preprocess_data(source, method_anomaly="fixed_baseline", **common, **mapping).compute()
+        assert int(np.isfinite(ds.dat_anomaly.values).sum()) == 24
+        assert ("valid_at" in ds.xindexes) == ("valid_at" in source.xindexes)
+        if "valid_at" in source.xindexes:
+            assert ds.dat_anomaly.sel(valid_at="2001-01-01").item() == 0.0
+            xr.testing.assert_identical(ds.extreme_events.sel(valid_at="2001-01-01"), ds.extreme_events.isel(record=0))
 
-    # Indexed integer record dimension + separate datetime valid_at coordinate on harmonic & detrend_fixed_baseline
     da_idx = da.assign_coords(record=np.arange(24) + 900)
+    da_xidx = da.set_xindex("valid_at")
+    da_canon = da.rename({"valid_at": "time"}).swap_dims({"record": "time"})
     for method in ("detrend_harmonic", "detrend_fixed_baseline"):
-        ds_h = marEx.preprocess_data(
-            da_idx,
-            method_anomaly=method,
-            standardise=(method == "detrend_harmonic"),
-            method_extreme="seasonal_percentile",
-            method_percentile="exact",
-            smooth_days=1,
-            window_days=30,
-            dimensions={"time": "record", "y": "lat", "x": "lon"},
-            coordinates={"time": "valid_at", "y": "lat", "x": "lon"},
-            compute_mode="lazy",
-        ).compute()
-        da_canon = da.rename({"valid_at": "time"}).swap_dims({"record": "time"})
-        ds_ref = marEx.preprocess_data(
-            da_canon,
-            method_anomaly=method,
-            standardise=(method == "detrend_harmonic"),
-            method_extreme="seasonal_percentile",
-            method_percentile="exact",
-            smooth_days=1,
-            window_days=30,
-            compute_mode="lazy",
-        ).compute()
-        for var in ("dat_anomaly", "extreme_events"):
-            np.testing.assert_array_equal(ds_h[var].values, ds_ref[var].values)
+        standardise = method == "detrend_harmonic"
+        options = {**common, "method_anomaly": method, "standardise": standardise}
+        ds_h = marEx.preprocess_data(da_idx, **options, **mapping)
+        ds_x = marEx.preprocess_data(da_xidx, **options, **mapping).compute()
+        ds_ref = marEx.preprocess_data(da_canon, **options)
+        assert "valid_at" in ds_x.xindexes
+        xr.testing.assert_identical(ds_x.extreme_events.sel(valid_at="2001-01-01"), ds_x.extreme_events.isel(record=0))
+        variables = ["dat_anomaly", "extreme_events"]
+        if standardise:
+            variables.extend(["dat_stn", "thresholds_stn", "extreme_events_stn"])
+        for var in variables:
+            assert ds_h[var].chunks == ds_ref[var].chunks
+        actual, expected = ds_h[variables].compute(), ds_ref[variables].compute()
+        for var in variables:
+            _assert_bits(actual[var].values, expected[var].values)

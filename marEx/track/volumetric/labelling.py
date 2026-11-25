@@ -163,15 +163,13 @@ def label_volume(
     _, component = connected_components(graph, directed=False)
 
     # Final IDs by first occupied voxel in C order.
-    flat = level_ids.ravel()
-    voxels = np.flatnonzero(flat)
-    voxel_component = component[flat[voxels]]
+    voxel_component = component[level_ids[foreground]]
     present, first = np.unique(voxel_component, return_index=True)
     lut = np.zeros(int(component.max()) + 1, dtype=np.int32)
     lut[present[np.argsort(first, kind="stable")]] = np.arange(1, len(present) + 1, dtype=np.int32)
-    labels = np.zeros(flat.size, dtype=np.int32)
-    labels[voxels] = lut[voxel_component]
-    return labels.reshape(foreground.shape), int(len(present))
+    labels = np.zeros(foreground.shape, dtype=np.int32)
+    labels[foreground] = lut[voxel_component]
+    return labels, int(len(present))
 
 
 def label_volumes_lazy(

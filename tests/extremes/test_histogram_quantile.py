@@ -429,22 +429,29 @@ def test_spatial_window_wraps_only_a_global_grid():
     ]:
 
         def row(engine=engine, window_spatial=window_spatial, grid=grid, lon=lon):
-            def thresholds(shift_east):
+            def thresholds(shift_east, mapped=False):
                 da, cycle = lon_field(lon, shift_east=shift_east)
+                dimensions, coordinates = GRID_DIMS, None
+                if mapped:
+                    da = da.rename(lon="i")
+                    da = da.assign_coords(lon=("i", lon), i=np.arange(lon.size))
+                    dimensions, coordinates = {**GRID_DIMS, "x": "i"}, {"x": "lon"}
                 out = H._compute_histogram_quantile_2d(
                     da,
                     q=0.95,
-                    dimensions=GRID_DIMS,
+                    dimensions=dimensions,
                     cycle=cycle,
                     window_steps=cycle.window_steps(11),
                     window_spatial=window_spatial,
                     precision=0.05,
                     max_anomaly=5.0,
                     engine=engine,
+                    coordinates=coordinates,
                 )
-                return out.transpose("lat", "lon", ...).values
+                return out.transpose("lat", dimensions["x"], ...).values
 
             base, moved = thresholds(0.0), thresholds(2.0)
+            np.testing.assert_array_equal(base, thresholds(0.0, mapped=True))
             half = window_spatial // 2
             if grid == "regional":
                 # The perturbation is large enough to move the thresholds it reaches...
@@ -476,6 +483,7 @@ def test_x_is_periodic():
         "descending": (with_lon(np.arange(360.0, 0.0, -1.0)), True),
         "rolled across the seam": (with_lon(np.roll(np.arange(0.0, 360.0, 2.5), 50)), True),
         "repeated seam column": (with_lon(np.arange(0.0, 360.5, 0.5)), True),
+        "single regional column": (with_lon(np.array([10.0])), False),
         "two steps short": (with_lon(np.arange(0.0, 358.0, 1.0)), False),
         "hemisphere": (with_lon(np.arange(0.0, 180.0, 0.5)), False),
         "6.25 degrees, near 2 pi": (with_lon(10.0 + 0.25 * np.arange(25)), False),

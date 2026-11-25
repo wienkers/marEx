@@ -31,12 +31,19 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
+import zarr
 from dask import is_dask_collection
 from dask.distributed import wait
 from numpy.typing import NDArray
 
 from .._dependencies import warn_missing_dependency
-from ..core.compute_mode import Materialiser, create_staging_dir
+from ..core.compute_mode import (
+    Materialiser,
+    create_staging_dir,
+    datetime_coordinate_dtypes,
+    open_zarr_with_coordinate_dtypes,
+    prepare_zarr_datetime_coords,
+)
 from ..core.encoding import clear_inherited_attrs, clear_store_encoding, write_zarr
 from ..exceptions import ConfigurationError, TrackingError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_dask_info, log_memory_usage, log_timing
@@ -55,6 +62,7 @@ logger = get_logger(__name__)
 # get cleaned up too. Checkpoint artefacts ("marEx_checkpoint_*") deliberately do not match.
 _TEMP_STORE_PREFIXES = ("marEx_temp_field", "marEx_temp_refresh")
 _TEMP_STORE_MAX_AGE_S = 24 * 3600
+_CHECKPOINT_DATETIME_DTYPES = "marex_datetime_coordinate_dtypes"
 
 
 def _prune_stale_temp_stores(temp_dir: str, max_age_s: float = _TEMP_STORE_MAX_AGE_S) -> None:
@@ -86,12 +94,18 @@ def _match_datetime_precision(ds: Optional[xr.Dataset], dtype: Optional[np.dtype
     """
     Give the datetimes derived from the input time axis that axis's precision, in place.
 
-    Staged stores are read back at the reader's default precision, which recent xarray no longer fixes at nanoseconds.
-    The values agree, but ``persist`` and ``streaming`` would otherwise return different dtypes. ``keep`` names the
-    input's other datetime coordinates, which may be finer than the axis and would lose values. A non-datetime64 time
-    axis (cftime), or one not known (``dtype=None``), is left alone.
+    Derived variables can acquire a different precision as xarray constructs them. ``keep`` names the input's
+    other datetime coordinates, which retain their own precision.
     """
-    if ds is None or dtype is None or not np.issubdtype(dtype, np.datetime64):
+    if ds is None or dtype is None:
+        return
+    if dtype.kind == "O" and "merge_time" in ds and ds.merge_time.dtype.kind == "O" and ds.merge_time.size:
+        # The gridded loop collects scalar coordinates as zero-dimensional arrays. For
+        # cftime, NumPy retains those wrappers when constructing the object-dtype ledger.
+        times = ds.merge_time.values
+        if isinstance(times[0], np.ndarray):
+            ds["merge_time"] = ds.merge_time.copy(data=np.array([time.item() for time in times], dtype=object))
+    if dtype.kind != "M":
         return
     for name in list(ds.variables):
         if name not in keep and np.issubdtype(ds[name].dtype, np.datetime64) and ds[name].dtype != dtype:
@@ -620,6 +634,7 @@ class tracker:
         # Validate coordinate presence before touching them, so a missing coordinate raises
         # the descriptive error rather than a bare KeyError from the indexing below.
         _validation.validate_required_coordinates(data_bin, self.timecoord, self.xcoord, self.ycoord)
+        self._datetime_coordinate_dtypes = datetime_coordinate_dtypes(data_bin)
 
         self.lat_init = data_bin[self.ycoord].persist()  # Save in original units
         self.lon_init = data_bin[self.xcoord].persist()
@@ -644,6 +659,8 @@ class tracker:
             mask.attrs = {"description": "All-valid mask (no mask supplied)"}
             logger.info("No mask supplied; treating every cell as valid")
 
+        if isinstance(R_fill, (bool, np.bool_)) or not isinstance(R_fill, (int, np.integer)) or R_fill < 0:
+            raise ConfigurationError(f"R_fill must be a non-negative integer, got {R_fill!r}")
         self.mask = mask
         self.R_fill = int(R_fill)
         self.T_fill = T_fill
@@ -842,17 +859,18 @@ class tracker:
                 # Earth radius in km
                 R_earth = 6378.0
 
-                # Get coordinate arrays (should be in degrees)
-                lat_coords = data_bin[self.ycoord]
+                # Get coordinate arrays (already converted to degrees on self.data_bin)
+                lat_coords = self.data_bin[self.ycoord]
 
                 # Convert to radians
                 lat_r = np.radians(lat_coords)
                 dlat = np.radians(grid_resolution)
                 dlon = np.radians(grid_resolution)
 
-                # Calculate grid areas using spherical geometry
-                # Area = R² * |sin(lat + dlat/2) - sin(lat - dlat/2)| * dlon
-                grid_area = (R_earth**2 * np.abs(np.sin(lat_r + dlat / 2) - np.sin(lat_r - dlat / 2)) * dlon).astype(np.float32)
+                # Calculate grid areas using spherical geometry, clipping polar interfaces at +/-90 deg
+                north = np.clip(lat_r + dlat / 2, -np.pi / 2, np.pi / 2)
+                south = np.clip(lat_r - dlat / 2, -np.pi / 2, np.pi / 2)
+                grid_area = (R_earth**2 * np.abs(np.sin(north) - np.sin(south)) * dlon).astype(np.float32)
 
                 # Check if cell_areas was originally provided (and warn about override)
                 if cell_areas is not None:
@@ -1020,17 +1038,9 @@ class tracker:
         logger.info("Starting complete tracking pipeline")
         log_memory_usage(logger, "Pipeline start")
 
-        # Read now: the pipeline releases the input. A checkpoint load has no input left to read.
-        time_dtype = None
-        own_datetimes: frozenset = frozenset()
-        if self.data_bin is not None:
-            names = [name for name in (self.timecoord, self.timedim) if name in self.data_bin.coords]
-            time_dtype = self.data_bin[names[0]].dtype if names else None
-            own_datetimes = frozenset(
-                name
-                for name, coord in self.data_bin.coords.items()
-                if name not in names and np.issubdtype(coord.dtype, np.datetime64)
-            )
+        # Subclasses can supply the time specification before releasing their input.
+        if not hasattr(self, "_datetime_coordinate_dtypes"):
+            self._datetime_coordinate_dtypes = datetime_coordinate_dtypes(self.data_bin) if self.data_bin is not None else {}
 
         # Progress tracking
         total_steps = 3
@@ -1074,6 +1084,10 @@ class tracker:
         clear_store_encoding(events_ds)
         clear_store_encoding(merges_ds)
         clear_inherited_attrs(events_ds, (self.timedim, self.timecoord, "time_start", "time_end"))
+        dtypes = self._datetime_coordinate_dtypes
+        time_spec = dtypes.get(self.timecoord, dtypes.get(self.timedim))
+        time_dtype = np.dtype(time_spec) if time_spec is not None else None
+        own_datetimes = frozenset(dtypes).difference((self.timecoord, self.timedim))
         _match_datetime_precision(events_ds, time_dtype, own_datetimes)
         _match_datetime_precision(merges_ds, time_dtype, own_datetimes)
 
@@ -1093,6 +1107,23 @@ class tracker:
         else:
             logger.debug("Returning events dataset only")
             return events_ds
+
+    def _write_preprocess_checkpoint(self, data: xr.DataArray, path: str) -> None:
+        """Write the field and its coordinate dtype specification to the checkpoint."""
+        ds = data.to_dataset(name="data_bin_preproc")
+        ds.attrs[_CHECKPOINT_DATETIME_DTYPES] = datetime_coordinate_dtypes(data)
+        write_zarr(prepare_zarr_datetime_coords(ds), path, mode="w")
+
+    def _load_preprocess_checkpoint(self, path: str) -> xr.DataArray:
+        """Open the saved field using the checkpoint's datetime types."""
+        attrs = zarr.open_group(path, mode="r").attrs
+        # Checkpoints predating dtype metadata can still use the constructor input's types.
+        self._datetime_coordinate_dtypes = attrs.get(_CHECKPOINT_DATETIME_DTYPES, getattr(self, "_datetime_coordinate_dtypes", {}))
+        return open_zarr_with_coordinate_dtypes(
+            path,
+            self._datetime_coordinate_dtypes,
+            chunks={self.timedim: self.timechunks},
+        )["data_bin_preproc"]
 
     def run_preprocess(self, checkpoint: Optional[str] = None) -> Tuple[xr.DataArray, Tuple[float, int, int, float, float, float]]:
         """
@@ -1116,13 +1147,7 @@ class tracker:
         if not checkpoint:
             checkpoint = self.checkpoint
 
-        def load_data_from_checkpoint() -> xr.DataArray:
-            """Load preprocessed data from checkpoint files."""
-            data_bin_preprocessed: xr.DataArray = xr.open_zarr(
-                f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr",
-                chunks={self.timedim: self.timechunks},
-            )["data_bin_preproc"]
-            return data_bin_preprocessed
+        field_path = f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr"
 
         def load_stats_from_checkpoint() -> Tuple[float, int, int, float, float, float]:
             object_stats_npz = np.load(f"{self.scratch_dir}/marEx_checkpoint_stats.npz")
@@ -1141,7 +1166,7 @@ class tracker:
 
         if checkpoint == "load":
             logger.info("Loading preprocessed data from checkpoint")
-            return load_data_from_checkpoint(), load_stats_from_checkpoint()
+            return self._load_preprocess_checkpoint(field_path), load_stats_from_checkpoint()
 
         # Compute area of initial binary data
         logger.debug("Computing area of initial binary data")
@@ -1216,11 +1241,10 @@ class tracker:
         if checkpoint and "save" in checkpoint:
             logger.info("Saving preprocessed data to checkpoint")
             with log_timing(logger, "Checkpoint saving"):
-                data_bin_filtered.name = "data_bin_preproc"
                 # Write lazily (no .persist()): the store computes the preprocessing graph
                 # straight to disk, then we reload to break the graph for downstream steps.
-                write_zarr(data_bin_filtered, f"{self.scratch_dir}/marEx_checkpoint_proc_bin.zarr", mode="w")
-                data_bin_filtered = load_data_from_checkpoint()
+                self._write_preprocess_checkpoint(data_bin_filtered, field_path)
+                data_bin_filtered = self._load_preprocess_checkpoint(field_path)
         else:
             logger.debug("Persisting preprocessed data in memory")
             data_bin_filtered = self.materialiser.stage(data_bin_filtered, "data_bin_filtered", preserve_chunks=True)
@@ -1354,6 +1378,9 @@ class tracker:
             preprocessed_area_fraction,
         ) = object_stats
 
+        # Inherit caller metadata first so tracker-owned statistics cannot be overwritten
+        events_ds.attrs.update(self.data_attrs)
+
         # Add general attributes to dataset
         events_ds.attrs["allow_merging"] = int(self.allow_merging)
         events_ds.attrs["N_objects_prefiltered"] = int(N_objects_prefiltered)
@@ -1389,9 +1416,6 @@ class tracker:
             events_ds.attrs["total_splits"] = int(merges_ds.sizes.get("split_ID", 0))
 
             print(f"   Total Merging Events Recorded: {events_ds.attrs['total_merges']}")
-
-        # Inherit metadata from input data_bin
-        events_ds.attrs.update(self.data_attrs)
 
         # Restore coordinates & remap centroids
         # Add lat & lon back as coordinates

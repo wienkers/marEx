@@ -216,6 +216,9 @@ def compute_normalised_anomaly(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    from ..core.validation import unmask_dataarray
+
+    da = unmask_dataarray(da)
 
     # Same guard as the ``anomaly.compute`` stage entry point. This function is a public
     # entry point in its own right, and without the check a numpy-backed array fails deep

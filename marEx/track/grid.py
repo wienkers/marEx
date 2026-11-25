@@ -81,6 +81,16 @@ def unify_coordinates(
             # endpoint-exclusive span is the opposite error: it rejects genuine full-turn
             # grids whose range is exactly 360 (or 2*pi).
             dlon = lon_range / max(int(lon.size) - 1, 1)
+            if lon.ndim == 2:
+                lon_values = np.asarray(lon.values, dtype=np.float64)
+                # The longitude direction may be along either axis on a structured grid.
+                # Repeated rows or columns contribute no longitude step.
+                dlon = 0.0
+                for axis in (0, 1):
+                    steps = np.abs(np.diff(lon_values, axis=axis))
+                    steps = steps[np.isfinite(steps) & (steps > 0)]
+                    if steps.size:
+                        dlon = max(dlon, float(np.median(steps)))
 
             # Check for degrees (range close to 360, or to 360 - dlon)
             if min(abs(lon_range - 360.0), abs(lon_range - (360.0 - dlon))) <= max(1.0, 0.5 * dlon):
@@ -130,6 +140,8 @@ def remap_coordinates(
     coordinate_units: Optional[str],
     xcoord: str,
     ycoord: str,
+    *,
+    wrap_centroid_longitude: bool = True,
 ) -> xr.Dataset:
     """Remap coordinates to original lat/lon values after processing.
     Map centroids from lat=[-180,180] back into original lat/lon units & range.
@@ -144,36 +156,23 @@ def remap_coordinates(
         # on disk under streaming), and the remap is elementwise.
         centroids = events_ds["centroid"]
 
-        # Split into components
-        centroids_lat = centroids.isel(component=0)  # [-90, 90] degrees
-        centroids_lon = centroids.isel(component=1)  # [-180, 180] degrees
-
-        # Get original coordinate bounds
-        lon_min = float(lon_init.min().compute().item())
-        lon_max = float(lon_init.max().compute().item())
-
-        # Convert units and adjust ranges
+        attrs = dict(centroids.attrs)
         if coordinate_units == "radians":
-            # Convert from degrees to radians
-            centroids_lat = centroids_lat * np.pi / 180.0  # Now in [-π/2, π/2]
-            centroids_lon = centroids_lon * np.pi / 180.0  # Now in [-π, π]
-
-            # Check if original longitude was in [0, 2π] range
-            if lon_min >= 0 and lon_max > np.pi:
-                # Shift from [-π, π] to [0, 2π]
-                centroids_lon = xr.where(centroids_lon < 0, centroids_lon + 2 * np.pi, centroids_lon)
-        else:
-            # Coordinates remain in degrees
-            # Check if original longitude was in [0, 360] range
-            if lon_min >= 0 and lon_max > 180:
-                # Shift from [-180, 180] to [0, 360]
-                centroids_lon = xr.where(centroids_lon < 0, centroids_lon + 360, centroids_lon)
-
-        # Reassemble centroids with remapped coordinates
-        centroids_remapped = xr.concat([centroids_lat, centroids_lon], dim="component")
-
-        # Update the dataset
-        events_ds["centroid"] = centroids_remapped
+            centroids = centroids * np.pi / 180.0
+        if wrap_centroid_longitude:
+            centroids_lat = centroids.isel(component=0)
+            centroids_lon = centroids.isel(component=1)
+            full_turn = 2 * np.pi if coordinate_units == "radians" else 360.0
+            lon_min = float(lon_init.min().compute().item())
+            lon_max = float(lon_init.max().compute().item())
+            if lon_min >= 0 and lon_max > full_turn / 2:
+                centroids_lon = xr.where(centroids_lon < 0, centroids_lon + full_turn, centroids_lon)
+            centroids = xr.concat([centroids_lat, centroids_lon], dim="component")
+        # The legacy degree output has no units attribute. Preserve its metadata contract
+        # while retaining declared units and recording any conversion to radians.
+        if coordinate_units is not None and (coordinate_units == "radians" or "units" in attrs):
+            attrs["units"] = coordinate_units
+        events_ds["centroid"] = centroids.assign_attrs(attrs)
 
     return events_ds
 

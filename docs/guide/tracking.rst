@@ -489,7 +489,7 @@ follow the 3-D tracker with volumes in place of areas, and the differences are l
 
 The ``"z"`` key alone selects the 4-D tracker. The depth dimension needs a
 one-dimensional numeric coordinate in metres (``units`` of ``m``, ``metre`` or ``meters``),
-increasing downwards. A coordinate with ``positive: up`` is negated internally and restored
+in strictly monotonic order. A coordinate with ``positive: up`` is negated internally and restored
 on output. Structured latitude/longitude grids only: ``unstructured_grid=True`` with a ``"z"``
 entry raises. A dimension beyond time, depth, latitude and longitude (an ensemble member, say)
 still raises a ``TrackingError``, so select or loop over it. The ``wet_mask`` is required
@@ -506,11 +506,12 @@ A volume needs the thickness of every layer, and thickness alone does not locate
 interfaces. The tracker accepts three ways to supply the vertical geometry.
 
 ``layer_bounds`` : :class:`xarray.DataArray`
-   The top and bottom interface of each layer in metres, with dimensions ``(depth, 2)`` or
-   ``(depth, lat, lon, 2)``. Pass it explicitly (for a CF dataset, ``ds["depth_bnds"]``). The
-   ``bounds`` attribute on the depth coordinate only names the bounds variable, so a coordinate
-   with that attribute still raises without ``layer_bounds``. Cropped depth ranges are
-   fine, since the interfaces are read and not summed.
+   The top and bottom interface of each layer in metres, in that order, with dimensions
+   ``(depth, 2)`` or ``(depth, lat, lon, 2)``. Wet layers must be ordered by depth and their
+   intervals may touch but cannot overlap. Pass the array explicitly (for a CF dataset,
+   ``ds["depth_bnds"]``). The ``bounds`` attribute on the depth coordinate only names the
+   bounds variable, so a coordinate with that attribute still raises without ``layer_bounds``.
+   Cropped depth ranges are fine, since the interfaces are read and not summed.
 
 ``layer_thickness`` : :class:`xarray.DataArray`, optional
    Thickness in metres, ``(depth, lat, lon)``, for partial cells at the sea floor (GLORYS12
@@ -519,8 +520,9 @@ interfaces. The tracker accepts three ways to supply the vertical geometry.
    It requires ``layer_bounds``.
 
 Labelled inputs are matched to the extremes field by their coordinates, so they may list depth,
-latitude or longitude in another order. Labels from a different grid raise, and an input with no
-coordinate on an axis is read by position.
+latitude or longitude in another order. After aligning the dimension indexes, the tracker checks
+any shared two-dimensional latitude and longitude coordinates on wet columns for ``cell_areas``
+and ``cell_volumes``. Labels from a different grid raise, and an unlabelled axis is read by position.
 
 ``layer_bounds="from_centres"``
    Reconstructs the interfaces at midpoints between the level centres. It is an explicit
@@ -528,16 +530,22 @@ coordinate on an axis is read by position.
    ``attrs["vertical_geometry"] = "reconstructed_from_centres"``.
 
 The horizontal cell area comes from ``cell_areas`` (units ``m2``, ``m^2`` or ``km2``) or from
-``grid_resolution`` in degrees. Without either, 4-D tracking raises. The cell volume is the area times the layer thickness, in float64 m\ :sup:`3`,
+``grid_resolution`` in degrees. Without either, 4-D tracking raises. Inferred latitude interfaces
+stop at the poles. The cell volume is the area times the layer thickness, in float64 m\ :sup:`3`,
 unless ``cell_volumes`` (m\ :sup:`3`, ``(depth, lat, lon)``) overrides the product. Interfaces
-are still needed alongside ``cell_volumes``, for the gap rule and the depth diagnostics. All
+are still needed alongside ``cell_volumes``, for the gap rule and the depth diagnostics. Inferred
 areas use an Earth radius of 6378 km.
 
 Vertical Connectivity
 ---------------------
 
 Each level is labelled with the 3-D tracker's rule (8 neighbours, joined across the longitude seam
-unless ``regional_mode`` is set). Two flagged cells in the same water column then join when
+unless ``regional_mode`` is set). A one-dimensional longitude axis can repeat its first meridian
+after a full turn, for example at 0° and 360°. The tracker checks that the wet mask and wet
+extremes agree at both endpoints, counts only the first column, and copies its event IDs to the
+last column on output.
+
+Two flagged cells in the same water column then join when
 every cell between them is wet and the intervening layers sum to no more than
 ``max_vertical_gap_m``. The default of ``0.0`` connects consecutive stored levels only, so an
 event with an unoccupied level in the middle splits in two. Raise it to bridge a thin
@@ -607,7 +615,9 @@ Parameters That Change or Raise
    * - ``R_fill``
      - Closing, opening and hole filling run on each level separately.
    * - ``T_fill``
-     - Closing in time only, as in 3-D.
+     - Maximum gap to close along the time axis, in timesteps. Must be a non-negative even integer.
+   * - ``checkpoint``
+     - Stores 4-D preprocessing under separate filenames from the 3-D checkpoint in ``temp_dir``.
    * - ``compute_mode``
      - ``"persist"`` or ``"streaming"``, as in 3-D.
 
@@ -622,14 +632,16 @@ tracker models the bytes it needs as
    (retained_chunks * time_chunk + 2) * n_voxels * 4  +  (n_voxels + 4 * layer_elements) * 8
 
 where ``n_voxels = nz * ny * nx`` and ``layer_elements`` is ``nz`` for depth-only geometry or
-``n_voxels`` for spatially varying layers. The first term is the int32 ID chunks plus two
+``n_voxels`` for spatially varying layers. The first term allows for int32 ID chunks plus up to two
 pristine slices used for split certification, with ``retained_chunks`` equal to 2 for
 ``streaming`` and 11 for ``persist``. The second is the float64 cell volumes and four vertical
-layer arrays (top, bottom, thickness and midpoint depth). ``merge_loop_client_bytes`` in
-``marEx.track.volumetric.merge_loop`` returns it.
+layer arrays (top, bottom, thickness and midpoint depth). Pass ``layer_elements`` and
+``pristine_slices=2`` to ``merge_loop_client_bytes`` in ``marEx.track.volumetric.merge_loop``
+to reproduce the tracker's estimate.
 
-Treat the formula as a lower bound. The wet masks, the per-merge partition buffers and the Dask
-graph are not in the model. On the GLORYS12 northeast Pacific box (36 x 361 x 601 =
+This is a buffer-sizing estimate. Short runs may retain fewer than the allowed number of
+chunks, and pristine slices are copied only when labels are edited. The model excludes wet
+masks, per-merge partition buffers and the Dask graph. On the GLORYS12 northeast Pacific box (36 x 361 x 601 =
 7.81 M voxels, 75 days, ``streaming``, 8 workers of 14 GB), the measured client memory above
 the pre-tracking baseline was 1.6 times the earlier five-array dense model at a time chunk of 5
 (1.48 GiB peak in total) and 1.4 times at a time chunk of 25 (3.04 GiB). The peaks include a Python and numba
@@ -639,8 +651,8 @@ halved the client peak and ran faster (263 s versus 359 s) with identical events
 Output
 ------
 
-``run()`` returns the 3-D variables with these changes. Depth is positive-down metres in
-every output, whatever the sign of the input coordinate.
+``run()`` returns the 3-D variables with these changes. Depth diagnostics use positive-down
+metres. ``ID_field`` keeps the input depth coordinate, including its sign and order.
 
 .. list-table::
    :header-rows: 1
@@ -651,7 +663,7 @@ every output, whatever the sign of the input coordinate.
      - Content
    * - ``ID_field``
      - ``(time, depth, lat, lon)``, int32
-     - Event ID, 0 for background and bridged gap cells. Keeps the input dimension and depth order.
+     - Event ID, 0 for background and bridged gap cells. Keeps the input dimension order.
    * - ``global_ID``, ``presence``, ``time_start``, ``time_end``
      - as 3-D
      - Same meaning as in 3-D.
@@ -663,7 +675,7 @@ every output, whatever the sign of the input coordinate.
      - Area of the projection onto the horizontal plane, in m\ :sup:`2`.
    * - ``centroid``
      - ``(component, time, ID)``
-     - Volume-weighted horizontal centroid (latitude, longitude) in degrees, correct across the longitude seam.
+     - Volume-weighted horizontal centroid (latitude, longitude), using ``horizontal_coordinate_units`` (degrees or radians, matching the input).
    * - ``depth_centroid``
      - ``(time, ID)``
      - Volume-weighted mean depth of the cell midpoints, in m.

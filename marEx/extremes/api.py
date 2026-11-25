@@ -16,7 +16,7 @@ from ..core.compute_mode import Materialiser, create_staging_dir
 from ..core.dimensions import resolve_dims
 from ..core.finalise import finalise_dataset, split_large_chunks
 from ..core.time_axis import SeasonalCycle, cadence_index_name
-from ..core.validation import _infer_dims_coords
+from ..core.validation import _infer_dims_coords, unmask_dataarray
 from ..exceptions import ConfigurationError, create_data_validation_error
 from ..logging_config import configure_logging, get_logger, log_memory_usage, log_timing
 from .base import identify_extremes, reject_empty_series, resolve_window_spatial
@@ -72,21 +72,20 @@ def _extreme_steps(
     return steps
 
 
-def _effective_window_spatial(
-    method: str,
-    window_spatial: Optional[int],
-    dimensions: Dict[str, str],
-    ds_or_da,
-    method_percentile: str = "approximate",
-) -> Optional[int]:
-    """
-    Resolve the spatial window actually used.
-
-    Record the gridded approximate default of 5 when the caller leaves the
-    width unset. Exact seasonal percentiles use one cell by default. Delegates
-    to :func:`marEx.extremes.base.resolve_window_spatial`.
-    """
-    return resolve_window_spatial(ds_or_da, dimensions, method, method_percentile, window_spatial)
+def _align_threshold_cycle(ds: xr.Dataset, thresholds: xr.DataArray) -> xr.Dataset:
+    """Expand an observed-only cycle, such as harmonic STD, before assigning thresholds."""
+    cycle_dim = next((dim for dim in thresholds.dims if dim not in ds.dat_anomaly.dims), None)
+    if cycle_dim not in ds.dims or cycle_dim not in thresholds.indexes:
+        return ds
+    index = thresholds.indexes[cycle_dim]
+    if cycle_dim in ds.indexes:
+        if not ds.indexes[cycle_dim].equals(index):
+            return ds.reindex({cycle_dim: index})
+    elif ds.sizes[cycle_dim] < index.size:
+        # An unlabelled dimension aligns positionally to the start of the cycle.
+        ds = ds.assign_coords({cycle_dim: index[: ds.sizes[cycle_dim]]})
+        return ds.reindex({cycle_dim: index})
+    return ds
 
 
 def _extremes_core(
@@ -316,9 +315,11 @@ def identify(
                 data_info={"available_variables": list(data.data_vars)},
             )
         ds = data
-        anomalies = data.dat_anomaly
+        anomalies = unmask_dataarray(data.dat_anomaly)
+        if anomalies is not data.dat_anomaly:
+            ds = ds.assign(dat_anomaly=anomalies)
     else:
-        anomalies = data
+        anomalies = unmask_dataarray(data)
         ds = xr.Dataset({"dat_anomaly": anomalies})
 
     logger.info(f"Identifying extremes - method: {method}, percentile: {threshold_percentile}%")
@@ -356,14 +357,11 @@ def identify(
             cycle=cycle,
             tail=tail,
         )
-        ds = ds.copy()
+        ds = _align_threshold_cycle(ds.copy(), thresholds)
         ds["extreme_events"] = extremes
         ds["thresholds"] = thresholds
 
-        # `method_percentile` is threaded rather than left to the helper's own default:
-        # the exact path defaults to a single cell, so defaulting it to 5 would
-        # record a 5x5 window the run never used.
-        effective_window_spatial = _effective_window_spatial(method, window_spatial, dimensions, ds, method_percentile)
+        effective_window_spatial = resolve_window_spatial(anomalies, dimensions, method, method_percentile, window_spatial)
         ds.attrs.update({"method_extreme": method, "threshold_percentile": threshold_percentile, "tail": tail})
         ds.attrs["preprocessing_steps"] = list(ds.attrs.get("preprocessing_steps", [])) + _extreme_steps(
             method,
@@ -376,8 +374,10 @@ def identify(
         )
         if method == "seasonal_percentile":
             ds.attrs.update({"window_days": window_days})
-            if effective_window_spatial is not None:
-                ds.attrs.update({"window_spatial": effective_window_spatial})
+        if method == "seasonal_percentile" and effective_window_spatial is not None:
+            ds.attrs["window_spatial"] = effective_window_spatial
+        else:
+            ds.attrs.pop("window_spatial", None)
         # The RESOLVED geometry, not what the caller passed: with both left unset these
         # were derived from the data, and the output has to say which bins produced it.
         ds.attrs.update({"method_percentile": method_percentile, "precision": used_precision, "max_anomaly": used_max_anomaly})

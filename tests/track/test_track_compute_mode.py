@@ -747,3 +747,175 @@ def test_a_finer_auxiliary_datetime_coordinate_keeps_its_values(tmp_path, mode):
     assert events.sensor_timestamp.dtype == stamps.dtype
     assert events.time.dtype == extremes.time.dtype
     marEx.clear_staging(events)
+
+
+def _coordinate_inputs(time_type):
+    from .volumetric.synthetic import make_inputs, scenarios
+
+    binary, meta = scenarios()["one_merge"]
+    extremes, wet, bounds, areas = make_inputs(binary, **{**meta["make_inputs"], "time_chunk": 2})
+    steps = np.arange(extremes.sizes["time"])
+    if time_type in ("s", "ms", "ns"):
+        start = {"s": "2500-01-01T00:00:01", "ms": "2001-02-27T00:00:00.123", "ns": "2001-02-27T00:00:00.123456789"}
+        axis = np.datetime64(start[time_type], time_type) + steps.astype("timedelta64[D]")
+    else:
+        axis = xr.date_range("2001-02-27", periods=steps.size, calendar=time_type, use_cftime=True)
+    stamp_type = {"s": "ms", "ms": "ns", "ns": "s"}.get(time_type, "ns")
+    stamps = np.datetime64("1999-02-01T00:00:00.123456789", stamp_type) + steps.astype("timedelta64[D]")
+    gregorian = xr.date_range("2001-03-27", periods=steps.size, calendar="gregorian", use_cftime=True)
+    extremes = extremes.assign_coords(
+        time=axis,
+        quality=("time", steps + 1),
+        sensor_depth=("time", steps + 11.5),
+        sensor_timestamp=("time", stamps),
+        gregorian_timestamp=("time", gregorian.values),
+    ).chunk({"time": 2})
+    return extremes, wet, bounds, areas
+
+
+def _track_coordinates(extremes, wet, tmp_path, mode, **kwargs):
+    return marEx.tracker(
+        extremes,
+        wet,
+        temp_dir=str(tmp_path),
+        compute_mode=mode,
+        R_fill=0,
+        T_fill=0,
+        regional_mode=True,
+        coordinate_units="degrees",
+        overlap_threshold=0.1,
+        quiet=True,
+        **kwargs,
+    )
+
+
+def _assert_coordinate_types(events, merges, source):
+    for name in ("time", "quality", "sensor_depth", "sensor_timestamp", "gregorian_timestamp"):
+        actual = events[name]
+        expected = source[name]
+        assert actual.dtype == expected.dtype, name
+        actual_values, expected_values = actual.values, expected.values
+        assert type(actual_values[0]) is type(expected_values[0]), name
+        np.testing.assert_array_equal(actual_values, expected_values, err_msg=name)
+
+    time_values = source.time.values
+    for actual in (events.time_start, events.time_end, merges.merge_time):
+        assert actual.size > 0, actual.name
+        assert actual.dtype == source.time.dtype, actual.name
+        values = actual.values
+        assert type(values[0]) is type(time_values[0]), actual.name
+        assert np.isin(values, time_values).all(), actual.name
+
+
+@pytest.mark.parametrize("time_type", ["s", "ms", "ns", "gregorian", "proleptic_gregorian", "360_day"])
+@pytest.mark.parametrize("volumetric", [False, True], ids=["gridded", "volumetric"])
+def test_coordinate_types_and_values_match_across_storage_routes(client, tmp_path, time_type, volumetric):
+    extremes, wet, bounds, areas = _coordinate_inputs(time_type)
+    if volumetric:
+        kwargs = {
+            "dimensions": {"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+            "layer_bounds": bounds,
+            "cell_areas": areas,
+            "volume_filter_absolute": 1.0,
+        }
+    else:
+        extremes = extremes.any("depth")
+        wet = wet.any("depth")
+        kwargs = {"area_filter_absolute": 1, "allow_merging": True, "nn_partitioning": False}
+    for name in ("quality", "sensor_depth", "sensor_timestamp", "gregorian_timestamp"):
+        assert extremes[name].chunks is not None
+
+    persist = _track_coordinates(extremes, wet, tmp_path / "persist", "persist", **kwargs).run(return_merges=True)
+    streaming = _track_coordinates(extremes, wet, tmp_path / "streaming", "streaming", **kwargs).run(return_merges=True)
+    try:
+        for events, merges in (persist, streaming):
+            _assert_coordinate_types(events, merges, extremes)
+        assert streaming[0].ID_field.chunks == persist[0].ID_field.chunks
+        _identical(streaming, persist, time_type)
+
+        path = tmp_path / "exported.zarr"
+        streaming[0].to_zarr(path)
+        time_coder = (
+            xr.coders.CFDatetimeCoder(use_cftime=True)
+            if extremes.time.dtype.kind == "O"
+            else xr.coders.CFDatetimeCoder(use_cftime=False, time_unit=time_type)
+        )
+        decoders = dict.fromkeys(("time", "time_start", "time_end"), time_coder)
+        decoders["sensor_timestamp"] = xr.coders.CFDatetimeCoder(time_unit=np.datetime_data(extremes.sensor_timestamp.dtype)[0])
+        decoders["gregorian_timestamp"] = xr.coders.CFDatetimeCoder(use_cftime=True)
+        with xr.open_zarr(path, decode_times=decoders) as saved:
+            for name in ("time", "quality", "sensor_depth", "sensor_timestamp", "gregorian_timestamp"):
+                np.testing.assert_array_equal(saved[name].values, extremes[name].values, err_msg=name)
+    finally:
+        marEx.clear_staging(streaming[0])
+
+
+@pytest.mark.parametrize("mode", ["persist", "streaming"])
+@pytest.mark.parametrize("time_type", ["ms", "gregorian"])
+def test_checkpoint_restores_datetime_coordinates_on_same_and_fresh_tracker(client, tmp_path, mode, time_type):
+    extremes, wet, _, _ = _coordinate_inputs(time_type)
+    extremes = extremes.any("depth")
+    wet = wet.any("depth")
+    kwargs = {"area_filter_absolute": 1, "allow_merging": True, "nn_partitioning": False}
+    tracker = _track_coordinates(extremes, wet, tmp_path, mode, **kwargs)
+    saved, _ = tracker.run_preprocess(checkpoint="save")
+    assert saved.time.dtype == extremes.time.dtype
+    assert tracker.data_bin is None
+
+    # The checkpoint must supply its own specification, even when the constructor's axis has a different type.
+    ns_times = np.datetime64("2001-02-27", "ns") + np.arange(extremes.sizes["time"]).astype("timedelta64[D]")
+    fresh = _track_coordinates(extremes.assign_coords(time=ns_times), wet, tmp_path, mode, **kwargs)
+    same_result = tracker.run(return_merges=True, checkpoint="load")
+    fresh_result = fresh.run(return_merges=True, checkpoint="load")
+    try:
+        for events, merges in (same_result, fresh_result):
+            _assert_coordinate_types(events, merges, extremes)
+        _identical(same_result, fresh_result, time_type)
+    finally:
+        if mode == "streaming":
+            marEx.clear_staging(same_result[0])
+            marEx.clear_staging(fresh_result[0])
+
+
+@pytest.mark.parametrize("volumetric", [False, True], ids=["gridded", "volumetric"])
+def test_streaming_preserves_relabeled_time_chunks_and_object_string_coords(client, tmp_path, volumetric):
+    import zarr
+
+    extremes, wet, bounds, areas = _coordinate_inputs("ns")
+    steps = np.arange(extremes.sizes["time"])
+    tags = np.array([f"obs-{i}" for i in steps], dtype=object)
+    coarse_dates = np.datetime64("2001-02-27", "D") + steps.astype("timedelta64[D]")
+    extremes = extremes.assign_coords(tag=("time", tags), obs_day=("time", coarse_dates)).chunk({"time": 2})
+    if volumetric:
+        kwargs = {
+            "dimensions": {"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+            "layer_bounds": bounds,
+            "cell_areas": areas,
+            "volume_filter_absolute": 1.0,
+        }
+    else:
+        extremes = extremes.any("depth")
+        wet = wet.any("depth")
+        kwargs = {"area_filter_absolute": 1, "allow_merging": True, "nn_partitioning": False}
+
+    def run():
+        p_ev, p_mg = _track_coordinates(extremes, wet, tmp_path / "p", "persist", **kwargs).run(return_merges=True)
+        persist = (p_ev.compute(), p_mg.compute())
+        del p_ev, p_mg
+        s_ev, s_mg = _track_coordinates(extremes, wet, tmp_path / "s", "streaming", **kwargs).run(return_merges=True)
+        staging_dir = s_ev.encoding["marex_staging_dir"]
+        try:
+            relabeled = zarr.open_group(f"{staging_dir}/relabeled_id_field.zarr", mode="r")["relabeled_id_field"]
+            chunk0 = relabeled.chunks[0]
+            stream = (s_ev.compute(), s_mg.compute())
+            del s_ev, s_mg
+            return persist, stream, chunk0
+        finally:
+            marEx.clear_staging(staging_dir)
+
+    persist, stream, chunk0 = released(run, "relabeled chunks and object coords")
+    assert chunk0 == 2
+    _identical(stream, persist, "object-and-coarse-coords")
+    np.testing.assert_array_equal(stream[0]["tag"].values, tags)
+    assert stream[0]["obs_day"].dtype == extremes["obs_day"].dtype
+    np.testing.assert_array_equal(stream[0]["obs_day"].values, extremes["obs_day"].values)

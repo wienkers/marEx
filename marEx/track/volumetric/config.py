@@ -244,6 +244,8 @@ def align_to_data(
     data_bin: xr.DataArray,
     axes: Sequence[Tuple[str, str]],
     name: str,
+    *,
+    wet_columns: Optional[xr.DataArray] = None,
 ) -> xr.DataArray:
     """
     Put an input on the data's coordinate labels.
@@ -260,6 +262,9 @@ def align_to_data(
         dimension's index is matched instead.
     name : str
         What to call the input in an error.
+    wet_columns : xarray.DataArray, optional
+        Check shared two-dimensional geographic coordinates in these wet columns after
+        aligning the dimension indexes.
 
     Returns
     -------
@@ -273,6 +278,8 @@ def align_to_data(
     ------
     ConfigurationError
         If the coordinates do not hold the same set of labels.
+    DataValidationError
+        If a shared two-dimensional geographic coordinate disagrees on wet columns.
     """
     for dim, coord in axes:
         # The named coordinate if both sides carry it, else the dimension's own index.
@@ -290,7 +297,7 @@ def align_to_data(
         want_order, have_order = np.argsort(want, kind="stable"), np.argsort(have, kind="stable")
         same_labels = (
             np.unique(want).size == np.unique(have).size
-            and np.allclose(want[want_order], have[have_order], rtol=_coordinate_rtol(want, have), atol=0.0)
+            and np.allclose(want[want_order], have[have_order], rtol=_coordinate_rtol(want, have), atol=0.0, equal_nan=True)
             if rounded
             else np.array_equal(want[want_order], have[have_order])
         )
@@ -310,6 +317,20 @@ def align_to_data(
         da = da.isel({dim: positions})
         if label == dim:
             da = da.assign_coords({dim: want})
+    if wet_columns is not None:
+        yx = wet_columns.dims
+        for _, coord in axes:
+            if coord not in da.coords or coord not in data_bin.coords:
+                continue
+            if set(da[coord].dims) != set(yx) or set(data_bin[coord].dims) != set(yx):
+                continue
+            want = data_bin[coord].transpose(*yx).values
+            have = da[coord].transpose(*yx).values
+            if want.shape != have.shape:
+                continue
+            matches = np.isclose(want, have, rtol=_coordinate_rtol(want, have), atol=1e-9, equal_nan=True)
+            if not matches.all() and np.any(~matches & wet_columns.values):
+                raise create_data_validation_error(f"{name} has a '{coord}' coordinate that does not match the data on wet columns")
     return da
 
 

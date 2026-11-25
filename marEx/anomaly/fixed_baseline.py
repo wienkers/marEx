@@ -18,8 +18,8 @@ from ..core.compute_mode import Materialiser
 from ..core.dimensions import spatial_dims
 from ..core.numerics import rolling_numerics
 from ..core.seasonal_apply import apply_seasonal_field
-from ..core.time_axis import SeasonalCycle, resolve_cycle
-from ..core.validation import _infer_dims_coords
+from ..core.time_axis import _DAYS_PER_CALENDAR_YEAR, SeasonalCycle, resolve_cycle
+from ..core.validation import _infer_dims_coords, unmask_dataarray
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 from .climatology import _rolling_mean_keep_tiles, last_day_pool
@@ -29,7 +29,9 @@ from .harmonic import _compute_anomaly_detrended
 logger = get_logger(__name__)
 
 
-def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smooth_days: float) -> xr.DataArray:
+def _smooth_climatology_circular(
+    clim: xr.DataArray, cycle: SeasonalCycle, smooth_days: Optional[float], *, calendar: str = "standard"
+) -> xr.DataArray:
     """Smooth a per-cycle-slot climatology with a centred moving average that wraps the year.
 
     Hobday et al. (2016)'s smoothing step: the climatology is a closed cycle, so 31 December
@@ -44,13 +46,18 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     average along the cycle. ``smooth_days`` is converted with the row width (one day, or one
     month), not the data cadence.
 
-    Operates on the single-chunk cycle axis, so it costs ``cycle.length x space`` and does
-    not depend on how the input was chunked.
+    Operates on the single-chunk cycle axis, so the cost depends on the number of
+    calendar slots and spatial cells.
     """
+    if smooth_days is None or smooth_days <= 1:
+        return clim
     cycle_dim = cycle.index_name
     steps_per_row = cycle.steps_per_day if cycle.is_subdaily else 1
-    n_rows = cycle.length // steps_per_row
+    n_slots = clim.sizes[cycle_dim]
+    n_rows = n_slots // steps_per_row
     row_days = cycle.slot_days * steps_per_row
+    if cycle_dim == "month":
+        row_days = _DAYS_PER_CALENDAR_YEAR.get(calendar, 365.25) / cycle.length
     window = replace(cycle, step_days=row_days).steps_for_days(smooth_days, name="smooth_days")
     if window >= n_rows:
         raise ConfigurationError(
@@ -79,19 +86,17 @@ def _smooth_climatology_circular(clim: xr.DataArray, cycle: SeasonalCycle, smoot
     # NaN-preserving: average the finite rows in each window, then re-mask rows that
     # were NaN before smoothing, so a seasonal-NaN cell (sea ice) keeps exactly its valid days
     # instead of losing half a window at each edge of its NaN season.
-    if padded.chunks is None:
-        with rolling_numerics():
+    with rolling_numerics():
+        if padded.chunks is None:
             smoothed = padded.rolling({"_row": window}, center=True, min_periods=1).mean()
-    else:
-        # Tasks scale with the number of tiles, so a window must not split them. Any one finite
-        # row in the window is enough, as with min_periods=1 above.
-        with rolling_numerics():
+        else:
+            # Keep the spatial tiles intact. One finite row in the window is enough.
             smoothed = _rolling_mean_keep_tiles(padded, "_row", window, max_missing=(window - 1) / window)
     smoothed = smoothed.isel({"_row": slice(window, window + n_rows)})
     smoothed = smoothed.where(rows.notnull())
     other = [d for d in dims if d != cycle_dim]
     smoothed = smoothed.transpose("_row", "_step", *other)
-    folded = smoothed.data.reshape((cycle.length,) + smoothed.shape[2:])
+    folded = smoothed.data.reshape((n_slots,) + smoothed.shape[2:])
     out = xr.DataArray(
         folded, dims=(cycle_dim, *other), coords={cycle_dim: labels, **{k: v for k, v in clim.coords.items() if k != cycle_dim}}
     )
@@ -105,7 +110,7 @@ def _compute_anomaly_fixed_baseline(
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
-    smooth_days: float = 21,
+    smooth_days: Optional[float] = 21,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed baseline method with full time series climatology.
@@ -129,22 +134,19 @@ def _compute_anomaly_fixed_baseline(
         the full time series.
     smooth_days : float, default=21
         Width of the circular moving average applied to the climatology, in days.
-        ``smooth_days=1`` disables smoothing.
+        Values up to 1, or None, disable smoothing.
 
     Returns
     -------
     xarray.Dataset
         Dataset containing anomalies and mask
     """
-    # A None materialiser means "default to persist mode", which keeps every existing
-    # caller, doctest and test working unchanged.
-    if materialiser is None:
-        materialiser = Materialiser("persist")
-
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    da = unmask_dataarray(da)
     cycle = resolve_cycle(da, coordinates["time"], cycle)
     cycle_dim = cycle.index_name
+    time_coord = da[coordinates["time"]]
 
     # Select data for climatology computation (optionally restricted to reference period)
     if reference_period is not None:
@@ -155,8 +157,8 @@ def _compute_anomaly_fixed_baseline(
                 details="The reference_period tuple must be (start_year, end_year) with start_year <= end_year",
                 suggestions=[f"Swap the order: use reference_period=({end_year}, {start_year})"],
             )
-        years = da[coordinates["time"]].dt.year
-        year_mask = (years >= start_year) & (years <= end_year)
+        years = time_coord.dt.year
+        year_mask = ((years >= start_year) & (years <= end_year)).compute()
         da_for_clim = da.isel({dimensions["time"]: year_mask})
         if da_for_clim.sizes[dimensions["time"]] == 0:
             data_min_year = int(years.min().values)
@@ -188,8 +190,20 @@ def _compute_anomaly_fixed_baseline(
         dtype=np.float32,
     )
 
-    # Day 366 takes every year's 31 December, not only the leap years' (see `last_day_pool`).
-    pool = last_day_pool(da_for_clim[coordinates["time"]], cycle, read_coord=da[coordinates["time"]])
+    # Keep the original cycle for mapping clock phases, and size the smoothing axis
+    # to the physical year. A mixed-length calendar can use day 366 if a leap year
+    # occurs in the full time axis, even outside the reference period.
+    calendar = time_coord.dt.calendar
+    fixed_year_days = _DAYS_PER_CALENDAR_YEAR.get(calendar)
+    steps_per_day = cycle.steps_per_day
+    cycle_length = cycle.length
+    pool = None
+    if steps_per_day:
+        year_days = fixed_year_days or (366 if bool(time_coord.dt.is_leap_year.any()) else 365)
+        cycle_length = min(cycle_length, int(year_days) * steps_per_day)
+        if fixed_year_days is None and cycle_length == cycle.length == 366 * steps_per_day:
+            # Day 366 pools every year's 31 December at the same clock phase.
+            pool = last_day_pool(da_for_clim[coordinates["time"]], cycle, read_coord=time_coord)
     if pool is not None and len(pool[0]):
         positions, slots, last_labels = pool
         last_day = flox.xarray.xarray_reduce(
@@ -205,22 +219,16 @@ def _compute_anomaly_fixed_baseline(
             [daily_climatology.sel({cycle_dim: slice(None, int(last_labels[0]) - 1)}), last_day], dim=cycle_dim
         )
 
-    # Ensure the climatology spans the full day-of-year range 1..366. A cycle slot no
-    # timestep fell into (no 31 December at all, or a gap) would otherwise silently NaN
-    # every such day of the full series. Reindex to 366 and forward-fill the missing
-    # group from the slot before it. In the common case both operations are no-ops. The
-    # dayofyear dim is rechunked to a single chunk so the dask ffill is valid.
-    daily_climatology = (
-        daily_climatology.reindex({cycle_dim: np.arange(1, cycle.length + 1)}).chunk({cycle_dim: -1}).ffill(cycle_dim)
-    )
-    daily_climatology = _smooth_climatology_circular(daily_climatology, cycle, smooth_days)
+    # Missing reference slots stay missing and contribute no values when smoothing.
+    daily_climatology = daily_climatology.reindex({cycle_dim: cycle.labels[:cycle_length]}).chunk({cycle_dim: -1})
+    daily_climatology = _smooth_climatology_circular(daily_climatology, cycle, smooth_days, calendar=calendar)
 
     # Compute anomalies by subtracting daily climatology from original data
     logger.debug("Computing anomalies by subtracting daily climatology")
     anomalies = apply_seasonal_field(
         da,
         daily_climatology,
-        cycle.index_of(da[coordinates["time"]]).values,
+        cycle.index_of(time_coord).values,
         timedim=dimensions["time"],
         cycledim=cycle_dim,
         operation="subtract",
@@ -233,10 +241,12 @@ def _compute_anomaly_fixed_baseline(
         # Extra (non-horizontal) spatial dims such as depth are made whole alongside
         # the horizontal ones, so the mask keeps the field's full spatial shape.
         chunk_dict_mask = {dim: -1 for dim in mask_dims}
-        coords_to_drop = [coordinates["time"]]
-        if cycle_dim in da.coords:
-            coords_to_drop.append(cycle_dim)
-        mask = np.isfinite(da.isel({dimensions["time"]: 0})).drop_vars(coords_to_drop).chunk(chunk_dict_mask)
+        coords_to_drop = [c for c, v in da.coords.items() if dimensions["time"] in v.dims and c != dimensions["time"]]
+        mask = (
+            np.isfinite(da.isel({dimensions["time"]: 0}, drop=True))
+            .drop_vars(coords_to_drop, errors="ignore")
+            .chunk(chunk_dict_mask)
+        )
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
         mask = xr.DataArray(np.any(np.isfinite(da.values)), dims=[], attrs={"description": "Time series validity mask"})
@@ -254,7 +264,7 @@ def _compute_anomaly_detrend_fixed_baseline(
     reference_period: Optional[Tuple[int, int]] = None,
     materialiser: Optional[Materialiser] = None,
     cycle: Optional[SeasonalCycle] = None,
-    smooth_days: float = 21,
+    smooth_days: Optional[float] = 21,
 ) -> xr.Dataset:
     """
     Compute anomalies using fixed detrended baseline method.
@@ -281,20 +291,16 @@ def _compute_anomaly_detrend_fixed_baseline(
         not the polynomial detrending.
     smooth_days : float, default=21
         Width of the circular moving average applied to the climatology, in days.
-        ``smooth_days=1`` disables smoothing.
+        Values up to 1, or None, disable smoothing.
 
     Returns
     -------
     xarray.Dataset
         Dataset containing anomalies and mask
     """
-    # A None materialiser means "default to persist mode", which keeps every existing
-    # caller, doctest and test working unchanged.
-    if materialiser is None:
-        materialiser = Materialiser("persist")
-
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    da = unmask_dataarray(da)
 
     logger.debug(f"Removing polynomial trends of orders: {detrend_orders}")
 

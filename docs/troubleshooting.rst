@@ -126,9 +126,10 @@ marEx checks its arguments before any compute starts. The table lists the common
      - Even ``window_days`` on a daily time axis.
      - Use an odd number of days.
    * - ``window_spatial`` rejected
-     - ``window_spatial`` is only valid for a gridded input with ``seasonal_percentile`` and
-       ``method_percentile="approximate"``. It must be odd.
-     - Leave it unset, or change the combination.
+     - An explicit ``window_spatial`` must be a positive odd width on a structured grid
+       with ``seasonal_percentile``. Both percentile estimators accept it.
+     - Supply a valid width or leave it unset. On a structured grid the default is
+       ``5`` for ``"approximate"`` and ``None`` (single cell) for ``"exact"``.
    * - ``precision`` rejected
      - ``precision`` was given with ``method_percentile="exact"``, or it implies more than 65,000 bins
        on a derived range (a warning appears above 10,000). Any geometry whose bin edges realise more than 65,535

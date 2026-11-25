@@ -10,6 +10,7 @@ analysis package.
 from typing import Dict, Optional, Tuple
 
 import dask
+import dask.array as dsa
 import numpy as np
 import xarray as xr
 
@@ -19,6 +20,36 @@ from .dimensions import COORDINATE_KEYS
 
 # Get module logger
 logger = get_logger(__name__)
+
+
+def _unmask_block(block, out_dtype):
+    if np.ma.isMaskedArray(block):
+        if np.ma.is_masked(block):
+            return np.asarray(np.ma.filled(block.astype(out_dtype, copy=False), np.nan), dtype=out_dtype)
+        return np.asarray(np.ma.getdata(block), dtype=out_dtype)
+    return np.asarray(block, dtype=out_dtype)
+
+
+def unmask_dataarray(da: xr.DataArray) -> xr.DataArray:
+    """Replace NumPy MaskedArray masks with NaN without touching plain ndarrays."""
+    raw = da.data
+    if isinstance(raw, np.ma.MaskedArray):
+        masked = bool(np.ma.is_masked(raw))
+        out_dtype = np.result_type(da.dtype, float) if masked and da.dtype.kind in "bui" else da.dtype
+        filled = np.ma.filled(raw.astype(out_dtype, copy=False), np.nan) if masked else np.ma.getdata(raw)
+        return da.copy(deep=False, data=np.asarray(filled, dtype=out_dtype))
+    meta = getattr(raw, "_meta", None)
+    if isinstance(meta, np.ma.MaskedArray):
+        out_dtype = np.result_type(da.dtype, float) if da.dtype.kind in "bui" else da.dtype
+        converted = dsa.map_blocks(
+            _unmask_block,
+            raw,
+            out_dtype=out_dtype,
+            dtype=out_dtype,
+            meta=np.empty((0,) * da.ndim, dtype=out_dtype),
+        )
+        return da.copy(deep=False, data=converted)
+    return da
 
 
 def _validate_dimensions_exist(da: xr.DataArray, dimensions: Dict[str, str]) -> None:

@@ -954,6 +954,49 @@ def test_region_writer_roundtrip(tmp_path):
     assert_no_failures(failures)
 
 
+@pytest.mark.parametrize("time_type", ["s", "ms", "ns", "gregorian", "proleptic_gregorian", "360_day"])
+def test_region_writer_writes_lazy_coordinates_without_reading_template(tmp_path, time_type):
+    def unexpected_read():
+        raise AssertionError("the writer evaluated the template ID field")
+
+    source = _field(n_time=7, chunk=3).compute()
+    steps = np.arange(source.sizes["time"])
+    if time_type in ("s", "ms", "ns"):
+        start = {"s": "2500-01-01T00:00:01", "ms": "2001-01-01T00:00:00.123", "ns": "2001-01-01T00:00:00.123456789"}
+        times = np.datetime64(start[time_type], time_type) + steps.astype("timedelta64[D]")
+        auxiliary = times + np.timedelta64(2, time_type)
+        coder = xr.coders.CFDatetimeCoder(use_cftime=False, time_unit=time_type)
+    else:
+        times = xr.date_range("2001-02-27", periods=steps.size, calendar=time_type, use_cftime=True)
+        auxiliary = xr.date_range("2001-03-27", periods=steps.size, calendar=time_type, use_cftime=True).values
+        coder = xr.coders.CFDatetimeCoder(use_cftime=True)
+
+    source = source.assign_coords(
+        time=times,
+        quality=("time", steps + 1),
+        sensor_depth=("time", steps + 11.5),
+        sensor_timestamp=("time", auxiliary),
+    )
+    chunked = source.chunk({"time": 3})
+    forbidden = dsa.from_delayed(dask.delayed(unexpected_read)(), shape=source.shape, dtype=source.dtype)
+    template = chunked.copy(data=forbidden.rechunk(chunked.chunks))
+    store = tmp_path / "regions.zarr"
+    writer = ObjectIDRegionWriter(template, store, "time")
+    for start, end in [(0, 3), (3, 6), (6, 7)]:
+        writer.write(start, end, source.isel(time=slice(start, end)))
+
+    result = writer.finalise()
+    assert result.chunks == chunked.chunks
+    independently_opened = xr.open_zarr(store, consolidated=False, decode_times={"time": coder, "sensor_timestamp": coder})[
+        source.name
+    ]
+    for reopened in (result, independently_opened):
+        xr.testing.assert_identical(reopened.compute(), source)
+        for name, coord in source.coords.items():
+            assert reopened[name].dtype == coord.dtype
+            assert type(reopened[name].values[0]) is type(coord.values[0])
+
+
 def test_region_writer_rejects_bad_coverage(tmp_path):
     """Finalising raises when no region was written, when a region is missing (a gap would silently leave
     zarr fill values), and when regions overlap."""

@@ -108,6 +108,86 @@ def test_the_smoothing_off_switches_and_the_rejected_window():
         _smooth_climatology_circular(clim, DAILY_CYCLE, 366)
 
 
+@pytest.mark.parametrize("calendar,expected", [("standard", [0, 0]), ("360_day", [6, -6])])
+def test_monthly_window_uses_the_calendar_month_length(calendar, expected):
+    time = xr.date_range("2000-01-01", periods=24, freq="MS", calendar=calendar, use_cftime=True)
+    field = xr.DataArray(np.where(time.month == 1, 12, 0).astype(np.float32), dims="time", coords={"time": time})
+    ds = marEx.anomaly.compute(
+        field.chunk({"time": 6}), method="fixed_baseline", smooth_days=45, dimensions={"time": "time"}
+    ).compute()
+
+    np.testing.assert_array_equal(ds.dat_anomaly.values.reshape(2, 12)[:, :2], np.tile(expected, (2, 1)))
+    np.testing.assert_array_equal(ds.dat_anomaly.values.reshape(2, 12)[:, 2:], 0)
+
+
+@pytest.mark.parametrize("calendar,year_days", [("360_day", 360), ("noleap", 365)])
+@pytest.mark.parametrize("pulse", [False, True])
+def test_subdaily_fixed_baseline_wraps_each_clock_phase_over_the_physical_year(calendar, year_days, pulse):
+    time = xr.date_range("2000-01-01T03:00", periods=8 * year_days, freq="6h", calendar=calendar, use_cftime=True)
+    phases = np.array([0, 10, 20, 30], dtype=np.float32)
+    year = np.tile(phases, (year_days, 1))
+    if pulse:
+        year[0, 0] += 42
+    field = xr.DataArray(np.tile(year.ravel(), 2), dims="time", coords={"time": time}).chunk({"time": 160})
+    ds = marEx.anomaly.compute(field, method="fixed_baseline", smooth_days=21, dimensions={"time": "time"}).compute()
+
+    windows = (np.arange(year_days)[:, None] + np.arange(-10, 11)) % year_days
+    expected = year - year[windows].mean(axis=1)
+    np.testing.assert_array_equal(ds.dat_anomaly.values, np.tile(expected.ravel(), 2))
+
+
+@pytest.mark.parametrize("smooth_days", [None, 1, 21])
+def test_fixed_baseline_preserves_missing_reference_slots(smooth_days):
+    ref = pd.date_range("2001-01-01T03:00", periods=40, freq="6h").delete(13)
+    target = pd.date_range("2002-01-01T03:00", periods=40, freq="6h")
+    time = ref.append(target)
+    values = time.hour.to_numpy(dtype=np.float32)
+    values[17] = np.nan
+    field = xr.DataArray(values, dims="time", coords={"time": time}).chunk({"time": 10})
+    ds = marEx.anomaly.compute(
+        field,
+        method="fixed_baseline",
+        dimensions={"time": "time"},
+        reference_period=(2001, 2001),
+        smooth_days=smooth_days,
+        validate=False,
+    ).compute()
+
+    expected = np.zeros(target.size, dtype=np.float32)
+    expected[[13, 18]] = np.nan  # One absent 09:00 timestamp and one observed slot with a missing value.
+    np.testing.assert_array_equal(ds.dat_anomaly.sel(time="2002").values, expected)
+
+
+@pytest.mark.parametrize("method", ["fixed_baseline", "detrend_fixed_baseline"])
+def test_reference_period_with_a_chunked_auxiliary_time_coordinate(method):
+    time = pd.date_range("2000-01-01", periods=24, freq="MS")
+    values = np.tile(np.arange(12, dtype=np.float32), 2) + np.repeat(np.array([0, 100], dtype=np.float32), 12)
+    field = xr.DataArray(
+        values,
+        dims="record",
+        coords={"record": np.arange(900, 924), "valid_at": ("record", time.values)},
+    ).chunk({"record": 6})
+    assert field.valid_at.chunks is not None
+    ds = marEx.anomaly.compute(
+        field,
+        method=method,
+        dimensions={"time": "record"},
+        coordinates={"time": "valid_at"},
+        reference_period=(2000, 2000),
+        smooth_days=1,
+        force_zero_mean=False,
+    ).compute()
+
+    if method == "detrend_fixed_baseline":
+        year_fraction = time.year + (time.dayofyear - 1) / np.where(time.is_leap_year, 366, 365)
+        design = np.column_stack([np.ones(time.size), year_fraction - np.mean(year_fraction)])
+        coefficients = np.linalg.lstsq(design, values, rcond=None)[0]
+        values = values - (design @ coefficients).astype(np.float32)
+    np.testing.assert_array_equal(ds.record, field.record)
+    np.testing.assert_array_equal(ds.valid_at, time.values)
+    np.testing.assert_allclose(ds.dat_anomaly.values, values - np.tile(values[:12], 2), rtol=0, atol=2e-5)
+
+
 def test_smooth_days_one_matches_an_independent_unsmoothed_reference():
     da = _daily_field()
     result = _compute_anomaly_fixed_baseline(da, smooth_days=1).dat_anomaly.compute()
@@ -485,7 +565,9 @@ def test_a_finer_climatology_tile_does_not_reach_the_anomaly(monkeypatch):
     monkeypatch.setattr(
         fixed_baseline,
         "_smooth_climatology_circular",
-        lambda clim, cycle, smooth_days: smooth(clim, cycle, smooth_days).chunk({"depth": 1, "lat": 3, "lon": 3}),
+        lambda clim, cycle, smooth_days, **kwargs: smooth(clim, cycle, smooth_days, **kwargs).chunk(
+            {"depth": 1, "lat": 3, "lon": 3}
+        ),
     )
     field = _chunked_field(731)
     anomaly = _compute_anomaly_fixed_baseline(

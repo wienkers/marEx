@@ -34,6 +34,7 @@ from ..logging_config import get_logger
 # tracking per-slice labeller (objects.identify_objects) use them.
 from .objects import _EIGHT_CONNECTIVITY, _merge_lon_seam, identify_objects
 from .overlap import sparse_bool_power
+from .validation import validate_fill_size
 
 logger = get_logger(__name__)
 
@@ -190,9 +191,9 @@ def _dilate_disk_words(source, result, horizontal, scratch, half_widths, first, 
     for dy in range(radius, -1, -1):
         half_width = half_widths[dy]
         while width < half_width:
-            # Shifting by at most width + 1 extends the interval without gaps even at
-            # a clipped outer work-buffer boundary.
-            step = min(half_width - width, width + 1)
+            # Limit the shift to width + 1 to avoid gaps at clipped edges,
+            # and to 63 so both shifts fit in a word.
+            step = min(half_width - width, width + 1, 63)
             left_shift = np.uint64(step)
             right_shift = np.uint64(64 - step)
             for y in range(first - dy, stop + dy):
@@ -213,54 +214,6 @@ def _dilate_disk_words(source, result, horizontal, scratch, half_widths, first, 
                 result[y, word] |= expanded[y - dy, word] | expanded[y + dy, word]
 
 
-@njit(nogil=True)
-def _dilate_disk_edt(source, result, horizontal, vertices, starts, radius):
-    """Threshold the squared Euclidean distance to the nearest foreground pixel."""
-    ny, nx = source.shape
-    # A capped horizontal distance is already outside the disk.
-    cap = radius + 1
-    limit = radius * radius
-    for y in range(ny):
-        run = cap
-        for x in range(nx):
-            run = 0 if source[y, x] else min(run + 1, cap)
-            horizontal[y, x] = run * run
-        run = cap
-        for x in range(nx - 1, -1, -1):
-            run = 0 if source[y, x] else min(run + 1, cap)
-            horizontal[y, x] = min(horizontal[y, x], run * run)
-
-    for x in range(nx):
-        # Each row contributes a parabola. Keep its vertex and its first
-        # integer row on the lower envelope, clamped to the grid extent.
-        size = 0
-        for y in range(ny):
-            start = 0
-            while size:
-                previous = vertices[size - 1]
-                delta = y - previous
-                numerator = horizontal[y, x] - horizontal[previous, x] + delta * (y + previous)
-                # Round the intersection up to the first integer row the new vertex owns.
-                start = 1 + (numerator - 1) // (2 * delta)
-                if start > starts[size - 1]:
-                    break
-                size -= 1
-            if size == 0:
-                start = 0
-            if start < ny:
-                vertices[size] = y
-                starts[size] = start
-                size += 1
-
-        active = 0
-        for y in range(ny):
-            if active + 1 < size and y == starts[active + 1]:
-                active += 1
-            vertex = vertices[active]
-            delta = y - vertex
-            result[y, x] = horizontal[vertex, x] + delta * delta <= limit
-
-
 def _structured_fill_block(bitmap, *, radius, regional):
     """Close and open each horizontal plane using the same four-radius halo."""
     radius = index(radius)
@@ -271,56 +224,37 @@ def _structured_fill_block(bitmap, *, radius, regional):
     # A change at any outer boundary can travel at most one radius per pass.
     halo = 4 * radius
     ny_padded, nx_padded = ny + 2 * halo, nx + 2 * halo
-    core = slice(halo, halo + ny), slice(halo, halo + nx)
     mode = "edge" if regional else "wrap"
     planes = bitmap.reshape(-1, ny, nx)
     outputs = result.reshape(-1, ny, nx)
     erosions = (False, True, True, False)
 
-    if radius <= 32:
-        n_words = (nx_padded + 63) // 64
-        shape = ny_padded, n_words
-        packed, work, horizontal, scratch = (np.empty(shape, dtype=np.uint64) for _ in range(4))
-        half_widths = np.array([isqrt(radius * radius - dy * dy) for dy in range(radius + 1)], dtype=np.int64)
-        last_mask = np.uint64((1 << (nx_padded - 64 * (n_words - 1))) - 1)
-        packed_bytes = np.zeros((ny_padded, n_words * 8), dtype=np.uint8)
-        first_byte, leading_bits = divmod(halo, 8)
-        for plane, output in zip(planes, outputs):
-            padded = np.pad(np.pad(plane, ((0, 0), (halo, halo)), mode=mode), ((halo, halo), (0, 0)), mode="edge")
-            byte_rows = np.packbits(padded.astype(bool, copy=False), axis=1, bitorder="little")
-            packed_bytes[:, : byte_rows.shape[1]] = byte_rows
-            packed[:] = packed_bytes.view("<u8")
-            for step, erosion in enumerate(erosions):
-                first, stop = step * radius, ny_padded - step * radius
-                if erosion:
-                    np.bitwise_not(packed[first:stop], out=packed[first:stop])
-                    packed[first:stop, -1] &= last_mask
-                first, stop = first + radius, stop - radius
-                _dilate_disk_words(packed, work, horizontal, scratch, half_widths, first, stop, last_mask)
-                if erosion:
-                    np.bitwise_not(work[first:stop], out=work[first:stop])
-                    work[first:stop, -1] &= last_mask
-                packed, work = work, packed
-            bytes_in_core_rows = packed[core[0]].astype("<u8", copy=False).view(np.uint8)
-            core_bits = np.unpackbits(bytes_in_core_rows[:, first_byte:], axis=1, count=leading_bits + nx, bitorder="little")
-            output[:] = core_bits[:, leading_bits:]
-    else:
-        shape = ny_padded, nx_padded
-        work = np.empty(shape, dtype=bool)
-        horizontal = np.empty(shape, dtype=np.int64)
-        vertices = np.empty(ny_padded, dtype=np.int64)
-        starts = np.empty(ny_padded, dtype=np.int64)
-        for plane, output in zip(planes, outputs):
-            lon_padded = np.pad(plane, ((0, 0), (halo, halo)), mode=mode)
-            padded = np.pad(lon_padded, ((halo, halo), (0, 0)), mode="edge").astype(bool, copy=False)
-            for erosion in erosions:
-                if erosion:
-                    np.logical_not(padded, out=padded)
-                _dilate_disk_edt(padded, work, horizontal, vertices, starts, radius)
-                if erosion:
-                    np.logical_not(work, out=work)
-                padded, work = work, padded
-            output[:] = padded[core]
+    n_words = (nx_padded + 63) // 64
+    shape = ny_padded, n_words
+    packed, work, horizontal, scratch = (np.empty(shape, dtype=np.uint64) for _ in range(4))
+    half_widths = np.array([isqrt(radius * radius - dy * dy) for dy in range(radius + 1)], dtype=np.int64)
+    last_mask = np.uint64((1 << (nx_padded - 64 * (n_words - 1))) - 1)
+    packed_bytes = np.zeros((ny_padded, n_words * 8), dtype=np.uint8)
+    first_byte, leading_bits = divmod(halo, 8)
+    for plane, output in zip(planes, outputs):
+        padded = np.pad(np.pad(plane, ((0, 0), (halo, halo)), mode=mode), ((halo, halo), (0, 0)), mode="edge")
+        byte_rows = np.packbits(padded.astype(bool, copy=False), axis=1, bitorder="little")
+        packed_bytes[:, : byte_rows.shape[1]] = byte_rows
+        packed[:] = packed_bytes.view("<u8")
+        for step, erosion in enumerate(erosions):
+            first, stop = step * radius, ny_padded - step * radius
+            if erosion:
+                np.bitwise_not(packed[first:stop], out=packed[first:stop])
+                packed[first:stop, -1] &= last_mask
+            first, stop = first + radius, stop - radius
+            _dilate_disk_words(packed, work, horizontal, scratch, half_widths, first, stop, last_mask)
+            if erosion:
+                np.bitwise_not(work[first:stop], out=work[first:stop])
+                work[first:stop, -1] &= last_mask
+            packed, work = work, packed
+        bytes_in_core_rows = packed[halo : halo + ny].astype("<u8", copy=False).view(np.uint8)
+        core_bits = np.unpackbits(bytes_in_core_rows[:, first_byte:], axis=1, count=leading_bits + nx, bitorder="little")
+        output[:] = core_bits[:, leading_bits:]
     return result
 
 
@@ -355,6 +289,7 @@ def fill_holes(
     """
     if R_fill is None:
         R_fill = default_R_fill
+    validate_fill_size(R_fill, "R_fill")
 
     if unstructured_grid:
         # Keep each CSR vector in a single chunk. Splitting a core dimension
@@ -467,6 +402,8 @@ def fill_time_gaps(
     data_bin_filled : xarray.DataArray
         Binary data with temporal gaps filled
     """
+    validate_fill_size(T_fill, "T_fill")
+    validate_fill_size(R_fill, "R_fill")
     if T_fill == 0:
         return data_bin
 

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from marEx.exceptions import TrackingError
-from marEx.track.volumetric.overlap import link_mask, volume_overlaps
+from marEx.track.volumetric.overlap import OverlapTable, link_mask, volume_overlaps
 from marEx.track.volumetric.store import ObjectIndex, VolumeStore
 
 
@@ -115,6 +115,35 @@ def test_link_mask_missing_ids_false():
     store = _store({1: 1.0, 2: 1.0})
     assert link_mask(pairs, np.array([1.0, 1.0]), store, 0.5).tolist() == [True, False]
     assert link_mask(pairs[:0], np.zeros(0), store, 0.5).shape == (0,)
+
+
+def test_sparse_refresh_counts_each_changed_id_once():
+    previous = np.ones(16, dtype=np.int32)
+    current = np.zeros_like(previous)
+    current[:3] = [2, 0, 3]
+    volume = np.arange(1.0, 17.0)
+    table = OverlapTable(previous, current, volume)
+
+    current[:2] = [0, 2]
+    table.current_index = ObjectIndex.from_slice(current)
+    table.refresh(previous, current, volume, [2, 2])
+
+    np.testing.assert_array_equal(table.pairs, [[1, 2], [1, 3]])
+    np.testing.assert_array_equal(table.volumes, [2.0, 3.0])
+
+
+def test_refresh_requires_an_index_and_matching_flat_slices():
+    previous = np.array([1, 0], dtype=np.int32)
+    current = np.array([2, 0], dtype=np.int32)
+    volume = np.ones(2)
+    table = OverlapTable(previous, current, volume)
+    with pytest.raises(TrackingError, match="attached index"):
+        table.refresh(previous, current, volume, [2])
+
+    table.current_index = ObjectIndex.from_slice(current)
+    for invalid in (volume[None, :], volume[:1]):
+        with pytest.raises(TrackingError, match="flat inputs of the same length"):
+            table.refresh(previous, current, invalid, [2])
 
 
 def test_store_from_slice_and_update():

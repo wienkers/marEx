@@ -27,6 +27,7 @@ from scipy.sparse.csgraph import connected_components
 import marEx
 import marEx.track as track
 from marEx.core.encoding import clear_store_encoding
+from marEx.exceptions import ConfigurationError
 from marEx.track.grid import build_sparse_dilation_matrix
 from marEx.track.labelling import label_time_connected
 from marEx.track.morphology import _EIGHT_CONNECTIVITY, _merge_lon_seam, drop_small_components, fill_holes, fill_time_gaps
@@ -734,7 +735,11 @@ def test_time_gap_values_equal_padded_closing(max_gap):
     values[:, 0, 1] = False
     values[[3, 8, 14], 0, 1] = True
     values[:, 0, 2] = False
-    data = xr.DataArray(values, dims=("time", "lat", "lon")).chunk({"time": (5, 2, 10, 5, 1), "lat": 2, "lon": 2})
+    coords = {
+        "time": 2**53 + np.arange(values.shape[0], dtype=np.int64),
+        "flag": ("time", np.arange(values.shape[0], dtype=np.int8)),
+    }
+    data = xr.DataArray(values, dims=("time", "lat", "lon"), coords=coords).chunk({"time": (5, 2, 10, 5, 1), "lat": 2, "lon": 2})
     filled = fill_time_gaps(
         data,
         max_gap,
@@ -744,14 +749,27 @@ def test_time_gap_values_equal_padded_closing(max_gap):
         False,
         None,
         "lon",
-        xr.ones_like(data.isel(time=0)),
+        xr.ones_like(data.isel(time=0, drop=True)),
         True,
     )
     width = max_gap + 1
     padded = np.pad(values, ((width, width), (0, 0), (0, 0)))
     expected = binary_closing(padded, structure=np.ones((width, 1, 1), bool))[width:-width]
     assert filled.chunks == data.chunks
-    np.testing.assert_array_equal(filled.compute(scheduler="single-threaded"), expected)
+    filled = filled.compute(scheduler="single-threaded")
+    assert filled.time.dtype == np.int64
+    assert filled.flag.dtype == np.int8
+    xr.testing.assert_identical(filled.coords.to_dataset(), data.coords.to_dataset())
+    np.testing.assert_array_equal(filled, expected)
+
+
+@pytest.mark.parametrize("time_chunk", [-1, 2])
+@pytest.mark.parametrize("gap, radius, parameter", [(-2, 0, "T_fill"), (0, -2, "R_fill"), (2, -2, "R_fill")])
+def test_fill_time_gaps_rejects_negative_sizes(time_chunk, gap, radius, parameter):
+    data = xr.DataArray(np.zeros((8, 3, 4), dtype=bool), dims=("time", "lat", "lon")).chunk({"time": time_chunk})
+    wet = xr.ones_like(data.isel(time=0, drop=True))
+    with pytest.raises(ConfigurationError, match=f"{parameter} must be non-negative"):
+        fill_time_gaps(data, gap, radius, "time", "lat", False, None, "lon", wet, True)
 
 
 def _fill(data_bin, mask, t_fill):

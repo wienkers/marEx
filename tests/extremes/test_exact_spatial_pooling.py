@@ -117,6 +117,71 @@ def test_cold_and_warm():
     assert np.median(warm) * 2 < direct
 
 
+def _middle_pivot_adversary(size):
+    """Arrange the smallest surviving entry at each successive midpoint."""
+    values = np.empty(size, dtype=np.float64)
+    positions = list(range(size))
+    for start in range(size):
+        middle = (start + size) // 2
+        values[positions[middle]] = start
+        # Partitioning around the minimum rotates the two surviving groups.
+        if start + 1 < middle:
+            positions[start + 1 : middle] = positions[start + 2 : middle] + [positions[start + 1]]
+        positions[middle:] = positions[middle + 1 :] + [positions[start]]
+    return values
+
+
+@pytest.mark.parametrize("size", [128, 1024])
+def test_adversarial_weighted_selection(size):
+    class CountedValues(np.ndarray):
+        reads = 0
+
+        def __getitem__(self, index):
+            if np.isscalar(index):
+                self.reads += 1
+            return super().__getitem__(index)
+
+    values = _middle_pivot_adversary(size).view(CountedValues)
+    weights = np.arange(size, dtype=np.int64) % 5 + 1
+    expanded = np.sort(np.repeat(np.asarray(values), weights))
+    rank = expanded.size * 95 // 100
+    selected = pool._select(values, weights, size, rank)
+    assert selected == expanded[rank]
+    # Each partition visit reads at most two values, plus one read per pivot.
+    assert values.reads <= 3 * (4 * size + 64) + 1
+
+
+@pytest.mark.skipif(pool.config.DISABLE_JIT, reason="Requires indexed refinement")
+def test_adversarial_pool_bits(monkeypatch):
+    monkeypatch.setattr(pool, "_MIN_COMPILED_WORK", 0)
+    monkeypatch.setattr(pool, "_sample_edges", lambda _: np.zeros(pool._BUCKETS - 1))
+    values = _middle_pivot_adversary(1024).reshape(-1, 1, 1)
+    slots = np.ones(len(values), dtype=np.int32)
+    actual = pool._pooled_percentiles(values, slots, 1, 1, 0, (0, 0), (1, 1), 95.0)
+    _assert_bits(actual, _oracle(values, slots, 1, 1, 1, 95.0, False))
+
+
+@pytest.mark.skipif(pool.config.DISABLE_JIT, reason="Requires indexed refinement")
+def test_unpopulated_slots_skip_strip_sums(monkeypatch):
+    monkeypatch.setattr(pool, "_MIN_COMPILED_WORK", 0)
+    strip_sums = pool._strip_sums
+    visits = []
+
+    def record(active, *args):
+        visits.append(active.sum())
+        return strip_sums(active, *args)
+
+    monkeypatch.setattr(pool, "_strip_sums", record)
+    values = np.arange(48, dtype=np.float64).reshape(8, 2, 3)
+    values[::2, 0, 1] = np.nan
+    slots = np.array([2, 2, 5, 5, 12, 12, 15, 15])
+    actual = pool._pooled_percentiles(values, slots, 15, 3, 1, (0, 0), (2, 3), 95.0)
+    expected = _oracle(values, slots, 15, 3, 3, 95.0, False)
+    _assert_bits(actual, expected)
+    assert 0 < len(visits) == np.isfinite(expected).any(axis=(1, 2)).sum() < 15
+    assert all(visits)
+
+
 @pytest.mark.parametrize("width", [1, 3, 5, 7])
 @pytest.mark.parametrize("percentile", [5.2, 10, 95, 99])
 @pytest.mark.parametrize("dtype,tail", [(np.float32, "upper"), (np.float64, "lower"), (np.float64, "upper"), (np.float32, "lower")])

@@ -16,14 +16,26 @@ _CF_CODING_ATTRS = ("_FillValue", "missing_value", "scale_factor", "add_offset")
 
 
 def _apply_block(source, lookup, positions, operation, arith_dtype, result_dtype):
-    apply = _OPERATIONS[operation]
     valid = positions >= 0
+    complete = valid.all()
+    fill = False if result_dtype.kind == "b" else np.nan
+    if not complete and not valid.any():
+        return np.full(source.shape, fill, dtype=result_dtype)
+
+    rows = source if complete else source[valid]
+    selected = lookup[positions if complete else positions[valid]]
+    mask = np.ma.getmask(rows) | np.ma.getmask(selected)
+    has_mask = mask.any()
+    apply = _OPERATIONS[operation]
     with np.errstate(divide="ignore", invalid="ignore") if operation == "divide" else nullcontext():
-        if valid.all():
-            return apply(source, lookup[positions], dtype=arith_dtype).astype(result_dtype, copy=False)
-        out = np.full(source.shape, np.nan if operation in ("subtract", "divide") else False, dtype=result_dtype)
-        if valid.any():
-            out[valid] = apply(source[valid], lookup[positions[valid]], dtype=arith_dtype)
+        result = apply(np.ma.getdata(rows), np.ma.getdata(selected), dtype=arith_dtype, where=~mask if has_mask else True)
+    result = result.astype(result_dtype, copy=False)
+    if has_mask:
+        result[mask] = fill
+    if complete:
+        return result
+    out = np.full(source.shape, fill, dtype=result_dtype)
+    out[valid] = result
     return out
 
 
@@ -53,34 +65,37 @@ def apply_seasonal_field(
 ) -> xr.DataArray:
     """Subtract, divide by, or compare with a seasonal field on the source's spatial grid.
 
-    The lookup replaces the time axis with positive cycle labels. Absent and invalid
-    labels keep their positions in time and produce NaN anomalies or false flags.
+    The lookup replaces the time axis with positive cycle labels. Missing or invalid
+    labels and masked values produce NaN anomalies or false flags in place.
     Each lazy task reads a whole cycle for one spatial tile and applies only the slots
-    used by its time chunk. The result keeps the source's layout and metadata.
+    used by its time chunk. The result keeps the source's name, layout and coordinates
+    except for the cycle coordinate. With ``keep_attrs=True``, subtraction and division
+    retain source attributes except ``_FillValue``, ``missing_value``, ``scale_factor``
+    and ``add_offset``. Otherwise the result has no attributes.
     """
     if operation not in _OPERATIONS:
         raise ValueError(f"Unknown seasonal operation {operation!r}")
     values = np.asarray(cycle_coord_values)
     if values.shape != (da.sizes[timedim],):
         raise ValueError(f"Expected one seasonal label per {timedim!r} position")
-    labels = lookup.get_index(cycledim)
+    if cycledim in lookup.coords and cycledim not in lookup.xindexes:
+        labels = pd.Index(np.asarray(lookup.coords[cycledim].values))
+    else:
+        labels = lookup.get_index(cycledim)
     positions = labels.get_indexer(values)
-    matched = positions >= 0
-    # 0, negative and missing labels are invalid even if they occur in the lookup.
-    matched_labels = labels.to_numpy()[positions[matched]]
-    valid_labels = ~pd.isna(matched_labels)
-    if valid_labels.any():
-        valid_labels[valid_labels.copy()] = np.asarray(matched_labels[valid_labels] > 0, dtype=bool)
-    positions[matched] = np.where(valid_labels, positions[matched], -1)
+    label_values = labels.to_numpy()
+    present = ~pd.isna(label_values)
+    valid_labels = np.zeros(len(labels), dtype=bool)
+    valid_labels[present] = label_values[present] > 0
+    positions[~np.r_[valid_labels, False][positions]] = -1  # The final slot handles unmatched positions (-1).
 
-    arith_dtype = np.dtype(bool)
-    if operation == "subtract":
-        arith_dtype = np.result_type(da.dtype, lookup.dtype)
-    elif operation == "divide":
-        arith_dtype = np.true_divide(np.empty(0, dtype=da.dtype), np.empty(0, dtype=lookup.dtype)).dtype
+    arith_dtype = _OPERATIONS[operation](np.empty(0, dtype=da.dtype), np.empty(0, dtype=lookup.dtype)).dtype
     dtype = arith_dtype
-    if operation == "subtract" and arith_dtype.kind in "bui" and (positions < 0).any():
-        dtype = np.result_type(arith_dtype, float)
+    if operation == "subtract" and arith_dtype.kind in "bui":
+        # Dask exposes the chunk type at graph construction, before any masks are read.
+        masked = any(np.ma.isMaskedArray(getattr(data, "_meta", data)) for data in (da.data, lookup.data))
+        if masked or (positions < 0).any():
+            dtype = np.result_type(arith_dtype, float)
 
     spatial = tuple(dim for dim in da.dims if dim != timedim)
     source = da.transpose(timedim, *spatial, transpose_coords=False)
@@ -130,7 +145,9 @@ def apply_seasonal_field(
             concatenate=True,
         ).rechunk(original)
 
-    coords = {name: coord for name, coord in da.coords.items() if name != cycledim}
+    coords = da.coords
+    if cycledim in coords:
+        coords = coords.to_dataset().drop_vars(cycledim).coords
     if xr.get_options()["keep_attrs"] is True and operation in ("subtract", "divide"):
         attrs = {k: v for k, v in da.attrs.items() if k not in _CF_CODING_ATTRS}
     else:

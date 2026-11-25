@@ -148,9 +148,19 @@ class OverlapTable:
         changed: Collection[int],
     ) -> None:
         """Replace affected rows using the complete, current membership of every edited child."""
-        if not changed:
+        changed_ids = set(changed)
+        if not changed_ids:
             return
-        members = [self.current_index.voxels(child) for child in changed]
+        index = self.current_index
+        if index is None:
+            raise TrackingError("Overlap refresh requires an attached index of the current slice")
+        previous, current, cell_volume = map(np.asarray, (previous, current, cell_volume))
+        if previous.ndim != 1 or not (previous.shape == current.shape == cell_volume.shape):
+            raise TrackingError(
+                "Overlap refresh requires flat inputs of the same length",
+                context={"previous": previous.shape, "current": current.shape, "cell_volume": cell_volume.shape},
+            )
+        members = [index.voxels(child) for child in changed_ids]
         # A dense pass is cheaper as a full scan than as a gather and merge of table rows.
         if sum(voxels.size for voxels in members) * 4 >= current.size:
             self.pairs, self.volumes = volume_overlaps(previous, current, cell_volume)
@@ -160,7 +170,7 @@ class OverlapTable:
         # survivor changes the order of additions and can move a link across its threshold.
         voxels = np.sort(np.concatenate(members))
         pairs, volumes = volume_overlaps(previous[voxels], current[voxels], cell_volume[voxels])
-        keep = ~np.isin(self.pairs[:, 1], list(changed))
+        keep = ~np.isin(self.pairs[:, 1], list(changed_ids))
         combined = np.concatenate((self.pairs[keep], pairs))
         order = np.lexsort((combined[:, 1], combined[:, 0]))
         self.pairs = combined[order]

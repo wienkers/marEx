@@ -570,6 +570,9 @@ def identify_extremes(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    from ..core.validation import unmask_dataarray
+
+    da = unmask_dataarray(da)
 
     # Validate method_percentile parameter
     valid_methods = ["exact", "approximate"]

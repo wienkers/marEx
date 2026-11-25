@@ -10,6 +10,7 @@ import pytest
 import xarray as xr
 
 import marEx
+from marEx.exceptions import DataValidationError
 from marEx.track.volumetric import merge_loop as _merge_loop
 from marEx.track.volumetric import tracker4d as _tracker4d
 from marEx.track.volumetric.tracker4d import VolumetricTracker
@@ -262,10 +263,21 @@ def test_depth_reversal_and_positive_up_invariance(reverse, up):
 
 def test_attrs_recorded():
     _, _, (extremes, wet, bounds, areas) = _scenario_inputs("merge_then_split")
+    extremes = extremes.assign_attrs(
+        N_events_final=987,
+        volume_units="km3",
+        overlap_threshold=0.9,
+        horizontal_coordinate_units="radians",
+        volume_filter_quartile=0.9,
+        source="synthetic",
+    )
     events, _, t = _track(extremes, wet, bounds, areas, max_vertical_gap_m=5.0, overlap_threshold=0.4)
     attrs = events.attrs
     missing = [k for k in EXPECTED_ATTRS if k not in attrs]
     assert not missing, missing
+    assert attrs["N_events_final"] == events.sizes["ID"] == 2
+    assert attrs["horizontal_coordinate_units"] == "degrees"
+    assert attrs["source"] == "synthetic"
     assert attrs["volume_units"] == "m3"
     assert attrs["max_vertical_gap_m"] == 5.0
     assert attrs["vertical_geometry"] == "bounds"
@@ -292,9 +304,70 @@ def test_no_area_variable():
     for name in DIAGNOSTICS:
         assert name in events.data_vars, name
     assert events["centroid"].sizes["component"] == 2
+    assert events["centroid"].attrs["units"] == "degrees"
 
 
-def test_checkpoint_save_then_load_matches(tmp_path):
+def _append_cyclic_endpoint(array):
+    longitude = float(array.lon[0]) + 360.0
+    return xr.concat([array, array.isel(lon=slice(0, 1)).assign_coords(lon=[longitude])], dim="lon")
+
+
+@pytest.mark.parametrize("units, start", [("degrees", 0.0), ("radians", -180.0)])
+def test_duplicate_endpoint_preserves_event_lineage_and_diagnostics(units, start):
+    binary = np.zeros((2, 1, 1, 4), dtype=bool)
+    binary[0, 0, 0, [0, 1]] = True
+    binary[1, 0, 0, [3, 0]] = True
+    extremes, wet, bounds, areas = make_inputs(binary, thickness=[1.0], lon0=start, dlon=90.0)
+    inputs = (extremes, wet, areas)
+    with_endpoint = tuple(_append_cyclic_endpoint(da) for da in inputs)
+    if units == "radians":
+        inputs = tuple(da.assign_coords(lat=np.deg2rad(da.lat), lon=np.deg2rad(da.lon)) for da in inputs)
+        with_endpoint = tuple(da.assign_coords(lat=np.deg2rad(da.lat), lon=np.deg2rad(da.lon)) for da in with_endpoint)
+
+    options = dict(regional_mode=False, coordinate_units=None, overlap_threshold=0.6)
+    reference, ref_merges, _ = _track(inputs[0], inputs[1], bounds, inputs[2], **options)
+    events, merges, _ = _track(with_endpoint[0], with_endpoint[1], bounds, with_endpoint[2], **options)
+    assert reference.attrs["N_events_final"] == 2  # One of each object's two physical cells overlaps.
+    assert events.ID_field.chunksizes["lon"] == (5,)
+    xr.testing.assert_identical(events.isel(lon=slice(None, -1)), reference)
+    xr.testing.assert_identical(merges, ref_merges)
+    np.testing.assert_array_equal(events.ID_field.isel(lon=-1), reference.ID_field.isel(lon=0))
+    xr.testing.assert_identical(events.lon, with_endpoint[0].lon)
+
+
+@pytest.mark.parametrize("which", ["extremes", "mask"])
+def test_inconsistent_duplicate_seam_raises(which):
+    binary = np.ones((2, 1, 1, 5), dtype=bool)
+    dry = np.zeros((1, 1, 5), dtype=bool)
+    if which == "extremes":
+        binary[1, 0, 0, -1] = False
+    else:
+        dry[0, 0, -1] = True
+    extremes, wet, bounds, areas = make_inputs(binary, thickness=[1.0], dlon=90.0, dry=dry)
+    with pytest.raises(DataValidationError, match=rf"{which}.*duplicate longitude endpoint"):
+        _track(extremes, wet, bounds, areas, regional_mode=False)
+
+
+@pytest.mark.parametrize("keep_attrs", [False, True])
+def test_radian_centroid_declares_units_after_conversion(keep_attrs):
+    inputs = make_inputs(np.ones((2, 1, 1, 1), dtype=bool), thickness=[1.0], lat0=30.5, lon0=-169.5)
+    inputs = tuple(da.assign_coords(lat=np.deg2rad(da.lat), lon=np.deg2rad(da.lon)) if "lon" in da.dims else da for da in inputs)
+    with xr.set_options(keep_attrs=keep_attrs):
+        events, _, _ = _track(*inputs, coordinate_units="radians")
+    assert events.centroid.attrs["units"] == events.attrs["horizontal_coordinate_units"] == "radians"
+    np.testing.assert_allclose(events.centroid.isel(time=0, ID=0), np.deg2rad([30.5, -169.5]), rtol=0.0, atol=1e-14)
+
+
+def test_centroid_uses_finite_wet_longitudes_for_its_origin():
+    binary = np.array([[[[False, False, False, True]]]] * 2, dtype=bool)
+    dry = np.array([[[False, True, True, False]]])
+    inputs = make_inputs(binary, thickness=[1.0], lat0=25.0, dry=dry)
+    inputs = tuple(da.assign_coords(lon=[10.0, np.nan, -20.0, 350.0]) if "lon" in da.dims else da for da in inputs)
+    events, _, _ = _track(*inputs)
+    np.testing.assert_allclose(events.centroid.isel(time=0, ID=0), [25.0, 350.0], rtol=0.0, atol=1e-12)
+
+
+def test_checkpoint_save_then_load_matches(client, tmp_path):
     # Preprocessing that does something: a hole closed in space and a gap closed in time.
     balls = [Ball(0, 7, z=1.5, y=5.0, x=5.5, rz=2.0, ry=3.5, rx=3.5, vx=0.2)]
     binary = paint(8, 4, 10, 12, balls)
@@ -303,10 +376,24 @@ def test_checkpoint_save_then_load_matches(tmp_path):
     extremes, wet, bounds, areas = make_inputs(binary, thickness=[10.0, 10.0, 20.0, 20.0])
     kw = dict(R_fill=1, T_fill=2, temp_dir=str(tmp_path))
 
+    surface = marEx.tracker(
+        extremes.isel(depth=0, drop=True),
+        wet.isel(depth=0, drop=True),
+        R_fill=0,
+        T_fill=0,
+        area_filter_absolute=1,
+        regional_mode=True,
+        coordinate_units="degrees",
+        temp_dir=str(tmp_path),
+        quiet=True,
+    )
+    surface_field, surface_stats = surface.run_preprocess(checkpoint="save")
+    surface_field = surface_field.compute()
+
     saved = marEx.tracker(extremes, wet, layer_bounds=bounds, cell_areas=areas, **_kwargs(checkpoint="save", **kw))
     events_saved, merges_saved = saved.run(return_merges=True)
-    assert os.path.isdir(tmp_path / "marEx_checkpoint_proc_bin.zarr")
-    stats = np.load(tmp_path / "marEx_checkpoint_stats.npz")
+    assert os.path.isdir(tmp_path / "marEx_tracker4d_checkpoint_proc_bin.zarr")
+    stats = np.load(tmp_path / "marEx_tracker4d_checkpoint_stats.npz")
     assert sorted(stats.files) == sorted(
         [
             "total_volume_IDed",
@@ -328,6 +415,9 @@ def test_checkpoint_save_then_load_matches(tmp_path):
     assert events_saved.attrs.keys() == events_loaded.attrs.keys()
     for key, value in events_saved.attrs.items():
         np.testing.assert_array_equal(events_loaded.attrs[key], value, err_msg=key)
+    surface_reloaded, reloaded_stats = surface.run_preprocess(checkpoint="load")
+    xr.testing.assert_identical(surface_reloaded, surface_field)
+    assert reloaded_stats == surface_stats
 
 
 def test_return_merges_has_overlap_volumes_int32_counts():
@@ -502,3 +592,160 @@ def test_merges_with_no_split_write_to_zarr(tmp_path):
     back = xr.open_zarr(tmp_path / "merges.zarr").load()
     assert back.sizes["split_ID"] == 0
     np.testing.assert_array_equal(back["child_event_IDs"].values, merges["child_event_IDs"].values)
+
+
+def test_checkpoint_reload_preserves_millisecond_datetimes(tmp_path):
+    _, _, (extremes, wet, bounds, areas) = _scenario_inputs("one_merge")
+    ms_time = extremes["time"].values.astype("datetime64[ms]")
+    extremes_ms = extremes.assign_coords(time=ms_time, obs_ms=("time", ms_time + np.timedelta64(500, "ms"))).chunk({"time": 3})
+    trk = marEx.regional_tracker(
+        extremes_ms,
+        wet,
+        coordinate_units="degrees",
+        R_fill=0,
+        T_fill=0,
+        volume_filter_absolute=1.0,
+        layer_bounds=bounds,
+        cell_areas=areas,
+        dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+        temp_dir=str(tmp_path),
+        quiet=True,
+    )
+    trk.run_preprocess(checkpoint="save")
+    events_same, merges_same = trk.run(checkpoint="load", return_merges=True)
+    assert events_same["time"].dtype == np.dtype("datetime64[ms]")
+    assert events_same["time_start"].dtype == np.dtype("datetime64[ms]")
+    assert events_same["ID_field"].coords["obs_ms"].dtype == np.dtype("datetime64[ms]")
+    assert merges_same["merge_time"].dtype == np.dtype("datetime64[ms]")
+
+
+def test_regional_mode_keeps_360_span_boundary_adjacent(tmp_path):
+    time = pd.date_range("2001-01-01", periods=2, freq="D")
+    lon = np.array([0.0, 90.0, 180.0, 270.0, 360.0])
+    lat = np.array([-10.0, 0.0, 10.0])
+    depth = np.array([5.0])
+    data = np.zeros((2, 1, 3, 5), dtype=bool)
+    data[:, 0, 1, [0, 3, 4]] = True
+    extremes = xr.DataArray(
+        data,
+        dims=("time", "depth", "lat", "lon"),
+        coords={"time": time, "depth": ("depth", depth, {"units": "m"}), "lat": lat, "lon": lon},
+    ).chunk({"time": 1})
+    wet = xr.DataArray(
+        np.ones((1, 3, 5), dtype=bool), dims=("depth", "lat", "lon"), coords={"depth": depth, "lat": lat, "lon": lon}
+    )
+    bounds = xr.DataArray(np.array([[0.0, 10.0]]), dims=("depth", "bounds"), coords={"depth": depth})
+    events = (
+        marEx.regional_tracker(
+            extremes,
+            wet,
+            coordinate_units="degrees",
+            R_fill=0,
+            T_fill=0,
+            grid_resolution=90.0,
+            volume_filter_absolute=1.0,
+            layer_bounds=bounds,
+            dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+            temp_dir=str(tmp_path),
+            quiet=True,
+        )
+        .run()
+        .compute()
+    )
+    row = events["ID_field"].values[0, 0, 1, :]
+    assert row[0] > 0 and row[3] > 0
+    assert row[3] == row[4]
+    assert row[0] != row[4]
+
+
+def test_cf_encoded_cftime_zero_split_ledger_matches_across_compute_modes(tmp_path):
+    _, _, (extremes, wet, bounds, areas) = _scenario_inputs("one_merge")
+    cftime_axis = xr.date_range("2001-01-01", periods=extremes.sizes["time"], calendar="360_day", use_cftime=True)
+    extremes = extremes.assign_coords(time=cftime_axis).chunk({"time": 2})
+    extremes["time"].encoding = {"units": "hours since 1990-01-01", "calendar": "360_day"}
+    common = dict(
+        coordinate_units="degrees",
+        R_fill=0,
+        T_fill=0,
+        volume_filter_absolute=1.0,
+        layer_bounds=bounds,
+        cell_areas=areas,
+        dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+        quiet=True,
+    )
+    ev_p, mg_p = marEx.regional_tracker(extremes, wet, compute_mode="persist", temp_dir=str(tmp_path / "p"), **common).run(
+        return_merges=True
+    )
+    ev_s, mg_s = marEx.regional_tracker(extremes, wet, compute_mode="streaming", temp_dir=str(tmp_path / "s"), **common).run(
+        return_merges=True
+    )
+    try:
+        assert mg_p.sizes["split_ID"] == 0
+        xr.testing.assert_identical(mg_s.compute(), mg_p.compute())
+    finally:
+        marEx.clear_staging(ev_s)
+
+
+def test_duplicate_seam_validation_respects_flipped_depth_and_transposed_dims(tmp_path):
+    import dask.array as dsa
+
+    from marEx.exceptions import DataValidationError
+
+    time = pd.date_range("2001-01-01", periods=4, freq="D")
+    lon = np.array([0.0, 90.0, 180.0, 270.0, 360.0])
+    lat = np.array([-30.0, 30.0])
+    depth_desc = np.array([15.0, 5.0])  # descending -> flip_z=True; index 0 is deep dry, index 1 is shallow wet
+    wet = xr.DataArray(
+        np.array([np.zeros((2, 5), dtype=bool), np.ones((2, 5), dtype=bool)]),
+        dims=("depth", "lat", "lon"),
+        coords={"depth": depth_desc, "lat": lat, "lon": lon},
+    )
+    data = np.zeros((4, 2, 2, 5), dtype=bool)
+    data[:, 1, 0, [0, 4]] = True
+    months = dsa.from_array(np.datetime64("2020-01", "M") + np.arange(4).astype("timedelta64[M]"), chunks=2)
+    extremes = xr.DataArray(
+        dsa.from_array(data, chunks=(2, 2, 2, 5)),
+        dims=("time", "depth", "lat", "lon"),
+        coords={
+            "time": time,
+            "depth": ("depth", depth_desc, {"units": "m"}),
+            "lat": lat,
+            "lon": lon,
+            "obs_month": ("time", months),
+        },
+    )
+    bounds = xr.DataArray(np.array([[10.0, 20.0], [0.0, 10.0]]), dims=("depth", "bnds"), coords={"depth": depth_desc})
+
+    # Dry-only mismatch on deep level (index 0) must be accepted; Dask datetime64[M] must survive checkpoint & streaming.
+    vols_ok = np.full((2, 2, 5), 1e10, dtype=np.float64)
+    vols_ok[0, :, 0] = np.nan
+    vols_ok[0, :, 4] = 999.0
+    cv_ok = xr.DataArray(vols_ok, dims=("depth", "lat", "lon")).transpose("lat", "depth", "lon")
+    common = dict(
+        R_fill=0,
+        T_fill=0,
+        dimensions={"time": "time", "z": "depth", "y": "lat", "x": "lon"},
+        layer_bounds=bounds,
+        cell_volumes=cv_ok,
+        grid_resolution=90.0,
+        volume_filter_absolute=1.0,
+        quiet=True,
+    )
+    trk_ck = marEx.tracker(extremes, wet, temp_dir=str(tmp_path / "ck"), compute_mode="persist", **common)
+    trk_ck.run_preprocess(checkpoint="save")
+    ev_ck_lazy = trk_ck.run(checkpoint="load")
+    ev_st = marEx.tracker(extremes, wet, temp_dir=str(tmp_path / "st"), compute_mode="streaming", **common).run()
+    try:
+        assert ev_ck_lazy["obs_month"].dtype == np.dtype("datetime64[M]")
+        assert ev_st["obs_month"].dtype == np.dtype("datetime64[M]")
+        ev_ck, ev_st_c = ev_ck_lazy.compute(), ev_st.compute()
+        xr.testing.assert_identical(ev_st_c, ev_ck)
+    finally:
+        marEx.clear_staging(ev_st)
+
+    # Wet mismatch on shallow level (index 1) under flip_z=True and transposed (lat, depth, lon) with nz == ny must fail.
+    vols_bad = np.full((2, 2, 5), 1e10, dtype=np.float64)
+    vols_bad[1, 0, 4] = 9e10
+    cv_bad = xr.DataArray(vols_bad, dims=("depth", "lat", "lon")).transpose("lat", "depth", "lon")
+    with pytest.raises(DataValidationError, match="cell_volumes differs on wet cells"):
+        marEx.tracker(extremes, wet, temp_dir=str(tmp_path / "bad"), **{**common, "cell_volumes": cv_bad})

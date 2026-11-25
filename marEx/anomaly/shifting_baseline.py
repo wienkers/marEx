@@ -13,7 +13,7 @@ import xarray as xr
 
 from ..core.dimensions import spatial_dims
 from ..core.time_axis import SeasonalCycle
-from ..core.validation import _infer_dims_coords
+from ..core.validation import _infer_dims_coords, unmask_dataarray
 from ..logging_config import get_logger
 from .climatology import smoothed_rolling_climatology
 
@@ -40,6 +40,7 @@ def _compute_anomaly_shifting_baseline(
     """
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    da = unmask_dataarray(da)
 
     # Compute smoothed rolling climatology
     climatology_smoothed = smoothed_rolling_climatology(

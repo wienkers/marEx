@@ -34,8 +34,14 @@ of the time coordinate. This is deliberate, not an oversight.
 from pathlib import Path
 from typing import List, Tuple, Union
 
+import dask.array as da
 import xarray as xr
 
+from ..core.compute_mode import (
+    datetime_coordinate_dtypes,
+    open_zarr_with_coordinate_dtypes,
+    prepare_zarr_datetime_coords,
+)
 from ..core.encoding import write_zarr
 from ..logging_config import get_logger
 
@@ -69,11 +75,13 @@ class ObjectIDRegionWriter:
 
     def _initialise(self) -> None:
         """Write schema and coordinates, but no field data."""
-        ds = self._template.to_dataset(name=self.name)
+        template = self._template
+        dummy = da.empty(template.shape, chunks=template.chunks or template.shape, dtype=template.dtype)
+        ds = template.copy(deep=False, data=dummy).to_dataset(name=self.name)
+        ds = prepare_zarr_datetime_coords(ds.assign_coords(ds.coords.to_dataset().load()))
 
-        # write_zarr drops the stale `chunks` and codec encoding carried in from an upstream
-        # open_zarr. compute=False writes metadata and eager (numpy) coordinates, leaving the
-        # dask-backed field unwritten. Every element is then supplied by write().
+        # With compute=False, Zarr writes the eager coordinates but only creates the
+        # schema for the dummy field. Every ID value is supplied by write().
         write_zarr(ds, self.path, mode="w", compute=False, consolidated=False)
         self._initialised = True
         logger.debug(f"Initialised ID-field region store at {self.path}")
@@ -135,7 +143,8 @@ class ObjectIDRegionWriter:
                 f"[0, {self._n_time}) along {self.timedim}. Written regions: {sorted(self._regions)}"
             )
 
-        reopened = xr.open_zarr(self.path, consolidated=False, chunks={})[self.name]
+        dtypes = datetime_coordinate_dtypes(self._template)
+        reopened = open_zarr_with_coordinate_dtypes(self.path, dtypes, consolidated=False, chunks={})[self.name]
 
         # Drop round-tripped encoding so a later save by the caller does not conflict.
         for coord in reopened.coords:

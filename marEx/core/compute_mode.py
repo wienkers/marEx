@@ -46,6 +46,98 @@ VALID_COMPUTE_MODES = ("persist", "lazy", "streaming")
 _STAGING_DIRS: list = []
 
 
+_CF_DATETIME_UNITS = {
+    "D": "days",
+    "h": "hours",
+    "m": "minutes",
+    "s": "seconds",
+    "ms": "milliseconds",
+    "us": "microseconds",
+    "ns": "nanoseconds",
+}
+
+
+def _is_cftime_coord(obj: Union[xr.DataArray, xr.Dataset], name: str, coord: xr.DataArray) -> bool:
+    if isinstance(obj.indexes.get(name), xr.CFTimeIndex):
+        return True
+    if "calendar" in coord.encoding or "calendar" in coord.attrs:
+        return True
+    if coord.size == 0:
+        return False
+    sample = np.asarray(coord.isel({d: slice(0, min(8, coord.sizes[d])) for d in coord.dims}).values).ravel()
+    non_null = [item for item in sample if item is not None]
+    return bool(non_null) and hasattr(non_null[0], "calendar")
+
+
+def prepare_zarr_datetime_coords(ds: xr.Dataset) -> xr.Dataset:
+    """Coerce non-CF NumPy datetime64 coordinates and set explicit epoch units before Zarr write."""
+    coerced = {}
+    for cname, coord in ds.coords.items():
+        if coord.dtype.kind == "M":
+            raw_unit = np.datetime_data(coord.dtype)[0]
+            if raw_unit not in _CF_DATETIME_UNITS:
+                target_dt = "datetime64[s]" if raw_unit in ("Y", "M", "W") else "datetime64[ns]"
+                coerced[cname] = coord.astype(target_dt)
+    if coerced:
+        ds = ds.assign_coords(coerced)
+    for coord in ds.coords.values():
+        if coord.dtype.kind == "M":
+            unit = _CF_DATETIME_UNITS[np.datetime_data(coord.dtype)[0]]
+            coord.encoding = {**coord.encoding, "units": f"{unit} since 1970-01-01", "dtype": np.int64}
+    return ds
+
+
+def datetime_coordinate_dtypes(obj: Union[xr.DataArray, xr.Dataset]) -> dict[str, str]:
+    """Record NumPy datetime units and cftime coordinates without loading full arrays."""
+    out: dict[str, str] = {}
+    for name, coord in obj.coords.items():
+        if coord.dtype.kind == "M":
+            out[name] = coord.dtype.name
+        elif coord.dtype.kind == "O" and _is_cftime_coord(obj, name, coord):
+            out[name] = "object"
+    return out
+
+
+def open_zarr_with_coordinate_dtypes(path: Union[str, Path], dtypes: dict[str, str], **kwargs) -> xr.Dataset:
+    """Reopen CF coordinates in their original NumPy units or stored cftime calendars."""
+    decoders = {}
+    for name, dtype in dtypes.items():
+        if dtype == "object":
+            decoders[name] = xr.coders.CFDatetimeCoder(use_cftime=True)
+        else:
+            unit = np.datetime_data(np.dtype(dtype))[0]
+            coder_unit = unit if unit in ("s", "ms", "us", "ns") else ("s" if unit in ("Y", "M", "W", "D", "h", "m") else "ns")
+            decoders[name] = xr.coders.CFDatetimeCoder(use_cftime=False, time_unit=coder_unit)
+    reopened = xr.open_zarr(path, decode_times=decoders, **kwargs)
+    # CF decoding can select a finer or pandas-compatible unit; cast back to exact NumPy dtype.
+    restored = {
+        name: coord.variable.astype(dtypes[name])
+        for name, coord in reopened.coords.items()
+        if name in dtypes and coord.dtype.kind == "M" and coord.dtype.name != dtypes[name]
+    }
+    if restored:
+        reopened = reopened.assign_coords(restored)
+    # Align chunked non-dimension coordinates to data_vars chunking so object/auxiliary coords
+    # never re-open as a monolithic (nt,) chunk alongside chunked data variables.
+    var_chunks: dict[str, tuple[int, ...]] = {}
+    for var in reopened.data_vars.values():
+        if var.chunks is not None:
+            for dim, ch in zip(var.dims, var.chunks):
+                var_chunks.setdefault(dim, ch)
+    if var_chunks:
+        rechunked_coords = {}
+        for cname, cvar in reopened.coords.items():
+            if cname not in reopened.xindexes and cvar.chunks is not None:
+                target = {
+                    d: var_chunks[d] for d in cvar.dims if d in var_chunks and cvar.chunks[cvar.dims.index(d)] != var_chunks[d]
+                }
+                if target:
+                    rechunked_coords[cname] = cvar.chunk(target)
+        if rechunked_coords:
+            reopened = reopened.assign_coords(rechunked_coords)
+    return reopened
+
+
 def create_staging_dir(scratch_dir: Union[str, Path]) -> Path:
     """
     Create a unique per-run staging directory under ``scratch_dir``.
@@ -402,19 +494,27 @@ class Materialiser:
         # dimension is value-neutral: it changes task granularity only, and the array is
         # re-opened with the on-disk chunking immediately below anyway.
         uniform: dict = {}
-        for variable in ds.variables.values():
+        for variable in ds.data_vars.values():
             if variable.chunks is None:
                 continue
             for dim, sizes in zip(variable.dims, variable.chunks):
                 uniform[dim] = max(uniform.get(dim, 0), max(sizes))
+        for variable in ds.coords.values():
+            if variable.chunks is None:
+                continue
+            for dim, sizes in zip(variable.dims, variable.chunks):
+                if dim not in uniform:
+                    uniform[dim] = max(sizes)
         if uniform:
             ds = ds.chunk(uniform)
 
         # write_zarr drops the stale `chunks` and codec encoding carried in from an upstream
         # open_zarr. Unconsolidated: the store is private and short-lived, and zarr-python 3
         # warns on every consolidated format-3 write that consolidation is outside the spec.
+        dtypes = datetime_coordinate_dtypes(ds)
+        ds = prepare_zarr_datetime_coords(ds)
         write_zarr(ds, path, mode="w", consolidated=False)
-        return xr.open_zarr(path, consolidated=False, chunks={})
+        return open_zarr_with_coordinate_dtypes(path, dtypes, consolidated=False, chunks={})
 
     @staticmethod
     def _restore(reopened: xr.DataArray, obj: xr.DataArray) -> xr.DataArray:

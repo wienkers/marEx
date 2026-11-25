@@ -14,7 +14,6 @@ from marEx.track.volumetric.merge_loop import (
     _resolve_timestep,
     _WaterComponents,
     consolidate_volumes,
-    final_links,
     split_and_merge_volumetric,
 )
 from marEx.track.volumetric.overlap import OverlapTable, volume_overlaps
@@ -22,6 +21,7 @@ from marEx.track.volumetric.partition import ScaledCoords, partition_child
 from marEx.track.volumetric.store import ObjectIndex
 
 from .conftest import VDIMS, build_case, store_from_field
+from .oracles import final_links
 from .synthetic import make_inputs, scenarios
 from .test_tracker4d import _kwargs
 

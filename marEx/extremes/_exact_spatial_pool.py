@@ -4,7 +4,7 @@ import numpy as np
 from numba import config, njit
 from numba.extending import register_jitable
 
-from ._exact_seasonal import _slot_index
+from ._exact_seasonal import _native_fraction, _slot_index
 
 _BUCKETS = 256
 _SAMPLE_SIZE = 16_384
@@ -15,7 +15,9 @@ _MIN_COMPILED_WORK = 1_000
 def _select(values, weights, size, rank):
     """Partition original values in place, carrying cell-constant counts as weights."""
     start, stop = 0, size
-    while stop - start > 1:
+    work_left = 4 * size + 64
+    while 1 < stop - start <= work_left:
+        work_left -= stop - start
         pivot = values[(start + stop) // 2]
         lower, upper, i = start, stop, start
         below, equal = 0, 0
@@ -42,7 +44,17 @@ def _select(values, weights, size, rank):
         else:
             start = upper
             rank -= below + equal
-    return values[start]
+    if stop - start == 1:
+        return values[start]
+
+    # Bound partition work even if each pivot removes only one entry.
+    # Mergesort the remaining interval and keep weights paired by index.
+    order = np.argsort(values[start:stop], kind="mergesort")
+    for index in order[:-1]:
+        rank -= weights[start + index]
+        if rank < 0:
+            return values[start + index]
+    return values[start + order[-1]]
 
 
 def _posting_index(source, edges):
@@ -134,7 +146,9 @@ def _crossing_values(source, offsets, posting, extrema, active, heads, queries, 
             selected[query] = _select(values, weights, size, queries[1, query])
 
 
-def _rolling_pool(source, edges, bounds, width, half, core_origin, periodic, fraction, max_active, result, replay, shape):
+def _rolling_pool(
+    source, edges, bounds, populations, width, half, core_origin, periodic, fraction, max_active, result, replay, shape
+):
     """Advance the slot cursors and build the two spatial strip sums per slot."""
     ny, nx = shape
     ids, offsets, extrema, posting, cell_buckets = _posting_index(source, edges)
@@ -160,7 +174,7 @@ def _rolling_pool(source, edges, bounds, width, half, core_origin, periodic, fra
     bits = source.view(np.uint64)
     mixed_zeros = np.any(bits == 1 << 63) and np.any(bits == 0)
     dtype = fraction.dtype
-    for slot in range(result.shape[0]):
+    for slot, population in enumerate(populations):
         if slot:
             depart = _slot_buckets(ids, cell_buckets, bounds[slot - 1], bounds[slot])
             np.subtract.at(active, depart, 1)
@@ -172,6 +186,8 @@ def _rolling_pool(source, edges, bounds, width, half, core_origin, periodic, fra
             arrive = _slot_buckets(ids, cell_buckets, bounds[entering], bounds[entering + 1])
             np.add.at(active, arrive, 1)
 
+        if not population:
+            continue
         pool = _strip_sums(active.reshape(ny, nx, _BUCKETS), y_edges, x_edges, periodic, vertical, horizontal)
         np.cumsum(pool, axis=-1, out=pool)
         totals = pool[..., -1]
@@ -258,6 +274,12 @@ def _pooled_percentiles(
     values, slots, n_slots, window_steps, half, core_origin, core_shape, percentile, *, periodic=False, direct=False
 ):
     """Reduce a haloed time/y/x tile using 1-based integer slot labels."""
+    if isinstance(values, np.ma.MaskedArray):
+        out_dt = np.result_type(values.dtype, float) if values.dtype.kind in "bui" else values.dtype
+        values = np.asarray(
+            np.ma.filled(values.astype(out_dt, copy=False), np.nan) if np.ma.is_masked(values) else np.ma.getdata(values),
+            dtype=out_dt,
+        )
     width = min(n_slots, 2 * (window_steps // 2) + 1)
     n_reductions = 1 if width == n_slots else n_slots
     result = np.full((n_reductions, *core_shape), np.nan, dtype=np.float32)
@@ -273,21 +295,11 @@ def _pooled_percentiles(
         return np.broadcast_to(result, (n_slots, *core_shape))
 
     dtype = values.dtype
-    fraction = np.true_divide(percentile, dtype.type(100)) if dtype in (np.float32, np.float64) else None
-    # With NumPy 1, float32 quantiles promote to float64 under division by Python 100.0.
-    native_rank = (
-        fraction is not None
-        and fraction.ndim == 0
-        and fraction.dtype == dtype
-        and np.true_divide(fraction, 1.0).dtype == dtype
-        and (1 * fraction).dtype == dtype
-    )
+    fraction = _native_fraction(percentile, dtype)
     if (
         direct
         or config.DISABLE_JIT
-        or not native_rank
-        or fraction.dtype != dtype
-        or not 0 <= fraction <= 1
+        or fraction is None
         or (dtype == np.float32 and max_active > 2**24)
         or np.count_nonzero(populations) * core_shape[0] * core_shape[1] < _MIN_COMPILED_WORK
     ):
@@ -298,7 +310,9 @@ def _pooled_percentiles(
         edges = _sample_edges(values)
         source = np.ascontiguousarray(values[order], dtype=np.float64).reshape(order.size, ny * nx)
         replay = np.zeros(result.shape, dtype=np.bool_)
-        _rolling_pool(source, edges, bounds, width, half, core_origin, periodic, fraction, max_active, result, replay, (ny, nx))
+        _rolling_pool(
+            source, edges, bounds, populations, width, half, core_origin, periodic, fraction, max_active, result, replay, (ny, nx)
+        )
         if replay.any():
             _numpy_pool(values, slots, n_slots, width, half, core_origin, percentile, periodic, result, replay)
 

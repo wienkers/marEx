@@ -77,7 +77,7 @@ def cluster_events(
         int32 ``(time, z, y, x)`` object IDs, unique across time, dask-backed and chunked in
         time only (the merge loop's output).
     links : numpy.ndarray
-        ``(n, 2)`` linked ``(id_t, id_t+1)`` pairs, as from :func:`final_links`.
+        ``(n, 2)`` linked ``(id_t, id_t+1)`` pairs emitted by the merge loop.
     merges : xarray.Dataset
         The merge ledger (``MergeLedger.to_dataset()``): ``parent_IDs`` ``(merge_ID,
         parent_idx)`` and ``merge_time``.

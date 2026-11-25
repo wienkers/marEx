@@ -153,6 +153,9 @@ def _anomaly_core(
 
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    from ..core.validation import unmask_dataarray
+
+    da = unmask_dataarray(da)
 
     # The cycle is deliberately NOT resolved here, only threaded. Each anomaly method
     # resolves it at the point it groups (`fixed_baseline`, `climatology`, and

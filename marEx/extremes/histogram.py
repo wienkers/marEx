@@ -459,10 +459,32 @@ def _histogram_tile_chunks(
     return chunk_dict
 
 
-def _x_is_periodic(da: xr.DataArray, x_dim: Optional[str]) -> bool:
+def _longitude_coordinate(da, x_dim, x_coord):
+    """Find the longitude coordinate along the horizontal x axis."""
+    coord = da.coords[x_coord] if x_coord in da.coords else None
+    # Membership excludes the virtual integer coordinate xarray supplies for a bare dimension.
+    if (coord is None or coord.dims != (x_dim,)) and x_dim in da.coords:
+        coord = da.coords[x_dim]
+    if coord is not None and coord.dims == (x_dim,) and coord.dtype.kind in "iuf":
+        return coord
+    return None
+
+
+def _longitude_spacing(coord):
+    # Units are read from the attribute, never guessed from the range: a 25-column 0.25 degree
+    # box spans 6.25, within half a step of a full turn in radians.
+    full_turn = 2 * np.pi if "rad" in str(coord.attrs.get("units", "")).lower() else 360.0
+    lon = np.asarray(coord.values, dtype=np.float64)
+    gaps = np.abs(np.diff(lon))
+    step = float(np.median(np.minimum(gaps, full_turn - np.mod(gaps, full_turn))))
+    return lon[-1] - lon[0], step, full_turn
+
+
+def _x_is_periodic(da: xr.DataArray, x_dim: Optional[str], x_coord: Optional[str] = None) -> bool:
     """Whether the spatial window should wrap ``x``: only when the grid spans the globe in it.
 
-    The x coordinate is read as longitude, in degrees unless its ``units`` attribute names
+    A mapped one-dimensional longitude takes precedence over the dimension coordinate.
+    Longitude is read in degrees unless its ``units`` attribute names
     radians. It closes on itself when its columns at the median step make a full turn to within
     half a step, counted either way a global grid is stored: ``n`` steps (0 to 360 - dx) or
     ``n - 1`` (a repeated seam column, 0 to 360). The step is taken across the seam too, so a
@@ -472,17 +494,40 @@ def _x_is_periodic(da: xr.DataArray, x_dim: Optional[str]) -> bool:
     Without a 1-D numeric coordinate there is no span to measure (a bare dimension, or the 2-D
     coordinates of a curvilinear grid), so ``x`` keeps wrapping as it did before this check existed.
     """
-    if x_dim is None or x_dim not in da.coords:
+    coord = _longitude_coordinate(da, x_dim, x_coord)
+    if coord is None:
         return True
-    coord = da.coords[x_dim]
-    if coord.ndim != 1 or coord.size < 2 or coord.dtype.kind not in "iuf":
-        return True
-    # Units are read from the attribute, never guessed from the range: a 25-column 0.25 degree
-    # box spans 6.25, within half a step of a full turn in radians.
-    full_turn = 2 * np.pi if "rad" in str(coord.attrs.get("units", "")).lower() else 360.0
-    step = np.abs(np.diff(np.asarray(coord.values, dtype=np.float64)))
-    step = float(np.median(np.minimum(step, full_turn - np.mod(step, full_turn))))
+    if coord.size < 2:
+        return False
+    _, step, full_turn = _longitude_spacing(coord)
     return step > 0 and any(abs(n * step - full_turn) <= 0.5 * step for n in (coord.size, coord.size - 1))
+
+
+def _x_has_duplicate_endpoint(da, x_dim, x_coord):
+    coord = _longitude_coordinate(da, x_dim, x_coord)
+    if coord is None or coord.size < 2:
+        return False
+    span, step, full_turn = _longitude_spacing(coord)
+    # Compare modulo one turn, allowing for rounding in a float32 longitude coordinate.
+    turns = span / full_turn
+    return np.isclose((coord.size - 1) * step, full_turn) and np.isclose(
+        turns, np.rint(turns), rtol=0, atol=np.finfo(np.float32).eps
+    )
+
+
+def _restore_duplicate_endpoint(thresholds: xr.DataArray, source_da: xr.DataArray, endpoint_coords, x_dim: str) -> xr.DataArray:
+    """Append a copy of column 0 at the duplicate cyclic endpoint while preserving custom xindexes."""
+    custom_x_indexes = [
+        name for name in source_da.xindexes if name != x_dim and name in thresholds.coords and x_dim in thresholds.coords[name].dims
+    ]
+    base = thresholds.drop_indexes(custom_x_indexes) if custom_x_indexes else thresholds
+    final_column = base.isel({x_dim: slice(0, 1)}).assign_coords(
+        {name: endpoint_coords[name].variable for name, coord in base.coords.items() if x_dim in coord.dims}
+    )
+    restored = xr.concat((base, final_column), dim=x_dim, coords="minimal", join="exact")
+    for name in custom_x_indexes:
+        restored = restored.set_xindex(name)
+    return restored
 
 
 def _shifted_window_sum(da: xr.DataArray, dim: str, window: int, periodic: bool) -> xr.DataArray:
@@ -1040,6 +1085,7 @@ def _slab_seasonal_threshold(
     q: float,
     q_mirror: float,
     tail: Literal["upper", "lower"],
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """Per-cycle-slot thresholds without the dense histogram.
 
@@ -1091,7 +1137,7 @@ def _slab_seasonal_threshold(
     # overlap refuses a depth beyond the array. A y axis narrower than the halo is one chunk, and a
     # depth of its size already reaches every real row from every cell, so the window is unchanged.
     # A non-global x is clamped the same way.
-    x_periodic = _x_is_periodic(da, x_dim)
+    x_periodic = _x_is_periodic(da, x_dim, (coordinates or {}).get("x"))
     halo = [
         half if dim == x_dim and x_periodic else min(half, int(da.sizes[dim])) if dim in (x_dim, y_dim) else 0
         for dim in spatial_dims_present
@@ -1129,9 +1175,11 @@ def _slab_seasonal_threshold(
         new_axis=len(spatial_dims_present),
         dtype=np.float32,
     )
-    coords = {name: coord for name, coord in da.coords.items() if time_dim not in coord.dims and cycle_dim not in coord.dims}
-    coords[cycle_dim] = np.arange(1, cycle.length + 1, dtype=np.uint16)
-    result = xr.DataArray(thresholds, dims=spatial_dims_present + [cycle_dim], coords=coords)
+    drop_coords = [c for c, v in da.coords.items() if time_dim in v.dims or cycle_dim in v.dims]
+    kept_coords = da.coords.to_dataset().drop_vars(drop_coords, errors="ignore").coords
+    result = xr.DataArray(thresholds, dims=spatial_dims_present + [cycle_dim], coords=kept_coords).assign_coords(
+        {cycle_dim: np.arange(1, cycle.length + 1, dtype=np.uint16)}
+    )
     # xarray names a DataArray after its dask key when no name is given; the dense engine's is None.
     result.name = None
     return result
@@ -1151,6 +1199,7 @@ def _compute_histogram_quantile_2d(
     tail: Literal["upper", "lower"] = "upper",
     range_mode: Literal["pinned", "estimated", "data"] = "pinned",
     engine: Literal["slab", "dense"] = "slab",
+    coordinates: Optional[Dict[str, str]] = None,
 ) -> xr.DataArray:
     """
     Efficiently compute quantiles using binned histograms optimised for extreme values.
@@ -1185,6 +1234,8 @@ def _compute_histogram_quantile_2d(
         How the per-cell counts are built. Both give identical thresholds. ``'dense'``
         is the flox histogram over a whole tile, kept as the reference the equivalence
         tests pin ``'slab'`` against, and used for even ``window_spatial``.
+    coordinates : dict, optional
+        Coordinate name mapping used to resolve the physical longitude for spatial pooling.
 
     Returns
     -------
@@ -1235,6 +1286,20 @@ def _compute_histogram_quantile_2d(
     # which flips the kernel's `cumsum <= q * N` ties. Rebuild the percentile first so the
     # complement is the one an upper-tail caller asking for 100 - p would get.
     q_mirror = (100.0 - round(q * 100.0, 10)) / 100.0
+
+    source_da = da
+    x_dim = dimensions.get("x") if dimensions else None
+    x_coord = (coordinates or {}).get("x")
+    seam_endpoint = None
+    if (
+        window_spatial is not None
+        and window_spatial > 1
+        and x_dim in da.dims
+        and _x_is_periodic(da, x_dim, x_coord)
+        and _x_has_duplicate_endpoint(da, x_dim, x_coord)
+    ):
+        seam_endpoint = da.isel({x_dim: slice(-1, None)}).coords
+        da = da.isel({x_dim: slice(0, -1)})
 
     # Two engines, one estimator. Both hand `_rolling_histogram_quantile` the same integer
     # (cycle x n_bins) counts per cell, so they return the same thresholds bit for bit.
@@ -1311,7 +1376,7 @@ def _compute_histogram_quantile_2d(
 
             # Longitude wraps only on a grid that spans the globe; a regional box is edged like latitude
             if lon_dim in hist_raw.dims:
-                lon_periodic = _x_is_periodic(da, lon_dim)
+                lon_periodic = _x_is_periodic(da, lon_dim, (coordinates or {}).get("x"))
                 if use_integer_window:
                     hist_rolled = _shifted_window_sum(hist_rolled, lon_dim, window_spatial, periodic=lon_periodic)
                 elif lon_periodic:
@@ -1368,6 +1433,7 @@ def _compute_histogram_quantile_2d(
             q,
             q_mirror,
             tail,
+            coordinates=coordinates,
         )
 
     # Drop time coordinate to avoid conflicts when comparing with data grouped by cycle slot
@@ -1378,12 +1444,15 @@ def _compute_histogram_quantile_2d(
     # Masking on NaN at t=0 alone would give seasonal cells (e.g. sea ice, valid part
     # of the year) a permanent NaN threshold. (Consistent with the 1D path.)
     nan_mask = da.isnull().all(dim=dimensions["time"]).compute()
+    masked_threshold = threshold.where(~nan_mask)
+    if seam_endpoint is not None and x_dim is not None:
+        masked_threshold = _restore_duplicate_endpoint(masked_threshold, source_da, seam_endpoint, x_dim)
     # Pin BEFORE the bounds check computes on it, in streaming mode too: the threshold is
     # bounded by cycle x space, not by time. `pin_one` (a no-op in streaming) left that
     # eager compute running the whole histogram graph, and the caller's `stage` running it
     # again. Writing it to zarr here instead still crashed at 731 x 120 x 1440 on
     # 16 x 14 GB (2/2), where persisting the same graph completed 2/2.
-    threshold = materialiser.pin_bounded(threshold.where(~nan_mask))
+    threshold = materialiser.pin_bounded(masked_threshold)
 
     # Validate threshold values against the sign-aware bounds. One scheduler round-trip
     # for the whole check -- see `_apply_threshold_bounds`, which both drivers share.

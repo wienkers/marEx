@@ -13,12 +13,13 @@ from marEx.track.volumetric.diagnostics import event_diagnostics
 from marEx.track.volumetric.events import FLAT_DIM, cluster_events
 from marEx.track.volumetric.geometry import build_vertical_geometry
 from marEx.track.volumetric.ids import IDAllocator
-from marEx.track.volumetric.merge_loop import MergeLedger, final_links, split_and_merge_volumetric
+from marEx.track.volumetric.merge_loop import MergeLedger, split_and_merge_volumetric
 from marEx.track.volumetric.partition import ScaledCoords
 from marEx.track.volumetric.tracker4d import identify_volumes
 
 from ..conftest import on_client as _on_client
 from .conftest import VDIMS, build_case, store_from_field
+from .oracles import final_links
 from .synthetic import Ball, paint, scenarios
 
 PROBE_DIM = "__probe_voxel__"

@@ -26,7 +26,7 @@ from .config import VolumetricDims
 from .geometry import VerticalGeometry
 from .ids import IDAllocator
 from .labelling import label_volume
-from .overlap import OverlapTable, link_mask, volume_overlaps
+from .overlap import OverlapTable
 from .partition import ScaledCoords, partition_child
 from .store import ObjectIndex, VolumeStore
 
@@ -59,6 +59,8 @@ class MergeLedger:
         float64 overlap volume (m^3) of each parent with the child, aligned with ``parent_ids``.
     time_dtype : numpy.dtype, optional
         dtype of ``merge_time`` and ``split_time`` when none was recorded (datetime64[ns] by default).
+    time_encoding : dict, optional
+        CF calendar and units of the source time coordinate for empty cftime columns.
     renamed : list of (int, int)
         ``(old_id, kept_id)`` for each ID consolidation removed. Resolves ledger IDs that no longer
         exist in the final field.
@@ -76,6 +78,7 @@ class MergeLedger:
     split_times: List = field(default_factory=list)
     split_parents: List[int] = field(default_factory=list)
     split_children: List[NDArray[np.int32]] = field(default_factory=list)
+    time_encoding: Dict[str, str] = field(default_factory=dict)
 
     def record_split(self, time_value, parent: int, children: List[int]) -> None:
         """Record that ``parent`` separated into ``children``, the kept ID first."""
@@ -107,21 +110,18 @@ class MergeLedger:
             parents[i, : len(p)] = p
             children[i, : len(c)] = c
             overlaps[i, : len(v)] = v
-        if n:
-            merge_time = np.asarray(self.times)
-        else:
-            merge_time = np.array([], dtype=self.time_dtype if self.time_dtype is not None else "datetime64[ns]")
         n_splits = len(self.split_parents)
         max_split_children = max((c.size for c in self.split_children), default=1)
         split_children = np.full((n_splits, max_split_children), -1, dtype=np.int32)
         for i, c in enumerate(self.split_children):
             split_children[i, : c.size] = c
-        if n_splits:
-            split_time = np.asarray(self.split_times)
-        else:
-            split_time = np.array([], dtype=self.time_dtype if self.time_dtype is not None else "datetime64[ns]")
+        first_time = next(iter(self.times or self.split_times), None)
+        calendar = self.time_encoding.get("calendar", getattr(first_time, "calendar", None))
+        empty_dtype = object if calendar is not None else self.time_dtype or "datetime64[ns]"
+        merge_time = np.asarray(self.times) if n else np.empty(0, dtype=empty_dtype)
+        split_time = np.asarray(self.split_times) if n_splits else np.empty(0, dtype=empty_dtype)
         renamed = np.asarray(self.renamed, dtype=np.int32).reshape(-1, 2)
-        return xr.Dataset(
+        ds = xr.Dataset(
             {
                 "parent_IDs": (("merge_ID", "parent_idx"), parents),
                 "child_IDs": (("merge_ID", "child_idx"), children),
@@ -138,6 +138,13 @@ class MergeLedger:
             },
             attrs={"fill_value": -1},
         )
+        if calendar is not None:
+            for name in ("merge_time", "split_time"):
+                if not ds[name].size:
+                    # Xarray cannot infer a CF datetime from an empty object array.
+                    ds[name].attrs.update(calendar=calendar, units=self.time_encoding.get("units", "days since 1970-01-01"))
+                    ds[name].encoding["dtype"] = "int64"
+        return ds
 
 
 @dataclass(frozen=True)
@@ -341,6 +348,7 @@ def consolidate_volumes(
     split_geometry: Optional[SplitGeometry] = None,
     overlaps: Optional[OverlapTable] = None,
     water_components: Optional[Tuple[_WaterComponents, _WaterComponents]] = None,
+    inplace: bool = False,
 ) -> NDArray[np.int32]:
     """
     Give one ID to the pieces of ``prev1`` that continue a single object of ``prev2``.
@@ -371,17 +379,19 @@ def consolidate_volumes(
         Active boundary's raw overlaps, updated when objects are renamed.
     water_components : tuple, optional
         Pristine components and ownership of the earlier and later slices.
+    inplace : bool, default=False
+        Allow editing a writable, C-contiguous slice owned by the caller.
 
     Returns
     -------
     numpy.ndarray
-        The consolidated ``prev1`` (a new array when anything was renamed; ``prev1`` itself otherwise).
+        The consolidated ``prev1``, copied on the first rename unless ``inplace`` is set.
     """
+    if inplace and not prev1.flags.writeable:
+        raise ValueError("assignment destination is read-only")
     flat_prev, flat_cur, flat_volume = prev2.ravel(), prev1.ravel(), cell_volume.ravel()
-    if overlaps is None:
-        linked, _ = _linked_pairs(flat_prev, flat_cur, store, flat_volume, threshold)
-    else:
-        linked, _ = overlaps.linked(store, threshold)
+    table = overlaps if overlaps is not None else OverlapTable(flat_prev, flat_cur, flat_volume)
+    linked, _ = table.linked(store, threshold)
     if linked.shape[0] == 0:
         return prev1
 
@@ -390,12 +400,12 @@ def consolidate_volumes(
     if splitting.size == 0:
         return prev1
 
-    out = prev1
-    kept: List[int] = []
+    out, flat_out = prev1, None
+    kept = set()
     renamed_onto: Dict[int, int] = {}
     candidates: List[Tuple[int, List[int]]] = []
     changed = set()
-    index = overlaps.current_index if overlaps is not None else None
+    index = table.current_index
     # Parents in ascending order; each sees the store as left by the previous one, as in 3-D.
     for parent in splitting.tolist():
         if parent not in store:
@@ -406,30 +416,27 @@ def consolidate_volumes(
             continue
         others = sorted({int(c) for c in children[1:].tolist() if int(c) in store and int(c) != first})
         if others:
-            if overlaps is None and water_components is None:
-                out = np.where(np.isin(out, others), np.int32(first), out).astype(prev1.dtype, copy=False)
-            else:
-                if out is prev1:
-                    out = prev1.copy(order="C")
-                    if index is None:
-                        index = ObjectIndex.from_slice(flat_cur)
-                    if water_components is not None:
-                        water_components[1].preserve()
-                if water_components is not None:
-                    water_components[1].consolidate(first, others, index)
+            if flat_out is None:
+                direct_edit = inplace and prev1.flags.c_contiguous and prev1.flags.writeable
+                out = prev1 if direct_edit else prev1.copy(order="C")
                 flat_out = out.ravel()
-                for oid in others:
-                    flat_out[index.voxels(oid)] = first
-                index.rename(others, first)
-                changed.update([first, *others])
+                if index is None:
+                    index = ObjectIndex.from_slice(flat_cur)
+                if water_components is not None:
+                    water_components[1].preserve()
+            if water_components is not None:
+                water_components[1].consolidate(first, others, index)
             for oid in others:
+                flat_out[index.voxels(oid)] = first
                 store.drop(oid)
+            index.rename(others, first)
+            changed.update([first, *others])
             logger.debug(f"Consolidated {others} into {first} (parent {parent})")
             if ledger is not None:
                 ledger.renamed.extend((oid, first) for oid in others)
                 renamed_onto.update((oid, first) for oid in others)
                 candidates.append((parent, [first, *others]))
-        kept.append(first)
+        kept.add(first)
 
     if ledger is not None and split_geometry is not None and candidates:
         water = (
@@ -452,28 +459,20 @@ def consolidate_volumes(
             if split:
                 ledger.record_split(time_value, parent, children)
 
-    # Recompute the kept objects' volumes from the consolidated slice, with the store's own
-    # summation so the value is bit-identical to identifying that object directly.
-    alive = [k for k in kept if k in store]
-    if alive:
-        store.update_from_slice(np.where(np.isin(out, alive), out, 0), cell_volume)
-    if overlaps is not None and changed:
-        overlaps.current_index = index
-        overlaps.refresh(flat_prev, out.ravel(), flat_volume, changed)
+    if changed:
+        for oid in sorted(kept):
+            if oid in store:
+                voxels = index.voxels(oid)
+                # Bincount sums in ascending voxel order, as in the volume store.
+                volume = np.bincount(np.zeros(voxels.size, dtype=np.intp), weights=flat_volume[voxels], minlength=1)
+                store.set(oid, volume[0])
+        if overlaps is not None:
+            overlaps.current_index = index
+            overlaps.refresh(flat_prev, flat_out, flat_volume, changed)
+        if inplace and out is not prev1:
+            prev1[...] = out
+            return prev1
     return out
-
-
-def _linked_pairs(
-    prev: NDArray[np.int32],
-    cur: NDArray[np.int32],
-    store: VolumeStore,
-    cell_volume: NDArray[np.float64],
-    threshold: float,
-) -> Tuple[NDArray[np.int64], NDArray[np.float64]]:
-    """Linked ``(prev_id, cur_id)`` pairs and their overlap volumes."""
-    pairs, overlap = volume_overlaps(prev, cur, cell_volume)
-    keep = link_mask(pairs, overlap, store, threshold)
-    return pairs[keep], overlap[keep]
 
 
 def _resolve_merge(
@@ -482,19 +481,18 @@ def _resolve_merge(
     index_prev: ObjectIndex,
     child_id: int,
     parent_ids: NDArray[np.int32],
-    overlap_rows: NDArray[np.float64],
     store: VolumeStore,
-    allocator: IDAllocator,
+    new_ids: NDArray[np.int32],
     coords: ScaledCoords,
     cell_volume: NDArray[np.float64],
     *,
     components: Optional[_WaterComponents] = None,
-) -> Tuple[NDArray[np.int32], NDArray[np.float64]]:
+) -> NDArray[np.int32]:
     """
     Partition one merged child among its parents.
 
     The child keeps its ID for the voxels nearest the first (lowest) parent; every other
-    parent's share gets a new ID from ``allocator``. Only the child's voxels are read or
+    parent's share gets a new ID from ``new_ids``. Only the child's voxels are read or
     written: the voxel sets come from the two indexes, never from a full-domain mask.
 
     Parameters
@@ -509,13 +507,10 @@ def _resolve_merge(
         The merged child.
     parent_ids : numpy.ndarray
         Its linked parents at ``t-1``, ascending.
-    overlap_rows : numpy.ndarray
-        Overlap volume (m^3) of each parent with the child, aligned with ``parent_ids``.
     store : VolumeStore
         Object volumes; the pieces' volumes are set and a piece with no voxels is dropped.
-    allocator : IDAllocator
-        Source of the ``len(parent_ids) - 1`` new IDs (the loop passes the block it drew for the
-        whole pass, which has the same ``allocate`` method).
+    new_ids : numpy.ndarray
+        The ``len(parent_ids) - 1`` consecutive IDs allocated for this child.
     coords : ScaledCoords
         Scaled voxel coordinates.
     cell_volume : numpy.ndarray
@@ -525,18 +520,9 @@ def _resolve_merge(
     -------
     child_ids : numpy.ndarray
         int32 ``[child_id, *new_ids]``, aligned with ``parent_ids``.
-    overlap_volumes : numpy.ndarray
-        float64 overlap volumes for the ledger.
-
-    Raises
-    ------
-    TrackingError
-        If the new IDs would exceed the int32 range. Nothing has been modified then.
     """
-    parent_ids = np.asarray(parent_ids, dtype=np.int32)
-    # Allocate first: an exhausted ID space raises before any field, index or store changes.
-    new_ids = allocator.allocate(parent_ids.size - 1)
-    child_ids = np.concatenate([np.array([child_id], dtype=np.int32), new_ids]).astype(np.int32, copy=False)
+    child_ids = np.empty(parent_ids.size, dtype=np.int32)
+    child_ids[0], child_ids[1:] = child_id, new_ids
 
     child_vox = index_t.voxels(child_id)
     parent_vox = [index_prev.voxels(p) for p in parent_ids.tolist()]
@@ -563,26 +549,7 @@ def _resolve_merge(
         store.drop(oid)
     if missing:
         logger.debug(f"Merge of child {child_id}: pieces {missing} received no voxels and were dropped")
-    return child_ids, np.asarray(overlap_rows, dtype=np.float64).copy()
-
-
-class _IDBlock:
-    """IDs already drawn from the allocator, handed out in order through the same ``allocate`` call."""
-
-    def __init__(self, ids: NDArray[np.int32]) -> None:
-        self._ids = ids
-        self._next = 0
-
-    def allocate(self, n: int) -> NDArray[np.int32]:
-        n = int(n)
-        if n < 0 or self._next + n > self._ids.size:
-            raise TrackingError(
-                f"Merge resolution requested {n} IDs from a block with {self._ids.size - self._next} left",
-                context={"requested": n, "remaining": self._ids.size - self._next},
-            )
-        out = self._ids[self._next : self._next + n]
-        self._next += n
-        return out
+    return child_ids
 
 
 def _rows_by_child(pairs: NDArray[np.int64], merging: NDArray[np.int64]) -> List[NDArray[np.int64]]:
@@ -609,9 +576,9 @@ def _resolve_merges(
     time_value,
     *,
     components: Optional[_WaterComponents] = None,
-) -> NDArray[np.int32]:
+) -> set[int]:
     """
-    Partition every child in ``merging`` among its linked parents, in place, and record each merge.
+    Partition the merging children in place, record each merge and return all edited IDs.
 
     The new IDs of the whole pass are allocated in one request before any child is touched, so an
     exhausted ID space raises with the slice, indexes, store and ledger unchanged. Children are
@@ -619,26 +586,32 @@ def _resolve_merges(
     as allocating per child.
     """
     rows_by_child = _rows_by_child(pairs, merging)
-    block = _IDBlock(allocator.allocate(sum(rows.size - 1 for rows in rows_by_child)))
+    new_ids = allocator.allocate(sum(rows.size - 1 for rows in rows_by_child))
+    changed = set()
+    start = 0
     for child_id, rows in zip(merging.tolist(), rows_by_child):
-        child_ids, overlap_volumes = _resolve_merge(
+        stop = start + rows.size - 1
+        parent_ids = pairs[rows, 0].astype(np.int32)
+        overlap_volumes = overlap[rows]
+        child_ids = _resolve_merge(
             cur,
             index_t,
             index_prev,
             child_id,
-            pairs[rows, 0].astype(np.int32),
-            overlap[rows],
+            parent_ids,
             store,
-            block,
+            new_ids[start:stop],
             coords,
             cell_volume,
             components=components,
         )
         ledger.times.append(time_value)
-        ledger.parent_ids.append(pairs[rows, 0].astype(np.int32))
+        ledger.parent_ids.append(parent_ids)
         ledger.child_ids.append(child_ids)
         ledger.overlap_volumes.append(overlap_volumes)
-    return cur
+        changed.update(child_ids.tolist())
+        start = stop
+    return changed
 
 
 def _resolve_timestep(
@@ -684,8 +657,7 @@ def _resolve_timestep(
             # current by each partition.
             index_prev = ObjectIndex.from_slice(prev)
             overlaps.current_index = ObjectIndex.from_slice(cur)
-        first_edit = len(ledger.child_ids)
-        cur = _resolve_merges(
+        changed = _resolve_merges(
             cur,
             overlaps.current_index,
             index_prev,
@@ -700,7 +672,6 @@ def _resolve_timestep(
             time_value,
             components=components,
         )
-        changed = {int(oid) for children in ledger.child_ids[first_edit:] for oid in children}
         overlaps.refresh(prev, cur, cell_volume, changed)
         iteration += 1
 
@@ -797,21 +768,27 @@ def split_and_merge_volumetric(
     """
     _check_field(id_field, dims)
     timedim = dims.time
-    cell_volume = np.ascontiguousarray(geom.cell_volume, dtype=np.float64).ravel()
-    spatial_shape = tuple(id_field.shape[1:])
-    n_voxels = int(np.prod(spatial_shape))
-    if cell_volume.size != n_voxels:
+    spatial_shape = id_field.shape[1:]
+    if geom.cell_volume.shape != spatial_shape:
         raise ConfigurationError(
-            f"cell_volume has {cell_volume.size} voxels, the ID field {n_voxels} per timestep",
+            f"cell_volume has shape {geom.cell_volume.shape}, expected {spatial_shape} for the ID field",
             context={"cell_volume": geom.cell_volume.shape, "id_field": spatial_shape},
         )
+    cell_volume = np.ascontiguousarray(geom.cell_volume, dtype=np.float64).ravel()
+    n_voxels = cell_volume.size
 
     split_geometry = None
     if max_gap_m is not None and wrap_x is not None:
         split_geometry = SplitGeometry(geom.wet, geom.thickness, float(max_gap_m), bool(wrap_x))
 
-    ledger = MergeLedger(time_dtype=id_field[timedim].dtype)
-    time_values = id_field[timedim].values
+    time = id_field[timedim]
+    time_values = time.values
+    ledger = MergeLedger(time_dtype=time.dtype)
+    if time.dtype.kind == "O":
+        if time_values.size and hasattr(time_values[0], "calendar"):
+            ledger.time_encoding = {"calendar": time_values[0].calendar}
+        elif "calendar" in time.encoding:
+            ledger.time_encoding = {"calendar": time.encoding["calendar"]}
 
     streaming = materialiser is not None and materialiser.is_streaming
     if streaming:
@@ -863,7 +840,7 @@ def split_and_merge_volumetric(
                     overlaps=overlaps,
                     components=current_water,
                 )
-                settled = consolidate_volumes(
+                consolidate_volumes(
                     previous,
                     current,
                     store,
@@ -874,10 +851,8 @@ def split_and_merge_volumetric(
                     split_geometry=split_geometry,
                     overlaps=overlaps,
                     water_components=(previous_water, current_water) if current_water is not None else None,
+                    inplace=True,
                 )
-                if settled is not current:
-                    current[:] = settled
-                del settled
                 if links_out is not None:
                     # Both IDs and volumes are final at this boundary. Consolidation
                     # can make formerly subthreshold pairs pass.
@@ -906,57 +881,3 @@ def split_and_merge_volumetric(
     else:
         id_field = id_field.persist()
     return id_field, store, ledger
-
-
-def final_links(
-    id_field: xr.DataArray,
-    store: VolumeStore,
-    cell_volume: NDArray[np.float64],
-    threshold: float,
-    timedim: str,
-) -> NDArray[np.int64]:
-    """
-    Every linked ``(id_t, id_t+1)`` pair of a finished ID field.
-
-    One client-side pass, one time chunk at a time, carrying the last slice of each chunk
-    into the next. Volumes come from ``store``, so they are the consolidated ones.
-
-    Parameters
-    ----------
-    id_field : xarray.DataArray
-        ``(time, z, y, x)`` IDs, numpy- or dask-backed.
-    store : VolumeStore
-        Object volumes.
-    cell_volume : numpy.ndarray
-        Voxel volumes (m^3), ``(z, y, x)``.
-    threshold : float
-        Overlap fraction above which two objects link.
-    timedim : str
-        Name of the time dimension (the first dimension).
-
-    Returns
-    -------
-    numpy.ndarray
-        ``(n, 2)`` int64 pairs, ordered by time and then lexicographically.
-    """
-    if id_field.dims[0] != timedim:
-        raise ConfigurationError(f"final_links expects '{timedim}' first, got dims {tuple(id_field.dims)}")
-    cv = np.ascontiguousarray(cell_volume, dtype=np.float64).ravel()
-    n_voxels = cv.size
-    nt = id_field.sizes[timedim]
-    chunk_sizes = list(id_field.chunks[0]) if id_field.chunks is not None else [nt]
-    out: List[NDArray[np.int64]] = []
-    previous: Optional[NDArray] = None
-    start = 0
-    for size in chunk_sizes:
-        values = np.asarray(id_field.isel({timedim: slice(start, start + size)}).values).reshape(size, n_voxels)
-        for t in range(size):
-            if previous is not None:
-                pairs, _ = _linked_pairs(previous, values[t], store, cv, threshold)
-                if pairs.shape[0]:
-                    out.append(pairs)
-            previous = values[t]
-        start += size
-    if not out:
-        return np.empty((0, 2), dtype=np.int64)
-    return np.concatenate(out, axis=0).astype(np.int64, copy=False)

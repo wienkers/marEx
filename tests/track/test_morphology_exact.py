@@ -3,9 +3,11 @@
 import numpy as np
 import pytest
 import xarray as xr
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_closing, binary_opening, distance_transform_edt
+from scipy.signal import fftconvolve
 from scipy.sparse import csr_matrix
 
+from marEx.exceptions import ConfigurationError
 from marEx.track import morphology
 from marEx.track.overlap import sparse_bool_power
 
@@ -26,6 +28,75 @@ def _edt_reference(plane, radius, regional):
 
 def _structured(data, wet, radius, regional):
     return morphology.fill_holes(data, radius, False, None, "lon", wet, regional, "lat")
+
+
+def _disk_reference(plane, radius, regional):
+    offsets = np.arange(-radius, radius + 1)
+    disk = offsets[:, None] ** 2 + offsets**2 <= radius**2
+    halo = 4 * radius
+    padded = np.pad(plane, ((0, 0), (halo, halo)), mode="edge" if regional else "wrap")
+    padded = np.pad(padded, ((halo, halo), (0, 0)), mode="edge")
+    if radius <= 1:
+        closed = binary_closing(padded, structure=disk)
+        opened = binary_opening(closed, structure=disk)
+        return opened[halo : halo + plane.shape[0], halo : halo + plane.shape[1]]
+
+    # Count footprint hits for each pass to avoid the large offset tables
+    # built by ndimage for wide disks. Valid convolution consumes one halo per pass.
+    footprint_size = disk.sum()
+    for minimum in (1, footprint_size, footprint_size, 1):
+        padded = np.rint(fftconvolve(padded, disk, mode="valid")) >= minimum
+    return padded
+
+
+@pytest.mark.parametrize("nx", [1, 5, 9, 63, 64, 65, 127, 128, 129])
+@pytest.mark.parametrize("radius", [0, 1, 31, 32, 33, 40, 63, 64, 65, 96, 128, 130])
+@pytest.mark.parametrize("regional", [False, True])
+def test_structured_disk_footprint_across_word_boundaries(nx, radius, regional):
+    scale = max(1, radius)
+    y, x = np.ogrid[: 4 * scale + 9, :nx]
+    edge = scale + 4 + (scale // 2 + 1) * np.cos(2 * np.pi * x / nx)
+    plane = y < edge
+    plane[1, nx // 2] = False
+    plane[-3, nx // 2] = True
+
+    expected = _disk_reference(plane, radius, regional)
+    assert expected.any() and not expected.all()
+    if radius:
+        assert expected[1, nx // 2] and not expected[-3, nx // 2]
+    data = xr.DataArray(plane[None], dims=("time", "lat", "lon")).chunk({"time": 1})
+    wet = xr.ones_like(data.isel(time=0, drop=True))
+    result = _structured(data, wet, radius, regional)
+    assert result.chunks == data.chunks
+    np.testing.assert_array_equal(result.compute().values[0], expected)
+
+
+@pytest.mark.parametrize("half_width", [63, 64, 65, 96, 128, 130, 513])
+@pytest.mark.parametrize("position", ["left", "middle", "right"])
+def test_wide_chord_clips_to_valid_packed_columns(half_width, position):
+    nx = 2 * half_width + 71
+    centre = {"left": 0, "middle": nx // 2, "right": nx - 1}[position]
+    n_words = (nx + 63) // 64
+    last_mask = np.uint64((1 << (nx - 64 * (n_words - 1))) - 1)
+    source = np.zeros((1, n_words), dtype=np.uint64)
+    source[0, centre // 64] = np.uint64(1) << np.uint64(centre % 64)
+    result, horizontal, scratch = (np.empty_like(source) for _ in range(3))
+
+    # A single wide chord forces a shift cap much sooner than a full disk does.
+    morphology._dilate_disk_words(source, result, horizontal, scratch, np.array([half_width]), 0, 1, last_mask)
+
+    columns = np.arange(n_words * 64)
+    expected = (np.abs(columns - centre) <= half_width) & (columns < nx)
+    result_bytes = result.astype("<u8", copy=False).view(np.uint8)
+    np.testing.assert_array_equal(np.unpackbits(result_bytes, bitorder="little"), expected)
+
+
+@pytest.mark.parametrize("default_radius, radius", [(-2, None), (0, -2)])
+def test_fill_holes_rejects_negative_radius(default_radius, radius):
+    data = xr.DataArray(np.zeros((4, 3, 5), dtype=bool), dims=("time", "lat", "lon")).chunk({"time": 2})
+    wet = xr.ones_like(data.isel(time=0, drop=True))
+    with pytest.raises(ConfigurationError, match="R_fill must be non-negative"):
+        morphology.fill_holes(data, default_radius, False, None, "lon", wet, True, "lat", R_fill=radius)
 
 
 @pytest.mark.parametrize("nx", [1, 7, 15, 63, 64, 65, 128, 145])
@@ -81,11 +152,15 @@ def test_structured_rank_four_preserves_layout_and_level_mask(regional, radius):
     wet = rng.random((3, 19, 65)) < 0.65
     dims = ("time", "depth", "lat", "lon")
     coords = {dim: np.arange(length) for dim, length in zip(dims, values.shape)}
+    coords["time"] = 2**53 + np.arange(values.shape[0], dtype=np.int64)
+    coords["flag"] = ("time", np.array([-1, 0, 1], dtype=np.int8))
     data = xr.DataArray(values, dims=dims, coords=coords).chunk({"time": (2, 1), "depth": (2, 1)})
     mask = xr.DataArray(wet, dims=dims[1:], coords={dim: coords[dim] for dim in dims[1:]})
     result = _structured(data, mask, radius, regional)
     assert result.chunks == data.chunks
     assert result.dims == data.dims
+    assert result.time.dtype == np.int64
+    assert result.flag.dtype == np.int8
     xr.testing.assert_identical(result.coords.to_dataset(), data.coords.to_dataset())
     expected = np.array([[_edt_reference(plane, radius, regional) for plane in frame] for frame in values])
     np.testing.assert_array_equal(result.compute().values, expected & wet)

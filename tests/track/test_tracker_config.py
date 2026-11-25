@@ -225,6 +225,14 @@ def _grid(**kwargs):
     )
 
 
+@pytest.mark.parametrize("time_chunk", [-1, 2])
+def test_tracker_rejects_negative_time_fill(time_chunk):
+    data = _small_grid().chunk({"time": time_chunk})
+    mask = xr.ones_like(data.isel(time=0, drop=True), dtype=bool)
+    with pytest.raises(ConfigurationError, match="T_fill must be non-negative"):
+        marEx.tracker(data, mask, R_fill=0, T_fill=-2, regional_mode=True, coordinate_units="degrees", quiet=True)
+
+
 def _not_dask(tmp_path):
     data = _small_grid()
     marEx.tracker(

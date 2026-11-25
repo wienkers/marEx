@@ -15,8 +15,15 @@ import xarray as xr
 from ..core.dimensions import TASK_ELEMENTS, extra_dim_chunks, horizontal_dims, spatial_dims
 from ..core.numerics import rolling_numerics
 from ..core.seasonal_apply import apply_seasonal_field
-from ..core.time_axis import SeasonalCycle, _median_step_days, add_decimal_year, is_subdaily_axis, resolve_cycle
-from ..core.validation import _infer_dims_coords
+from ..core.time_axis import (
+    _DAYS_PER_CALENDAR_YEAR,
+    SeasonalCycle,
+    _median_step_days,
+    add_decimal_year,
+    is_subdaily_axis,
+    resolve_cycle,
+)
+from ..core.validation import _infer_dims_coords, unmask_dataarray
 from ..exceptions import ConfigurationError
 from ..logging_config import get_logger
 
@@ -65,6 +72,7 @@ def _compute_anomaly_detrended(
     """
     # Infer and validate dimensions and coordinates
     dimensions, coordinates = _infer_dims_coords(da, dimensions, coordinates)
+    da = unmask_dataarray(da)
 
     # Default detrend_orders to linear if not specified
     if detrend_orders is None:
@@ -192,20 +200,6 @@ def _compute_anomaly_detrended(
         coords=model_coords,
     ).chunk({time_dim: da.chunksizes[time_dim]})
 
-    # Prepare dimensions for model coefficients based on data structure
-    dims = ["coeff"]
-    coords = {"coeff": np.arange(1, n_coeffs + 1)}
-
-    # Handle 1D (time series), 2D (unstructured) and 3D (gridded) data
-    if "y" in dimensions:  # 3D gridded case
-        dims.extend([dimensions["y"], dimensions["x"]])
-        coords[dimensions["y"]] = da[coordinates["y"]].values
-        coords[dimensions["x"]] = da[coordinates["x"]].values
-    elif "x" in dimensions:  # 2D unstructured case
-        dims.append(dimensions["x"])
-        coords.update(da[coordinates["x"]].coords)
-    # else: 1D time series case - no spatial dimensions to add
-
     # Fit model to data - use the actual dimensions of the result
     dot_result = pmodel_da.dot(da)
     # For dot product result, dimensions match input data's spatial dimensions
@@ -239,16 +233,10 @@ def _compute_anomaly_detrended(
     if mask_dims:
         # Spatial data - create 2D/3D mask
         chunk_dict_mask = {dim: -1 for dim in mask_dims}
-        mask_temp = np.isfinite(da.isel({dimensions["time"]: 0})).chunk(chunk_dict_mask)
-        # Drop time-related coordinates to create spatial mask
-        vars_to_drop = []
-        if "decimal_year" in mask_temp.coords:
-            vars_to_drop.append("decimal_year")
-        if dimensions["time"] in mask_temp.coords:
-            vars_to_drop.append(dimensions["time"])
-        if coordinates["time"] in mask_temp.coords:
-            vars_to_drop.append(coordinates["time"])
-        mask = mask_temp.drop_vars(vars_to_drop) if vars_to_drop else mask_temp
+        vars_to_drop = [c for c, v in da.coords.items() if dimensions["time"] in v.dims and c != dimensions["time"]]
+        mask = (
+            np.isfinite(da.isel({dimensions["time"]: 0}, drop=True)).drop_vars(vars_to_drop, errors="ignore").chunk(chunk_dict_mask)
+        )
     else:
         # 1D time series - create scalar mask indicating if any finite values exist
         chunk_dict_mask = {}  # Empty for 1D case
@@ -258,55 +246,64 @@ def _compute_anomaly_detrended(
     data_vars = {"dat_anomaly": da_detrend, "mask": mask}
 
     # Ensure all original coordinates are preserved in the dataset
-    coords_to_preserve = {}
-    for coord_name in da.coords:
-        if coord_name not in data_vars:  # Don't override data variables
-            coords_to_preserve[coord_name] = da.coords[coord_name]
+    coords_to_preserve = {c: da.coords[c] for c in da.coords if c not in data_vars and c != "decimal_year"}
 
     # Standardise anomalies by temporal variability if requested
     if standardise:
+        inferred_cycle = cycle is None
         cycle = resolve_cycle(da, coordinates["time"], cycle)
         cycle_dim = cycle.index_name
-        cycle_index = cycle.index_of(da_detrend[coordinates["time"]]).compute()
+        time_coord = da_detrend[coordinates["time"]]
+        cycle_length = cycle.length
+        if inferred_cycle and cycle.is_daily:
+            fixed_year_days = _DAYS_PER_CALENDAR_YEAR.get(time_coord.dt.calendar)
+            year_days = fixed_year_days or (366 if bool(time_coord.dt.is_leap_year.any()) else 365)
+            cycle_length = min(cycle_length, int(year_days))
+        cycle_index = cycle.index_of(time_coord).compute()
+        in_cycle = (cycle_index >= 1) & (cycle_index <= cycle_length)
+        group_index = cycle_index
+        if not bool(in_cycle.all()):
+            group_index = cycle_index.where(in_cycle)
+            da_detrend = da_detrend.where(in_cycle)
+            data_vars["dat_anomaly"] = da_detrend
 
-        # Calculate per-cycle-slot standard deviation using cohorts
-        std_day = flox.xarray.xarray_reduce(
-            da_detrend,
-            cycle_index,
-            dim=dimensions["time"],
-            func="std",
-            isbin=False,
-            method="cohorts",
-            dtype=np.float32,
-        )
-
-        # Calculate the 30-day rolling standard deviation over the observed cycle slots.
-        # The 30 days and the padding width are physical, so they are converted through
-        # the cycle. `steps_for_days` deliberately does NOT force the result odd: on
-        # daily data 30 days is 30 steps and the pad is 16, exactly what this code has
-        # always used, and forcing it odd would move every standardised result.
-        std_steps = cycle.steps_for_days(30, name="standardisation window")
-        if std_steps == 1:
-            # Same reasoning as `smoothed_rolling_climatology`'s degenerate case: on a
-            # monthly axis 30 days rounds to one step, which is INSIDE `steps_for_days`'
-            # half-step rule so it warns about nothing -- yet the rolling smoothing of
-            # the per-slot standard deviation disappears entirely. Say so.
-            logger.warning(
-                "The 30-day standardisation window resolves to a single timestep on this %g-day axis: "
-                "the per-slot standard deviation is used unsmoothed.",
-                cycle.step_days,
+        if bool(in_cycle.any()):
+            std_day = flox.xarray.xarray_reduce(
+                da_detrend,
+                group_index,
+                dim=time_dim,
+                func="std",
+                ddof=0,
+                isbin=False,
+                method="cohorts",
+                dtype=np.float32,
             )
-        pad_size = std_steps // 2 + 1
-        n_doy = std_day.sizes[cycle_dim]
-        if n_doy < pad_size:
-            # Dask's wrap padding takes at most one copy of the axis on each side.
-            wrapped_positions = np.arange(-pad_size, n_doy + pad_size) % n_doy
-            std_day_wrap = std_day.isel({cycle_dim: wrapped_positions})
+
+            # Roll over physical calendar slots, including empty slots as gaps. Keep
+            # the legacy even-window alignment (15 days before and 14 after on daily data).
+            observed = std_day.get_index(cycle_dim).astype(cycle.labels.dtype)
+            window = SeasonalCycle(cycle_dim, cycle_length, cycle.slot_days).steps_for_days(30, name="standardisation window")
+            if window == 1:
+                logger.warning(
+                    "The 30-day standardisation window resolves to a single %s slot: "
+                    "the per-slot standard deviation is used unsmoothed.",
+                    cycle_dim,
+                )
+            window = min(window, cycle_length)
+            pad = window // 2 + 1
+            wrapped = (
+                std_day.reindex({cycle_dim: cycle.labels[:cycle_length]}).chunk({cycle_dim: -1}).pad({cycle_dim: pad}, mode="wrap")
+            )
+            with rolling_numerics():
+                std_rolling = np.sqrt((wrapped**2).rolling({cycle_dim: window}, center=True, min_periods=1).mean())
+            std_rolling = std_rolling.isel({cycle_dim: slice(pad, pad + cycle_length)}).sel({cycle_dim: observed})
+            std_rolling = std_rolling.assign_coords({cycle_dim: observed.to_numpy()})
         else:
-            std_day_wrap = std_day.pad({cycle_dim: pad_size}, mode="wrap")
-        with rolling_numerics():
-            std_rolling = np.sqrt((std_day_wrap**2).rolling({cycle_dim: std_steps}, center=True).mean()).isel(
-                {cycle_dim: slice(pad_size, n_doy + pad_size)}
+            drop_time_coords = [c for c, v in da_detrend.coords.items() if time_dim in v.dims and c != time_dim]
+            std_rolling = (
+                da_detrend.drop_vars(drop_time_coords, errors="ignore")
+                .isel({time_dim: 0}, drop=True)
+                .expand_dims({cycle_dim: cycle.labels[:0]})
             )
 
         # Divide anomalies by rolling standard deviation
@@ -343,7 +340,7 @@ def _compute_anomaly_detrended(
             return chunks
 
         chunk_dict_field = _field_chunks(max(da_stn.chunksizes[dimensions["time"]]))
-        chunk_dict_std = _field_chunks(n_doy)
+        chunk_dict_std = _field_chunks(std_rolling.sizes[cycle_dim])
         chunk_dict_std[cycle_dim] = -1
 
         da_stn = da_stn.chunk(chunk_dict_field)
@@ -353,5 +350,9 @@ def _compute_anomaly_detrended(
         data_vars["dat_stn"] = da_stn
         data_vars["STD"] = std_rolling
 
-    # Build output dataset with metadata
-    return xr.Dataset(data_vars=data_vars, coords=coords_to_preserve).drop_vars("decimal_year")
+    # Build output dataset with metadata and restore custom auxiliary indexes
+    ds_out = xr.Dataset(data_vars=data_vars, coords=coords_to_preserve).drop_vars("decimal_year", errors="ignore")
+    for idx_name in da.xindexes:
+        if idx_name not in ds_out.xindexes and idx_name in ds_out.coords:
+            ds_out = ds_out.set_xindex(idx_name)
+    return ds_out

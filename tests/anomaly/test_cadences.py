@@ -318,14 +318,7 @@ def test_detrend_harmonic_refuses_subdaily_input_and_names_a_way_forward(sixhour
 
 
 def test_subdaily_shifting_tile_is_budgeted_on_the_cycle_and_binds(sixhourly_sst, monkeypatch):
-    """The climatology's tile budget is sized for the 1464-slot cycle, and a small budget really tiles the field.
-
-    ``rolling_climatology`` budgets ``output_elements_per_cell = n_target_years * cycle.length``;
-    on daily-only code that was ``n_years * 366`` from a hardcoded length, a quarter of the
-    output a 6-hourly axis produces. The call is intercepted, so this is a tripwire rather than a
-    restatement. Exact equality, not divisibility: ``n_years * 366`` is a multiple of 1464
-    whenever ``n_years`` is a multiple of 4.
-    """
+    """Budget all four slots per day in the occupied-pair table and verify that a small budget tiles the field."""
     import marEx.anomaly.climatology as C
     import marEx.core.dimensions as D
 
@@ -334,7 +327,8 @@ def test_subdaily_shifting_tile_is_budgeted_on_the_cycle_and_binds(sixhourly_sst
 
     def spy(*args, **kwargs):
         tile = real(*args, **kwargs)
-        calls.append((kwargs, tile))
+        if "output_elements_per_cell" in kwargs:
+            calls.append((kwargs, tile))
         return tile
 
     monkeypatch.setattr(C, "tile_spatial_chunks", spy)
@@ -354,11 +348,10 @@ def test_subdaily_shifting_tile_is_budgeted_on_the_cycle_and_binds(sixhourly_sst
     assert bool(np.isfinite(ds.dat_anomaly).any().compute())
     assert calls, "rolling_climatology did not budget its spatial tiling at all"
     per_cell = calls[0][0]["output_elements_per_cell"]
-    n_years = len(np.unique(sixhourly_sst.time.dt.year.values))
-    assert per_cell == n_years * 366 * 4, (
-        f"the climatology budgeted {per_cell} output elements per cell; the 6-hourly cycle needs {n_years * 366 * 4}. "
-        f"{n_years * 366} means it is still sized on a hardcoded day-of-year axis."
-    )
+    # The windows for 2003 and 2005 include a leap year. The 2004 window
+    # covers 2001 to 2003. Each target also has four pooled December rows,
+    # and the table ends with one shared NaN row.
+    assert per_cell == 4 * (366 + 365 + 366 + 3) + 1
 
     calls.clear()
     monkeypatch.setattr(D, "TASK_ELEMENTS", 200_000)
